@@ -1,0 +1,6 @@
+connection_types: [extends, contradicts, supports, replicates, applies-method-of, reinterprets, related]
+statuses: [draft, review, final, archived]
+directories:
+  notes: notes/
+  concepts: concepts/
+write_branch: drafts

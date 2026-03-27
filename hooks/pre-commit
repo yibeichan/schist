@@ -1,0 +1,20 @@
+#!/bin/sh
+# schist pre-commit hook — reject staged files containing secrets
+
+PATTERNS='sk-|ghp_|ghs_|AKIA|-----BEGIN|password\s*=|api_key\s*='
+
+STAGED_FILES=$(git diff --cached --name-only)
+if [ -z "$STAGED_FILES" ]; then
+    exit 0
+fi
+
+MATCH=$(echo "$STAGED_FILES" | xargs grep -lE "$PATTERNS" 2>/dev/null)
+if [ -n "$MATCH" ]; then
+    echo "ERROR: Potential secret detected in staged files:"
+    echo "$MATCH" | sed 's/^/  /'
+    echo ""
+    echo "If this is intentional, use git commit --no-verify"
+    exit 1
+fi
+
+exit 0

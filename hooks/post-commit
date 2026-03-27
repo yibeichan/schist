@@ -1,0 +1,21 @@
+#!/bin/sh
+# schist post-commit hook — re-ingest vault into SQLite after every commit
+
+VAULT_ROOT=$(git rev-parse --show-toplevel)
+DB_PATH="$VAULT_ROOT/.schist/schist.db"
+mkdir -p "$VAULT_ROOT/.schist"
+
+# Find ingest.py: env var, then common locations
+if [ -n "$SCHIST_INGEST_SCRIPT" ] && [ -f "$SCHIST_INGEST_SCRIPT" ]; then
+    INGEST="$SCHIST_INGEST_SCRIPT"
+elif [ -f "$VAULT_ROOT/.schist/ingest.py" ]; then
+    INGEST="$VAULT_ROOT/.schist/ingest.py"
+elif command -v schist-ingest >/dev/null 2>&1; then
+    schist-ingest --vault "$VAULT_ROOT" --db "$DB_PATH"
+    exit $?
+else
+    echo "schist: ingest.py not found. Set SCHIST_INGEST_SCRIPT or install schist."
+    exit 0
+fi
+
+python3 "$INGEST" --vault "$VAULT_ROOT" --db "$DB_PATH"
