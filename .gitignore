@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# SQLite (derived, disposable)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Schist vault derived data
+.schist/
+
+# Viewer build output
+viewer/static/data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.env
+.env.local
