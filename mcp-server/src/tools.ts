@@ -63,6 +63,7 @@ export async function loadVaultConfig(vaultRoot: string): Promise<VaultConfig> {
 }
 
 function triggerIngestion(vaultRoot: string): void {
+  // Resolves schist repo root from dist/ runtime path — do not replace with __dirname (ESM)
   const schist_repo = path.resolve(
     path.dirname(new URL(import.meta.url).pathname),
     "../../"

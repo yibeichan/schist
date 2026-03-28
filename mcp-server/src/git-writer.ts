@@ -48,12 +48,13 @@ export async function writeNote(
 
   const release = await Promise.race([
     writeMutex.acquire(),
-    new Promise<never>((_, reject) =>
-      setTimeout(
+    new Promise<never>((_, reject) => {
+      const t = setTimeout(
         () => reject({ error: "WRITE_TIMEOUT", message: "Git write timed out after 10s — another write is in progress" }),
         10000
-      )
-    ),
+      );
+      t.unref();
+    }),
   ]);
 
   try {
@@ -89,12 +90,13 @@ export async function appendToNote(
 
   const release = await Promise.race([
     writeMutex.acquire(),
-    new Promise<never>((_, reject) =>
-      setTimeout(
+    new Promise<never>((_, reject) => {
+      const t = setTimeout(
         () => reject({ error: "WRITE_TIMEOUT", message: "Git write timed out after 10s — another write is in progress" }),
         10000
-      )
-    ),
+      );
+      t.unref();
+    }),
   ]);
 
   try {
