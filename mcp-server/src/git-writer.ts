@@ -1,11 +1,16 @@
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
-import { Mutex } from "async-mutex";
+import { Mutex, withTimeout } from "async-mutex";
 import * as fs from "fs/promises";
 import * as path from "path";
 
 const execFile = promisify(execFileCb);
-const writeMutex = new Mutex();
+const WRITE_TIMEOUT_ERROR = Object.assign(
+  new Error("Git write timed out after 10s — another write is in progress"),
+  { error: "WRITE_TIMEOUT" }
+);
+
+const writeMutex = withTimeout(new Mutex(), 10000, WRITE_TIMEOUT_ERROR);
 
 async function git(vaultRoot: string, args: string[]): Promise<string> {
   const { stdout } = await execFile("git", args, { cwd: vaultRoot });
@@ -46,16 +51,7 @@ export async function writeNote(
 ): Promise<{ path: string; commitSha: string }> {
   assertPathSafe(vaultRoot, relPath);
 
-  const release = await Promise.race([
-    writeMutex.acquire(),
-    new Promise<never>((_, reject) => {
-      const t = setTimeout(
-        () => reject({ error: "WRITE_TIMEOUT", message: "Git write timed out after 10s — another write is in progress" }),
-        10000
-      );
-      t.unref();
-    }),
-  ]);
+  const release = await writeMutex.acquire();
 
   try {
     const branch = await getWriteBranch(vaultRoot);
@@ -88,16 +84,7 @@ export async function appendToNote(
 ): Promise<{ path: string; commitSha: string }> {
   assertPathSafe(vaultRoot, relPath);
 
-  const release = await Promise.race([
-    writeMutex.acquire(),
-    new Promise<never>((_, reject) => {
-      const t = setTimeout(
-        () => reject({ error: "WRITE_TIMEOUT", message: "Git write timed out after 10s — another write is in progress" }),
-        10000
-      );
-      t.unref();
-    }),
-  ]);
+  const release = await writeMutex.acquire();
 
   try {
     const branch = await getWriteBranch(vaultRoot);

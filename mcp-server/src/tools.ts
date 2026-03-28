@@ -1,15 +1,25 @@
 import * as fs from "fs/promises";
 import * as path from "path";
-import { execFile as execFileCb } from "child_process";
-import { promisify } from "util";
+import { spawn } from "child_process";
+import { fileURLToPath } from "url";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote } from "./git-writer.js";
-import { buildNote, buildConnectionLine, parseConnections } from "./markdown-parser.js";
+import { buildNote, buildConnectionLine } from "./markdown-parser.js";
 import type { VaultConfig, ToolError } from "./types.js";
 
-const execFile = promisify(execFileCb);
-
 function slugify(title: string): string {
+  return (
+    title
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, "")
+      .replace(/\s+/g, "-")
+      .replace(/-+/g, "-")
+      .trim() || "untitled"
+  );
+}
+
+/** Returns the raw slug without the "untitled" fallback — used to detect empty-slug titles */
+function rawSlug(title: string): string {
   return title
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, "")
@@ -65,15 +75,18 @@ export async function loadVaultConfig(vaultRoot: string): Promise<VaultConfig> {
 function triggerIngestion(vaultRoot: string): void {
   // Resolves schist repo root from dist/ runtime path — do not replace with __dirname (ESM)
   const schist_repo = path.resolve(
-    path.dirname(new URL(import.meta.url).pathname),
+    path.dirname(fileURLToPath(import.meta.url)),
     "../../"
   );
   const dbPath = path.join(vaultRoot, ".schist", "schist.db");
   const scriptPath = path.join(schist_repo, "ingestion", "ingest.py");
 
-  execFile("python3", [scriptPath, "--vault", vaultRoot, "--db", dbPath], {
+  const child = spawn("python3", [scriptPath, "--vault", vaultRoot, "--db", dbPath], {
     cwd: vaultRoot,
-  }).catch((err: unknown) => {
+    stdio: "ignore",
+  });
+  child.unref();
+  child.on("error", (err) => {
     console.error("[schist] ingestion failed:", err);
   });
 }
@@ -156,6 +169,13 @@ export async function create_note(
       return {
         error: "VALIDATION_ERROR",
         message: `Directory "${directory}" not configured. Allowed: ${config.directories.join(", ")}`,
+      } satisfies ToolError;
+    }
+
+    if (rawSlug(args.title) === "") {
+      return {
+        error: "VALIDATION_ERROR",
+        message: "Title must contain at least one alphanumeric character",
       } satisfies ToolError;
     }
 

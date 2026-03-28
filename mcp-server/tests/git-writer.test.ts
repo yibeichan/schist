@@ -58,4 +58,28 @@ describe("git-writer", () => {
     expect(raceResult).toBe("timeout");
     release();
   });
+
+  test("Mutex: lock is NOT left held after withTimeout fires", async () => {
+    const { Mutex, withTimeout } = await import("async-mutex");
+
+    // 50 ms timeout — short enough to fire in the test
+    const timedMutex = withTimeout(new Mutex(), 50, new Error("timed out"));
+
+    // Hold the lock indefinitely
+    const release = await timedMutex.acquire();
+
+    // A second acquire attempt should reject with our timeout error
+    await expect(timedMutex.acquire()).rejects.toThrow("timed out");
+
+    // Release the original holder — the mutex must become available again
+    release();
+
+    // If the mutex were permanently locked, this would hang; wrap with a 500 ms wall clock guard
+    const acquireAfterRelease = await Promise.race([
+      timedMutex.acquire().then((rel) => { rel(); return "ok"; }),
+      new Promise<string>((_, rej) => setTimeout(() => rej(new Error("mutex still locked after timeout")), 500)),
+    ]);
+
+    expect(acquireAfterRelease).toBe("ok");
+  });
 });

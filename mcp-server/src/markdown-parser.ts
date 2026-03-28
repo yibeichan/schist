@@ -42,10 +42,10 @@ export function parseNote(content: string): {
 }
 
 function sanitizeContext(context: string): string {
-  // Remove newlines first
-  let safe = context.replace(/\n/g, " ");
-  // Remove patterns that look like connection entries
-  safe = safe.replace(/^-\s+\S+:\s+/gm, "");
+  // Remove patterns that look like connection entries FIRST (multiline match must run before \n removal)
+  let safe = context.replace(/^-\s+\S+:\s+/gm, "");
+  // Then normalize newlines to spaces
+  safe = safe.replace(/\n/g, " ");
   return safe.trim();
 }
 
