@@ -1,32 +1,7 @@
 import Database from "better-sqlite3";
 import * as path from "path";
 import type { SearchResult, Note, Concept, Connection } from "./types.js";
-
-const CONNECTION_RE = /^-\s+(\S+):\s+(\S+)(?:\s+"([^"]*)")?(?:\s+—\s+(.*))?$/;
-
-function parseConnectionsSync(body: string): Connection[] {
-  const connections: Connection[] = [];
-  let inSection = false;
-  for (const line of body.split("\n")) {
-    const stripped = line.trim();
-    if (stripped.startsWith("## Connections")) {
-      inSection = true;
-      continue;
-    }
-    if (inSection && stripped.startsWith("## ")) break;
-    if (inSection) {
-      const match = stripped.match(CONNECTION_RE);
-      if (match) {
-        connections.push({
-          type: match[1],
-          target: match[2],
-          context: match[3] || match[4] || undefined,
-        });
-      }
-    }
-  }
-  return connections;
-}
+import { CONNECTION_RE, parseConnections as parseConnectionsSync } from "./markdown-parser.js";
 
 function openDb(vaultRoot: string): Database.Database {
   const dbPath = path.join(vaultRoot, ".schist", "schist.db");

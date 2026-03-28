@@ -67,7 +67,7 @@ async function main() {
           properties: {
             query: { type: "string" },
             limit: { type: "number" },
-            status: { type: "string", enum: ["draft", "review", "final", "archived"] },
+            status: { type: "string", enum: config.statuses },
             tags: { type: "array", items: { type: "string" } },
           },
           required: ["query"],
@@ -92,7 +92,7 @@ async function main() {
             body: { type: "string" },
             tags: { type: "array", items: { type: "string" } },
             concepts: { type: "array", items: { type: "string" } },
-            status: { type: "string", enum: ["draft", "review", "final"] },
+            status: { type: "string", enum: config.statuses },
             connections: {
               type: "array",
               items: {
@@ -120,7 +120,7 @@ async function main() {
             target: { type: "string" },
             type: {
               type: "string",
-              enum: ["extends", "contradicts", "supports", "replicates", "applies-method-of", "reinterprets", "related"],
+              enum: config.connectionTypes,
             },
             context: { type: "string" },
           },

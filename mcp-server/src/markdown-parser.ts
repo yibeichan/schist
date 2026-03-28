@@ -1,7 +1,8 @@
 import matter from "gray-matter";
 import type { Connection } from "./types.js";
 
-const CONNECTION_RE = /^-\s+(\S+):\s+(\S+)(?:\s+"([^"]*)")?(?:\s+—\s+(.*))?$/;
+/** Shared regex for connection lines — exported so sqlite-reader doesn't duplicate it. */
+export const CONNECTION_RE = /^-\s+(\S+):\s+(\S+)(?:\s+"([^"]*)")?(?:\s+—\s+(.*))?$/;
 
 export function parseConnections(body: string): Connection[] {
   const connections: Connection[] = [];

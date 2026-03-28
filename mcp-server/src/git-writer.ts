@@ -10,7 +10,8 @@ const WRITE_TIMEOUT_ERROR = Object.assign(
   { error: "WRITE_TIMEOUT" }
 );
 
-const writeMutex = withTimeout(new Mutex(), 10000, WRITE_TIMEOUT_ERROR);
+/** @internal — exported for test instrumentation only */
+export const writeMutex = withTimeout(new Mutex(), 10000, WRITE_TIMEOUT_ERROR);
 
 async function git(vaultRoot: string, args: string[]): Promise<string> {
   const { stdout } = await execFile("git", args, { cwd: vaultRoot });
@@ -44,15 +45,18 @@ function assertPathSafe(vaultRoot: string, relPath: string): void {
   }
 }
 
-export async function writeNote(
+/**
+ * Acquires the write mutex, checks out the write branch, runs fn(absPath),
+ * then stages + commits relPath. Shared by writeNote and appendToNote to
+ * eliminate duplicated mutex/git boilerplate.
+ */
+async function withWriteLock(
   vaultRoot: string,
   relPath: string,
-  content: string
+  commitMessage: string,
+  fn: (absPath: string) => Promise<void>
 ): Promise<{ path: string; commitSha: string }> {
-  assertPathSafe(vaultRoot, relPath);
-
   const release = await writeMutex.acquire();
-
   try {
     const branch = await getWriteBranch(vaultRoot);
     await ensureBranch(vaultRoot, branch);
@@ -60,21 +64,34 @@ export async function writeNote(
 
     const absPath = path.resolve(vaultRoot, relPath);
     await fs.mkdir(path.dirname(absPath), { recursive: true });
-    await fs.writeFile(absPath, content, "utf-8");
+    await fn(absPath);
 
     await git(vaultRoot, ["add", relPath]);
-
-    const titleMatch = content.match(/^title:\s*["']?(.+?)["']?\s*$/m);
-    const title = titleMatch ? titleMatch[1] : relPath;
-
     // NEVER --no-verify — hard coded out
-    await git(vaultRoot, ["commit", "-m", `feat(schist): write ${title} — via MCP`]);
-
+    await git(vaultRoot, ["commit", "-m", commitMessage]);
     const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
     return { path: relPath, commitSha: sha };
   } finally {
     release();
   }
+}
+
+export async function writeNote(
+  vaultRoot: string,
+  relPath: string,
+  content: string
+): Promise<{ path: string; commitSha: string }> {
+  assertPathSafe(vaultRoot, relPath);
+  const titleMatch = content.match(/^title:\s*["']?(.+?)["']?\s*$/m);
+  const title = titleMatch ? titleMatch[1] : relPath;
+  return withWriteLock(
+    vaultRoot,
+    relPath,
+    `feat(schist): write ${title} — via MCP`,
+    async (absPath) => {
+      await fs.writeFile(absPath, content, "utf-8");
+    }
+  );
 }
 
 export async function appendToNote(
@@ -83,32 +100,19 @@ export async function appendToNote(
   addition: string
 ): Promise<{ path: string; commitSha: string }> {
   assertPathSafe(vaultRoot, relPath);
-
-  const release = await writeMutex.acquire();
-
-  try {
-    const branch = await getWriteBranch(vaultRoot);
-    await ensureBranch(vaultRoot, branch);
-    await git(vaultRoot, ["checkout", branch]);
-
-    const absPath = path.resolve(vaultRoot, relPath);
-    let existing = "";
-    try {
-      existing = await fs.readFile(absPath, "utf-8");
-    } catch {
-      // file doesn't exist yet
+  return withWriteLock(
+    vaultRoot,
+    relPath,
+    `feat(schist): append to ${relPath} — via MCP`,
+    async (absPath) => {
+      let existing = "";
+      try {
+        existing = await fs.readFile(absPath, "utf-8");
+      } catch {
+        // file doesn't exist yet
+      }
+      const newContent = existing + (existing.endsWith("\n") ? "" : "\n") + addition;
+      await fs.writeFile(absPath, newContent, "utf-8");
     }
-
-    const newContent = existing + (existing.endsWith("\n") ? "" : "\n") + addition;
-    await fs.writeFile(absPath, newContent, "utf-8");
-
-    await git(vaultRoot, ["add", relPath]);
-    // NEVER --no-verify
-    await git(vaultRoot, ["commit", "-m", `feat(schist): append to ${relPath} — via MCP`]);
-
-    const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
-    return { path: relPath, commitSha: sha };
-  } finally {
-    release();
-  }
+  );
 }

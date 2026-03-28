@@ -1,4 +1,4 @@
-import { writeNote } from "../src/git-writer.js";
+import { writeNote, writeMutex } from "../src/git-writer.js";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
@@ -58,6 +58,32 @@ describe("git-writer", () => {
     expect(raceResult).toBe("timeout");
     release();
   });
+
+  test("writeNote: rejects with WRITE_TIMEOUT when mutex is held and subsequent write succeeds after release", async () => {
+    const vault = await makeTempVault();
+
+    // Hold the shared write mutex for 12 s — longer than the 10 s withTimeout threshold
+    const release = await writeMutex.acquire();
+    const holdTimer = setTimeout(release, 12000);
+
+    // writeNote should time out because the mutex is held
+    await expect(
+      writeNote(vault, "notes/blocked.md", "---\ntitle: Blocked\n---\nBody")
+    ).rejects.toMatchObject({ error: "WRITE_TIMEOUT" });
+
+    // Release early so the test doesn't take 12 s
+    clearTimeout(holdTimer);
+    release();
+
+    // After release the mutex must be acquirable — a subsequent write must succeed
+    const result = await writeNote(
+      vault,
+      "notes/after-timeout.md",
+      "---\ntitle: After Timeout\n---\nBody"
+    );
+    expect(result.commitSha).toBeDefined();
+    expect(result.path).toBe("notes/after-timeout.md");
+  }, 30000);
 
   test("Mutex: lock is NOT left held after withTimeout fires", async () => {
     const { Mutex, withTimeout } = await import("async-mutex");
