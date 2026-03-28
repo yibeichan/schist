@@ -10,7 +10,18 @@ const WRITE_TIMEOUT_ERROR = Object.assign(
   { error: "WRITE_TIMEOUT" }
 );
 
-/** @internal — exported for test instrumentation only */
+/**
+ * @internal — exported for test instrumentation only.
+ *
+ * Timer / graceful-shutdown note:
+ * `withTimeout` from async-mutex creates a `setTimeout` internally only
+ * while an `acquire()` call is waiting (i.e. the mutex is contended). The
+ * timer is created inside the Promise executor and is always cleared via
+ * `clearTimeout` before resolve/reject completes — confirmed by reading
+ * async-mutex@0.5.x src (lib/withTimeout.js case 2/3). There is no
+ * persistent background timer attached to the wrapper itself, so no
+ * `.unref()` is needed and graceful shutdown is not affected.
+ */
 export const writeMutex = withTimeout(new Mutex(), 10000, WRITE_TIMEOUT_ERROR);
 
 async function git(vaultRoot: string, args: string[]): Promise<string> {

@@ -133,7 +133,13 @@ export function queryGraph(
     !trimmed.match(/^(SELECT|WITH)\b/i) ||
     trimmed.match(/\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE)\b/i)
   ) {
-    throw { error: "INVALID_SQL", message: "Only SELECT and WITH queries are allowed" };
+    // Return a ToolError result rather than throwing a plain object.
+    // Throwing non-Error objects loses stack traces and breaks instanceof checks
+    // in callers. The tools.ts normalizeError handler then serialises this cleanly.
+    throw Object.assign(
+      new Error("Only SELECT and WITH queries are allowed"),
+      { error: "INVALID_SQL" }
+    );
   }
 
   const db = openDb(vaultRoot);

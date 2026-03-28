@@ -12,19 +12,32 @@
   "jest": {
     "preset": "ts-jest/presets/default-esm",
     "testEnvironment": "node",
-    "extensionsToTreatAsEsm": [".ts"],
-    "moduleNameMapper": { "^(\\.{1,2}/.*)\\.js$": "$1" },
-    "transform": { "^.+\\.tsx?$": ["ts-jest", { "useESM": true }] }
+    "extensionsToTreatAsEsm": [
+      ".ts"
+    ],
+    "moduleNameMapper": {
+      "^(\\.{1,2}/.*)\\.js$": "$1"
+    },
+    "transform": {
+      "^.+\\.tsx?$": [
+        "ts-jest",
+        {
+          "useESM": true
+        }
+      ]
+    }
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.28.0",
     "async-mutex": "^0.5.0",
     "better-sqlite3": "^11.0.0",
-    "gray-matter": "^4.0.3"
+    "gray-matter": "^4.0.3",
+    "js-yaml": "^4.1.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
     "@types/jest": "^30.0.0",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
     "jest": "^30.3.0",
     "ts-jest": "^29.4.6",

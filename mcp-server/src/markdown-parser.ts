@@ -47,6 +47,10 @@ function sanitizeContext(context: string): string {
   let safe = context.replace(/^-\s+\S+:\s+/gm, "");
   // Then normalize newlines to spaces
   safe = safe.replace(/\n/g, " ");
+  // Strip embedded double-quotes entirely: the context field is delimited by "..."
+  // in the serialised format (regex: [^"]*) so any " inside would break parsing.
+  // Replace with single-quote to preserve readability of quoted speech.
+  safe = safe.replace(/"/g, "'");
   return safe.trim();
 }
 

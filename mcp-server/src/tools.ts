@@ -2,6 +2,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
+import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote } from "./git-writer.js";
 import { buildNote, buildConnectionLine } from "./markdown-parser.js";
@@ -32,43 +33,64 @@ function today(): string {
   return new Date().toISOString().split("T")[0];
 }
 
+/**
+ * Normalise any caught value into a plain ToolError object so that
+ * JSON.stringify always produces { error, message } — Error.message is
+ * non-enumerable and would otherwise be silently dropped.
+ */
+function normalizeError(e: unknown, fallbackCode = "GIT_ERROR"): ToolError {
+  // Already a plain ToolError shape (thrown by git-writer / assertPathSafe)
+  if (
+    e !== null &&
+    typeof e === "object" &&
+    "error" in e &&
+    "message" in e &&
+    typeof (e as Record<string, unknown>).error === "string"
+  ) {
+    const te = e as Record<string, unknown>;
+    return { error: te.error as string, message: te.message as string, details: te.details };
+  }
+  // Real Error instance — .message is non-enumerable, must be lifted explicitly
+  if (e instanceof Error) {
+    const extra = e as Error & { error?: string };
+    return {
+      error: extra.error ?? fallbackCode,
+      message: e.message,
+      details: { stack: e.stack },
+    };
+  }
+  return { error: fallbackCode, message: String(e) };
+}
+
 export async function loadVaultConfig(vaultRoot: string): Promise<VaultConfig> {
   const configPath = path.join(vaultRoot, "schist.yaml");
   const content = await fs.readFile(configPath, "utf-8");
 
-  const getField = (key: string, def: string): string => {
-    const match = content.match(new RegExp(`^${key}:\\s*["']?(.+?)["']?\\s*$`, "m"));
-    return match ? match[1].trim() : def;
+  // Use js-yaml instead of hand-rolled regexes: handles inline comments,
+  // quoted strings with ":", multiline values, and all valid YAML.
+  const raw = yamlLoad(content) as Record<string, unknown>;
+
+  const getString = (key: string, def: string): string => {
+    const v = raw[key];
+    return typeof v === "string" ? v.trim() : def;
   };
 
-  const getList = (key: string, def: string[]): string[] => {
-    const blockMatch = content.match(new RegExp(`^${key}:\\s*\\n((?:[ \\t]+-[ \\t]+.+\\n?)+)`, "m"));
-    if (blockMatch) {
-      return blockMatch[1]
-        .split("\n")
-        .map((l) => l.replace(/^\s+-\s+["']?/, "").replace(/["']?\s*$/, "").trim())
-        .filter(Boolean);
-    }
-    const inlineMatch = content.match(new RegExp(`^${key}:\\s*\\[([^\\]]+)\\]`, "m"));
-    if (inlineMatch) {
-      return inlineMatch[1]
-        .split(",")
-        .map((s) => s.trim().replace(/["']/g, ""))
-        .filter(Boolean);
-    }
+  const getStringList = (key: string, def: string[]): string[] => {
+    const v = raw[key];
+    if (Array.isArray(v)) return v.map(String).filter(Boolean);
     return def;
   };
 
   return {
-    name: getField("name", path.basename(vaultRoot)),
+    name: getString("name", path.basename(vaultRoot)),
     path: vaultRoot,
-    directories: getList("directories", ["notes", "papers", "concepts"]),
-    connectionTypes: getList("connection_types", [
+    directories: getStringList("directories", ["notes", "papers", "concepts"]),
+    connectionTypes: getStringList("connection_types", [
       "extends", "contradicts", "supports", "replicates",
       "applies-method-of", "reinterprets", "related",
     ]),
-    statuses: getList("statuses", ["draft", "review", "final", "archived"]),
-    writeBranch: getField("write_branch", "drafts"),
+    statuses: getStringList("statuses", ["draft", "review", "final", "archived"]),
+    writeBranch: getString("write_branch", "drafts"),
   };
 }
 
@@ -102,7 +124,7 @@ export async function search_notes(
       tags: args.tags,
     });
   } catch (e: unknown) {
-    return { error: "INGEST_ERROR", message: String(e), details: e } satisfies ToolError;
+    return normalizeError(e, "INGEST_ERROR");
   }
 }
 
@@ -140,7 +162,7 @@ export async function get_note(
       connections,
     };
   } catch (e: unknown) {
-    return { error: "INGEST_ERROR", message: String(e), details: e } satisfies ToolError;
+    return normalizeError(e, "INGEST_ERROR");
   }
 }
 
@@ -181,8 +203,25 @@ export async function create_note(
 
     const slug = slugify(args.title);
     const date = today();
-    const filename = `${date}-${slug}.md`;
-    const relPath = `${directory}/${filename}`;
+
+    // Guard against same-day same-title collision: append HH-MM-SS suffix when
+    // the target path already exists so we never silently overwrite a note or
+    // produce a git "nothing to commit" error.
+    const baseFilename = `${date}-${slug}.md`;
+    const basePath = `${directory}/${baseFilename}`;
+    let relPath = basePath;
+    try {
+      await fs.access(path.join(vaultRoot, basePath));
+      // File exists — append time suffix to make the path unique
+      const timeSuffix = new Date()
+        .toISOString()
+        .split("T")[1]
+        .slice(0, 8)       // HH:MM:SS
+        .replace(/:/g, "-"); // colons not safe in filenames on all OSes
+      relPath = `${directory}/${date}-${slug}-${timeSuffix}.md`;
+    } catch {
+      // File does not exist — use base path as-is
+    }
 
     const metadata: Record<string, unknown> = {
       title: args.title,
@@ -200,9 +239,7 @@ export async function create_note(
 
     return { id: relPath, path: relPath, commitSha: result.commitSha };
   } catch (e: unknown) {
-    const err = e as Partial<ToolError>;
-    if (err?.error) return e;
-    return { error: "GIT_ERROR", message: String(e), details: e } satisfies ToolError;
+    return normalizeError(e, "GIT_ERROR");
   }
 }
 
@@ -241,9 +278,7 @@ export async function add_connection(
 
     return { source: args.source, target: args.target, type: args.type, commitSha: result.commitSha };
   } catch (e: unknown) {
-    const err = e as Partial<ToolError>;
-    if (err?.error) return e;
-    return { error: "GIT_ERROR", message: String(e), details: e } satisfies ToolError;
+    return normalizeError(e, "GIT_ERROR");
   }
 }
 
@@ -254,7 +289,7 @@ export async function list_concepts(
   try {
     return sqliteReader.listConcepts(vaultRoot, args);
   } catch (e: unknown) {
-    return { error: "INGEST_ERROR", message: String(e), details: e } satisfies ToolError;
+    return normalizeError(e, "INGEST_ERROR");
   }
 }
 
@@ -265,19 +300,19 @@ export async function query_graph(
   try {
     return sqliteReader.queryGraph(vaultRoot, args.sql, args.params);
   } catch (e: unknown) {
-    const err = e as Partial<ToolError>;
-    if (err?.error) return e;
-    return { error: "INVALID_SQL", message: String(e), details: e } satisfies ToolError;
+    return normalizeError(e, "INVALID_SQL");
   }
 }
 
 export async function get_context(
   vaultRoot: string,
+  // Default to "minimal" for agent session-start: only note/concept/edge counts
+  // + last 3 modified. Agents that need richer context request standard/full.
   args: { depth?: "minimal" | "standard" | "full" }
 ): Promise<unknown> {
   try {
-    return sqliteReader.getContext(vaultRoot, args.depth ?? "standard");
+    return sqliteReader.getContext(vaultRoot, args.depth ?? "minimal");
   } catch (e: unknown) {
-    return { error: "INGEST_ERROR", message: String(e), details: e } satisfies ToolError;
+    return normalizeError(e, "INGEST_ERROR");
   }
 }
