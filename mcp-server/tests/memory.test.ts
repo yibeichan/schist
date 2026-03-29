@@ -10,7 +10,7 @@ let tempDir: string;
 beforeEach(async () => {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-memory-test-"));
   process.env.SCHIST_MEMORY_DB = path.join(tempDir, "test-memory.db");
-  // Clear agent ID so tests can use any owner
+  // Clear agent ID — individual tests set it as needed
   delete process.env.SCHIST_AGENT_ID;
 });
 
@@ -21,11 +21,37 @@ afterEach(async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Helper: add memory with env var set
+// ---------------------------------------------------------------------------
+function addMemoryAs(owner: string, entry: Omit<Parameters<typeof addMemory>[0], "owner">) {
+  const prev = process.env.SCHIST_AGENT_ID;
+  process.env.SCHIST_AGENT_ID = owner;
+  try {
+    return addMemory({ owner, ...entry });
+  } finally {
+    if (prev === undefined) delete process.env.SCHIST_AGENT_ID;
+    else process.env.SCHIST_AGENT_ID = prev;
+  }
+}
+
+function setStateAs(owner: string, key: string, value: unknown, ttl_hours?: number) {
+  const prev = process.env.SCHIST_AGENT_ID;
+  process.env.SCHIST_AGENT_ID = owner;
+  try {
+    return setAgentState(key, value, owner, ttl_hours);
+  } finally {
+    if (prev === undefined) delete process.env.SCHIST_AGENT_ID;
+    else process.env.SCHIST_AGENT_ID = prev;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // add_memory — owner enforcement
 // ---------------------------------------------------------------------------
 
 describe("addMemory", () => {
   it("inserts a memory entry and returns id + created_at", () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
     const result = addMemory({
       owner: "sansan",
       entry_type: "decision",
@@ -54,12 +80,14 @@ describe("addMemory", () => {
   });
 
   it("rejects invalid entry_type CHECK constraint", () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
     expect(() =>
       addMemory({ owner: "sansan", entry_type: "invalid_type", content: "test" })
     ).toThrow();
   });
 
   it("stores and returns tags as array", () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
     addMemory({
       owner: "sansan",
       entry_type: "completion",
@@ -69,6 +97,18 @@ describe("addMemory", () => {
     const results = searchMemory({ owner: "sansan" });
     expect(results[0].tags).toEqual(["rollup", "kiosk"]);
   });
+
+  it("throws CONFIG_ERROR when SCHIST_AGENT_ID is not set", () => {
+    delete process.env.SCHIST_AGENT_ID;
+    try {
+      addMemory({ owner: "sansan", entry_type: "decision", content: "test" });
+      fail("Expected error to be thrown");
+    } catch (e: unknown) {
+      expect(e).toBeInstanceOf(Error);
+      expect((e as Error).message).toMatch(/SCHIST_AGENT_ID/);
+      expect((e as Record<string, unknown>).error).toBe("CONFIG_ERROR");
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -77,9 +117,9 @@ describe("addMemory", () => {
 
 describe("searchMemory", () => {
   beforeEach(() => {
-    addMemory({ owner: "sansan", entry_type: "decision", content: "Use SQLite WAL mode", tags: ["infra"] });
-    addMemory({ owner: "ninjia", entry_type: "lesson", content: "Check RLS policies before merge", tags: ["security"] });
-    addMemory({ owner: "sansan", entry_type: "blocker", content: "Ninjia CSO review pending", tags: ["rollup"] });
+    addMemoryAs("sansan", { entry_type: "decision", content: "Use SQLite WAL mode", tags: ["infra"] });
+    addMemoryAs("ninjia", { entry_type: "lesson", content: "Check RLS policies before merge", tags: ["security"] });
+    addMemoryAs("sansan", { entry_type: "blocker", content: "Ninjia CSO review pending", tags: ["rollup"] });
   });
 
   it("returns all entries with no filter", () => {
@@ -112,24 +152,29 @@ describe("searchMemory", () => {
 
 describe("setAgentState", () => {
   it("allows owner to set their own prefixed key", () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
     const result = setAgentState("sansan.current_pr", 266, "sansan");
     expect(result.key).toBe("sansan.current_pr");
   });
 
   it("rejects key with wrong prefix", () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
     expect(() => setAgentState("ninjia.current_task", "review", "sansan")).toThrow();
   });
 
   it("allows team.* for owner=eleven", () => {
+    process.env.SCHIST_AGENT_ID = "eleven";
     const result = setAgentState("team.active_blockers", ["PR #266"], "eleven");
     expect(result.key).toBe("team.active_blockers");
   });
 
   it("rejects team.* for non-eleven owner", () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
     expect(() => setAgentState("team.active_blockers", [], "sansan")).toThrow();
   });
 
   it("stores and retrieves JSON value", () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
     setAgentState("sansan.meta", { pr: 266, status: "open" }, "sansan");
     const entry = getAgentState("sansan.meta");
     expect(entry).not.toBeNull();
@@ -140,6 +185,49 @@ describe("setAgentState", () => {
     const entry = getAgentState("sansan.nonexistent");
     expect(entry).toBeNull();
   });
+
+  it("throws OWNERSHIP_ERROR when agent B tries to overwrite agent A's key", () => {
+    // Agent A sets the key
+    setStateAs("ninjia", "ninjia.secret_key", "original_value");
+
+    // Agent B (with matching prefix via team scenario isn't possible, so we
+    // test via direct DB setup): insert a key with owner=ninjia, then agent
+    // sansan tries to overwrite with a key that has ninjia prefix.
+    // Since prefix check fires first for sansan->ninjia prefix, we need a
+    // scenario where prefix passes but owner differs.
+    // Use team.* key: eleven sets it, then another eleven-impersonating agent
+    // can't hijack. Actually the simplest: ninjia sets ninjia.x, then
+    // another caller claiming to be ninjia but actually being someone else
+    // via raw DB manipulation. But with assertOwner, the env var must match.
+    //
+    // Real scenario: Agent A (ninjia) creates ninjia.task, then the DB has
+    // owner=ninjia. Now if SCHIST_AGENT_ID changes to a different value but
+    // someone calls setAgentState with owner matching the new SCHIST_AGENT_ID
+    // and a key that already exists with a different owner.
+    //
+    // Simplest: use team.* keys — eleven creates team.x, then we change
+    // owner in DB to simulate another agent, and eleven tries to overwrite.
+    // Actually even simpler: directly test the ownership check.
+
+    // eleven sets team.shared
+    setStateAs("eleven", "team.shared", "eleven_data");
+
+    // Manually change the owner in DB to simulate a different agent owning it
+    const db = new Database(process.env.SCHIST_MEMORY_DB!);
+    db.prepare("UPDATE agent_state SET owner = 'ninjia' WHERE key = 'team.shared'").run();
+    db.close();
+
+    // Now eleven tries to overwrite — should fail with OWNERSHIP_ERROR
+    process.env.SCHIST_AGENT_ID = "eleven";
+    try {
+      setAgentState("team.shared", "hijack", "eleven");
+      fail("Expected error to be thrown");
+    } catch (e: unknown) {
+      expect(e).toBeInstanceOf(Error);
+      expect((e as Error).message).toMatch(/owned by another agent/);
+      expect((e as Record<string, unknown>).error).toBe("OWNERSHIP_ERROR");
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -148,20 +236,23 @@ describe("setAgentState", () => {
 
 describe("deleteAgentState", () => {
   it("deletes own key and returns deleted=true", () => {
-    setAgentState("sansan.temp", "value", "sansan");
+    setStateAs("sansan", "sansan.temp", "value");
+    process.env.SCHIST_AGENT_ID = "sansan";
     const result = deleteAgentState("sansan.temp", "sansan");
     expect(result.deleted).toBe(true);
     expect(getAgentState("sansan.temp")).toBeNull();
   });
 
   it("returns deleted=false for non-existent key", () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
     const result = deleteAgentState("sansan.missing", "sansan");
     expect(result.deleted).toBe(false);
   });
 
   it("rejects deleting another agent's key", () => {
-    setAgentState("ninjia.secret", "val", "ninjia");
+    setStateAs("ninjia", "ninjia.secret", "val");
     // sansan trying to delete ninjia's key — prefix check fires first
+    process.env.SCHIST_AGENT_ID = "sansan";
     expect(() => deleteAgentState("ninjia.secret", "sansan")).toThrow();
   });
 });
@@ -172,7 +263,7 @@ describe("deleteAgentState", () => {
 
 describe("searchMemory — FTS5 sanitization", () => {
   beforeEach(() => {
-    addMemory({ owner: "sansan", entry_type: "decision", content: "Set up research-db schema", tags: ["infra"] });
+    addMemoryAs("sansan", { entry_type: "decision", content: "Set up research-db schema", tags: ["infra"] });
   });
 
   it("handles hyphenated query without throwing", () => {
@@ -224,12 +315,9 @@ describe("addConceptAlias", () => {
 
   it("throws when SCHIST_AGENT_ID is not set", () => {
     delete process.env.SCHIST_AGENT_ID;
-    // assertOwner on this branch only checks mismatch, not missing — so this
-    // should succeed (no env var = no gate). If the H1 fix from research-db-cli
-    // is merged, this test should be updated to expect a throw.
-    // For now, verify it doesn't crash with an unrelated error.
-    const alias = addConceptAlias(vaultDir, "dl", "deep-learning", undefined, "sansan");
-    expect(alias.duplicate_slug).toBe("dl");
+    expect(() =>
+      addConceptAlias(vaultDir, "dl", "deep-learning", undefined, "sansan")
+    ).toThrow(/SCHIST_AGENT_ID/);
   });
 
   it("throws when SCHIST_AGENT_ID mismatches created_by", () => {
