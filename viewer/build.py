@@ -41,10 +41,7 @@ def build_graph(db: sqlite3.Connection) -> dict:
     concepts = db.execute(
         "SELECT slug, title, description FROM concepts"
     ).fetchall()
-    # concept_slugs used below to filter edges whose endpoints don't exist in the graph
-    concept_slugs = set()
     for slug, title, desc in concepts:
-        concept_slugs.add(slug)
         nodes.append(
             {
                 "id": slug,
@@ -54,6 +51,7 @@ def build_graph(db: sqlite3.Connection) -> dict:
             }
         )
 
+    # doc_ids contains both note ids and concept slugs (both are in nodes at this point)
     doc_ids = {n["id"] for n in nodes}
     edges = db.execute(
         "SELECT source, target, type, context FROM edges"
@@ -61,9 +59,9 @@ def build_graph(db: sqlite3.Connection) -> dict:
     for source, target, etype, context in edges:
         # Skip edges whose endpoints are not present in the graph
         # (e.g. free-text target references that weren't ingested as nodes)
-        if source not in doc_ids and source not in concept_slugs:
+        if source not in doc_ids:
             continue
-        if target not in doc_ids and target not in concept_slugs:
+        if target not in doc_ids:
             continue
         links.append(
             {
