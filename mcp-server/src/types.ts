@@ -53,3 +53,41 @@ export interface GitWriteResult {
   path: string;
   commitSha: string;
 }
+
+// ── Memory V2 types ────────────────────────────────────────────────────────
+
+export interface MemoryEntry {
+  id: number;
+  owner: string;
+  date: string;
+  entry_type: 'decision' | 'lesson' | 'blocker' | 'completion' | 'observation';
+  content: string;
+  tags: string[];
+  related_doc?: string;
+  source_ref?: string;
+  confidence: 'low' | 'medium' | 'high';
+  created_at: string;
+}
+
+export interface AgentStateEntry {
+  key: string;
+  value: unknown;
+  owner: string;
+  updated_at: string;
+  ttl_hours?: number | null;
+}
+
+export interface Domain {
+  slug: string;
+  label: string;
+  description?: string;
+  parent_slug?: string;
+}
+
+export interface ConceptAlias {
+  duplicate_slug: string;
+  canonical_slug: string;
+  reason?: string;
+  created_by: string;
+  created_at: string;
+}

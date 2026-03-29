@@ -15,6 +15,15 @@ import {
   query_graph,
   get_context,
   loadVaultConfig,
+  // Memory V2
+  add_memory,
+  search_memory,
+  get_agent_state,
+  set_agent_state,
+  delete_agent_state,
+  add_concept_alias,
+  list_domains,
+  assign_domain,
 } from "./tools.js";
 import type { VaultConfig } from "./types.js";
 
@@ -61,6 +70,115 @@ function makeReadTools(config: VaultConfig) {
           tags: { type: "array", items: { type: "string" } },
         },
         required: ["query"],
+      },
+    },
+  ];
+}
+
+function makeMemoryReadTools(_config: VaultConfig) {
+  return [
+    {
+      name: "search_memory",
+      description: "Search agent memory entries by text, owner, type, or date range.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          query: { type: "string" },
+          owner: { type: "string" },
+          entry_type: { type: "string", enum: ["decision", "lesson", "blocker", "completion", "observation"] },
+          date_from: { type: "string" },
+          date_to: { type: "string" },
+          limit: { type: "number" },
+        },
+      },
+    },
+    {
+      name: "get_agent_state",
+      description: "Get a keyed agent state value (e.g. 'sansan.current_pr').",
+      inputSchema: {
+        type: "object" as const,
+        properties: { key: { type: "string" } },
+        required: ["key"],
+      },
+    },
+    {
+      name: "list_domains",
+      description: "List research domain taxonomy.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+  ];
+}
+
+function makeMemoryWriteTools(_config: VaultConfig) {
+  return [
+    {
+      name: "add_memory",
+      description: "Add a memory entry (decision, lesson, blocker, completion, or observation). owner must match SCHIST_AGENT_ID.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          owner: { type: "string" },
+          entry_type: { type: "string", enum: ["decision", "lesson", "blocker", "completion", "observation"] },
+          content: { type: "string" },
+          date: { type: "string" },
+          tags: { type: "array", items: { type: "string" } },
+          related_doc: { type: "string" },
+          source_ref: { type: "string" },
+          confidence: { type: "string", enum: ["low", "medium", "high"] },
+        },
+        required: ["owner", "entry_type", "content"],
+      },
+    },
+    {
+      name: "set_agent_state",
+      description: "Set a keyed agent state value. Key prefix must match owner (e.g. sansan.*). team.* requires owner=eleven.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          key: { type: "string" },
+          value: {},
+          owner: { type: "string" },
+          ttl_hours: { type: "number" },
+        },
+        required: ["key", "value", "owner"],
+      },
+    },
+    {
+      name: "delete_agent_state",
+      description: "Delete a keyed agent state value (owner-enforced).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          key: { type: "string" },
+          owner: { type: "string" },
+        },
+        required: ["key", "owner"],
+      },
+    },
+    {
+      name: "add_concept_alias",
+      description: "Mark a concept slug as a duplicate of a canonical slug.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          duplicate_slug: { type: "string" },
+          canonical_slug: { type: "string" },
+          reason: { type: "string" },
+          created_by: { type: "string" },
+        },
+        required: ["duplicate_slug", "canonical_slug", "created_by"],
+      },
+    },
+    {
+      name: "assign_domain",
+      description: "Assign a research domain to a doc.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          doc_id: { type: "string" },
+          domain_slug: { type: "string" },
+        },
+        required: ["doc_id", "domain_slug"],
       },
     },
   ];
@@ -203,8 +321,10 @@ async function main() {
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const tools = [
       ...makeReadTools(config),
+      ...makeMemoryReadTools(config),
       makeCapabilityTool(),
       ...(writeEnabled ? makeWriteTools(config) : []),
+      ...(writeEnabled ? makeMemoryWriteTools(config) : []),
     ];
     return { tools };
   });
@@ -260,6 +380,42 @@ async function main() {
             break;
           case "get_context":
             result = await get_context(vaultRoot, toolArgs as Parameters<typeof get_context>[1]);
+            break;
+          // Memory V2 — read (always available)
+          case "search_memory":
+            result = await search_memory(vaultRoot, toolArgs as Parameters<typeof search_memory>[1]);
+            break;
+          case "get_agent_state":
+            result = await get_agent_state(vaultRoot, toolArgs as Parameters<typeof get_agent_state>[1]);
+            break;
+          case "list_domains":
+            result = await list_domains(vaultRoot, toolArgs as Parameters<typeof list_domains>[1]);
+            break;
+          // Memory V2 — write (require writeEnabled)
+          case "add_memory":
+            result = writeEnabled
+              ? await add_memory(vaultRoot, toolArgs as Parameters<typeof add_memory>[1])
+              : { error: "VALIDATION_ERROR", message: "add_memory requires write capability. Call request_capabilities first." };
+            break;
+          case "set_agent_state":
+            result = writeEnabled
+              ? await set_agent_state(vaultRoot, toolArgs as Parameters<typeof set_agent_state>[1])
+              : { error: "VALIDATION_ERROR", message: "set_agent_state requires write capability." };
+            break;
+          case "delete_agent_state":
+            result = writeEnabled
+              ? await delete_agent_state(vaultRoot, toolArgs as Parameters<typeof delete_agent_state>[1])
+              : { error: "VALIDATION_ERROR", message: "delete_agent_state requires write capability." };
+            break;
+          case "add_concept_alias":
+            result = writeEnabled
+              ? await add_concept_alias(vaultRoot, toolArgs as Parameters<typeof add_concept_alias>[1])
+              : { error: "VALIDATION_ERROR", message: "add_concept_alias requires write capability." };
+            break;
+          case "assign_domain":
+            result = writeEnabled
+              ? await assign_domain(vaultRoot, toolArgs as Parameters<typeof assign_domain>[1])
+              : { error: "VALIDATION_ERROR", message: "assign_domain requires write capability." };
             break;
           default:
             result = { error: "VALIDATION_ERROR", message: `Unknown tool: ${name}` };
