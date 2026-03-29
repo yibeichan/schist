@@ -18,12 +18,32 @@ import sqlite3
 from pathlib import Path
 
 
+def normalize_endpoint(endpoint: str) -> str:
+    """Normalise an edge source/target to the canonical node ID.
+
+    Edges may store paths like ``concepts/<slug>.md`` but concept nodes use
+    the bare slug as their ``id``. Strip the directory prefix and ``.md``
+    suffix so the endpoint can be matched against ``doc_ids``.
+    """
+    if endpoint.startswith("concepts/"):
+        endpoint = endpoint[len("concepts/"):]
+    if endpoint.endswith(".md"):
+        endpoint = endpoint[: -len(".md")]
+    return endpoint
+
+
 def build_graph(db: sqlite3.Connection) -> dict:
     nodes = []
     links = []
 
+    # Exclude concept markdown files from the docs query: the `docs` table
+    # contains every ingested .md file, including concepts/<slug>.md, which
+    # would produce a duplicate node alongside the canonical concept node from
+    # the `concepts` table.
     docs = db.execute(
-        "SELECT id, title, date, status, tags FROM docs ORDER BY date DESC"
+        "SELECT id, title, date, status, tags FROM docs"
+        " WHERE id NOT LIKE 'concepts/%'"
+        " ORDER BY date DESC"
     ).fetchall()
     for id_, title, date, status, tags_json in docs:
         tags = json.loads(tags_json) if tags_json else []
@@ -51,22 +71,24 @@ def build_graph(db: sqlite3.Connection) -> dict:
             }
         )
 
-    # doc_ids contains both note ids and concept slugs (both are in nodes at this point)
+    # doc_ids contains both note ids and concept slugs at this point.
     doc_ids = {n["id"] for n in nodes}
     edges = db.execute(
         "SELECT source, target, type, context FROM edges"
     ).fetchall()
     for source, target, etype, context in edges:
+        # Normalise endpoints: edges may store paths like concepts/<slug>.md
+        # but concept nodes use bare slug as their id.
+        src = normalize_endpoint(source)
+        tgt = normalize_endpoint(target)
         # Skip edges whose endpoints are not present in the graph
         # (e.g. free-text target references that weren't ingested as nodes)
-        if source not in doc_ids:
-            continue
-        if target not in doc_ids:
+        if src not in doc_ids or tgt not in doc_ids:
             continue
         links.append(
             {
-                "source": source,
-                "target": target,
+                "source": src,
+                "target": tgt,
                 "type": etype,
                 "context": context or "",
             }
@@ -81,7 +103,9 @@ def build_search_index(db: sqlite3.Connection) -> dict:
     Lunr builds the index client-side from the documents array — no server needed.
     """
     docs = db.execute(
-        "SELECT id, title, date, status, tags, body FROM docs ORDER BY date DESC"
+        "SELECT id, title, date, status, tags, body FROM docs"
+        " WHERE id NOT LIKE 'concepts/%'"
+        " ORDER BY date DESC"
     ).fetchall()
 
     documents = []
@@ -104,6 +128,9 @@ def build_search_index(db: sqlite3.Connection) -> dict:
             "date": date or "",
             "status": status or "draft",
             "tags": tags,
+            # Full body stored here for the detail panel; the truncated
+            # body_excerpt above is only used by the lunr index.
+            "body": (body or "").strip(),
         }
 
     return {"documents": documents, "store": store}

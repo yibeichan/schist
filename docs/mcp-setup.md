@@ -5,7 +5,7 @@ via the Model Context Protocol over stdio.
 
 ## Configuration
 
-The server requires one environment variable:
+The server requires the vault path, provided in one of two ways:
 
 ```
 SCHIST_VAULT_PATH=/path/to/your/vault
@@ -13,6 +13,8 @@ SCHIST_VAULT_PATH=/path/to/your/vault
 
 This is intentionally **not** configured in this repository. Set it in your agent
 environment (e.g. OpenClaw `mcp.servers.schist.env.SCHIST_VAULT_PATH`).
+
+Alternatively, pass `--vault /path/to/vault` as a CLI argument.
 
 ## Starting the server
 

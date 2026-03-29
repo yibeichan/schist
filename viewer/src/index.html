@@ -161,10 +161,17 @@
 <script>
 (async () => {
   // ── Data loading ──────────────────────────────────────────────────────────
-  const [graphData, searchData] = await Promise.all([
-    fetch("graph.json").then(r => r.json()),
-    fetch("search-index.json").then(r => r.json()),
-  ]);
+  let graphData, searchData;
+  try {
+    [graphData, searchData] = await Promise.all([
+      fetch("graph.json").then(r => { if (!r.ok) throw new Error(`graph.json: HTTP ${r.status}`); return r.json(); }),
+      fetch("search-index.json").then(r => { if (!r.ok) throw new Error(`search-index.json: HTTP ${r.status}`); return r.json(); }),
+    ]);
+  } catch (err) {
+    document.getElementById("stats").textContent =
+      `⚠ Failed to load viewer data: ${err.message}. Serve this directory over HTTP (e.g. python3 -m http.server).`;
+    return;
+  }
 
   const { nodes, links } = graphData;
   const { documents, store } = searchData;
@@ -226,7 +233,10 @@
       row.appendChild(txt("div", n.label, "result-title"));
 
       const meta = el("div", "result-meta");
-      meta.appendChild(txt("span", `${n.date || ""} · ${n.status || n.type}`, "status"));
+      const dateText = n.date || "";
+      const statusText = n.status || n.type;
+      const metaText = dateText ? `${dateText} · ${statusText}` : statusText;
+      meta.appendChild(txt("span", metaText, "status"));
       for (const t of (n.tags || []).slice(0, 3)) {
         meta.appendChild(txt("span", t, "tag"));
       }
@@ -283,8 +293,8 @@
     }
     metaEl.replaceChildren(metaFrag);
 
-    const doc = documents.find(d => d.id === id);
-    document.getElementById("detail-body").textContent = doc?.body || node.description || "";
+    // Use store body (full text) — documents[].body is truncated for lunr indexing only
+    document.getElementById("detail-body").textContent = meta.body || node.description || "";
 
     const outgoing = links.filter(l => l.source === id || (l.source && l.source.id === id));
     const incoming = links.filter(l => l.target === id || (l.target && l.target.id === id));
