@@ -422,16 +422,13 @@ export async function add_concept_alias(
 }
 
 export async function assign_domain(
-  vaultRoot: string,
+  _vaultRoot: string,
   args: { doc_id: string; domain_slug: string }
 ): Promise<unknown> {
-  try {
-    // Add domain_slug as a tag on the doc (stored in docs.tags JSON array)
-    const note = sqliteReader.getNote(vaultRoot, args.doc_id);
-    if (!note) return { error: "NOT_FOUND", message: `Doc '${args.doc_id}' not found` };
-    // Return the domain assignment — actual persistence is via create_note/update
-    return { id: args.doc_id, domain_slug: args.domain_slug };
-  } catch (e: unknown) {
-    return normalizeError(e, "INGEST_ERROR");
-  }
+  // TODO: implement actual persistence — add domain_slug to the doc's
+  // frontmatter via the git-writer path, then trigger re-ingestion.
+  return {
+    error: "NOT_IMPLEMENTED",
+    message: `assign_domain is not yet implemented (doc_id=${args.doc_id}, domain_slug=${args.domain_slug})`,
+  } satisfies ToolError;
 }

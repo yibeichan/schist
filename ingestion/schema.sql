@@ -81,6 +81,16 @@ CREATE TABLE IF NOT EXISTS agent_memory (
 
 CREATE VIRTUAL TABLE IF NOT EXISTS agent_memory_fts USING fts5(owner, entry_type, content, tags, content='agent_memory', content_rowid='id');
 
+CREATE TRIGGER IF NOT EXISTS agent_memory_ai AFTER INSERT ON agent_memory BEGIN
+  INSERT INTO agent_memory_fts(rowid, owner, entry_type, content, tags)
+  VALUES (new.id, new.owner, new.entry_type, new.content, new.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS agent_memory_ad AFTER DELETE ON agent_memory BEGIN
+  INSERT INTO agent_memory_fts(agent_memory_fts, rowid, owner, entry_type, content, tags)
+  VALUES ('delete', old.id, old.owner, old.entry_type, old.content, old.tags);
+END;
+
 CREATE TABLE IF NOT EXISTS agent_state (
   key        TEXT PRIMARY KEY,
   value      TEXT NOT NULL,

@@ -5,9 +5,18 @@ import * as fs from "fs";
 import type { SearchResult, Note, Concept, Connection, MemoryEntry, AgentStateEntry, Domain, ConceptAlias } from "./types.js";
 import { CONNECTION_RE, parseConnections as parseConnectionsSync } from "./markdown-parser.js";
 
-function openDb(vaultRoot: string): Database.Database {
+/** Sanitize user input for FTS5 MATCH: quote each token to prevent query syntax injection. */
+function sanitizeFtsQuery(raw: string): string {
+  return raw
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(token => `"${token.replace(/"/g, '""')}"`)
+    .join(" ");
+}
+
+function openDb(vaultRoot: string, opts?: { readonly?: boolean }): Database.Database {
   const dbPath = path.join(vaultRoot, ".schist", "schist.db");
-  return new Database(dbPath, { readonly: true });
+  return new Database(dbPath, { readonly: opts?.readonly ?? true });
 }
 
 export function searchNotes(
@@ -329,7 +338,6 @@ export function searchMemory(opts: {
       datetime(updated_at, '+' || ttl_hours || ' hours') < datetime('now')`);
 
     const limit = opts.limit ?? 50;
-    const conditions: string[] = [];
     const params: unknown[] = [];
 
     let useFts = false;
@@ -345,7 +353,7 @@ export function searchMemory(opts: {
         JOIN agent_memory m ON m.id = f.rowid
         WHERE agent_memory_fts MATCH ?
       `;
-      params.push(opts.query!);
+      params.push(sanitizeFtsQuery(opts.query!));
       if (opts.owner) { sql += " AND m.owner = ?"; params.push(opts.owner); }
       if (opts.entry_type) { sql += " AND m.entry_type = ?"; params.push(opts.entry_type); }
       if (opts.date_from) { sql += " AND m.date >= ?"; params.push(opts.date_from); }
@@ -378,8 +386,8 @@ function rowToMemoryEntry(row: Record<string, unknown>): MemoryEntry {
     entry_type: row.entry_type as MemoryEntry["entry_type"],
     content: row.content as string,
     tags: row.tags ? JSON.parse(row.tags as string) : [],
-    related_doc: row.related_doc as string | undefined,
-    source_ref: row.source_ref as string | undefined,
+    related_doc: row.related_doc == null ? undefined : (row.related_doc as string),
+    source_ref: row.source_ref == null ? undefined : (row.source_ref as string),
     confidence: row.confidence as MemoryEntry["confidence"],
     created_at: row.created_at as string,
   };
@@ -444,8 +452,8 @@ export function listDomains(vaultRoot: string): Domain[] {
     return rows.map(r => ({
       slug: r.slug as string,
       label: r.label as string,
-      description: r.description as string | undefined,
-      parent_slug: r.parent_slug as string | undefined,
+      description: r.description == null ? undefined : (r.description as string),
+      parent_slug: r.parent_slug == null ? undefined : (r.parent_slug as string),
     }));
   } catch {
     // Table may not exist in older DBs — return empty
@@ -463,7 +471,7 @@ export function addConceptAlias(
   created_by: string
 ): ConceptAlias {
   assertOwner(created_by);
-  const db = openDb(vaultRoot);
+  const db = openDb(vaultRoot, { readonly: false });
   try {
     db.prepare(`
       INSERT OR REPLACE INTO concept_aliases (duplicate_slug, canonical_slug, reason, created_by)
