@@ -448,7 +448,7 @@ export function deleteAgentState(key: string, owner: string): { deleted: boolean
 export function listDomains(vaultRoot: string): Domain[] {
   const db = openDb(vaultRoot);
   try {
-    const rows = db.prepare("SELECT * FROM research_domains ORDER BY parent_slug NULLS FIRST, slug").all() as Record<string, unknown>[];
+    const rows = db.prepare("SELECT * FROM domains ORDER BY parent_slug NULLS FIRST, slug").all() as Record<string, unknown>[];
     return rows.map(r => ({
       slug: r.slug as string,
       label: r.label as string,

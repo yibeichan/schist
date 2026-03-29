@@ -99,11 +99,11 @@ CREATE TABLE IF NOT EXISTS agent_state (
   ttl_hours  INTEGER DEFAULT NULL
 );
 
-CREATE TABLE IF NOT EXISTS research_domains (
+CREATE TABLE IF NOT EXISTS domains (
   slug        TEXT PRIMARY KEY,
   label       TEXT NOT NULL,
   description TEXT,
-  parent_slug TEXT REFERENCES research_domains(slug)
+  parent_slug TEXT REFERENCES domains(slug)
 );
 
 CREATE TABLE IF NOT EXISTS concept_aliases (

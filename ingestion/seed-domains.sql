@@ -1,10 +1,10 @@
--- Seed research_domains taxonomy
+-- Seed domains taxonomy
 -- Run after schema.sql. Safe to re-run (INSERT OR IGNORE).
 --
 -- NOT auto-wired into ingest.py — run manually against your vault DB:
 --   sqlite3 /path/to/vault/.schist/schist.db < ingestion/seed-domains.sql
 
-INSERT OR IGNORE INTO research_domains (slug, label, description, parent_slug) VALUES
+INSERT OR IGNORE INTO domains (slug, label, description, parent_slug) VALUES
   ('ai',             'Artificial Intelligence',  'ML, LLMs, agents, alignment',                    NULL),
   ('ai-ml',          'Machine Learning',         'Supervised/unsupervised learning, deep learning', 'ai'),
   ('ai-agents',      'AI Agents',                'Multi-agent systems, tool use, planning',         'ai'),
