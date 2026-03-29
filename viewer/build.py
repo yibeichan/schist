@@ -7,7 +7,7 @@ Usage:
 
 Output files (generic, no vault-specific content):
     graph.json        — nodes (docs + concepts) and edges for D3 force graph
-    search-index.json — lunr.js pre-built search index + document store
+    search-index.json — lunr.js document list + metadata store (index built client-side)
     index.html        — viewer UI (copied from src/index.html)
 """
 
@@ -41,6 +41,7 @@ def build_graph(db: sqlite3.Connection) -> dict:
     concepts = db.execute(
         "SELECT slug, title, description FROM concepts"
     ).fetchall()
+    # concept_slugs used below to filter edges whose endpoints don't exist in the graph
     concept_slugs = set()
     for slug, title, desc in concepts:
         concept_slugs.add(slug)
@@ -53,10 +54,17 @@ def build_graph(db: sqlite3.Connection) -> dict:
             }
         )
 
+    doc_ids = {n["id"] for n in nodes}
     edges = db.execute(
         "SELECT source, target, type, context FROM edges"
     ).fetchall()
     for source, target, etype, context in edges:
+        # Skip edges whose endpoints are not present in the graph
+        # (e.g. free-text target references that weren't ingested as nodes)
+        if source not in doc_ids and source not in concept_slugs:
+            continue
+        if target not in doc_ids and target not in concept_slugs:
+            continue
         links.append(
             {
                 "source": source,
@@ -129,8 +137,8 @@ def main():
     graph_out = out_dir / "graph.json"
     search_out = out_dir / "search-index.json"
 
-    graph_out.write_text(json.dumps(graph, indent=2))
-    search_out.write_text(json.dumps(search, indent=2))
+    graph_out.write_text(json.dumps(graph, indent=2, ensure_ascii=False), encoding="utf-8")
+    search_out.write_text(json.dumps(search, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # Copy viewer UI
     src_html = Path(__file__).parent / "src" / "index.html"

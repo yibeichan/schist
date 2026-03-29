@@ -139,7 +139,7 @@
   <div id="graph-wrap">
     <svg id="graph"></svg>
     <div id="detail">
-      <button id="detail-close">×</button>
+      <button id="detail-close" aria-label="Close details" title="Close details">×</button>
       <h2 id="detail-title"></h2>
       <div id="detail-meta"></div>
       <div id="detail-body"></div>
@@ -183,6 +183,18 @@
   let activeFilter = "all";
   let searchQuery = "";
 
+  // ── DOM helpers — all vault-sourced values go through textContent only ────
+  function el(tag, cls) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    return e;
+  }
+  function txt(tag, text, cls) {
+    const e = el(tag, cls);
+    e.textContent = text;
+    return e;
+  }
+
   // ── Sidebar list ──────────────────────────────────────────────────────────
   const resultsEl = document.getElementById("results");
   const statsEl = document.getElementById("stats");
@@ -205,20 +217,28 @@
 
     items.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
 
-    resultsEl.innerHTML = items.map(n => `
-      <div class="result-item${n.id === selectedId ? " selected" : ""}" data-id="${n.id}">
-        <div class="result-title">${n.label}</div>
-        <div class="result-meta">
-          <span class="status">${n.date || ""} · ${n.status || n.type}</span>
-          ${(n.tags || []).slice(0, 3).map(t => `<span class="tag">${t}</span>`).join("")}
-        </div>
-      </div>
-    `).join("");
+    // #2 XSS fix: build DOM nodes — no innerHTML interpolation of vault data
+    const frag = document.createDocumentFragment();
+    for (const n of items) {
+      const row = el("button", "result-item" + (n.id === selectedId ? " selected" : ""));
+      row.type = "button";
+      row.setAttribute("data-id", n.id);
+      row.appendChild(txt("div", n.label, "result-title"));
+
+      const meta = el("div", "result-meta");
+      meta.appendChild(txt("span", `${n.date || ""} · ${n.status || n.type}`, "status"));
+      for (const t of (n.tags || []).slice(0, 3)) {
+        meta.appendChild(txt("span", t, "tag"));
+      }
+      row.appendChild(meta);
+
+      row.addEventListener("click", () => selectNode(n.id));
+      // keyboard: Enter/Space already fires click on <button>
+      frag.appendChild(row);
+    }
+    resultsEl.replaceChildren(frag);
 
     statsEl.textContent = `${items.length} / ${nodes.length} items`;
-    resultsEl.querySelectorAll(".result-item").forEach(el => {
-      el.addEventListener("click", () => selectNode(el.dataset.id));
-    });
   }
 
   // ── Filter buttons ────────────────────────────────────────────────────────
@@ -250,12 +270,18 @@
     const node = nodes.find(n => n.id === id);
     if (!node) return;
     const meta = store[id] || {};
+
+    // #1 XSS fix: all vault-sourced values set via textContent / setAttribute only
     document.getElementById("detail-title").textContent = node.label;
-    document.getElementById("detail-meta").innerHTML = `
-      <span>${meta.date || ""}</span>
-      <span>${meta.status || ""}</span>
-      ${(meta.tags || []).map(t => `<span class="tag">${t}</span>`).join(" ")}
-    `;
+
+    const metaEl = document.getElementById("detail-meta");
+    const metaFrag = document.createDocumentFragment();
+    metaFrag.appendChild(txt("span", meta.date || ""));
+    metaFrag.appendChild(txt("span", meta.status || ""));
+    for (const t of (meta.tags || [])) {
+      metaFrag.appendChild(txt("span", t, "tag"));
+    }
+    metaEl.replaceChildren(metaFrag);
 
     const doc = documents.find(d => d.id === id);
     document.getElementById("detail-body").textContent = doc?.body || node.description || "";
@@ -269,17 +295,21 @@
 
     const connEl = document.getElementById("detail-connections");
     if (allConns.length) {
-      connEl.innerHTML = `<h3>Connections</h3>` + allConns.map(c => {
+      const connFrag = document.createDocumentFragment();
+      connFrag.appendChild(txt("h3", "Connections"));
+      for (const c of allConns) {
         const peer = nodes.find(n => n.id === c.peer);
-        return `<div class="conn-item" data-id="${c.peer}">
-          <span class="conn-type">${c.dir} ${c.type}</span>${peer?.label || c.peer}
-        </div>`;
-      }).join("");
-      connEl.querySelectorAll(".conn-item").forEach(el => {
-        el.addEventListener("click", () => selectNode(el.dataset.id));
-      });
+        const row = el("button", "conn-item");
+        row.type = "button";
+        row.setAttribute("data-id", c.peer);
+        row.appendChild(txt("span", `${c.dir} ${c.type}`, "conn-type"));
+        row.appendChild(document.createTextNode(peer?.label || c.peer));
+        row.addEventListener("click", () => selectNode(c.peer));
+        connFrag.appendChild(row);
+      }
+      connEl.replaceChildren(connFrag);
     } else {
-      connEl.innerHTML = "";
+      connEl.replaceChildren();
     }
 
     detail.classList.add("open");
