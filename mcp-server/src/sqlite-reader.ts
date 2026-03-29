@@ -34,7 +34,7 @@ export function searchNotes(
       JOIN docs ON docs.rowid = docs_fts.rowid
       WHERE docs_fts MATCH ?
     `;
-    const params: unknown[] = [query];
+    const params: unknown[] = [sanitizeFtsQuery(query)];
 
     if (opts?.status) {
       sql += ` AND docs.status = ?`;
