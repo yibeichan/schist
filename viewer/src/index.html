@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>schist — knowledge graph</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2a2d3a;
+      --text: #e2e4ec;
+      --muted: #6b7280;
+      --accent: #7c6af7;
+      --accent-dim: #4b45a0;
+      --note: #5b9cf6;
+      --concept: #f59e42;
+      --link-default: #374151;
+      --link-hover: #6b7280;
+    }
+
+    html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; font-size: 14px; }
+
+    #app { display: flex; height: 100vh; }
+
+    /* Sidebar */
+    #sidebar {
+      width: 300px; min-width: 220px; max-width: 400px;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex; flex-direction: column;
+      overflow: hidden;
+      resize: horizontal;
+    }
+    #sidebar-header { padding: 16px; border-bottom: 1px solid var(--border); }
+    #sidebar-header h1 { font-size: 16px; font-weight: 600; color: var(--text); letter-spacing: 0.02em; }
+    #sidebar-header p { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+    #search-wrap { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+    #search {
+      width: 100%; padding: 7px 10px;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--text); font-size: 13px;
+      outline: none;
+    }
+    #search:focus { border-color: var(--accent); }
+    #search::placeholder { color: var(--muted); }
+
+    #filter-wrap { padding: 8px 12px; border-bottom: 1px solid var(--border); display: flex; gap: 6px; flex-wrap: wrap; }
+    .filter-btn {
+      padding: 3px 9px; border-radius: 12px; border: 1px solid var(--border);
+      background: transparent; color: var(--muted); font-size: 11px; cursor: pointer;
+    }
+    .filter-btn.active { background: var(--accent-dim); color: var(--text); border-color: var(--accent); }
+
+    #results { flex: 1; overflow-y: auto; padding: 8px 0; }
+    .result-item {
+      padding: 9px 14px; cursor: pointer; border-bottom: 1px solid var(--border);
+      transition: background 0.1s;
+    }
+    .result-item:hover, .result-item.selected { background: var(--bg); }
+    .result-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .result-meta { font-size: 11px; color: var(--muted); margin-top: 2px; display: flex; gap: 6px; flex-wrap: wrap; }
+    .tag { background: var(--border); border-radius: 3px; padding: 1px 5px; font-size: 10px; }
+    .status { font-style: italic; }
+
+    #stats { padding: 8px 14px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--border); }
+
+    /* Graph */
+    #graph-wrap { flex: 1; position: relative; overflow: hidden; }
+    #graph { width: 100%; height: 100%; }
+
+    /* Detail panel */
+    #detail {
+      position: absolute; right: 0; top: 0; bottom: 0;
+      width: 320px; background: var(--surface);
+      border-left: 1px solid var(--border);
+      overflow-y: auto; padding: 18px;
+      transform: translateX(100%);
+      transition: transform 0.2s ease;
+      z-index: 10;
+    }
+    #detail.open { transform: translateX(0); }
+    #detail-close {
+      position: absolute; top: 12px; right: 12px;
+      background: none; border: none; color: var(--muted);
+      font-size: 18px; cursor: pointer; line-height: 1;
+    }
+    #detail h2 { font-size: 15px; font-weight: 600; margin-bottom: 6px; padding-right: 24px; }
+    #detail-meta { font-size: 11px; color: var(--muted); margin-bottom: 14px; }
+    #detail-meta span { margin-right: 8px; }
+    #detail-body { font-size: 12px; line-height: 1.65; color: #b0b4c0; white-space: pre-wrap; }
+    #detail-connections { margin-top: 14px; }
+    #detail-connections h3 { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+    .conn-item { font-size: 12px; padding: 5px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+    .conn-item:hover { color: var(--accent); }
+    .conn-type { font-size: 10px; color: var(--accent); margin-right: 6px; }
+
+    /* Tooltip */
+    #tooltip {
+      position: absolute; pointer-events: none; display: none;
+      background: var(--surface); border: 1px solid var(--border);
+      padding: 6px 10px; border-radius: 6px; font-size: 12px;
+      max-width: 200px; z-index: 20;
+    }
+
+    /* Legend */
+    #legend {
+      position: absolute; bottom: 14px; left: 14px;
+      display: flex; gap: 12px; font-size: 11px; color: var(--muted);
+      pointer-events: none;
+    }
+    .legend-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; vertical-align: middle; }
+    .legend-note { background: var(--note); }
+    .legend-concept { background: var(--concept); }
+  </style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <div id="sidebar-header">
+      <h1>schist</h1>
+      <p id="vault-name">knowledge graph</p>
+    </div>
+    <div id="search-wrap">
+      <input id="search" type="search" placeholder="Search notes…" autocomplete="off" />
+    </div>
+    <div id="filter-wrap">
+      <button class="filter-btn active" data-filter="all">All</button>
+      <button class="filter-btn" data-filter="note">Notes</button>
+      <button class="filter-btn" data-filter="concept">Concepts</button>
+    </div>
+    <div id="results"></div>
+    <div id="stats"></div>
+  </div>
+
+  <div id="graph-wrap">
+    <svg id="graph"></svg>
+    <div id="detail">
+      <button id="detail-close" aria-label="Close details" title="Close details">×</button>
+      <h2 id="detail-title"></h2>
+      <div id="detail-meta"></div>
+      <div id="detail-body"></div>
+      <div id="detail-connections"></div>
+    </div>
+    <div id="tooltip"></div>
+    <div id="legend">
+      <span><span class="legend-dot legend-note"></span>note</span>
+      <span><span class="legend-dot legend-concept"></span>concept</span>
+    </div>
+  </div>
+</div>
+
+<!-- D3.js v7 (CDN) -->
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<!-- lunr.js (CDN) -->
+<script src="https://cdn.jsdelivr.net/npm/lunr@2/lunr.min.js"></script>
+
+<script>
+(async () => {
+  // ── Data loading ──────────────────────────────────────────────────────────
+  let graphData, searchData;
+  try {
+    [graphData, searchData] = await Promise.all([
+      fetch("graph.json").then(r => { if (!r.ok) throw new Error(`graph.json: HTTP ${r.status}`); return r.json(); }),
+      fetch("search-index.json").then(r => { if (!r.ok) throw new Error(`search-index.json: HTTP ${r.status}`); return r.json(); }),
+    ]);
+  } catch (err) {
+    document.getElementById("stats").textContent =
+      `⚠ Failed to load viewer data: ${err.message}. Serve this directory over HTTP (e.g. python3 -m http.server).`;
+    return;
+  }
+
+  const { nodes, links } = graphData;
+  const { documents, store } = searchData;
+
+  // ── lunr index ───────────────────────────────────────────────────────────
+  const idx = lunr(function () {
+    this.ref("id");
+    this.field("title", { boost: 10 });
+    this.field("tags", { boost: 5 });
+    this.field("body");
+    documents.forEach(doc => this.add(doc));
+  });
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  let selectedId = null;
+  let activeFilter = "all";
+  let searchQuery = "";
+
+  // ── DOM helpers — all vault-sourced values go through textContent only ────
+  function el(tag, cls) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    return e;
+  }
+  function txt(tag, text, cls) {
+    const e = el(tag, cls);
+    e.textContent = text;
+    return e;
+  }
+
+  // ── Sidebar list ──────────────────────────────────────────────────────────
+  const resultsEl = document.getElementById("results");
+  const statsEl = document.getElementById("stats");
+
+  function renderList() {
+    let items = nodes.filter(n => {
+      if (activeFilter !== "all" && n.type !== activeFilter) return false;
+      return true;
+    });
+
+    if (searchQuery.trim()) {
+      try {
+        const hits = idx.search(searchQuery + "~1");
+        const hitIds = new Set(hits.map(h => h.ref));
+        items = items.filter(n => hitIds.has(n.id));
+      } catch {
+        // partial/empty query — show all
+      }
+    }
+
+    items.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+
+    // #2 XSS fix: build DOM nodes — no innerHTML interpolation of vault data
+    const frag = document.createDocumentFragment();
+    for (const n of items) {
+      const row = el("button", "result-item" + (n.id === selectedId ? " selected" : ""));
+      row.type = "button";
+      row.setAttribute("data-id", n.id);
+      row.appendChild(txt("div", n.label, "result-title"));
+
+      const meta = el("div", "result-meta");
+      const dateText = n.date || "";
+      const statusText = n.status || n.type;
+      const metaText = dateText ? `${dateText} · ${statusText}` : statusText;
+      meta.appendChild(txt("span", metaText, "status"));
+      for (const t of (n.tags || []).slice(0, 3)) {
+        meta.appendChild(txt("span", t, "tag"));
+      }
+      row.appendChild(meta);
+
+      row.addEventListener("click", () => selectNode(n.id));
+      // keyboard: Enter/Space already fires click on <button>
+      frag.appendChild(row);
+    }
+    resultsEl.replaceChildren(frag);
+
+    statsEl.textContent = `${items.length} / ${nodes.length} items`;
+  }
+
+  // ── Filter buttons ────────────────────────────────────────────────────────
+  document.querySelectorAll(".filter-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".filter-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      activeFilter = btn.dataset.filter;
+      renderList();
+    });
+  });
+
+  document.getElementById("search").addEventListener("input", e => {
+    searchQuery = e.target.value;
+    renderList();
+  });
+
+  // ── Detail panel ──────────────────────────────────────────────────────────
+  const detail = document.getElementById("detail");
+
+  function selectNode(id) {
+    selectedId = id;
+    renderList();
+    highlightNode(id);
+    showDetail(id);
+  }
+
+  function showDetail(id) {
+    const node = nodes.find(n => n.id === id);
+    if (!node) return;
+    const meta = store[id] || {};
+
+    // #1 XSS fix: all vault-sourced values set via textContent / setAttribute only
+    document.getElementById("detail-title").textContent = node.label;
+
+    const metaEl = document.getElementById("detail-meta");
+    const metaFrag = document.createDocumentFragment();
+    // Only show date if present — avoid leading " · status" when date is empty
+    const detailDate = meta.date || "";
+    const detailStatus = meta.status || node.type || "";
+    const detailMetaText = detailDate ? `${detailDate} · ${detailStatus}` : detailStatus;
+    if (detailMetaText) metaFrag.appendChild(txt("span", detailMetaText, "status"));
+    for (const t of (meta.tags || [])) {
+      metaFrag.appendChild(txt("span", t, "tag"));
+    }
+    metaEl.replaceChildren(metaFrag);
+
+    // Use store body (full text) — documents[].body is truncated for lunr indexing only
+    document.getElementById("detail-body").textContent = meta.body || node.description || "";
+
+    const outgoing = links.filter(l => l.source === id || (l.source && l.source.id === id));
+    const incoming = links.filter(l => l.target === id || (l.target && l.target.id === id));
+    const allConns = [
+      ...outgoing.map(l => ({ dir: "→", peer: l.target?.id || l.target, type: l.type })),
+      ...incoming.map(l => ({ dir: "←", peer: l.source?.id || l.source, type: l.type })),
+    ];
+
+    const connEl = document.getElementById("detail-connections");
+    if (allConns.length) {
+      const connFrag = document.createDocumentFragment();
+      connFrag.appendChild(txt("h3", "Connections"));
+      for (const c of allConns) {
+        const peer = nodes.find(n => n.id === c.peer);
+        const row = el("button", "conn-item");
+        row.type = "button";
+        row.setAttribute("data-id", c.peer);
+        row.appendChild(txt("span", `${c.dir} ${c.type}`, "conn-type"));
+        row.appendChild(document.createTextNode(peer?.label || c.peer));
+        row.addEventListener("click", () => selectNode(c.peer));
+        connFrag.appendChild(row);
+      }
+      connEl.replaceChildren(connFrag);
+    } else {
+      connEl.replaceChildren();
+    }
+
+    detail.classList.add("open");
+  }
+
+  document.getElementById("detail-close").addEventListener("click", () => {
+    detail.classList.remove("open");
+    selectedId = null;
+    renderList();
+    highlightNode(null);
+  });
+
+  // ── D3 force graph ────────────────────────────────────────────────────────
+  const svg = d3.select("#graph");
+  const wrap = document.getElementById("graph-wrap");
+
+  let width = wrap.clientWidth;
+  let height = wrap.clientHeight;
+
+  svg.attr("width", width).attr("height", height);
+
+  const g = svg.append("g");
+
+  svg.call(d3.zoom().scaleExtent([0.1, 8]).on("zoom", e => g.attr("transform", e.transform)));
+
+  const simulation = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id(d => d.id).distance(80).strength(0.4))
+    .force("charge", d3.forceManyBody().strength(-180))
+    .force("center", d3.forceCenter(width / 2, height / 2))
+    .force("collision", d3.forceCollide(18));
+
+  const linkG = g.append("g").attr("class", "links");
+  const nodeG = g.append("g").attr("class", "nodes");
+
+  const linkEl = linkG.selectAll("line")
+    .data(links)
+    .join("line")
+    .attr("stroke", "var(--link-default)")
+    .attr("stroke-width", 1.2)
+    .attr("stroke-opacity", 0.6);
+
+  const nodeEl = nodeG.selectAll("circle")
+    .data(nodes)
+    .join("circle")
+    .attr("r", d => d.type === "concept" ? 7 : 5)
+    .attr("fill", d => d.type === "concept" ? "var(--concept)" : "var(--note)")
+    .attr("stroke", "var(--bg)")
+    .attr("stroke-width", 1.5)
+    .style("cursor", "pointer")
+    .call(d3.drag()
+      .on("start", (event, d) => { if (!event.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on("drag", (event, d) => { d.fx = event.x; d.fy = event.y; })
+      .on("end", (event, d) => { if (!event.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
+    )
+    .on("click", (event, d) => { event.stopPropagation(); selectNode(d.id); })
+    .on("mouseover", (event, d) => {
+      const tip = document.getElementById("tooltip");
+      tip.style.display = "block";
+      tip.style.left = (event.offsetX + 14) + "px";
+      tip.style.top = (event.offsetY - 10) + "px";
+      tip.textContent = d.label;
+    })
+    .on("mousemove", (event) => {
+      const tip = document.getElementById("tooltip");
+      tip.style.left = (event.offsetX + 14) + "px";
+      tip.style.top = (event.offsetY - 10) + "px";
+    })
+    .on("mouseout", () => { document.getElementById("tooltip").style.display = "none"; });
+
+  const labelEl = nodeG.selectAll("text")
+    .data(nodes.filter(n => n.type === "concept"))
+    .join("text")
+    .text(d => d.label)
+    .attr("font-size", 9)
+    .attr("fill", "var(--muted)")
+    .attr("dy", -10)
+    .attr("text-anchor", "middle")
+    .style("pointer-events", "none");
+
+  simulation.on("tick", () => {
+    linkEl
+      .attr("x1", d => d.source.x).attr("y1", d => d.source.y)
+      .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
+    nodeEl.attr("cx", d => d.x).attr("cy", d => d.y);
+    labelEl.attr("x", d => d.x).attr("y", d => d.y);
+  });
+
+  function highlightNode(id) {
+    if (!id) {
+      nodeEl.attr("opacity", 1);
+      linkEl.attr("stroke-opacity", 0.6).attr("stroke", "var(--link-default)");
+      return;
+    }
+    const connectedIds = new Set([id]);
+    links.forEach(l => {
+      const src = l.source?.id || l.source;
+      const tgt = l.target?.id || l.target;
+      if (src === id) connectedIds.add(tgt);
+      if (tgt === id) connectedIds.add(src);
+    });
+    nodeEl.attr("opacity", d => connectedIds.has(d.id) ? 1 : 0.2);
+    linkEl
+      .attr("stroke-opacity", l => {
+        const src = l.source?.id || l.source;
+        const tgt = l.target?.id || l.target;
+        return (src === id || tgt === id) ? 0.9 : 0.1;
+      })
+      .attr("stroke", l => {
+        const src = l.source?.id || l.source;
+        const tgt = l.target?.id || l.target;
+        return (src === id || tgt === id) ? "var(--accent)" : "var(--link-default)";
+      });
+  }
+
+  // Click background to deselect
+  svg.on("click", () => {
+    detail.classList.remove("open");
+    selectedId = null;
+    renderList();
+    highlightNode(null);
+  });
+
+  // Resize
+  new ResizeObserver(() => {
+    width = wrap.clientWidth; height = wrap.clientHeight;
+    svg.attr("width", width).attr("height", height);
+    simulation.force("center", d3.forceCenter(width / 2, height / 2)).alpha(0.1).restart();
+  }).observe(wrap);
+
+  // ── Init ──────────────────────────────────────────────────────────────────
+  renderList();
+  document.getElementById("vault-name").textContent =
+    `${nodes.filter(n => n.type === "note").length} notes · ${nodes.filter(n => n.type === "concept").length} concepts`;
+
+})();
+</script>
+</body>
+</html>
