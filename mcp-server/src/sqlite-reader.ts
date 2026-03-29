@@ -275,11 +275,14 @@ function openMemoryDb(): Database.Database {
   return db;
 }
 
-/** Validate caller identity — throws if SCHIST_AGENT_ID is set and doesn't match owner */
+/** Validate caller identity — SCHIST_AGENT_ID must be set and must match owner */
 function assertOwner(owner: string): void {
   const agentId = process.env.SCHIST_AGENT_ID;
-  if (agentId && agentId !== owner) {
-    throw { error: "VALIDATION_ERROR", message: `Owner '${owner}' does not match SCHIST_AGENT_ID '${agentId}'` };
+  if (!agentId) {
+    throw Object.assign(new Error("SCHIST_AGENT_ID env var is required for write operations"), { error: "CONFIG_ERROR" });
+  }
+  if (agentId !== owner) {
+    throw Object.assign(new Error(`Owner '${owner}' does not match SCHIST_AGENT_ID '${agentId}'`), { error: "VALIDATION_ERROR" });
   }
 }
 
@@ -287,10 +290,10 @@ function assertOwner(owner: string): void {
 function assertKeyPrefix(key: string, owner: string): void {
   const keyPrefix = key.split(".")[0];
   if (keyPrefix !== owner && keyPrefix !== "team") {
-    throw { error: "VALIDATION_ERROR", message: `agent_state: key '${key}' prefix must match owner '${owner}'` };
+    throw Object.assign(new Error(`agent_state: key '${key}' prefix must match owner '${owner}'`), { error: "VALIDATION_ERROR" });
   }
   if (keyPrefix === "team" && owner !== "eleven") {
-    throw { error: "VALIDATION_ERROR", message: `agent_state: team.* keys require owner=eleven` };
+    throw Object.assign(new Error("agent_state: team.* keys require owner=eleven"), { error: "VALIDATION_ERROR" });
   }
 }
 
@@ -419,10 +422,15 @@ export function setAgentState(key: string, value: unknown, owner: string, ttl_ho
   assertKeyPrefix(key, owner);
   const db = openMemoryDb();
   try {
+    // H4 fix: prevent silent ownership hijack — check existing key owner before upsert
+    const existing = db.prepare("SELECT owner FROM agent_state WHERE key = ?").get(key) as { owner: string } | undefined;
+    if (existing && existing.owner !== owner) {
+      throw Object.assign(new Error("Cannot overwrite state key owned by another agent"), { error: "OWNERSHIP_ERROR" });
+    }
     db.prepare(`
       INSERT INTO agent_state (key, value, owner, ttl_hours)
       VALUES (?, ?, ?, ?)
-      ON CONFLICT(key) DO UPDATE SET value=excluded.value, owner=excluded.owner,
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value,
         ttl_hours=excluded.ttl_hours, updated_at=datetime('now')
     `).run(key, JSON.stringify(value), owner, ttl_hours ?? null);
     const row = db.prepare("SELECT updated_at FROM agent_state WHERE key = ?").get(key) as { updated_at: string };
