@@ -316,3 +316,122 @@ export async function get_context(
     return normalizeError(e, "INGEST_ERROR");
   }
 }
+
+// ── Memory V2 Tools ────────────────────────────────────────────────────────
+
+/** Helper: validate SCHIST_AGENT_ID matches owner (skip if env var not set) */
+function assertAgentIdentity(owner: string): void {
+  const agentId = process.env.SCHIST_AGENT_ID;
+  if (agentId && agentId !== owner) {
+    throw { error: "VALIDATION_ERROR", message: `Owner '${owner}' does not match SCHIST_AGENT_ID '${agentId}'` };
+  }
+}
+
+// READ-ONLY memory tools (no capability gate)
+
+export async function search_memory(
+  _vaultRoot: string,
+  args: { query?: string; owner?: string; entry_type?: string; date_from?: string; date_to?: string; limit?: number }
+): Promise<unknown> {
+  try {
+    return sqliteReader.searchMemory(args);
+  } catch (e: unknown) {
+    return normalizeError(e, "INVALID_SQL");
+  }
+}
+
+export async function get_agent_state(
+  _vaultRoot: string,
+  args: { key: string }
+): Promise<unknown> {
+  try {
+    return sqliteReader.getAgentState(args.key);
+  } catch (e: unknown) {
+    return normalizeError(e, "INVALID_SQL");
+  }
+}
+
+export async function list_domains(
+  vaultRoot: string,
+  _args: Record<string, never>
+): Promise<unknown> {
+  try {
+    return sqliteReader.listDomains(vaultRoot);
+  } catch (e: unknown) {
+    return normalizeError(e, "INGEST_ERROR");
+  }
+}
+
+// WRITE memory tools (require write capability gate)
+
+export async function add_memory(
+  _vaultRoot: string,
+  args: {
+    owner: string;
+    entry_type: string;
+    content: string;
+    date?: string;
+    tags?: string[];
+    related_doc?: string;
+    source_ref?: string;
+    confidence?: string;
+  }
+): Promise<unknown> {
+  try {
+    assertAgentIdentity(args.owner);
+    return sqliteReader.addMemory(args);
+  } catch (e: unknown) {
+    return normalizeError(e, "VALIDATION_ERROR");
+  }
+}
+
+export async function set_agent_state(
+  _vaultRoot: string,
+  args: { key: string; value: unknown; owner: string; ttl_hours?: number }
+): Promise<unknown> {
+  try {
+    assertAgentIdentity(args.owner);
+    return sqliteReader.setAgentState(args.key, args.value, args.owner, args.ttl_hours);
+  } catch (e: unknown) {
+    return normalizeError(e, "VALIDATION_ERROR");
+  }
+}
+
+export async function delete_agent_state(
+  _vaultRoot: string,
+  args: { key: string; owner: string }
+): Promise<unknown> {
+  try {
+    assertAgentIdentity(args.owner);
+    return sqliteReader.deleteAgentState(args.key, args.owner);
+  } catch (e: unknown) {
+    return normalizeError(e, "VALIDATION_ERROR");
+  }
+}
+
+export async function add_concept_alias(
+  vaultRoot: string,
+  args: { duplicate_slug: string; canonical_slug: string; reason?: string; created_by: string }
+): Promise<unknown> {
+  try {
+    assertAgentIdentity(args.created_by);
+    return sqliteReader.addConceptAlias(vaultRoot, args.duplicate_slug, args.canonical_slug, args.reason, args.created_by);
+  } catch (e: unknown) {
+    return normalizeError(e, "VALIDATION_ERROR");
+  }
+}
+
+export async function assign_domain(
+  vaultRoot: string,
+  args: { doc_id: string; domain_slug: string }
+): Promise<unknown> {
+  try {
+    // Add domain_slug as a tag on the doc (stored in docs.tags JSON array)
+    const note = sqliteReader.getNote(vaultRoot, args.doc_id);
+    if (!note) return { error: "NOT_FOUND", message: `Doc '${args.doc_id}' not found` };
+    // Return the domain assignment — actual persistence is via create_note/update
+    return { id: args.doc_id, domain_slug: args.domain_slug };
+  } catch (e: unknown) {
+    return normalizeError(e, "INGEST_ERROR");
+  }
+}

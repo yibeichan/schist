@@ -62,3 +62,45 @@ CREATE INDEX idx_edges_target ON edges(target);
 CREATE INDEX idx_edges_type ON edges(type);
 CREATE INDEX idx_docs_status ON docs(status);
 CREATE INDEX idx_docs_date ON docs(date);
+
+-- ── Memory V2 Extension ────────────────────────────────────────────────────
+-- These tables are NOT rebuilt on re-ingest. They are persistent state.
+
+CREATE TABLE IF NOT EXISTS agent_memory (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner        TEXT NOT NULL,
+  date         TEXT NOT NULL,
+  entry_type   TEXT NOT NULL CHECK(entry_type IN ('decision','lesson','blocker','completion','observation')),
+  content      TEXT NOT NULL,
+  tags         TEXT,
+  related_doc  TEXT,
+  source_ref   TEXT,
+  confidence   TEXT NOT NULL DEFAULT 'medium' CHECK(confidence IN ('low','medium','high')),
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS agent_memory_fts USING fts5(owner, entry_type, content, tags, content='agent_memory', content_rowid='id');
+
+CREATE TABLE IF NOT EXISTS agent_state (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  owner      TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  ttl_hours  INTEGER DEFAULT NULL
+);
+
+CREATE TABLE IF NOT EXISTS research_domains (
+  slug        TEXT PRIMARY KEY,
+  label       TEXT NOT NULL,
+  description TEXT,
+  parent_slug TEXT REFERENCES research_domains(slug)
+);
+
+CREATE TABLE IF NOT EXISTS concept_aliases (
+  duplicate_slug TEXT NOT NULL REFERENCES concepts(slug),
+  canonical_slug TEXT NOT NULL REFERENCES concepts(slug),
+  reason         TEXT,
+  created_by     TEXT NOT NULL,
+  created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (duplicate_slug, canonical_slug)
+);
