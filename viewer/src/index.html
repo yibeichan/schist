@@ -286,8 +286,11 @@
 
     const metaEl = document.getElementById("detail-meta");
     const metaFrag = document.createDocumentFragment();
-    metaFrag.appendChild(txt("span", meta.date || ""));
-    metaFrag.appendChild(txt("span", meta.status || ""));
+    // Only show date if present — avoid leading " · status" when date is empty
+    const detailDate = meta.date || "";
+    const detailStatus = meta.status || node.type || "";
+    const detailMetaText = detailDate ? `${detailDate} · ${detailStatus}` : detailStatus;
+    if (detailMetaText) metaFrag.appendChild(txt("span", detailMetaText, "status"));
     for (const t of (meta.tags || [])) {
       metaFrag.appendChild(txt("span", t, "tag"));
     }

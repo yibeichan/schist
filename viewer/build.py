@@ -76,6 +76,7 @@ def build_graph(db: sqlite3.Connection) -> dict:
     edges = db.execute(
         "SELECT source, target, type, context FROM edges"
     ).fetchall()
+    skipped = 0
     for source, target, etype, context in edges:
         # Normalise endpoints: edges may store paths like concepts/<slug>.md
         # but concept nodes use bare slug as their id.
@@ -84,6 +85,7 @@ def build_graph(db: sqlite3.Connection) -> dict:
         # Skip edges whose endpoints are not present in the graph
         # (e.g. free-text target references that weren't ingested as nodes)
         if src not in doc_ids or tgt not in doc_ids:
+            skipped += 1
             continue
         links.append(
             {
@@ -93,6 +95,9 @@ def build_graph(db: sqlite3.Connection) -> dict:
                 "context": context or "",
             }
         )
+
+    if skipped:
+        print(f"  NOTE: {skipped} edge(s) skipped — endpoint not found in graph nodes")
 
     return {"nodes": nodes, "links": links}
 
