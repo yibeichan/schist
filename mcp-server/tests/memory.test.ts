@@ -1,7 +1,8 @@
 import * as os from "os";
 import * as path from "path";
 import * as fs from "fs/promises";
-import { addMemory, searchMemory, getAgentState, setAgentState, deleteAgentState } from "../src/sqlite-reader.js";
+import Database from "better-sqlite3";
+import { addMemory, searchMemory, getAgentState, setAgentState, deleteAgentState, addConceptAlias } from "../src/sqlite-reader.js";
 
 // Use a temp DB for each test suite
 let tempDir: string;
@@ -162,5 +163,59 @@ describe("deleteAgentState", () => {
     setAgentState("ninjia.secret", "val", "ninjia");
     // sansan trying to delete ninjia's key — prefix check fires first
     expect(() => deleteAgentState("ninjia.secret", "sansan")).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// searchMemory — FTS5 query sanitization (C2 fix)
+// ---------------------------------------------------------------------------
+
+describe("searchMemory — FTS5 sanitization", () => {
+  beforeEach(() => {
+    addMemory({ owner: "sansan", entry_type: "decision", content: "Set up research-db schema", tags: ["infra"] });
+  });
+
+  it("handles hyphenated query without throwing", () => {
+    // Before the fix, 'research-db' was interpreted as FTS5 column subtraction
+    const results = searchMemory({ query: "research-db" });
+    expect(Array.isArray(results)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// addConceptAlias — writable DB handle (C1 fix)
+// ---------------------------------------------------------------------------
+
+describe("addConceptAlias", () => {
+  let vaultDir: string;
+
+  beforeEach(async () => {
+    vaultDir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-alias-test-"));
+    const schistDir = path.join(vaultDir, ".schist");
+    await fs.mkdir(schistDir, { recursive: true });
+    // Create a minimal schist.db with concept_aliases table
+    const db = new Database(path.join(schistDir, "schist.db"));
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS concept_aliases (
+        duplicate_slug  TEXT NOT NULL,
+        canonical_slug  TEXT NOT NULL,
+        reason          TEXT,
+        created_by      TEXT NOT NULL,
+        created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (duplicate_slug, canonical_slug)
+      );
+    `);
+    db.close();
+  });
+
+  afterEach(async () => {
+    await fs.rm(vaultDir, { recursive: true, force: true });
+  });
+
+  it("succeeds without throwing (writable handle)", () => {
+    const alias = addConceptAlias(vaultDir, "ml", "machine-learning", "abbreviation", "sansan");
+    expect(alias.duplicate_slug).toBe("ml");
+    expect(alias.canonical_slug).toBe("machine-learning");
+    expect(alias.created_by).toBe("sansan");
   });
 });

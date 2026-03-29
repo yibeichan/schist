@@ -5,9 +5,18 @@ import * as fs from "fs";
 import type { SearchResult, Note, Concept, Connection, MemoryEntry, AgentStateEntry, Domain, ConceptAlias } from "./types.js";
 import { CONNECTION_RE, parseConnections as parseConnectionsSync } from "./markdown-parser.js";
 
-function openDb(vaultRoot: string): Database.Database {
+function openDb(vaultRoot: string, opts?: { readonly?: boolean }): Database.Database {
   const dbPath = path.join(vaultRoot, ".schist", "schist.db");
-  return new Database(dbPath, { readonly: true });
+  return new Database(dbPath, { readonly: opts?.readonly ?? true });
+}
+
+/** Sanitize user input for FTS5 MATCH: quote each token to prevent query syntax injection. */
+function sanitizeFtsQuery(raw: string): string {
+  return raw
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(token => `"${token.replace(/"/g, '""')}"`)
+    .join(" ");
 }
 
 export function searchNotes(
@@ -25,7 +34,7 @@ export function searchNotes(
       JOIN docs ON docs.rowid = docs_fts.rowid
       WHERE docs_fts MATCH ?
     `;
-    const params: unknown[] = [query];
+    const params: unknown[] = [sanitizeFtsQuery(query)];
 
     if (opts?.status) {
       sql += ` AND docs.status = ?`;
@@ -345,7 +354,7 @@ export function searchMemory(opts: {
         JOIN agent_memory m ON m.id = f.rowid
         WHERE agent_memory_fts MATCH ?
       `;
-      params.push(opts.query!);
+      params.push(sanitizeFtsQuery(opts.query!));
       if (opts.owner) { sql += " AND m.owner = ?"; params.push(opts.owner); }
       if (opts.entry_type) { sql += " AND m.entry_type = ?"; params.push(opts.entry_type); }
       if (opts.date_from) { sql += " AND m.date >= ?"; params.push(opts.date_from); }
@@ -463,7 +472,7 @@ export function addConceptAlias(
   created_by: string
 ): ConceptAlias {
   assertOwner(created_by);
-  const db = openDb(vaultRoot);
+  const db = openDb(vaultRoot, { readonly: false });
   try {
     db.prepare(`
       INSERT OR REPLACE INTO concept_aliases (duplicate_slug, canonical_slug, reason, created_by)
