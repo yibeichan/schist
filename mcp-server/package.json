@@ -42,5 +42,8 @@
     "jest": "^30.3.0",
     "ts-jest": "^29.4.6",
     "typescript": "^5.7.0"
+  },
+  "bin": {
+    "schist-memory": "./dist/cli/memory-cli.js"
   }
 }
