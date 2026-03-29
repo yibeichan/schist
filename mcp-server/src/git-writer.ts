@@ -52,7 +52,6 @@ function assertPathSafe(vaultRoot: string, relPath: string): void {
   const absVaultRoot = path.resolve(vaultRoot);
   const absPath = path.resolve(vaultRoot, relPath);
   if (!absPath.startsWith(absVaultRoot + path.sep) && absPath !== absVaultRoot) {
-    // error: "PATH_TRAVERSAL" — documented in docs/mcp-setup.md § Path validation
     throw { error: "PATH_TRAVERSAL", message: "Write path is outside vault root" };
   }
 }
