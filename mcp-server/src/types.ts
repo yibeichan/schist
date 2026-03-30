@@ -15,6 +15,8 @@ export interface Note {
   concepts: string[];
   body: string;
   connections: Connection[];
+  scope?: string;      // e.g., "global", "decisions", "research/ai"
+  source?: string;     // "human" | "agent" | undefined (default: agent)
 }
 
 export interface Concept {
@@ -32,6 +34,7 @@ export interface SearchResult {
   status: string;
   tags: string[];
   snippet: string;
+  scope?: string;
 }
 
 export interface VaultConfig {
