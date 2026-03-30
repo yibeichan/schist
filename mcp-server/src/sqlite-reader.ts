@@ -2,8 +2,50 @@ import Database from "better-sqlite3";
 import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
+import { load as yamlLoad } from "js-yaml";
 import type { SearchResult, Note, Concept, Connection, MemoryEntry, AgentStateEntry, Domain, ConceptAlias } from "./types.js";
 import { CONNECTION_RE, parseConnections as parseConnectionsSync } from "./markdown-parser.js";
+
+// ── Agent scope map (loaded from vault.yaml) ─────────────────────────────
+
+/** Map of agent name → default scope, loaded once from vault.yaml */
+let agentScopeMap: Map<string, string> | null = null;
+
+/**
+ * Load participant default scopes from vault.yaml.
+ * Supports both string[] and object[] participant formats.
+ * Cached after first load.
+ */
+export function loadAgentScopeMap(vaultRoot: string): Map<string, string> {
+  if (agentScopeMap) return agentScopeMap;
+
+  agentScopeMap = new Map();
+  try {
+    const vaultYamlPath = path.join(vaultRoot, "vault.yaml");
+    if (!fs.existsSync(vaultYamlPath)) return agentScopeMap;
+
+    const raw = yamlLoad(fs.readFileSync(vaultYamlPath, "utf-8")) as Record<string, unknown>;
+    const participants = raw.participants;
+    if (!Array.isArray(participants)) return agentScopeMap;
+
+    for (const p of participants) {
+      if (typeof p === "string") {
+        agentScopeMap.set(p, "global");
+      } else if (p && typeof p === "object" && "name" in p) {
+        const obj = p as { name: string; default_scope?: string };
+        agentScopeMap.set(obj.name, obj.default_scope ?? "global");
+      }
+    }
+  } catch {
+    // vault.yaml missing or malformed — use empty map
+  }
+  return agentScopeMap;
+}
+
+/** Reset cached scope map (for testing) */
+export function resetAgentScopeMap(): void {
+  agentScopeMap = null;
+}
 
 /** Sanitize user input for FTS5 MATCH: quote each token to prevent query syntax injection. */
 function sanitizeFtsQuery(raw: string): string {
@@ -22,7 +64,7 @@ function openDb(vaultRoot: string, opts?: { readonly?: boolean }): Database.Data
 export function searchNotes(
   vaultRoot: string,
   query: string,
-  opts?: { limit?: number; status?: string; tags?: string[]; scope?: string }
+  opts?: { limit?: number; status?: string; tags?: string[]; scope?: string; calling_scope?: string }
 ): SearchResult[] {
   const db = openDb(vaultRoot);
   try {
@@ -50,8 +92,10 @@ export function searchNotes(
 
     if (opts?.scope) {
       if (opts.scope === "inherit") {
-        // Show global notes + notes from the calling scope; prioritize scope-local results
-        const callingScope = "global"; // default when no calling context available
+        // Resolve calling scope: explicit param > agent default from vault.yaml > "global"
+        const scopeMap = loadAgentScopeMap(vaultRoot);
+        const agentName = process.env.SCHIST_AGENT_NAME ?? process.env.SCHIST_AGENT_ID;
+        const callingScope = opts.calling_scope ?? scopeMap.get(agentName ?? "") ?? "global";
         sql += ` AND (docs.scope = 'global' OR docs.scope = ?)`;
         params.push(callingScope);
         sql += ` ORDER BY CASE WHEN docs.scope = ? THEN 0 ELSE 1 END`;
