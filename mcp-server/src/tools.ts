@@ -115,13 +115,14 @@ function triggerIngestion(vaultRoot: string): void {
 
 export async function search_notes(
   vaultRoot: string,
-  args: { query: string; limit?: number; status?: string; tags?: string[] }
+  args: { query: string; limit?: number; status?: string; tags?: string[]; scope?: string }
 ): Promise<unknown> {
   try {
     return sqliteReader.searchNotes(vaultRoot, args.query, {
       limit: args.limit,
       status: args.status,
       tags: args.tags,
+      scope: args.scope,
     });
   } catch (e: unknown) {
     return normalizeError(e, "INGEST_ERROR");

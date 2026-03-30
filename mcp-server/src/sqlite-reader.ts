@@ -22,13 +22,13 @@ function openDb(vaultRoot: string, opts?: { readonly?: boolean }): Database.Data
 export function searchNotes(
   vaultRoot: string,
   query: string,
-  opts?: { limit?: number; status?: string; tags?: string[] }
+  opts?: { limit?: number; status?: string; tags?: string[]; scope?: string }
 ): SearchResult[] {
   const db = openDb(vaultRoot);
   try {
     const limit = opts?.limit ?? 20;
     let sql = `
-      SELECT docs.id, docs.title, docs.date, docs.status, docs.tags,
+      SELECT docs.id, docs.title, docs.date, docs.status, docs.tags, docs.scope,
              snippet(docs_fts, 1, '<b>', '</b>', '...', 20) as snippet
       FROM docs_fts
       JOIN docs ON docs.rowid = docs_fts.rowid
@@ -48,6 +48,20 @@ export function searchNotes(
       }
     }
 
+    if (opts?.scope) {
+      if (opts.scope === "inherit") {
+        // Show global notes + notes from the calling scope; prioritize scope-local results
+        const callingScope = "global"; // default when no calling context available
+        sql += ` AND (docs.scope = 'global' OR docs.scope = ?)`;
+        params.push(callingScope);
+        sql += ` ORDER BY CASE WHEN docs.scope = ? THEN 0 ELSE 1 END`;
+        params.push(callingScope);
+      } else {
+        sql += ` AND docs.scope = ?`;
+        params.push(opts.scope);
+      }
+    }
+
     sql += ` LIMIT ?`;
     params.push(limit);
 
@@ -59,6 +73,7 @@ export function searchNotes(
       status: (row.status as string) ?? "draft",
       tags: row.tags ? JSON.parse(row.tags as string) : [],
       snippet: (row.snippet as string) ?? "",
+      scope: (row.scope as string) ?? undefined,
     }));
   } finally {
     db.close();
@@ -83,6 +98,8 @@ export function getNote(vaultRoot: string, id: string): Note | null {
       concepts: row.concepts ? JSON.parse(row.concepts as string) : [],
       body,
       connections,
+      scope: (row.scope as string) ?? undefined,
+      source: (row.source as string) ?? undefined,
     };
   } finally {
     db.close();
