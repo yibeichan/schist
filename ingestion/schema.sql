@@ -14,6 +14,8 @@ CREATE TABLE docs (
     tags        TEXT,                   -- JSON array: '["attention", "transformer"]'
     concepts    TEXT,                   -- JSON array of concept slugs
     body        TEXT NOT NULL,          -- full markdown body (sans frontmatter)
+    scope       TEXT DEFAULT 'global', -- derived from directory or frontmatter
+    source      TEXT,                  -- "human" | "agent" | null
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now'))
 );
@@ -41,19 +43,20 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(
     title,
     body,
     tags,
+    scope,
     content='docs',
     content_rowid='rowid'
 );
 
 -- Triggers to keep FTS in sync during ingestion
 CREATE TRIGGER docs_ai AFTER INSERT ON docs BEGIN
-    INSERT INTO docs_fts(rowid, title, body, tags)
-    VALUES (new.rowid, new.title, new.body, new.tags);
+    INSERT INTO docs_fts(rowid, title, body, tags, scope)
+    VALUES (new.rowid, new.title, new.body, new.tags, new.scope);
 END;
 
 CREATE TRIGGER docs_ad AFTER DELETE ON docs BEGIN
-    INSERT INTO docs_fts(docs_fts, rowid, title, body, tags)
-    VALUES ('delete', old.rowid, old.title, old.body, old.tags);
+    INSERT INTO docs_fts(docs_fts, rowid, title, body, tags, scope)
+    VALUES ('delete', old.rowid, old.title, old.body, old.tags, old.scope);
 END;
 
 -- Indexes

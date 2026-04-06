@@ -112,6 +112,17 @@ def ingest(vault_path: str, db_path: str):
         concepts = raw_concepts if isinstance(raw_concepts, list) else []
         concepts_json = json.dumps(concepts) if concepts else None
 
+        # Scope: explicit frontmatter > directory path > 'global'
+        scope = meta.get('scope')
+        if not scope:
+            if len(rel.parts) > 1:
+                scope = str(rel.parent)
+            else:
+                scope = 'global'
+
+        # Source: from frontmatter, defaults to None
+        source = meta.get('source')  # "human" or "agent" or None
+
         doc_id = str(rel)
 
         # Determine if this is a concept file (in concepts/ dir or has 'concept' key)
@@ -125,8 +136,8 @@ def ingest(vault_path: str, db_path: str):
         if date_val is not None:
             date_val = str(date_val)
         conn.execute(
-            'INSERT INTO docs (id, title, date, status, tags, concepts, body) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            (doc_id, title, date_val, meta.get('status', 'draft'), tags_json, concepts_json, body),
+            'INSERT INTO docs (id, title, date, status, tags, concepts, body, scope, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (doc_id, title, date_val, meta.get('status', 'draft'), tags_json, concepts_json, body, scope, source),
         )
         doc_count += 1
 
