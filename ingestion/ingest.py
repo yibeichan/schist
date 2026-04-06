@@ -116,7 +116,7 @@ def ingest(vault_path: str, db_path: str):
         scope = meta.get('scope')
         if not scope:
             if len(rel.parts) > 1:
-                scope = str(rel.parent)
+                scope = rel.parent.as_posix()
             else:
                 scope = 'global'
 

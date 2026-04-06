@@ -239,7 +239,15 @@ class TestValidation:
     # 11. scope_convention is known
     def test_reject_unknown_scope_convention(self):
         with pytest.raises(ACLError, match="scope_convention"):
-            parse_vault_data(_v1(scope_convention="flat"))
+            parse_vault_data(_v1(scope_convention="unknown-mode"))
+
+    def test_accept_flat_scope_convention(self):
+        acl = parse_vault_data(_v1(scope_convention="flat"))
+        assert acl.scope_convention == "flat"
+
+    def test_accept_multi_vault_scope_convention(self):
+        acl = parse_vault_data(_v1(scope_convention="multi-vault"))
+        assert acl.scope_convention == "multi-vault"
 
     # 12. type values are agent or spoke
     def test_reject_invalid_type(self):
@@ -547,3 +555,38 @@ class TestMetadataValidation:
         })
         with pytest.raises(ACLError, match="metadata value.*must be a string"):
             parse_vault_data(data)
+
+    def test_reject_non_dict_metadata(self):
+        data = _v1(participants=[
+            {"name": "alice", "metadata": "not-a-dict"},
+        ], access={
+            "alice": {"read": ["*"], "write": ["*"]},
+        })
+        with pytest.raises(ACLError, match="metadata must be a mapping"):
+            parse_vault_data(data)
+
+
+class TestStringParticipants:
+    def test_string_participant_coerced_to_object(self):
+        data = _v1(participants=[
+            "alice",
+            {"name": "cluster-bob", "type": "spoke", "transport": "git-only"},
+        ], access={
+            "alice": {"read": ["*"], "write": ["*"]},
+            "cluster-bob": {"read": ["*"], "write": ["research/bob"]},
+        })
+        acl = parse_vault_data(data)
+        alice = acl.get_participant("alice")
+        assert alice is not None
+        assert alice.type == "agent"
+        assert alice.default_scope == "global"
+        assert alice.transport == "ssh-and-git"
+        assert alice.metadata == {}
+
+    def test_all_string_participants(self):
+        data = _v1(participants=["alice", "cluster-bob"], access={
+            "alice": {"read": ["*"], "write": ["*"]},
+            "cluster-bob": {"read": ["*"], "write": ["research/bob"]},
+        })
+        acl = parse_vault_data(data)
+        assert len(acl.participants) == 2

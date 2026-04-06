@@ -13,7 +13,7 @@ import yaml
 SUPPORTED_VERSIONS = {1}
 VALID_TYPES = {"agent", "spoke"}
 VALID_TRANSPORTS = {"ssh-and-git", "git-only"}
-VALID_SCOPE_CONVENTIONS = {"subdirectory"}
+VALID_SCOPE_CONVENTIONS = {"subdirectory", "flat", "multi-vault"}
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 
 DEFAULT_RATE_LIMITS = {
@@ -188,8 +188,10 @@ def parse_vault_data(data: dict[str, Any]) -> VaultACL:
     participants: list[Participant] = []
     seen_names: set[str] = set()
     for i, p in enumerate(raw_participants):
-        if not isinstance(p, dict):
-            errors.append(f"participants[{i}]: must be a mapping")
+        if isinstance(p, str):
+            p = {"name": p}
+        elif not isinstance(p, dict):
+            errors.append(f"participants[{i}]: must be a string or mapping")
             continue
 
         pname = p.get("name")
@@ -226,7 +228,12 @@ def parse_vault_data(data: dict[str, Any]) -> VaultACL:
                 errors.append(f"participant '{pname}': invalid default_scope: {e}")
 
         metadata = p.get("metadata") or {}
-        if isinstance(metadata, dict):
+        if not isinstance(metadata, dict):
+            errors.append(
+                f"participant '{pname}': metadata must be a mapping, got {type(metadata).__name__}"
+            )
+            metadata = {}
+        else:
             for mk, mv in metadata.items():
                 if not isinstance(mv, str):
                     errors.append(
