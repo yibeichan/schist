@@ -233,19 +233,27 @@ def parse_vault_data(data: dict[str, Any]) -> VaultACL:
                 f"participant '{pname}': metadata must be a mapping, got {type(metadata).__name__}"
             )
             metadata = {}
-        else:
-            for mk, mv in metadata.items():
-                if not isinstance(mv, str):
-                    errors.append(
-                        f"participant '{pname}': metadata value for '{mk}' must be a string, got {type(mv).__name__}"
-                    )
+
+        validated_metadata: dict[str, str] = {}
+        for mk, mv in metadata.items():
+            if not isinstance(mk, str):
+                errors.append(
+                    f"participant '{pname}': metadata key must be a string, got {type(mk).__name__}"
+                )
+                continue
+            if not isinstance(mv, str):
+                errors.append(
+                    f"participant '{pname}': metadata value for '{mk}' must be a string, got {type(mv).__name__}"
+                )
+                continue
+            validated_metadata[mk] = mv
 
         participants.append(Participant(
             name=pname,
             type=ptype,
             default_scope=default_scope,
             transport=transport,
-            metadata=metadata,
+            metadata=validated_metadata,
         ))
 
     # --- access ---
