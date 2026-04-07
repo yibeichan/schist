@@ -98,8 +98,8 @@ export function searchNotes(
         const scopeMap = loadAgentScopeMap(vaultRoot);
         const agentName = process.env.SCHIST_AGENT_NAME ?? process.env.SCHIST_AGENT_ID;
         const callingScope = scopeMap.get(agentName ?? "") ?? "global";
-        sql += ` AND (docs.scope = 'global' OR docs.scope = ?)`;
-        params.push(callingScope);
+        sql += ` AND (docs.scope = 'global' OR docs.scope = ? OR docs.scope LIKE ? || '/%')`;
+        params.push(callingScope, callingScope);
         sql += ` ORDER BY CASE WHEN docs.scope = ? THEN 0 ELSE 1 END`;
         params.push(callingScope);
       } else {
