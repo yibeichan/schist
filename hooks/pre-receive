@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Git pre-receive hook — enforces vault.yaml ACL on pushes.
+
+Install into a bare repo:
+    cp hooks/pre-receive <bare-repo>/hooks/pre-receive
+    chmod +x <bare-repo>/hooks/pre-receive
+
+Requires:
+    - schist package installed (pip install -e cli/)
+    - SCHIST_IDENTITY env var set (or GL_USER for gitolite)
+"""
+
+import sys
+
+from schist.pre_receive import main
+
+sys.exit(main())
