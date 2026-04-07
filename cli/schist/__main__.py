@@ -5,7 +5,7 @@ import argparse
 import os
 import sys
 
-from . import commands
+from . import commands, sync
 
 
 def main():
@@ -55,11 +55,32 @@ def main():
     p_schema = sub.add_parser('schema', help='Print or validate schema')
     p_schema.add_argument('--validate', action='store_true')
 
+    # init
+    p_init = sub.add_parser('init', help='Initialize a vault')
+    p_init.add_argument('--spoke', action='store_true', help='Initialize as spoke vault')
+    p_init.add_argument('--hub', help='Hub repository URL')
+    p_init.add_argument('--scope', help='Scope to sync (directory path)')
+    p_init.add_argument('--identity', default=os.environ.get('SCHIST_IDENTITY'),
+                        help='Spoke identity (or set SCHIST_IDENTITY)')
+
+    # sync
+    p_sync = sub.add_parser('sync', help='Sync spoke vault with hub')
+    sync_sub = p_sync.add_subparsers(dest='sync_action')
+    sync_sub.add_parser('pull', help='Pull updates from hub')
+    sync_sub.add_parser('push', help='Push local changes to hub')
+
     args = parser.parse_args()
 
     if not args.command:
         parser.print_help()
         sys.exit(1)
+
+    # init --spoke: vault doesn't exist yet, special path
+    if args.command == 'init' and getattr(args, 'spoke', False):
+        vault_path = args.vault or os.path.basename(args.hub or 'vault').replace('.git', '')
+        db_path = args.db or os.path.join(vault_path, '.schist', 'schist.db')
+        sync.init_spoke(args, vault_path, db_path)
+        sys.exit(0)
 
     vault_path = args.vault
     if not vault_path:
@@ -67,6 +88,17 @@ def main():
         sys.exit(1)
 
     db_path = args.db or os.path.join(vault_path, '.schist', 'schist.db')
+
+    # sync sub-dispatch
+    if args.command == 'sync':
+        if args.sync_action == 'pull':
+            sync.sync_pull(args, vault_path, db_path)
+        elif args.sync_action == 'push':
+            sync.sync_push(args, vault_path, db_path)
+        else:
+            print('Usage: schist sync {pull|push}', file=sys.stderr)
+            sys.exit(1)
+        sys.exit(0)
 
     dispatch = {
         'add': commands.add,
