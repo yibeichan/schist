@@ -113,7 +113,7 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
 
         if n > 0:
             msg = f"sync({config.identity}): {n} file{'s' if n != 1 else ''}"
-            ok, output = git_ops.commit(vault_path, msg)
+            ok, output = git_ops.commit(vault_path, msg, files=staged)
             if not ok:
                 print(f"Error: commit failed: {output}", file=sys.stderr)
                 sys.exit(1)
@@ -140,14 +140,25 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
 
 
 def _rebuild_index(vault_path: str, db_path: str) -> None:
-    """Delete existing SQLite and re-ingest from markdown files."""
+    """Delete existing SQLite and re-ingest from markdown files.
+
+    Uses rename-on-success: old DB is only removed after ingest succeeds.
+    """
     db = Path(db_path)
+    backup = None
     if db.exists():
-        db.unlink()
+        backup = db.with_suffix(".db.bak")
+        db.rename(backup)
 
     from .sqlite_query import _run_ingest
 
     try:
         _run_ingest(vault_path, db_path)
+        # Success — remove backup
+        if backup and backup.exists():
+            backup.unlink()
     except Exception as e:
+        # Restore backup so user keeps old (stale) index rather than none
+        if backup and backup.exists():
+            backup.rename(db)
         print(f"Warning: index rebuild failed: {e}", file=sys.stderr)

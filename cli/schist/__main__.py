@@ -77,7 +77,7 @@ def main():
 
     # init --spoke: vault doesn't exist yet, special path
     if args.command == 'init' and getattr(args, 'spoke', False):
-        vault_path = args.vault or os.path.basename(args.hub or 'vault').replace('.git', '')
+        vault_path = args.vault or os.path.basename(args.hub or 'vault').removesuffix('.git')
         db_path = args.db or os.path.join(vault_path, '.schist', 'schist.db')
         sync.init_spoke(args, vault_path, db_path)
         sys.exit(0)

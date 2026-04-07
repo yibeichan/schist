@@ -88,6 +88,11 @@ def pull_rebase(vault_path: str) -> tuple[bool, str]:
             return False, output.strip()
         return True, output.strip()
     except subprocess.TimeoutExpired:
+        # Abort any in-progress rebase to restore clean state
+        subprocess.run(
+            ['git', 'rebase', '--abort'],
+            cwd=vault_path, capture_output=True, text=True,
+        )
         return False, "Pull timed out after 60s"
     except subprocess.CalledProcessError as e:
         return False, (e.stdout or '') + (e.stderr or '')
@@ -119,28 +124,35 @@ def has_uncommitted_changes(vault_path: str) -> bool:
 
 
 def has_unpushed_commits(vault_path: str) -> bool:
-    """Check if local branch is ahead of origin."""
+    """Check if local branch is ahead of origin.
+
+    Returns True if there are unpushed commits, or if the check fails
+    (erring on the side of attempting a push).
+    """
     branch = current_branch(vault_path)
+    if not branch:
+        return True  # Detached HEAD — let push attempt and report the real error
     result = subprocess.run(
         ['git', 'rev-list', f'origin/{branch}..HEAD', '--count'],
         cwd=vault_path, capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        return True  # Can't determine — assume yes so push is attempted
     try:
         return int(result.stdout.strip()) > 0
     except ValueError:
-        return False
+        return True
 
 
 def stage_scope_files(vault_path: str, scope: str) -> tuple[bool, str]:
-    """Stage all files within the scope directory."""
+    """Stage all files within the scope directory.
+
+    Only stages files under the scope path. Root-level files (vault.yaml,
+    schist.yaml) are NOT staged — spokes should not modify those.
+    """
     try:
         result = subprocess.run(
             ['git', 'add', scope + '/'],
-            cwd=vault_path, capture_output=True, text=True,
-        )
-        # Also stage root-level files that may have changed
-        subprocess.run(
-            ['git', 'add', '*.yaml', '*.md'],
             cwd=vault_path, capture_output=True, text=True,
         )
         output = result.stdout + result.stderr
