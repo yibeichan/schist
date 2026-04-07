@@ -69,7 +69,6 @@ function makeReadTools(config: VaultConfig) {
           status: { type: "string", enum: config.statuses },
           tags: { type: "array", items: { type: "string" } },
           scope: { type: "string", description: 'Filter by scope. Use "inherit" to search agent default scope + global.' },
-          calling_scope: { type: "string", description: "Override calling scope for inherit mode (optional)." },
         },
         required: ["query"],
       },

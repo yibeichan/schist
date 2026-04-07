@@ -43,7 +43,7 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(
     title,
     body,
     tags,
-    scope,
+    scope UNINDEXED,
     content='docs',
     content_rowid='rowid'
 );

@@ -8,18 +8,20 @@ import { CONNECTION_RE, parseConnections as parseConnectionsSync } from "./markd
 
 // ── Agent scope map (loaded from vault.yaml) ─────────────────────────────
 
-/** Map of agent name → default scope, loaded once from vault.yaml */
-let agentScopeMap: Map<string, string> | null = null;
+/** Map of vaultRoot → (agent name → default scope), loaded once per vault from vault.yaml */
+const agentScopeCache: Map<string, Map<string, string>> = new Map();
 
 /**
  * Load participant default scopes from vault.yaml.
  * Supports both string[] and object[] participant formats.
- * Cached after first load.
+ * Cached per vaultRoot after first load.
  */
 export function loadAgentScopeMap(vaultRoot: string): Map<string, string> {
-  if (agentScopeMap) return agentScopeMap;
+  const cached = agentScopeCache.get(vaultRoot);
+  if (cached) return cached;
 
-  agentScopeMap = new Map();
+  const agentScopeMap = new Map<string, string>();
+  agentScopeCache.set(vaultRoot, agentScopeMap);
   try {
     const vaultYamlPath = path.join(vaultRoot, "vault.yaml");
     if (!fs.existsSync(vaultYamlPath)) return agentScopeMap;
@@ -44,7 +46,7 @@ export function loadAgentScopeMap(vaultRoot: string): Map<string, string> {
 
 /** Reset cached scope map (for testing) */
 export function resetAgentScopeMap(): void {
-  agentScopeMap = null;
+  agentScopeCache.clear();
 }
 
 /** Sanitize user input for FTS5 MATCH: quote each token to prevent query syntax injection. */
@@ -64,7 +66,7 @@ function openDb(vaultRoot: string, opts?: { readonly?: boolean }): Database.Data
 export function searchNotes(
   vaultRoot: string,
   query: string,
-  opts?: { limit?: number; status?: string; tags?: string[]; scope?: string; calling_scope?: string }
+  opts?: { limit?: number; status?: string; tags?: string[]; scope?: string }
 ): SearchResult[] {
   const db = openDb(vaultRoot);
   try {
@@ -95,9 +97,9 @@ export function searchNotes(
         // Resolve calling scope: explicit param > agent default from vault.yaml > "global"
         const scopeMap = loadAgentScopeMap(vaultRoot);
         const agentName = process.env.SCHIST_AGENT_NAME ?? process.env.SCHIST_AGENT_ID;
-        const callingScope = opts.calling_scope ?? scopeMap.get(agentName ?? "") ?? "global";
-        sql += ` AND (docs.scope = 'global' OR docs.scope = ?)`;
-        params.push(callingScope);
+        const callingScope = scopeMap.get(agentName ?? "") ?? "global";
+        sql += ` AND (docs.scope = 'global' OR docs.scope = ? OR docs.scope LIKE ? || '/%')`;
+        params.push(callingScope, callingScope);
         sql += ` ORDER BY CASE WHEN docs.scope = ? THEN 0 ELSE 1 END`;
         params.push(callingScope);
       } else {
@@ -143,7 +145,7 @@ export function getNote(vaultRoot: string, id: string): Note | null {
       body,
       connections,
       scope: (row.scope as string) ?? undefined,
-      source: (row.source as string) ?? undefined,
+      source: (row.source === "human" || row.source === "agent") ? row.source as "human" | "agent" : undefined,
     };
   } finally {
     db.close();

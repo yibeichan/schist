@@ -113,15 +113,17 @@ def ingest(vault_path: str, db_path: str):
         concepts_json = json.dumps(concepts) if concepts else None
 
         # Scope: explicit frontmatter > directory path > 'global'
-        scope = meta.get('scope')
-        if not scope:
-            if len(rel.parts) > 1:
-                scope = str(rel.parent)
-            else:
-                scope = 'global'
+        raw_scope = meta.get('scope')
+        if isinstance(raw_scope, str) and raw_scope:
+            scope = raw_scope
+        elif len(rel.parts) > 1:
+            scope = rel.parent.as_posix()
+        else:
+            scope = 'global'
 
         # Source: from frontmatter, defaults to None
-        source = meta.get('source')  # "human" or "agent" or None
+        raw_source = meta.get('source')
+        source = raw_source if raw_source in {"human", "agent"} else None
 
         doc_id = str(rel)
 

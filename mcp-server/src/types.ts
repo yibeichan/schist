@@ -16,7 +16,7 @@ export interface Note {
   body: string;
   connections: Connection[];
   scope?: string;      // e.g., "global", "decisions", "research/ai"
-  source?: string;     // "human" | "agent" | undefined (default: agent)
+  source?: "human" | "agent"; // allowed values; omitted means undefined
 }
 
 export interface Concept {
