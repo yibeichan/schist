@@ -420,7 +420,7 @@ class TestGetChangedFiles:
     def test_normal_diff(self):
         from schist.pre_receive import get_changed_files
 
-        mock_result = type("Result", (), {"stdout": "a.md\nb.md\n", "returncode": 0})()
+        mock_result = type("Result", (), {"stdout": "a.md\0b.md\0", "returncode": 0})()
         with patch("subprocess.run", return_value=mock_result):
             result = get_changed_files("aaa", "bbb")
         assert result == ["a.md", "b.md"]
@@ -428,7 +428,7 @@ class TestGetChangedFiles:
     def test_new_branch_uses_diff_tree(self):
         from schist.pre_receive import ZERO_SHA, get_changed_files
 
-        mock_result = type("Result", (), {"stdout": "new-file.md\n", "returncode": 0})()
+        mock_result = type("Result", (), {"stdout": "new-file.md\0", "returncode": 0})()
         with patch("subprocess.run", return_value=mock_result) as mock_run:
             result = get_changed_files(ZERO_SHA, "abc123")
         assert result == ["new-file.md"]

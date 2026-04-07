@@ -81,20 +81,22 @@ def get_changed_files(oldrev: str, newrev: str) -> list[str]:
         # New branch — diff all files in the new ref against empty tree
         # Use git diff-tree against the empty tree hash
         result = subprocess.run(
-            ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", newrev],
+            ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", newrev],
             capture_output=True,
             text=True,
             check=True,
+            timeout=30,
         )
     else:
         result = subprocess.run(
-            ["git", "diff", "--name-only", oldrev, newrev],
+            ["git", "diff", "--name-only", "-z", oldrev, newrev],
             capture_output=True,
             text=True,
             check=True,
+            timeout=30,
         )
 
-    return [f for f in result.stdout.strip().split("\n") if f]
+    return [f for f in result.stdout.strip("\0").split("\0") if f]
 
 
 def check_push(
@@ -113,17 +115,15 @@ def check_push(
         scope = derive_scope(filepath)
 
         if scope == "":
-            # Root-level file — only wildcard writers can modify
-            if not acl.can_write(identity, "__root__"):
-                # can_write with a non-matching scope; check if they have "*"
-                entry = acl.access.get(identity)
-                if entry is None or "*" not in entry.write:
-                    violations.append(Violation(
-                        identity=identity,
-                        filepath=filepath,
-                        scope="(root)",
-                        refname=refname,
-                    ))
+            # Root-level file — only wildcard ("*") writers can modify
+            entry = acl.access.get(identity)
+            if entry is None or "*" not in entry.write:
+                violations.append(Violation(
+                    identity=identity,
+                    filepath=filepath,
+                    scope="(root)",
+                    refname=refname,
+                ))
         else:
             if not acl.can_write(identity, scope):
                 violations.append(Violation(
@@ -177,22 +177,26 @@ def log_rejection(
 
 
 def find_vault_yaml() -> Path | None:
-    """Locate vault.yaml in the repository being pushed to.
+    """Locate vault.yaml on the filesystem for non-bare repos.
 
-    In a bare repo (typical for pre-receive), vault.yaml is accessed via
-    git show HEAD:vault.yaml. For non-bare repos, check the working tree.
+    In a bare repo (typical for pre-receive), returns None so the caller
+    falls through to git show HEAD:vault.yaml instead.
     """
     git_dir = os.environ.get("GIT_DIR", ".")
 
-    # Try working tree first (non-bare repo)
-    work_tree = Path(git_dir).parent / "vault.yaml"
-    if work_tree.is_file():
-        return work_tree
+    # Check for a working tree (non-bare repo: GIT_DIR is <repo>/.git)
+    work_tree = os.environ.get("GIT_WORK_TREE")
+    if work_tree:
+        candidate = Path(work_tree) / "vault.yaml"
+        if candidate.is_file():
+            return candidate
 
-    # Bare repo — check if vault.yaml exists at HEAD
-    bare_path = Path(git_dir) / "vault.yaml"
-    if bare_path.is_file():
-        return bare_path
+    # Heuristic: if GIT_DIR ends with .git, parent is the working tree
+    git_path = Path(git_dir)
+    if git_path.name == ".git":
+        candidate = git_path.parent / "vault.yaml"
+        if candidate.is_file():
+            return candidate
 
     return None
 
@@ -205,9 +209,10 @@ def extract_vault_yaml_from_git() -> str | None:
             capture_output=True,
             text=True,
             check=True,
+            timeout=10,
         )
         return result.stdout
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
 
 
