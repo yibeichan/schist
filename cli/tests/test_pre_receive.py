@@ -275,6 +275,17 @@ class TestLogRejection:
 class TestMain:
     """Integration tests for the main() entry point with mocked git."""
 
+    @pytest.fixture(autouse=True)
+    def _isolate_rate_limit_db(self, tmp_path, monkeypatch):
+        """Point rate-limit sqlite at a per-test tmp dir.
+
+        Tests in this class exercise main() without passing db_path, so
+        the rate-limit check falls back to `$GIT_DIR/rate-limits.sqlite`.
+        Setting GIT_DIR for the duration of the test keeps the DB inside
+        tmp_path and avoids polluting the repo root.
+        """
+        monkeypatch.setenv("GIT_DIR", str(tmp_path))
+
     def _run(
         self,
         acl: VaultACL,
