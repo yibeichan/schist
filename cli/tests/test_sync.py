@@ -147,6 +147,31 @@ class TestSyncPull:
         mock_ingest.assert_called_once()
         assert "Pull complete" in capsys.readouterr().out
 
+    @patch("schist.sync.git_ops.pull_rebase", return_value=(True, ""))
+    @patch("schist.sync._rebuild_index")
+    @patch("subprocess.run")
+    def test_pull_heals_leftover_rebase(self, mock_run, mock_ingest, mock_pull, tmp_path, capsys):
+        """sync_pull aborts a prior half-rebase (e.g. from a SIGKILL'd MCP pull)."""
+        from schist.sync import sync_pull
+
+        vault = _make_spoke(tmp_path)
+        # Simulate a leftover rebase directory from a killed pull
+        (Path(vault) / ".git" / "rebase-merge").mkdir(parents=True)
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        args = MagicMock()
+        sync_pull(args, vault, "db.sqlite")
+
+        # subprocess.run should have been called with git rebase --abort
+        called_with_abort = any(
+            ("rebase" in (call.args[0] if call.args else []) and
+             "--abort" in (call.args[0] if call.args else []))
+            for call in mock_run.call_args_list
+        )
+        assert called_with_abort, f"expected rebase --abort, got calls: {mock_run.call_args_list}"
+        assert "Aborting leftover rebase" in capsys.readouterr().err
+
     @patch("schist.sync.git_ops.pull_rebase", return_value=(False, "CONFLICT in research/mario/note.md"))
     def test_pull_conflict_aborts(self, mock_pull, tmp_path, capsys):
         from schist.sync import sync_pull

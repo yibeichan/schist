@@ -113,6 +113,56 @@ function triggerIngestion(vaultRoot: string): void {
   });
 }
 
+/** Fire-and-forget spoke push after a write. No-op for non-spoke vaults. */
+export function triggerSpokePush(vaultRoot: string): void {
+  const spokeConfig = path.join(vaultRoot, ".schist", "spoke.yaml");
+  fs.access(spokeConfig).then(() => {
+    const child = spawn(
+      "python3",
+      ["-m", "schist", "--vault", vaultRoot, "sync", "push"],
+      { cwd: vaultRoot, stdio: "ignore", env: process.env, detached: true }
+    );
+    child.unref();
+    child.on("error", (err) => {
+      console.error("[schist] spoke push failed:", err);
+    });
+  }).catch(() => {
+    // Not a spoke vault — silent no-op
+  });
+}
+
+/**
+ * Pull from hub before a read, with a hard timeout. Falls through silently on
+ * failure so a flaky hub never blocks an agent read. Awaited but bounded.
+ */
+export async function maybeSpokePull(vaultRoot: string, timeoutMs = 5000): Promise<void> {
+  const spokeConfig = path.join(vaultRoot, ".schist", "spoke.yaml");
+  try {
+    await fs.access(spokeConfig);
+  } catch {
+    return; // Not a spoke
+  }
+  await new Promise<void>((resolve) => {
+    const child = spawn(
+      "python3",
+      ["-m", "schist", "--vault", vaultRoot, "sync", "pull"],
+      { cwd: vaultRoot, stdio: "ignore", env: process.env, detached: true }
+    );
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve();
+    }, timeoutMs);
+    child.on("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
 export async function search_notes(
   vaultRoot: string,
   args: { query: string; limit?: number; status?: string; tags?: string[]; scope?: string }
@@ -237,6 +287,7 @@ export async function create_note(
     const result = await writeNote(vaultRoot, relPath, noteContent);
 
     triggerIngestion(vaultRoot);
+    triggerSpokePush(vaultRoot);
 
     return { id: relPath, path: relPath, commitSha: result.commitSha };
   } catch (e: unknown) {
@@ -277,6 +328,9 @@ export async function add_connection(
 
     const result = await writeNote(vaultRoot, args.source, newContent);
 
+    triggerIngestion(vaultRoot);
+    triggerSpokePush(vaultRoot);
+
     return { source: args.source, target: args.target, type: args.type, commitSha: result.commitSha };
   } catch (e: unknown) {
     return normalizeError(e, "GIT_ERROR");
@@ -312,6 +366,7 @@ export async function get_context(
   args: { depth?: "minimal" | "standard" | "full" }
 ): Promise<unknown> {
   try {
+    await maybeSpokePull(vaultRoot);
     return sqliteReader.getContext(vaultRoot, args.depth ?? "minimal");
   } catch (e: unknown) {
     return normalizeError(e, "INGEST_ERROR");

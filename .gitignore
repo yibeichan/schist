@@ -29,3 +29,7 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Pre-receive hook audit log (runtime-generated)
+hooks/rejected-pushes.log
+cli/hooks/rejected-pushes.log

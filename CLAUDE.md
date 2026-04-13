@@ -46,6 +46,23 @@ Three-layer design: **Agent Layer** (MCP clients, CLI) → **MCP Server** (tool 
 3. Read tools (`search_notes`, `query_graph`) query SQLite directly (read-only)
 4. CI/viewer build: SQLite → `graph.json` + `search-index.json` → static site
 
+### Hub & spoke (multi-machine)
+
+When the vault is a spoke (has `.schist/spoke.yaml`), the MCP server adds two
+behaviors on top of the data flow above:
+
+- **Auto-push after writes:** `create_note` and `add_connection` fire a
+  detached `python3 -m schist sync push` after the local commit. Errors are
+  logged but never block the agent.
+- **Auto-pull before `get_context`:** bounded by a 5s timeout; falls through
+  silently on failure so a flaky hub never stalls reads. Other read tools
+  (`search_notes`, `query_graph`, `list_concepts`) do NOT auto-pull — agents
+  call `get_context` at session start to refresh.
+
+The hub is a bare git repo with a pre-receive hook that enforces vault.yaml
+ACLs. Create one with `schist init --hub --hub-path /path --name X
+--participant a --participant b`. Full setup: `docs/hub-spoke-setup.md`.
+
 ### Key invariants
 - **Git is canonical** — SQLite is derived and disposable, rebuilt from scratch each ingest
 - **Append-only** — no deletes or in-place edits via MCP/CLI; to revise, create a new note with `contradicts:`/`extends:` connection

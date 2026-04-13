@@ -41,6 +41,39 @@ schist search --vault ~/vaults/research "knowledge"
 schist context --vault ~/vaults/research
 ```
 
+## Multi-Machine (Hub & Spokes)
+
+A single laptop is fine. The real value comes when several machines share one
+knowledge graph — e.g. Claude running on a laptop, on an HPC cluster, and on a
+Raspberry Pi all writing into the same vault and seeing each other's notes.
+
+schist uses a **hub + spokes** topology. The hub is a bare git repo (on any
+machine reachable by SSH) that holds the canonical vault and enforces an ACL
+on every push. Each spoke is a sparse-checkout clone of the hub tied to one
+scope and one identity.
+
+```
+               ┌─────────────┐
+               │  Hub (bare) │
+               │  vault.git  │
+               │  pre-receive│
+               └──────┬──────┘
+                      │
+         ┌────────────┼────────────┐
+         │            │            │
+    ┌────▼────┐  ┌────▼────┐  ┌────▼────┐
+    │ laptop  │  │   HPC   │  │   Pi    │
+    │ spoke   │  │  spoke  │  │  spoke  │
+    └─────────┘  └─────────┘  └─────────┘
+```
+
+On a write, the spoke's MCP server commits locally and pushes to the hub in
+the background. On a read, it pulls from the hub first (bounded, falls
+through on failure). The hub's pre-receive hook rejects any push that writes
+outside the pusher's declared scope.
+
+End-to-end setup: [`docs/hub-spoke-setup.md`](./docs/hub-spoke-setup.md).
+
 ## Agent Integration
 
 ### Claude Desktop / Claude Code

@@ -3,7 +3,7 @@ import * as path from "path";
 import * as os from "os";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
-import { loadVaultConfig, create_note } from "../src/tools.js";
+import { loadVaultConfig, create_note, get_context, triggerSpokePush, maybeSpokePull } from "../src/tools.js";
 
 const execFile = promisify(execFileCb);
 
@@ -108,6 +108,133 @@ describe("create_note filename collision", () => {
 // ---------------------------------------------------------------------------
 // Lazy capabilities — index-level behaviour (unit test via tools layer)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Spoke auto-sync — fires only when .schist/spoke.yaml is present
+// ---------------------------------------------------------------------------
+
+describe("triggerSpokePush", () => {
+  test("spawns python push when spoke.yaml exists", async () => {
+    const vault = await makeTempVault();
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, ".schist", "spoke.yaml"),
+      "hub: file:///nonexistent\nidentity: test\nscope: notes\n"
+    );
+
+    // Stub python3 that touches a sentinel file so we can observe invocation.
+    // The fs.access → spawn chain inside triggerSpokePush is microtask-delayed,
+    // so we poll a few times before giving up.
+    const sentinel = path.join(vault, ".schist", "push-fired");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-py-"));
+    const stub = path.join(stubDir, "python3");
+    await fs.writeFile(
+      stub,
+      `#!/bin/sh\ntouch "${sentinel}"\n`,
+      { mode: 0o755 }
+    );
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      triggerSpokePush(vault);
+      // spawn is fire-and-forget; poll briefly for the sentinel
+      let fired = false;
+      for (let i = 0; i < 60; i++) {
+        try {
+          await fs.access(sentinel);
+          fired = true;
+          break;
+        } catch {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      }
+      expect(fired).toBe(true);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  test("no-op when spoke.yaml missing", async () => {
+    const vault = await makeTempVault();
+    // No .schist/spoke.yaml — should silently do nothing. Verify no throw.
+    expect(() => triggerSpokePush(vault)).not.toThrow();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+});
+
+describe("maybeSpokePull", () => {
+  test("returns quickly when spoke.yaml missing", async () => {
+    const vault = await makeTempVault();
+    const t0 = Date.now();
+    await maybeSpokePull(vault, 5000);
+    expect(Date.now() - t0).toBeLessThan(200);
+  });
+
+  test("honors timeout when pull hangs", async () => {
+    const vault = await makeTempVault();
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, ".schist", "spoke.yaml"),
+      "hub: file:///nonexistent\nidentity: test\nscope: notes\n"
+    );
+
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-py-"));
+    const stub = path.join(stubDir, "python3");
+    await fs.writeFile(stub, "#!/bin/sh\nsleep 10\n", { mode: 0o755 });
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const t0 = Date.now();
+      await maybeSpokePull(vault, 300);
+      const elapsed = Date.now() - t0;
+      expect(elapsed).toBeGreaterThanOrEqual(250);
+      expect(elapsed).toBeLessThan(1500);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+});
+
+describe("get_context wiring", () => {
+  test("get_context awaits maybeSpokePull when spoke.yaml present", async () => {
+    const vault = await makeTempVault();
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, ".schist", "spoke.yaml"),
+      "hub: file:///nonexistent\nidentity: test\nscope: notes\n"
+    );
+
+    // Stub python3 that sleeps 500ms then writes a sentinel — if get_context
+    // awaits maybeSpokePull, the pull runs before the SQLite read (which will
+    // fail because there's no DB, but that's caught and doesn't affect the
+    // ordering check).
+    const sentinel = path.join(vault, ".schist", "get-context-pull-fired");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-py-"));
+    const stub = path.join(stubDir, "python3");
+    await fs.writeFile(
+      stub,
+      `#!/bin/sh\nsleep 0.2\ntouch "${sentinel}"\n`,
+      { mode: 0o755 }
+    );
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      await get_context(vault, { depth: "minimal" });
+      // maybeSpokePull is awaited with 5s timeout — by the time get_context
+      // returns, the stub must have completed and the sentinel must exist.
+      const exists = await fs.access(sentinel).then(() => true).catch(() => false);
+      expect(exists).toBe(true);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+});
 
 describe("normalizeError", () => {
   test("WRITE_TIMEOUT Error has error field lifted", async () => {
