@@ -15,6 +15,10 @@ from . import git_ops
 from .acl import ACLError, parse_vault_data
 from .spoke_config import SpokeConfig, is_spoke, load_spoke_config, save_spoke_config
 
+class _HubInitError(Exception):
+    """Raised by init_hub build steps so the outer function can clean up staging."""
+
+
 PRE_RECEIVE_HOOK = """\
 #!/usr/bin/env python3
 \"\"\"Git pre-receive hook — enforces vault.yaml ACL on pushes.
@@ -100,14 +104,33 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
     # MCP server's 5s maybeSpokePull timeout). Detect leftover rebase state
     # and abort before starting a fresh pull. Without this, every subsequent
     # sync fails with "rebase in progress" until manual cleanup.
-    for rebase_dir in (".git/rebase-merge", ".git/rebase-apply"):
-        if (Path(vault_path) / rebase_dir).exists():
-            print(f"Aborting leftover rebase ({rebase_dir})...", file=sys.stderr)
-            subprocess.run(
-                ["git", "rebase", "--abort"],
+    rebase_present = any(
+        (Path(vault_path) / d).exists()
+        for d in (".git/rebase-merge", ".git/rebase-apply")
+    )
+    if rebase_present:
+        print("Aborting leftover rebase state...", file=sys.stderr)
+        abort = subprocess.run(
+            ["git", "rebase", "--abort"],
+            cwd=vault_path, capture_output=True, text=True,
+        )
+        if abort.returncode != 0:
+            # --abort can fail if the rebase is in a weird state (e.g. git is
+            # still running, or an orphan rebase-merge without a HEAD ref).
+            # Try --quit, which drops rebase state without restoring HEAD.
+            quit_result = subprocess.run(
+                ["git", "rebase", "--quit"],
                 cwd=vault_path, capture_output=True, text=True,
             )
-            break
+            if quit_result.returncode != 0:
+                print(
+                    "Error: could not clear rebase state automatically.\n"
+                    f"  rebase --abort: {abort.stderr.strip()}\n"
+                    f"  rebase --quit:  {quit_result.stderr.strip()}\n"
+                    "  Manual fix: rm -rf .git/rebase-merge .git/rebase-apply",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
     print(f"Pulling from hub as {config.identity}...")
 
@@ -178,6 +201,11 @@ def init_hub(args, hub_path: str) -> None:
 
     Creates: <hub_path> (bare repo), <hub_path>/hooks/pre-receive (ACL enforcer),
     and an initial commit containing vault.yaml on the main branch.
+
+    Builds everything in a sibling staging directory and atomically renames on
+    success. If any step fails, only the staging directory is touched — the
+    final hub_path never exists in a half-initialized state, and retries after
+    failure always work cleanly.
     """
     name = getattr(args, "name", None)
     participants = list(getattr(args, "participant", None) or [])
@@ -189,7 +217,7 @@ def init_hub(args, hub_path: str) -> None:
         print("Error: at least one --participant is required", file=sys.stderr)
         sys.exit(1)
 
-    hub = Path(hub_path)
+    hub = Path(hub_path).resolve()
     if hub.exists() and any(hub.iterdir()):
         print(f"Error: hub path '{hub_path}' already exists and is not empty", file=sys.stderr)
         sys.exit(1)
@@ -202,80 +230,37 @@ def init_hub(args, hub_path: str) -> None:
         print(f"Error: generated vault.yaml failed validation: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Create bare repo with main as the initial branch.
-    hub.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        ["git", "init", "--bare", "--initial-branch=main", str(hub)],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        print(f"Error: git init --bare failed: {result.stderr.strip()}", file=sys.stderr)
-        shutil.rmtree(hub, ignore_errors=True)
+    # Stage in a sibling directory so the final os.rename is atomic (same FS).
+    # The staging name uses PID to avoid collisions with concurrent inits.
+    hub.parent.mkdir(parents=True, exist_ok=True)
+    staging = hub.parent / f".{hub.name}.init-{os.getpid()}"
+    if staging.exists():
+        shutil.rmtree(staging)
+
+    try:
+        _build_hub_in_staging(staging, hub, vault_data, participants, name)
+    except _HubInitError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        # Best-effort staging cleanup. If it fails, surface the path so the
+        # user can remove it manually — but the final hub_path is untouched.
+        try:
+            if staging.exists():
+                shutil.rmtree(staging)
+        except OSError as cleanup_err:
+            print(
+                f"Warning: could not clean up staging dir {staging}: {cleanup_err}\n"
+                f"  Manual fix: rm -rf {staging}",
+                file=sys.stderr,
+            )
         sys.exit(1)
 
-    # Install pre-receive hook. Warn if the schist package isn't importable
-    # by the python3 on this host — the hook will fail at push time otherwise.
-    hook_path = hub / "hooks" / "pre-receive"
-    hook_path.parent.mkdir(parents=True, exist_ok=True)
-    hook_path.write_text(PRE_RECEIVE_HOOK)
-    hook_path.chmod(0o755)
-
-    check = subprocess.run(
-        ["python3", "-c", "import schist.pre_receive"],
-        capture_output=True, text=True,
-    )
-    if check.returncode != 0:
-        print(
-            "Warning: `python3 -c 'import schist.pre_receive'` failed on this host.\n"
-            "  The pre-receive hook will reject all pushes until the schist\n"
-            "  package is installed: pip install -e <schist>/cli",
-            file=sys.stderr,
-        )
-
-    # Seed the initial commit via a temp worktree — bare repos can't hold files.
-    with tempfile.TemporaryDirectory(prefix="schist-hub-seed-") as tmp:
-        seed = Path(tmp) / "seed"
-        seed.mkdir()
-        env = os.environ.copy()
-        # Force identity for the seed commit so init_hub works on fresh hosts
-        # without pre-configured git user.name/user.email.
-        env.setdefault("GIT_AUTHOR_NAME", "schist")
-        env.setdefault("GIT_AUTHOR_EMAIL", "schist@local")
-        env.setdefault("GIT_COMMITTER_NAME", "schist")
-        env.setdefault("GIT_COMMITTER_EMAIL", "schist@local")
-        # Pre-receive identity check runs before ACL load — on the fresh bare
-        # repo the ACL returns None (HEAD doesn't exist yet) and the push is
-        # allowed, but only if identity is set. Use the first participant.
-        env["SCHIST_IDENTITY"] = participants[0]
-
-        def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
-            return subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
-
-        for cmd in (
-            ["git", "init", "--initial-branch=main"],
-            ["git", "remote", "add", "origin", str(hub)],
-        ):
-            r = run(cmd, seed)
-            if r.returncode != 0:
-                print(f"Error: {' '.join(cmd)} failed: {r.stderr.strip()}", file=sys.stderr)
-                shutil.rmtree(hub, ignore_errors=True)
-                sys.exit(1)
-
-        (seed / "vault.yaml").write_text(yaml.dump(vault_data, default_flow_style=False, sort_keys=False))
-
-        # On the seed push, the pre-receive hook short-circuits to "allow":
-        # HEAD doesn't exist yet on the fresh bare, so load_acl() returns None
-        # and main() returns 0. Subsequent pushes see the committed vault.yaml.
-        for cmd in (
-            ["git", "add", "vault.yaml"],
-            ["git", "commit", "-m", f"init: seed vault {name}"],
-            ["git", "push", "-u", "origin", "main"],
-        ):
-            r = run(cmd, seed)
-            if r.returncode != 0:
-                print(f"Error: {' '.join(cmd)} failed: {r.stderr.strip()}", file=sys.stderr)
-                shutil.rmtree(hub, ignore_errors=True)
-                sys.exit(1)
+    # Atomic rename: either hub_path points at a complete bare repo, or it
+    # doesn't exist at all. No half-initialized intermediate state.
+    if hub.exists():
+        # The pre-check above guarded against existing non-empty; an empty
+        # dir is OK to remove before rename.
+        hub.rmdir()
+    os.rename(staging, hub)
 
     print(f"Hub initialized at {hub_path}")
     print(f"  participants: {', '.join(participants)}")
@@ -284,6 +269,90 @@ def init_hub(args, hub_path: str) -> None:
     print(f"  1. Edit {hub_path}/hooks/pre-receive's environment if needed")
     print(f"  2. On each spoke, run: schist init --spoke --hub <url> --scope <scope> --identity <name>")
     print(f"  3. Review and extend vault.yaml by cloning, editing, and pushing.")
+
+
+def _build_hub_in_staging(
+    staging: Path,
+    final_hub: Path,
+    vault_data: dict,
+    participants: list[str],
+    name: str,
+) -> None:
+    """Build the bare repo + hook + seed commit entirely inside `staging`.
+
+    Raises _HubInitError with a descriptive message on any failure. The caller
+    is responsible for cleaning up `staging`.
+    """
+    # 1. Create bare repo at the staging path
+    staging.mkdir(parents=True)
+    result = subprocess.run(
+        ["git", "init", "--bare", "--initial-branch=main", str(staging)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise _HubInitError(f"git init --bare failed: {result.stderr.strip()}")
+
+    # 2. Install pre-receive hook
+    hook_path = staging / "hooks" / "pre-receive"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text(PRE_RECEIVE_HOOK)
+    hook_path.chmod(0o755)
+
+    # 3. Sanity-check: schist must be importable for the hook to work at
+    #    push time. This runs in the current shell's env, which may differ
+    #    from the sshd env the hook actually runs under — warn, don't fail.
+    check = subprocess.run(
+        ["python3", "-c", "import schist.pre_receive"],
+        capture_output=True, text=True,
+    )
+    if check.returncode != 0:
+        print(
+            "Warning: `python3 -c 'import schist.pre_receive'` failed on this host.\n"
+            "  The pre-receive hook will reject all pushes until the schist\n"
+            "  package is installed on the path that git-receive-pack uses\n"
+            "  (check sshd/gitolite env, not just your interactive shell):\n"
+            "  pip install -e <schist>/cli",
+            file=sys.stderr,
+        )
+
+    # 4. Seed the initial commit via a temp worktree next to staging, so its
+    #    git push targets the bare via a same-filesystem absolute path.
+    with tempfile.TemporaryDirectory(prefix="schist-hub-seed-") as tmp:
+        seed = Path(tmp) / "seed"
+        seed.mkdir()
+        env = os.environ.copy()
+        env.setdefault("GIT_AUTHOR_NAME", "schist")
+        env.setdefault("GIT_AUTHOR_EMAIL", "schist@local")
+        env.setdefault("GIT_COMMITTER_NAME", "schist")
+        env.setdefault("GIT_COMMITTER_EMAIL", "schist@local")
+        # Pre-receive identity check runs before ACL load — on the fresh bare
+        # the ACL returns None (HEAD doesn't exist yet) and the push is
+        # allowed, but identity must still be set. Use the first participant.
+        env["SCHIST_IDENTITY"] = participants[0]
+
+        def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
+            return subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
+
+        for cmd in (
+            ["git", "init", "--initial-branch=main"],
+            ["git", "remote", "add", "origin", str(staging)],
+        ):
+            r = run(cmd, seed)
+            if r.returncode != 0:
+                raise _HubInitError(f"{' '.join(cmd)} failed: {r.stderr.strip()}")
+
+        (seed / "vault.yaml").write_text(
+            yaml.dump(vault_data, default_flow_style=False, sort_keys=False)
+        )
+
+        for cmd in (
+            ["git", "add", "vault.yaml"],
+            ["git", "commit", "-m", f"init: seed vault {name}"],
+            ["git", "push", "-u", "origin", "main"],
+        ):
+            r = run(cmd, seed)
+            if r.returncode != 0:
+                raise _HubInitError(f"{' '.join(cmd)} failed: {r.stderr.strip()}")
 
 
 def _build_seed_vault(name: str, participants: list[str]) -> dict:

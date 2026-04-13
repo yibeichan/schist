@@ -103,6 +103,44 @@ class TestInitHub:
         # All can read everything
         assert acl.can_read("a", "research/b")
 
+    def test_failed_init_leaves_no_hub_path(self, tmp_path, capsys, monkeypatch):
+        """If init_hub fails partway, hub_path must not exist (no half-init).
+
+        Simulates a failure in the seed-push step by forcing a bad hub name.
+        After the failure, the hub_path must not exist, so a retry with
+        corrected args succeeds without manual cleanup.
+        """
+        from schist.sync import init_hub
+
+        hub = tmp_path / "hub.git"
+
+        # Force failure inside _build_hub_in_staging by monkeypatching
+        # subprocess.run to fail on the seed push.
+        import schist.sync as sync_mod
+        real_run = sync_mod.subprocess.run
+        call_count = {"n": 0}
+
+        def fake_run(cmd, *a, **kw):
+            call_count["n"] += 1
+            # Let the git init --bare on staging succeed
+            if "init" in cmd and "--bare" in cmd:
+                return real_run(cmd, *a, **kw)
+            # Simulate total failure for everything else
+            return type("R", (), {"returncode": 1, "stdout": "", "stderr": "simulated failure"})()
+
+        monkeypatch.setattr(sync_mod.subprocess, "run", fake_run)
+
+        args = SimpleNamespace(name="vault", participant=["alpha"])
+        with pytest.raises(SystemExit):
+            init_hub(args, str(hub))
+
+        # Crucial: hub_path must not exist after failure
+        assert not hub.exists(), "failed init_hub left a half-initialized hub_path"
+
+        # And no staging directory littered alongside
+        leftover = list(tmp_path.glob(".hub.git.init-*"))
+        assert not leftover, f"staging dir not cleaned up: {leftover}"
+
     def test_hub_push_then_rejects_out_of_scope(self, tmp_path):
         """After init_hub, a spoke push outside its scope is rejected."""
         from schist.sync import init_hub

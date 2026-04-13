@@ -199,6 +199,71 @@ describe("maybeSpokePull", () => {
   }, 10000);
 });
 
+describe("sync error sentinel", () => {
+  test("get_context surfaces last-sync-error as syncWarning and clears it", async () => {
+    const vault = await makeTempVault();
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    const sentinelPath = path.join(vault, ".schist", "last-sync-error");
+    await fs.writeFile(
+      sentinelPath,
+      "2026-04-12T18:00:00Z push spawn failed: spawn python3 ENOENT\n"
+    );
+
+    const result = await get_context(vault, { depth: "minimal" }) as Record<string, unknown>;
+    expect(result.syncWarning).toBeDefined();
+    expect(result.syncWarning as string).toContain("push spawn failed");
+
+    // Sentinel should be cleared after surfacing
+    const cleared = await fs.access(sentinelPath).then(() => false).catch(() => true);
+    expect(cleared).toBe(true);
+  }, 10000);
+
+  test("get_context has no syncWarning when sentinel is absent", async () => {
+    const vault = await makeTempVault();
+    const result = await get_context(vault, { depth: "minimal" }) as Record<string, unknown>;
+    expect(result.syncWarning).toBeUndefined();
+  });
+
+  test("triggerSpokePush writes sentinel when spawn fails", async () => {
+    const vault = await makeTempVault();
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, ".schist", "spoke.yaml"),
+      "hub: file:///nonexistent\nidentity: test\nscope: notes\n"
+    );
+
+    // Stub python3 that exits nonzero — triggers the 'exit' handler path
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-py-"));
+    const stub = path.join(stubDir, "python3");
+    await fs.writeFile(stub, "#!/bin/sh\nexit 7\n", { mode: 0o755 });
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      triggerSpokePush(vault);
+      // Poll for the sentinel to appear
+      const sentinelPath = path.join(vault, ".schist", "last-sync-error");
+      let found = false;
+      for (let i = 0; i < 60; i++) {
+        try {
+          const content = await fs.readFile(sentinelPath, "utf-8");
+          if (content.includes("exited with code 7")) {
+            found = true;
+            break;
+          }
+        } catch {
+          // not yet
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(found).toBe(true);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+});
+
 describe("get_context wiring", () => {
   test("get_context awaits maybeSpokePull when spoke.yaml present", async () => {
     const vault = await makeTempVault();
