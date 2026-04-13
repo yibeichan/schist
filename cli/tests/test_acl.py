@@ -105,17 +105,18 @@ class TestValidV1:
         assert rl.notes_per_sync == 10
 
     def test_parse_live_vault_yaml(self):
-        """Parse the real vault.yaml from the schist-vault repo."""
+        """Parse the real vault.yaml from the schist-vault repo if present."""
         import os
         vault_path = os.path.expanduser("~/Projects/GitHub/schist-vault/vault.yaml")
         if not os.path.exists(vault_path):
             pytest.skip("Live vault.yaml not available")
-        # v0 vault — should parse with warning
+        # Accept either v0 (legacy, parses with a warning) or v1 (current).
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
             acl = parse_vault_yaml(vault_path)
-        assert acl.vault_version == 0
+        assert acl.vault_version in (0, 1)
         assert len(acl.participants) >= 1
+        assert len(acl.access) >= 1
 
 
 # ---------------------------------------------------------------------------

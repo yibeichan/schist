@@ -56,12 +56,17 @@ def main():
     p_schema.add_argument('--validate', action='store_true')
 
     # init
-    p_init = sub.add_parser('init', help='Initialize a vault')
+    p_init = sub.add_parser('init', help='Initialize a vault (hub or spoke)')
     p_init.add_argument('--spoke', action='store_true', help='Initialize as spoke vault')
-    p_init.add_argument('--hub', help='Hub repository URL')
-    p_init.add_argument('--scope', help='Scope to sync (directory path)')
+    p_init.add_argument('--hub', help='(spoke) Hub repository URL')
+    p_init.add_argument('--scope', help='(spoke) Scope to sync (directory path)')
     p_init.add_argument('--identity', default=os.environ.get('SCHIST_IDENTITY'),
-                        help='Spoke identity (or set SCHIST_IDENTITY)')
+                        help='(spoke) Spoke identity (or set SCHIST_IDENTITY)')
+    p_init.add_argument('--hub-path', dest='hub_path',
+                        help='(hub) Path to the bare repo to create')
+    p_init.add_argument('--name', help='(hub) Vault name for the seeded vault.yaml')
+    p_init.add_argument('--participant', action='append',
+                        help='(hub) Participant name (repeatable)')
 
     # sync
     p_sync = sub.add_parser('sync', help='Sync spoke vault with hub')
@@ -74,6 +79,14 @@ def main():
     if not args.command:
         parser.print_help()
         sys.exit(1)
+
+    # init --hub-path: hub init, no vault path needed
+    if args.command == 'init' and getattr(args, 'hub_path', None):
+        if getattr(args, 'spoke', False):
+            print('Error: --hub-path and --spoke are mutually exclusive', file=sys.stderr)
+            sys.exit(1)
+        sync.init_hub(args, args.hub_path)
+        sys.exit(0)
 
     # init --spoke: vault doesn't exist yet, special path
     if args.command == 'init' and getattr(args, 'spoke', False):

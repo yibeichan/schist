@@ -147,6 +147,74 @@ class TestSyncPull:
         mock_ingest.assert_called_once()
         assert "Pull complete" in capsys.readouterr().out
 
+    @patch("schist.sync.git_ops.pull_rebase", return_value=(True, ""))
+    @patch("schist.sync._rebuild_index")
+    @patch("subprocess.run")
+    def test_pull_heals_leftover_rebase(self, mock_run, mock_ingest, mock_pull, tmp_path, capsys):
+        """sync_pull aborts a prior half-rebase (e.g. from a SIGKILL'd MCP pull)."""
+        from schist.sync import sync_pull
+
+        vault = _make_spoke(tmp_path)
+        # Simulate a leftover rebase directory from a killed pull
+        (Path(vault) / ".git" / "rebase-merge").mkdir(parents=True)
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        args = MagicMock()
+        sync_pull(args, vault, "db.sqlite")
+
+        # subprocess.run should have been called with git rebase --abort
+        called_with_abort = any(
+            ("rebase" in (call.args[0] if call.args else []) and
+             "--abort" in (call.args[0] if call.args else []))
+            for call in mock_run.call_args_list
+        )
+        assert called_with_abort, f"expected rebase --abort, got calls: {mock_run.call_args_list}"
+        assert "Aborting leftover rebase" in capsys.readouterr().err
+
+    @patch("schist.sync.git_ops.pull_rebase", return_value=(True, ""))
+    @patch("schist.sync._rebuild_index")
+    @patch("subprocess.run")
+    def test_pull_falls_back_to_rebase_quit(self, mock_run, mock_ingest, mock_pull, tmp_path, capsys):
+        """If `rebase --abort` fails, sync_pull tries `rebase --quit` as fallback."""
+        from schist.sync import sync_pull
+
+        vault = _make_spoke(tmp_path)
+        (Path(vault) / ".git" / "rebase-apply").mkdir(parents=True)
+
+        # First subprocess.run (rebase --abort) fails; second (rebase --quit) succeeds.
+        mock_run.side_effect = [
+            MagicMock(returncode=128, stdout="", stderr="fatal: no rebase in progress"),
+            MagicMock(returncode=0, stdout="", stderr=""),
+        ]
+
+        args = MagicMock()
+        sync_pull(args, vault, "db.sqlite")  # should not sys.exit
+
+        calls = [call.args[0] for call in mock_run.call_args_list if call.args]
+        assert ["git", "rebase", "--abort"] in calls
+        assert ["git", "rebase", "--quit"] in calls
+
+    @patch("schist.sync._rebuild_index")
+    @patch("subprocess.run")
+    def test_pull_exits_when_rebase_cleanup_fails(self, mock_run, mock_ingest, tmp_path, capsys):
+        """If both --abort and --quit fail, sync_pull exits with a clear error."""
+        from schist.sync import sync_pull
+
+        vault = _make_spoke(tmp_path)
+        (Path(vault) / ".git" / "rebase-merge").mkdir(parents=True)
+
+        # Both abort and quit fail
+        mock_run.return_value = MagicMock(returncode=128, stdout="", stderr="git is confused")
+
+        args = MagicMock()
+        with pytest.raises(SystemExit):
+            sync_pull(args, vault, "db.sqlite")
+
+        err = capsys.readouterr().err
+        assert "could not clear rebase state" in err
+        assert "Manual fix" in err
+
     @patch("schist.sync.git_ops.pull_rebase", return_value=(False, "CONFLICT in research/mario/note.md"))
     def test_pull_conflict_aborts(self, mock_pull, tmp_path, capsys):
         from schist.sync import sync_pull

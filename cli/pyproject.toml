@@ -10,3 +10,8 @@ dependencies = ["python-frontmatter>=1.1.0", "pyyaml>=6.0"]
 
 [project.scripts]
 schist = "schist.__main__:main"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: slow tests that spawn real git subprocesses",
+]

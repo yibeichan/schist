@@ -113,6 +113,93 @@ function triggerIngestion(vaultRoot: string): void {
   });
 }
 
+const SYNC_ERROR_SENTINEL = ".schist/last-sync-error";
+
+/**
+ * Write a sync-failure sentinel so agents have a visible trace when a
+ * background push silently fails. `get_context` reads this and surfaces it
+ * to the caller on the next read.
+ */
+async function writeSyncError(vaultRoot: string, message: string): Promise<void> {
+  try {
+    const sentinelPath = path.join(vaultRoot, SYNC_ERROR_SENTINEL);
+    await fs.mkdir(path.dirname(sentinelPath), { recursive: true });
+    const entry = `${new Date().toISOString()} ${message}\n`;
+    await fs.writeFile(sentinelPath, entry);
+  } catch {
+    // Can't write the sentinel either — truly nothing we can do.
+  }
+}
+
+/** Fire-and-forget spoke push after a write. No-op for non-spoke vaults. */
+export function triggerSpokePush(vaultRoot: string): void {
+  const spokeConfig = path.join(vaultRoot, ".schist", "spoke.yaml");
+  fs.access(spokeConfig).then(() => {
+    const child = spawn(
+      "python3",
+      ["-m", "schist", "--vault", vaultRoot, "sync", "push"],
+      { cwd: vaultRoot, stdio: "ignore", env: process.env, detached: true }
+    );
+    child.unref();
+    child.on("error", (err) => {
+      // spawn error = python3 not on PATH, or permission denied. Silent by
+      // default is a footgun — write a sentinel so the next get_context can
+      // surface it. Also log for operators watching stderr.
+      console.error("[schist] spoke push failed:", err);
+      writeSyncError(vaultRoot, `push spawn failed: ${err.message}`);
+    });
+    child.on("exit", (code) => {
+      if (code !== null && code !== 0) {
+        writeSyncError(vaultRoot, `push exited with code ${code}`);
+      }
+    });
+  }).catch(() => {
+    // Not a spoke vault — silent no-op
+  });
+}
+
+/**
+ * Pull from hub before a read, with a hard timeout. Falls through silently on
+ * failure so a flaky hub never blocks an agent read. Awaited but bounded.
+ */
+export async function maybeSpokePull(vaultRoot: string, timeoutMs = 5000): Promise<void> {
+  const spokeConfig = path.join(vaultRoot, ".schist", "spoke.yaml");
+  try {
+    await fs.access(spokeConfig);
+  } catch {
+    return; // Not a spoke
+  }
+  await new Promise<void>((resolve) => {
+    const child = spawn(
+      "python3",
+      ["-m", "schist", "--vault", vaultRoot, "sync", "pull"],
+      { cwd: vaultRoot, stdio: "ignore", env: process.env, detached: true }
+    );
+    // `detached: true` puts the child in its own process group. On timeout we
+    // must signal the whole group (negative PID) — child.kill() only signals
+    // python3, leaving git-fetch/git-rebase grandchildren alive with a live
+    // .git/index.lock. SIGTERM first, then SIGKILL after a short grace in
+    // case git ignores SIGTERM mid-rebase.
+    const killGroup = (sig: NodeJS.Signals): void => {
+      if (child.pid === undefined) return;
+      try { process.kill(-child.pid, sig); } catch { /* already dead */ }
+    };
+    const timer = setTimeout(() => {
+      killGroup("SIGTERM");
+      setTimeout(() => killGroup("SIGKILL"), 500);
+      resolve();
+    }, timeoutMs);
+    child.on("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
 export async function search_notes(
   vaultRoot: string,
   args: { query: string; limit?: number; status?: string; tags?: string[]; scope?: string }
@@ -237,6 +324,7 @@ export async function create_note(
     const result = await writeNote(vaultRoot, relPath, noteContent);
 
     triggerIngestion(vaultRoot);
+    triggerSpokePush(vaultRoot);
 
     return { id: relPath, path: relPath, commitSha: result.commitSha };
   } catch (e: unknown) {
@@ -277,6 +365,9 @@ export async function add_connection(
 
     const result = await writeNote(vaultRoot, args.source, newContent);
 
+    triggerIngestion(vaultRoot);
+    triggerSpokePush(vaultRoot);
+
     return { source: args.source, target: args.target, type: args.type, commitSha: result.commitSha };
   } catch (e: unknown) {
     return normalizeError(e, "GIT_ERROR");
@@ -311,10 +402,34 @@ export async function get_context(
   // + last 3 modified. Agents that need richer context request standard/full.
   args: { depth?: "minimal" | "standard" | "full" }
 ): Promise<unknown> {
+  await maybeSpokePull(vaultRoot);
+
+  // Read (and clear) any pending background-sync-failure sentinel so agents
+  // don't silently work against a stale local view. This runs independently
+  // of the SQLite read — even if the DB query fails, we surface the warning
+  // on the error result so the operator knows to check the hub connection.
+  let syncWarning: string | undefined;
+  const sentinelPath = path.join(vaultRoot, SYNC_ERROR_SENTINEL);
   try {
-    return sqliteReader.getContext(vaultRoot, args.depth ?? "minimal");
+    const errText = (await fs.readFile(sentinelPath, "utf-8")).trim();
+    if (errText) {
+      syncWarning = `Recent background sync failure: ${errText}. Writes may not have reached the hub.`;
+      await fs.unlink(sentinelPath).catch(() => {});
+    }
+  } catch {
+    // No sentinel — healthy state
+  }
+
+  try {
+    const context = sqliteReader.getContext(vaultRoot, args.depth ?? "minimal") as Record<string, unknown>;
+    if (syncWarning) context.syncWarning = syncWarning;
+    return context;
   } catch (e: unknown) {
-    return normalizeError(e, "INGEST_ERROR");
+    const err = normalizeError(e, "INGEST_ERROR");
+    if (syncWarning) {
+      return { ...err, syncWarning };
+    }
+    return err;
   }
 }
 
