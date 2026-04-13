@@ -478,3 +478,148 @@ class TestEdgeCases:
         assert rc == 1
         stderr = capsys.readouterr().err
         assert "failed to load vault.yaml" in stderr
+
+
+# ---------------------------------------------------------------------------
+# main() rate-limit integration
+# ---------------------------------------------------------------------------
+
+
+RATE_LIMIT_VAULT_DATA = {
+    "name": "rl-test",
+    "vault_version": 1,
+    "scope_convention": "subdirectory",
+    "participants": [
+        {"name": "admin", "type": "agent"},
+        {"name": "other", "type": "agent"},
+    ],
+    "access": {
+        "admin": {"read": ["*"], "write": ["*"]},
+        "other": {"read": ["*"], "write": ["ops"]},
+    },
+    "rate_limits": {
+        "admin": {"git_syncs_per_hour": 2, "notes_per_sync": 3},
+    },
+}
+
+
+@pytest.fixture()
+def rl_acl() -> VaultACL:
+    return parse_vault_data(RATE_LIMIT_VAULT_DATA)
+
+
+class TestMainRateLimit:
+    def _run(
+        self,
+        acl: VaultACL,
+        identity: str,
+        stdin_lines: list[str],
+        changed_files: list[str],
+        *,
+        log_path: Path,
+        db_path: Path,
+    ) -> int:
+        with patch("schist.pre_receive.get_changed_files", return_value=changed_files):
+            return main(
+                stdin=stdin_lines,
+                acl=acl,
+                identity=identity,
+                log_path=log_path,
+                db_path=db_path,
+            )
+
+    def test_rate_limit_rejection_path(self, rl_acl, tmp_path, capsys):
+        """ACL passes, rate limit trips after exhausting git_syncs_per_hour."""
+        log_path = tmp_path / "rejected-pushes.log"
+        db_path = tmp_path / "rate-limits.sqlite"
+        stdin = ["abc def refs/heads/main"]
+        files = ["notes/a.md"]
+
+        # Admin's limit is 2. Pushes 1 and 2 should pass; push 3 should reject.
+        for _ in range(2):
+            rc = self._run(
+                rl_acl, "admin", stdin, files,
+                log_path=log_path, db_path=db_path,
+            )
+            assert rc == 0
+        rc = self._run(
+            rl_acl, "admin", stdin, files,
+            log_path=log_path, db_path=db_path,
+        )
+        assert rc == 1
+        stderr = capsys.readouterr().err
+        assert "rate limit exceeded" in stderr
+        assert "git_syncs_per_hour" in stderr
+        assert "Retry after" in stderr
+        # Rejection logged with identity tag.
+        content = log_path.read_text()
+        assert "RATE_LIMIT_REJECTED" in content
+        assert "identity=admin" in content
+
+    def test_rate_limit_passes_under_limit(self, rl_acl, tmp_path):
+        """ACL passes, rate limit passes, exit 0."""
+        log_path = tmp_path / "rejected-pushes.log"
+        db_path = tmp_path / "rate-limits.sqlite"
+        rc = self._run(
+            rl_acl, "admin",
+            ["abc def refs/heads/main"],
+            ["notes/a.md"],
+            log_path=log_path, db_path=db_path,
+        )
+        assert rc == 0
+        # No rejection log written on success.
+        assert not log_path.exists()
+
+    def test_notes_per_sync_rejection_path(self, rl_acl, tmp_path, capsys):
+        """A single push with more notes than notes_per_sync is rejected."""
+        log_path = tmp_path / "rejected-pushes.log"
+        db_path = tmp_path / "rate-limits.sqlite"
+        # Admin limit is 3 notes per sync; push 4.
+        files = [f"notes/{i}.md" for i in range(4)]
+        rc = self._run(
+            rl_acl, "admin",
+            ["abc def refs/heads/main"],
+            files,
+            log_path=log_path, db_path=db_path,
+        )
+        assert rc == 1
+        stderr = capsys.readouterr().err
+        assert "rate limit exceeded" in stderr
+        assert "notes_per_sync" in stderr
+        # The DB should NOT have recorded this attempt (notes_per_sync is
+        # stateless and runs before the sqlite transaction).
+        import sqlite3
+        if db_path.exists():
+            conn = sqlite3.connect(str(db_path))
+            try:
+                (n,) = conn.execute(
+                    "SELECT COUNT(*) FROM sync_events WHERE identity = 'admin'"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                n = 0
+            conn.close()
+            assert n == 0
+
+    def test_rate_limit_runs_after_acl(self, rl_acl, tmp_path, capsys):
+        """ACL violation wins over rate-limit violation.
+
+        'other' cannot write to notes/, AND pushing 4 notes would trip
+        notes_per_sync. ACL runs first so the rejection reason is ACL,
+        and no rate-limit slot is consumed.
+        """
+        log_path = tmp_path / "rejected-pushes.log"
+        db_path = tmp_path / "rate-limits.sqlite"
+        files = [f"notes/{i}.md" for i in range(4)]
+        rc = self._run(
+            rl_acl, "other",
+            ["abc def refs/heads/main"],
+            files,
+            log_path=log_path, db_path=db_path,
+        )
+        assert rc == 1
+        stderr = capsys.readouterr().err
+        # ACL rejection surfaces (out-of-scope), not rate-limit rejection.
+        assert "out-of-scope writes" in stderr
+        assert "rate limit exceeded" not in stderr
+        # DB file should not exist — rate_limit.check_rate_limit was never called.
+        assert not db_path.exists()

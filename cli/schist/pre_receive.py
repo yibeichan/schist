@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from schist.acl import VaultACL, parse_vault_yaml
+from schist.rate_limit import RateLimitResult, check_rate_limit
 
 logger = logging.getLogger("schist.pre_receive")
 
@@ -176,6 +177,31 @@ def log_rejection(
         logger.warning("Failed to write rejection log: %s", e)
 
 
+def log_rate_limit_rejection(
+    identity: str,
+    result: RateLimitResult,
+    log_path: Path | None = None,
+) -> None:
+    """Append a rate-limit rejection to the audit log."""
+    if log_path is None:
+        git_dir = os.environ.get("GIT_DIR", ".")
+        log_path = Path(git_dir) / "hooks" / "rejected-pushes.log"
+
+    timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+    entry = (
+        f"[{timestamp}] RATE_LIMIT_REJECTED identity={identity} "
+        f"reason={result.reason} limit={result.limit} observed={result.observed} "
+        f"retry_after={result.retry_after}\n"
+    )
+
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as f:
+            f.write(entry)
+    except OSError as e:
+        logger.warning("Failed to write rate-limit rejection log: %s", e)
+
+
 def find_vault_yaml() -> Path | None:
     """Locate vault.yaml on the filesystem for non-bare repos.
 
@@ -240,6 +266,7 @@ def main(
     acl: VaultACL | None = None,
     identity: str | None = None,
     log_path: Path | None = None,
+    db_path: Path | None = None,
 ) -> int:
     """Pre-receive hook entry point.
 
@@ -248,6 +275,7 @@ def main(
         acl: Pre-loaded VaultACL. None loads from vault.yaml.
         identity: Override identity. None resolves from environment.
         log_path: Override rejection log path.
+        db_path: Override rate-limit sqlite DB path.
 
     Returns:
         0 if push is allowed, 1 if rejected.
@@ -289,6 +317,7 @@ def main(
         stdin = sys.stdin.read().strip().split("\n")
 
     all_violations: list[Violation] = []
+    all_changed_files: list[str] = []
 
     for line in stdin:
         line = line.strip()
@@ -307,6 +336,7 @@ def main(
             print(f"ERROR: failed to diff {oldrev}..{newrev}: {e}", file=sys.stderr)
             return 1
 
+        all_changed_files.extend(changed_files)
         violations = check_push(identity, changed_files, acl, refname)
         all_violations.extend(violations)
 
@@ -314,6 +344,20 @@ def main(
         msg = format_rejection(all_violations)
         print(msg, file=sys.stderr)
         log_rejection(all_violations, log_path=log_path)
+        return 1
+
+    # ACL passed — enforce rate limits. Runs after ACL so that rejected
+    # pushes never consume a rate-limit slot.
+    rl_result = check_rate_limit(
+        identity,
+        all_changed_files,
+        acl,
+        db_path=db_path,
+        log_path=log_path,
+    )
+    if not rl_result.allowed:
+        print(rl_result.message, file=sys.stderr)
+        log_rate_limit_rejection(identity, rl_result, log_path=log_path)
         return 1
 
     return 0
