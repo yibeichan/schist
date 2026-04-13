@@ -523,7 +523,8 @@ class TestFailOpen:
             now=1000, db_path=db_path, log_path=log_path,
         )
         stderr = capsys.readouterr().err
-        assert "WARNING: rate limit DB unavailable" in stderr
+        assert "WARNING: RATE_LIMIT_BYPASSED" in stderr
+        assert "rate limit DB unavailable" in stderr
         assert "DISABLED for this push" in stderr
 
     def test_fail_open_logs_to_rejected_pushes_log(
@@ -536,7 +537,31 @@ class TestFailOpen:
         )
         assert log_path.exists()
         content = log_path.read_text()
-        assert "rate_limit_db_failure" in content
+        assert "RATE_LIMIT_BYPASSED" in content
+
+    def test_fail_open_on_unexpected_exception(
+        self, acl_sub, db_path, log_path, capsys, monkeypatch,
+    ):
+        """Any exception from _init_db — not just sqlite3.Error/OSError —
+        must fail-open. The catch is broadened to ``Exception`` so a rare
+        programming error (e.g. a bad Path string triggering a TypeError
+        inside sqlite3.connect) cannot propagate and crash the hook,
+        which would be inadvertently fail-closed.
+        """
+        import schist.rate_limit as rl_mod
+
+        def boom(_db_path):
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(rl_mod, "_init_db", boom)
+        result = check_rate_limit(
+            "agent-a", ["notes/a.md"], acl_sub,
+            now=1000, db_path=db_path, log_path=log_path,
+        )
+        assert result.allowed is True
+        assert result.reason == "db_unavailable"
+        stderr = capsys.readouterr().err
+        assert "RATE_LIMIT_BYPASSED" in stderr
 
 
 # ---------------------------------------------------------------------------

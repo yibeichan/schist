@@ -623,3 +623,34 @@ class TestMainRateLimit:
         assert "rate limit exceeded" not in stderr
         # DB file should not exist — rate_limit.check_rate_limit was never called.
         assert not db_path.exists()
+
+    def test_multi_ref_push_deduplicates_notes(self, rl_acl, tmp_path):
+        """A multi-ref push touching the same file across refs counts it once.
+
+        Regression guard: ``notes_per_sync`` is a count of unique
+        note-bearing files in a push. A legitimate push to two branches
+        that share files must not be double-counted.
+        """
+        log_path = tmp_path / "rejected-pushes.log"
+        db_path = tmp_path / "rate-limits.sqlite"
+        stdin = [
+            "aaa bbb refs/heads/main",
+            "ccc ddd refs/heads/feature",
+        ]
+        # Admin limit is 3 notes_per_sync. We push 3 unique files across
+        # two refs — 6 total file-touches, but only 3 unique files. Without
+        # dedup this would be rejected as 6 > 3.
+        shared_files = ["notes/a.md", "notes/b.md", "notes/c.md"]
+
+        with patch(
+            "schist.pre_receive.get_changed_files",
+            return_value=shared_files,
+        ):
+            rc = main(
+                stdin=stdin,
+                acl=rl_acl,
+                identity="admin",
+                log_path=log_path,
+                db_path=db_path,
+            )
+        assert rc == 0

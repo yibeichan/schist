@@ -7,7 +7,9 @@ Design: see ``eleven-main-design-rate-limiting-20260412.md``. Key invariants:
 
 - DELETE + SELECT + INSERT run inside a single ``BEGIN IMMEDIATE`` transaction
   so concurrent pushes from the same identity cannot race past the limit.
-- ``PRAGMA journal_mode=WAL`` and ``busy_timeout=5000`` on every connection.
+- ``PRAGMA busy_timeout=5000`` on every connection so the atomic transaction
+  waits out contention instead of failing immediately. WAL journal mode is
+  intentionally NOT set — see ``_init_db`` for why.
 - Any DB or import error fails OPEN with a stderr warning — ACL is the
   primary defense and a broken rate-limit DB must not brick the hub.
 - ``notes_per_sync`` only counts files under note-bearing directories, so
@@ -137,9 +139,15 @@ def _get_limits(acl: VaultACL, identity: str) -> RateLimits:
 
 
 def _fail_open(err: Exception, log_path: Path | None) -> RateLimitResult:
-    """Print stderr warning + append to rejection log, return allow result."""
+    """Print stderr warning + append to rejection log, return allow result.
+
+    The log tag ``RATE_LIMIT_BYPASSED`` is intentionally alarm-triggering so
+    operational dashboards can alert on repeated occurrences — a corrupt or
+    unwritable rate-limit DB lets every push through uncounted and must be
+    visible to humans, not just buried in "operational" noise.
+    """
     print(
-        f"WARNING: rate limit DB unavailable ({err}); "
+        f"WARNING: RATE_LIMIT_BYPASSED — rate limit DB unavailable ({err}); "
         "rate limiting DISABLED for this push",
         file=sys.stderr,
     )
@@ -149,10 +157,10 @@ def _fail_open(err: Exception, log_path: Path | None) -> RateLimitResult:
             timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
             with open(log_path, "a") as f:
                 f.write(
-                    f"[{timestamp}] rate_limit_db_failure err={err!r}\n"
+                    f"[{timestamp}] RATE_LIMIT_BYPASSED err={err!r}\n"
                 )
         except OSError as log_err:
-            logger.warning("Failed to write rate_limit_db_failure log: %s", log_err)
+            logger.warning("Failed to write RATE_LIMIT_BYPASSED log: %s", log_err)
     return RateLimitResult(allowed=True, reason="db_unavailable")
 
 
@@ -225,7 +233,7 @@ def check_rate_limit(
 
     try:
         conn = _init_db(db_path)
-    except (sqlite3.Error, OSError) as e:
+    except Exception as e:  # noqa: BLE001 — fail-open is an explicit design choice
         return _fail_open(e, log_path)
 
     try:
@@ -246,6 +254,12 @@ def check_rate_limit(
                     (identity,),
                 ).fetchone()
                 conn.execute("ROLLBACK")
+                # The DELETE filter is strict `<`, so an event at exactly
+                # `now - WINDOW_SECONDS` survives this pass and is swept on
+                # the next call. That makes the true "next free slot" one
+                # second after `oldest_ts + WINDOW_SECONDS`, not at it. The
+                # formula below gives 0 at the boundary; `max(1, ...)` is
+                # therefore semantically correct, not a bug mask.
                 retry_after = max(1, (oldest_ts + WINDOW_SECONDS) - now)
                 return RateLimitResult(
                     allowed=False,

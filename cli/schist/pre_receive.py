@@ -348,9 +348,15 @@ def main(
 
     # ACL passed — enforce rate limits. Runs after ACL so that rejected
     # pushes never consume a rate-limit slot.
+    #
+    # Dedupe across refs: a multi-ref push (e.g. main + feature) that
+    # touches the same file in both refs would otherwise count the file
+    # twice and trigger false notes_per_sync rejections. dict.fromkeys
+    # preserves order for deterministic logging.
+    unique_changed_files = list(dict.fromkeys(all_changed_files))
     rl_result = check_rate_limit(
         identity,
-        all_changed_files,
+        unique_changed_files,
         acl,
         db_path=db_path,
         log_path=log_path,
