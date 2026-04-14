@@ -23,7 +23,6 @@ import {
   delete_agent_state,
   add_concept_alias,
   list_domains,
-  assign_domain,
 } from "./tools.js";
 import type { VaultConfig } from "./types.js";
 
@@ -168,18 +167,6 @@ function makeMemoryWriteTools(_config: VaultConfig) {
           created_by: { type: "string" },
         },
         required: ["duplicate_slug", "canonical_slug", "created_by"],
-      },
-    },
-    {
-      name: "assign_domain",
-      description: "Assign a research domain to a doc.",
-      inputSchema: {
-        type: "object" as const,
-        properties: {
-          doc_id: { type: "string" },
-          domain_slug: { type: "string" },
-        },
-        required: ["doc_id", "domain_slug"],
       },
     },
   ];
@@ -412,11 +399,6 @@ async function main() {
             result = writeEnabled
               ? await add_concept_alias(vaultRoot, toolArgs as Parameters<typeof add_concept_alias>[1])
               : { error: "VALIDATION_ERROR", message: "add_concept_alias requires write capability." };
-            break;
-          case "assign_domain":
-            result = writeEnabled
-              ? await assign_domain(vaultRoot, toolArgs as Parameters<typeof assign_domain>[1])
-              : { error: "VALIDATION_ERROR", message: "assign_domain requires write capability." };
             break;
           default:
             result = { error: "VALIDATION_ERROR", message: `Unknown tool: ${name}` };

@@ -536,15 +536,3 @@ export async function add_concept_alias(
     return normalizeError(e, "VALIDATION_ERROR");
   }
 }
-
-export async function assign_domain(
-  _vaultRoot: string,
-  args: { doc_id: string; domain_slug: string }
-): Promise<unknown> {
-  // TODO: implement actual persistence — add domain_slug to the doc's
-  // frontmatter via the git-writer path, then trigger re-ingestion.
-  return {
-    error: "NOT_IMPLEMENTED",
-    message: `assign_domain is not yet implemented (doc_id=${args.doc_id}, domain_slug=${args.domain_slug})`,
-  } satisfies ToolError;
-}
