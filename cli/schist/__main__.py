@@ -56,15 +56,17 @@ def main():
     p_schema.add_argument('--validate', action='store_true')
 
     # init
-    p_init = sub.add_parser('init', help='Initialize a vault (hub or spoke)')
+    p_init = sub.add_parser('init', help='Initialize a vault (standalone, hub, or spoke)')
+    p_init.add_argument('path', nargs='?', default=None,
+                        help='(standalone) Path to new vault (default: current dir)')
     p_init.add_argument('--spoke', action='store_true', help='Initialize as spoke vault')
     p_init.add_argument('--hub', help='(spoke) Hub repository URL')
     p_init.add_argument('--scope', help='(spoke) Scope to sync (directory path)')
     p_init.add_argument('--identity', default=os.environ.get('SCHIST_IDENTITY'),
-                        help='(spoke) Spoke identity (or set SCHIST_IDENTITY)')
+                        help='(spoke/standalone) Identity name (or set SCHIST_IDENTITY)')
     p_init.add_argument('--hub-path', dest='hub_path',
                         help='(hub) Path to the bare repo to create')
-    p_init.add_argument('--name', help='(hub) Vault name for the seeded vault.yaml')
+    p_init.add_argument('--name', help='(hub/standalone) Vault name for vault.yaml')
     p_init.add_argument('--participant', action='append',
                         help='(hub) Participant name (repeatable)')
 
@@ -80,19 +82,10 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    # init --hub-path: hub init, no vault path needed
-    if args.command == 'init' and getattr(args, 'hub_path', None):
-        if getattr(args, 'spoke', False):
-            print('Error: --hub-path and --spoke are mutually exclusive', file=sys.stderr)
-            sys.exit(1)
-        sync.init_hub(args, args.hub_path)
-        sys.exit(0)
-
-    # init --spoke: vault doesn't exist yet, special path
-    if args.command == 'init' and getattr(args, 'spoke', False):
-        vault_path = args.vault or os.path.basename(args.hub or 'vault').removesuffix('.git')
-        db_path = args.db or os.path.join(vault_path, '.schist', 'schist.db')
-        sync.init_spoke(args, vault_path, db_path)
+    # init: all modes (hub, spoke, standalone) routed through one helper so
+    # the conflict matrix lives in one place.
+    if args.command == 'init':
+        sync._dispatch_init(args)
         sys.exit(0)
 
     vault_path = args.vault
