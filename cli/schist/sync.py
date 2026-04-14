@@ -12,11 +12,11 @@ from pathlib import Path
 import yaml
 
 from . import git_ops
-from .acl import ACLError, parse_vault_data
+from .acl import ACLError, NAME_RE, parse_vault_data
 from .spoke_config import SpokeConfig, is_spoke, load_spoke_config, save_spoke_config
 
-class _HubInitError(Exception):
-    """Raised by init_hub build steps so the outer function can clean up staging."""
+class _InitError(Exception):
+    """Raised by init_* build steps so the outer function can clean up staging."""
 
 
 PRE_RECEIVE_HOOK = """\
@@ -32,6 +32,53 @@ import sys
 from schist.pre_receive import main
 
 sys.exit(main())
+"""
+
+
+POST_COMMIT_HOOK = r"""#!/bin/sh
+# schist post-commit hook — re-ingest vault into SQLite after every commit
+
+VAULT_ROOT=$(git rev-parse --show-toplevel)
+DB_PATH="$VAULT_ROOT/.schist/schist.db"
+mkdir -p "$VAULT_ROOT/.schist"
+
+# Find ingest.py: env var, then common locations
+if [ -n "$SCHIST_INGEST_SCRIPT" ] && [ -f "$SCHIST_INGEST_SCRIPT" ]; then
+    INGEST="$SCHIST_INGEST_SCRIPT"
+elif [ -f "$VAULT_ROOT/.schist/ingest.py" ]; then
+    INGEST="$VAULT_ROOT/.schist/ingest.py"
+elif command -v schist-ingest >/dev/null 2>&1; then
+    schist-ingest --vault "$VAULT_ROOT" --db "$DB_PATH"
+    exit $?
+else
+    echo "schist: ingest.py not found. Set SCHIST_INGEST_SCRIPT or install schist."
+    exit 0
+fi
+
+python3 "$INGEST" --vault "$VAULT_ROOT" --db "$DB_PATH"
+"""
+
+
+PRE_COMMIT_HOOK = r"""#!/bin/sh
+# schist pre-commit hook — reject staged files containing secrets
+
+PATTERNS='sk-|ghp_|ghs_|AKIA|-----BEGIN|password\s*=|api_key\s*='
+
+STAGED_FILES=$(git diff --cached --name-only)
+if [ -z "$STAGED_FILES" ]; then
+    exit 0
+fi
+
+MATCH=$(echo "$STAGED_FILES" | xargs grep -lE "$PATTERNS" 2>/dev/null)
+if [ -n "$MATCH" ]; then
+    echo "ERROR: Potential secret detected in staged files:"
+    echo "$MATCH" | sed 's/^/  /'
+    echo ""
+    echo "If this is intentional, use git commit --no-verify"
+    exit 1
+fi
+
+exit 0
 """
 
 
@@ -239,7 +286,10 @@ def init_hub(args, hub_path: str) -> None:
 
     try:
         _build_hub_in_staging(staging, hub, vault_data, participants, name)
-    except _HubInitError as e:
+    except (_InitError, OSError) as e:
+        # OSError catches filesystem failures (permission denied, disk full,
+        # etc.) raised by staging.mkdir() or any subsequent write so the user
+        # gets a clean "Error: ..." line instead of a raw traceback.
         print(f"Error: {e}", file=sys.stderr)
         # Best-effort staging cleanup. If it fails, surface the path so the
         # user can remove it manually — but the final hub_path is untouched.
@@ -280,7 +330,7 @@ def _build_hub_in_staging(
 ) -> None:
     """Build the bare repo + hook + seed commit entirely inside `staging`.
 
-    Raises _HubInitError with a descriptive message on any failure. The caller
+    Raises _InitError with a descriptive message on any failure. The caller
     is responsible for cleaning up `staging`.
     """
     # 1. Create bare repo at the staging path
@@ -290,7 +340,7 @@ def _build_hub_in_staging(
         capture_output=True, text=True,
     )
     if result.returncode != 0:
-        raise _HubInitError(f"git init --bare failed: {result.stderr.strip()}")
+        raise _InitError(f"git init --bare failed: {result.stderr.strip()}")
 
     # 2. Install pre-receive hook
     hook_path = staging / "hooks" / "pre-receive"
@@ -339,7 +389,7 @@ def _build_hub_in_staging(
         ):
             r = run(cmd, seed)
             if r.returncode != 0:
-                raise _HubInitError(f"{' '.join(cmd)} failed: {r.stderr.strip()}")
+                raise _InitError(f"{' '.join(cmd)} failed: {r.stderr.strip()}")
 
         (seed / "vault.yaml").write_text(
             yaml.dump(vault_data, default_flow_style=False, sort_keys=False)
@@ -352,7 +402,7 @@ def _build_hub_in_staging(
         ):
             r = run(cmd, seed)
             if r.returncode != 0:
-                raise _HubInitError(f"{' '.join(cmd)} failed: {r.stderr.strip()}")
+                raise _InitError(f"{' '.join(cmd)} failed: {r.stderr.strip()}")
 
 
 def _build_seed_vault(name: str, participants: list[str]) -> dict:
@@ -379,6 +429,215 @@ def _build_seed_vault(name: str, participants: list[str]) -> dict:
         "participants": participant_entries,
         "access": access,
     }
+
+
+def init_standalone(args) -> None:
+    """Initialize a local standalone vault with no hub or participants.
+
+    Scaffolds: a git working repo at the target path with vault.yaml, empty
+    notes/concepts/papers directories (each with .gitkeep), a .gitignore that
+    excludes .schist/ (runtime SQLite state), and the post-commit + pre-commit
+    hooks installed in .git/hooks/ (after the seed commit, so the hooks don't
+    run on it).
+
+    Mirrors init_hub's staging-dir + atomic rename pattern so a half-initialized
+    target never exists on disk. On failure, only the staging directory is
+    touched and it is cleaned up before exit.
+    """
+    path_arg = getattr(args, "path", None) or "."
+    target = Path(path_arg).resolve()
+
+    name = getattr(args, "name", None) or target.name
+    identity = getattr(args, "identity", None) or "local"
+
+    if not NAME_RE.match(identity):
+        print(
+            f"Error: --identity '{identity}' must match ^[a-z][a-z0-9-]*$",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if target.exists() and any(target.iterdir()):
+        print(
+            f"Error: '{path_arg}' already exists and is not empty",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Build vault.yaml data and validate before touching the filesystem.
+    vault_data = _build_standalone_vault(name, identity)
+    try:
+        parse_vault_data(vault_data)
+    except ACLError as e:
+        print(
+            f"Error: generated vault.yaml failed validation: {e}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Stage in a sibling directory so the final os.rename is atomic (same FS).
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = target.parent / f".{target.name}.init-{os.getpid()}"
+    if staging.exists():
+        shutil.rmtree(staging)
+
+    try:
+        _build_standalone_in_staging(staging, vault_data, name)
+    except (_InitError, OSError) as e:
+        # OSError catches filesystem failures (permission denied, disk full,
+        # etc.) raised by staging.mkdir() or any subsequent write so the user
+        # gets a clean "Error: ..." line instead of a raw traceback.
+        print(f"Error: {e}", file=sys.stderr)
+        try:
+            if staging.exists():
+                shutil.rmtree(staging)
+        except OSError as cleanup_err:
+            print(
+                f"Warning: could not clean up staging dir {staging}: {cleanup_err}\n"
+                f"  Manual fix: rm -rf {staging}",
+                file=sys.stderr,
+            )
+        sys.exit(1)
+
+    # Atomic rename: either target points at a complete vault, or it doesn't
+    # exist at all.
+    if target.exists():
+        target.rmdir()
+    os.rename(staging, target)
+
+    print(f"Vault initialized at {target}")
+    print()
+    print("Next steps:")
+    print(f"  1. export SCHIST_VAULT_PATH={target}")
+    print(f"  2. schist add --title 'My first note'")
+    print(f"  3. Set SCHIST_INGEST_SCRIPT for post-commit ingest, or install schist-ingest on PATH.")
+
+
+def _build_standalone_in_staging(
+    staging: Path,
+    vault_data: dict,
+    name: str,
+) -> None:
+    """Build the standalone working-tree repo entirely inside `staging`.
+
+    Raises _InitError with a descriptive message on any failure. The caller is
+    responsible for cleaning up `staging`.
+    """
+    staging.mkdir(parents=True)
+
+    result = subprocess.run(
+        ["git", "init", "--initial-branch=main", str(staging)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise _InitError(f"git init failed: {result.stderr.strip()}")
+
+    # Scaffold empty content dirs with .gitkeep sentinels so they survive the
+    # initial commit even though git doesn't track empty directories.
+    for d in ("notes", "concepts", "papers"):
+        sub = staging / d
+        sub.mkdir()
+        (sub / ".gitkeep").write_text("")
+
+    # Runtime SQLite state lives under .schist/ and must never be committed.
+    (staging / ".gitignore").write_text(".schist/\n")
+
+    (staging / "vault.yaml").write_text(
+        yaml.dump(vault_data, default_flow_style=False, sort_keys=False)
+    )
+
+    env = os.environ.copy()
+    env.setdefault("GIT_AUTHOR_NAME", "schist")
+    env.setdefault("GIT_AUTHOR_EMAIL", "schist@local")
+    env.setdefault("GIT_COMMITTER_NAME", "schist")
+    env.setdefault("GIT_COMMITTER_EMAIL", "schist@local")
+
+    def run(cmd: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(cmd, cwd=staging, env=env, capture_output=True, text=True)
+
+    # Seed commit runs BEFORE installing hooks so the commit is unaffected by
+    # the pre-commit secret scanner (benign here, but keeps intent explicit).
+    for cmd in (
+        ["git", "add", "."],
+        ["git", "commit", "-m", f"init: scaffold standalone vault {name}"],
+    ):
+        r = run(cmd)
+        if r.returncode != 0:
+            raise _InitError(f"{' '.join(cmd)} failed: {r.stderr.strip()}")
+
+    hooks_dir = staging / ".git" / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    post = hooks_dir / "post-commit"
+    post.write_text(POST_COMMIT_HOOK)
+    post.chmod(0o755)
+    pre = hooks_dir / "pre-commit"
+    pre.write_text(PRE_COMMIT_HOOK)
+    pre.chmod(0o755)
+
+
+def _build_standalone_vault(name: str, identity: str) -> dict:
+    """Construct a minimal valid vault.yaml data dict for a standalone vault.
+
+    Single-participant, single-agent, full-vault read+write. Kept separate from
+    `_build_seed_vault` because the two diverge on participant type, default
+    scope, and ACL shape — parametrizing would hide the difference behind
+    callbacks.
+    """
+    return {
+        "vault_version": 1,
+        "name": name,
+        "scope_convention": "subdirectory",
+        "participants": [{
+            "name": identity,
+            "type": "agent",
+            "default_scope": "global",
+        }],
+        "access": {identity: {"read": ["*"], "write": ["*"]}},
+    }
+
+
+def _dispatch_init(args) -> None:
+    """Route `schist init` to the right mode based on arg combination.
+
+    Three modes (mutually exclusive):
+      - hub:        `--hub-path PATH` (optionally --name/--participant)
+      - spoke:      `--spoke --hub URL --scope S --identity I`
+      - standalone: no mode flags; optional positional <path>
+
+    Centralizing the conflict matrix here also closes a pre-existing trap:
+    `--hub URL` without `--spoke` used to fall through to a KeyError crash,
+    and with standalone init added would silently run as standalone and drop
+    the hub URL. Both are rejected up front.
+    """
+    hub_path = getattr(args, "hub_path", None)
+    spoke = getattr(args, "spoke", False)
+    hub_url = getattr(args, "hub", None)
+    standalone_path = getattr(args, "path", None)
+
+    if hub_path and spoke:
+        print("Error: --hub-path and --spoke are mutually exclusive", file=sys.stderr)
+        sys.exit(1)
+    if hub_path and hub_url:
+        print("Error: --hub-path and --hub are mutually exclusive (--hub is for spoke mode)", file=sys.stderr)
+        sys.exit(1)
+    if hub_url and not spoke:
+        print("Error: --hub requires --spoke", file=sys.stderr)
+        sys.exit(1)
+    if standalone_path and (hub_path or spoke):
+        print("Error: positional <path> is only valid for standalone init", file=sys.stderr)
+        sys.exit(1)
+
+    if hub_path:
+        init_hub(args, hub_path)
+        return
+
+    if spoke:
+        vault_path = args.vault or os.path.basename(hub_url or "vault").removesuffix(".git")
+        db_path = args.db or os.path.join(vault_path, ".schist", "schist.db")
+        init_spoke(args, vault_path, db_path)
+        return
+
+    init_standalone(args)
 
 
 def _rebuild_index(vault_path: str, db_path: str) -> None:
