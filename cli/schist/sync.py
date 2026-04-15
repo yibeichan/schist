@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -183,14 +184,93 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
 
     ok, output = git_ops.pull_rebase(vault_path)
     if not ok:
-        print(f"Error: pull failed — {output}", file=sys.stderr)
-        if "conflict" in output.lower() or "CONFLICT" in output:
-            print("Resolve conflicts manually or re-clone the spoke.", file=sys.stderr)
+        if "CONFLICT" in output or "conflict" in output.lower():
+            _print_conflict_recovery(vault_path, config, output)
+        else:
+            print(f"Error: pull failed — {output}", file=sys.stderr)
         sys.exit(1)
 
     # Rebuild index
     _rebuild_index(vault_path, db_path)
     print(f"Pull complete. Index rebuilt.")
+
+
+_CONFLICT_RE = re.compile(r"CONFLICT \([^)]+\): Merge conflict in (.+)")
+
+
+def _extract_conflicting_files(git_output: str) -> list[str]:
+    """Parse git rebase output for `CONFLICT (content): Merge conflict in <path>`
+    lines. Returns the list of conflicting file paths, in order of appearance,
+    deduplicated. Returns an empty list if no conflicts were matched (e.g. the
+    failure was a delete-modify conflict that git phrases differently)."""
+    seen: set[str] = set()
+    files: list[str] = []
+    for line in git_output.splitlines():
+        match = _CONFLICT_RE.match(line.strip())
+        if match:
+            path = match.group(1).strip()
+            if path not in seen:
+                seen.add(path)
+                files.append(path)
+    return files
+
+
+def _print_conflict_recovery(
+    vault_path: str, config: SpokeConfig, git_output: str
+) -> None:
+    """Render the pull-conflict error block with concrete recovery steps.
+
+    `pull_rebase` in git_ops.py auto-aborts the failed rebase, so by the time
+    we land here the local working tree is already back to pre-pull state.
+    The user's work is NOT lost — they just couldn't automatically absorb the
+    hub's changes. This message tells them that explicitly and gives three
+    concrete recovery paths sized from safest to most-hands-on."""
+    conflicts = _extract_conflicting_files(git_output)
+
+    print(
+        "Error: pull failed with conflicts. Local state is unchanged "
+        "(the rebase was auto-aborted).",
+        file=sys.stderr,
+    )
+    if conflicts:
+        print("", file=sys.stderr)
+        print("Conflicting files:", file=sys.stderr)
+        for f in conflicts:
+            print(f"  {f}", file=sys.stderr)
+    print("", file=sys.stderr)
+    print(
+        "The hub has commits that touch the same lines as your local work. "
+        "Recovery options:",
+        file=sys.stderr,
+    )
+    print("", file=sys.stderr)
+    print("  1. INSPECT what's on the hub first:", file=sys.stderr)
+    print(f"       git -C {vault_path} fetch origin", file=sys.stderr)
+    print(f"       git -C {vault_path} log HEAD..origin/main --oneline", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("  2. MANUAL REBASE (advanced — resolve conflicts yourself):", file=sys.stderr)
+    print(
+        f"       git -C {vault_path} fetch origin && "
+        f"git -C {vault_path} rebase origin/main",
+        file=sys.stderr,
+    )
+    print(
+        "       # edit conflicting files, git add <files>, git rebase --continue",
+        file=sys.stderr,
+    )
+    print(f"       schist sync pull   # rebuild index", file=sys.stderr)
+    print("", file=sys.stderr)
+    print(
+        "  3. RE-CLONE (safest — your local changes must already be pushed):",
+        file=sys.stderr,
+    )
+    print(f"       schist sync push              # push first if you have any", file=sys.stderr)
+    print(f"       rm -rf {vault_path}", file=sys.stderr)
+    print(
+        f"       schist init --spoke --hub {config.hub} "
+        f"--scope {config.scope} --identity {config.identity}",
+        file=sys.stderr,
+    )
 
 
 def sync_push(args, vault_path: str, db_path: str) -> None:

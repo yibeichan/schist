@@ -215,8 +215,21 @@ class TestSyncPull:
         assert "could not clear rebase state" in err
         assert "Manual fix" in err
 
-    @patch("schist.sync.git_ops.pull_rebase", return_value=(False, "CONFLICT in research/mario/note.md"))
-    def test_pull_conflict_aborts(self, mock_pull, tmp_path, capsys):
+    @patch(
+        "schist.sync.git_ops.pull_rebase",
+        return_value=(
+            False,
+            "Auto-merging research/mario/a.md\n"
+            "CONFLICT (content): Merge conflict in research/mario/a.md\n"
+            "Auto-merging research/mario/b.md\n"
+            "CONFLICT (content): Merge conflict in research/mario/b.md\n"
+            "error: Failed to merge in the changes.",
+        ),
+    )
+    def test_pull_conflict_rich_recovery_message(self, mock_pull, tmp_path, capsys):
+        """On conflict, sync_pull prints conflicting-file list + 3 recovery
+        paths (INSPECT, MANUAL REBASE, RE-CLONE) and explicitly tells the
+        user their local state is unchanged."""
         from schist.sync import sync_pull
 
         vault = _make_spoke(tmp_path)
@@ -224,8 +237,79 @@ class TestSyncPull:
         with pytest.raises(SystemExit):
             sync_pull(args, vault, "db.sqlite")
         err = capsys.readouterr().err
-        assert "pull failed" in err
-        assert "conflict" in err.lower() or "re-clone" in err.lower()
+
+        # Core message: what happened + that local state is safe
+        assert "pull failed with conflicts" in err
+        assert "Local state is unchanged" in err
+        assert "auto-aborted" in err
+
+        # Both conflicting files appear in the list
+        assert "research/mario/a.md" in err
+        assert "research/mario/b.md" in err
+
+        # All three recovery paths are presented
+        assert "INSPECT" in err
+        assert "MANUAL REBASE" in err
+        assert "RE-CLONE" in err
+
+        # Re-clone option shows the exact re-init command with spoke identity
+        assert "schist init --spoke" in err
+        assert "cluster-mario" in err  # identity from _make_spoke()
+        assert "git@pi.local:vault.git" in err  # hub URL from _make_spoke()
+
+    def test_pull_non_conflict_error_keeps_raw_output(self, tmp_path, capsys):
+        """Non-conflict errors (e.g. network failure) skip the rich recovery
+        block and just surface the raw git output."""
+        from schist.sync import sync_pull
+
+        vault = _make_spoke(tmp_path)
+        args = MagicMock()
+        with patch(
+            "schist.sync.git_ops.pull_rebase",
+            return_value=(False, "fatal: Could not resolve hostname pi.local"),
+        ), pytest.raises(SystemExit):
+            sync_pull(args, vault, "db.sqlite")
+        err = capsys.readouterr().err
+        assert "Error: pull failed" in err
+        assert "Could not resolve hostname" in err
+        # None of the rich-recovery headers should appear
+        assert "INSPECT" not in err
+        assert "RE-CLONE" not in err
+
+    def test_extract_conflicting_files_parses_git_output(self):
+        """Unit test on the helper: various CONFLICT line shapes are matched."""
+        from schist.sync import _extract_conflicting_files
+
+        output = (
+            "Auto-merging a.md\n"
+            "CONFLICT (content): Merge conflict in a.md\n"
+            "CONFLICT (modify/delete): b.md deleted in HEAD and modified in commit\n"
+            "CONFLICT (content): Merge conflict in nested/dir/c.md\n"
+            "error: Failed to merge in the changes."
+        )
+        files = _extract_conflicting_files(output)
+        # Only "content"-style conflicts are matched (intentional — that's
+        # what the regex targets). modify/delete is a different shape.
+        assert files == ["a.md", "nested/dir/c.md"]
+
+    def test_extract_conflicting_files_deduplicates(self):
+        """Duplicate conflict lines are deduplicated in the returned list."""
+        from schist.sync import _extract_conflicting_files
+
+        output = (
+            "CONFLICT (content): Merge conflict in foo.md\n"
+            "CONFLICT (content): Merge conflict in foo.md\n"
+            "CONFLICT (content): Merge conflict in bar.md\n"
+        )
+        assert _extract_conflicting_files(output) == ["foo.md", "bar.md"]
+
+    def test_extract_conflicting_files_empty_on_no_match(self):
+        """If git output has no CONFLICT lines (unusual but possible),
+        return an empty list rather than raising."""
+        from schist.sync import _extract_conflicting_files
+
+        assert _extract_conflicting_files("fatal: something else") == []
+        assert _extract_conflicting_files("") == []
 
 
 # ---------------------------------------------------------------------------
