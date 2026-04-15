@@ -11,6 +11,17 @@ dependencies = ["python-frontmatter>=1.1.0", "pyyaml>=6.0.3"]
 [project.scripts]
 schist = "schist.__main__:main"
 
+# Explicit package list — without this, setuptools 82+ flat-layout
+# auto-discovery fails when a local `cli/hooks/` directory exists (as
+# created by test_rate_limit.py's `rejected-pushes.log`, which lands
+# under cli/hooks/ by default even though the log file is gitignored).
+# setuptools then errors with "Multiple top-level packages discovered in
+# a flat-layout: ['hooks', 'schist']" because .gitignore is invisible
+# to it. Pinning packages to ["schist"] makes the install deterministic
+# regardless of stray local directories.
+[tool.setuptools]
+packages = ["schist"]
+
 [tool.pytest.ini_options]
 markers = [
     "integration: slow tests that spawn real git subprocesses",
