@@ -644,6 +644,12 @@ def _rebuild_index(vault_path: str, db_path: str) -> None:
     """Delete existing SQLite and re-ingest from markdown files.
 
     Uses rename-on-success: old DB is only removed after ingest succeeds.
+    Before dropping the backup, side tables (`domains`, `concept_aliases`)
+    are copied forward into the new DB — they live alongside
+    docs/concepts/edges in schist.db but are not rebuilt from markdown, so
+    on the commit-path rebuild they survive naturally (ingest.py runs
+    against the existing DB). Here we rename the whole file, so the copy
+    is the only thing keeping them alive.
     """
     db = Path(db_path)
     backup = None
@@ -655,11 +661,52 @@ def _rebuild_index(vault_path: str, db_path: str) -> None:
 
     try:
         _run_ingest(vault_path, db_path)
-        # Success — remove backup
         if backup and backup.exists():
+            _preserve_side_tables(backup, db)
             backup.unlink()
     except Exception as e:
         # Restore backup so user keeps old (stale) index rather than none
         if backup and backup.exists():
             backup.rename(db)
         print(f"Warning: index rebuild failed: {e}", file=sys.stderr)
+
+
+# Side tables that live in schist.db but are not populated by ingest.py.
+# Columns are hardcoded (rather than using `SELECT *`) so a schema evolution
+# in `ingestion/schema.sql` cannot silently misalign columns during the copy.
+# If you add a column to either table, update this map too — `test_sync.py`
+# has a guard test that asserts every table column is listed here.
+_SIDE_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
+    "domains": ("slug", "label", "description", "parent_slug"),
+    "concept_aliases": (
+        "duplicate_slug", "canonical_slug", "reason", "created_by", "created_at",
+    ),
+}
+
+
+def _preserve_side_tables(backup: Path, new_db: Path) -> None:
+    """Copy side-table rows from `backup` into `new_db`.
+
+    Uses ATTACH DATABASE + INSERT OR IGNORE SELECT with explicit column lists
+    so schema drift between backup and new DB can't cause column-order
+    corruption. A missing table in the backup (older DB format) is skipped
+    silently; any other sqlite3 error re-raises.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(str(new_db))
+    try:
+        conn.execute("ATTACH DATABASE ? AS backup", (str(backup),))
+        for table, cols in _SIDE_TABLE_COLUMNS.items():
+            col_list = ", ".join(cols)
+            try:
+                conn.execute(
+                    f"INSERT OR IGNORE INTO main.{table} ({col_list}) "
+                    f"SELECT {col_list} FROM backup.{table}"
+                )
+            except sqlite3.OperationalError as e:
+                if "no such table" not in str(e).lower():
+                    raise
+        conn.commit()
+    finally:
+        conn.close()

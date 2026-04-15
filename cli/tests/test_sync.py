@@ -301,3 +301,187 @@ class TestSyncPush:
             sync_push(args, vault, "db.sqlite")
         err = capsys.readouterr().err
         assert "unreachable" in err.lower() or "saved locally" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# _rebuild_index side-table preservation
+# ---------------------------------------------------------------------------
+
+
+def _init_vault_with_schema(tmp_path: Path) -> tuple[str, str]:
+    """Set up a minimal vault + run a real ingest so schist.db exists with
+    the current schema.sql applied. Returns (vault_path, db_path).
+    """
+    import shutil
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "notes").mkdir()
+    (vault / "concepts").mkdir()
+    # One real markdown file so ingest has something to insert into docs
+    (vault / "notes" / "2026-01-01-seed.md").write_text(
+        "---\ntitle: seed\ndate: '2026-01-01'\nstatus: draft\n---\n\nSeed body.\n"
+    )
+    db_path = str(vault / ".schist" / "schist.db")
+    (vault / ".schist").mkdir()
+
+    # Run _rebuild_index once to lay down the schema + seed doc row
+    from schist.sync import _rebuild_index
+
+    _rebuild_index(str(vault), db_path)
+    if not Path(db_path).exists():
+        pytest.skip("ingest.py unavailable — can't set up the rebuild preservation tests")
+    return str(vault), db_path
+
+
+class TestRebuildIndexSideTablePreservation:
+    def test_concept_aliases_survive_rebuild(self, tmp_path):
+        """Rows in concept_aliases must survive a second _rebuild_index."""
+        import sqlite3
+        from schist.sync import _rebuild_index
+
+        vault, db_path = _init_vault_with_schema(tmp_path)
+
+        # Insert a concept_alias row into the existing DB
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO concept_aliases "
+                "(duplicate_slug, canonical_slug, reason, created_by) "
+                "VALUES (?, ?, ?, ?)",
+                ("backprop", "backpropagation", "short form", "tester"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Rebuild (simulates spoke pull)
+        _rebuild_index(vault, db_path)
+
+        # Row should still be there
+        conn = sqlite3.connect(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT duplicate_slug, canonical_slug, reason, created_by "
+                "FROM concept_aliases"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        assert rows == [("backprop", "backpropagation", "short form", "tester")]
+
+    def test_domains_survive_rebuild(self, tmp_path):
+        """Rows in domains must survive a second _rebuild_index."""
+        import sqlite3
+        from schist.sync import _rebuild_index
+
+        vault, db_path = _init_vault_with_schema(tmp_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.executemany(
+                "INSERT INTO domains (slug, label, description, parent_slug) "
+                "VALUES (?, ?, ?, ?)",
+                [
+                    ("ai", "AI", "Artificial intelligence", None),
+                    ("ml", "ML", "Machine learning", "ai"),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        _rebuild_index(vault, db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT slug, label, description, parent_slug FROM domains "
+                "ORDER BY slug"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        assert rows == [
+            ("ai", "AI", "Artificial intelligence", None),
+            ("ml", "ML", "Machine learning", "ai"),
+        ]
+
+    def test_rebuild_ok_with_no_prior_db(self, tmp_path):
+        """First rebuild (no backup) should succeed with no side-table data."""
+        import sqlite3
+        from schist.sync import _rebuild_index
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "notes").mkdir()
+        (vault / ".schist").mkdir()
+        (vault / "notes" / "2026-01-01-seed.md").write_text(
+            "---\ntitle: seed\ndate: '2026-01-01'\nstatus: draft\n---\n\nBody.\n"
+        )
+        db_path = str(vault / ".schist" / "schist.db")
+
+        _rebuild_index(str(vault), db_path)
+
+        if not Path(db_path).exists():
+            pytest.skip("ingest.py unavailable")
+
+        conn = sqlite3.connect(db_path)
+        try:
+            # Both side tables should exist, both empty
+            assert conn.execute("SELECT COUNT(*) FROM domains").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM concept_aliases").fetchone()[0] == 0
+        finally:
+            conn.close()
+
+    def test_rebuild_handles_missing_side_table_in_backup(self, tmp_path):
+        """Older DB format without `domains` or `concept_aliases` should not
+        crash the rebuild — the missing tables should be skipped silently."""
+        import sqlite3
+        from schist.sync import _rebuild_index
+
+        vault, db_path = _init_vault_with_schema(tmp_path)
+
+        # Simulate an older DB format by dropping concept_aliases
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("DROP TABLE concept_aliases")
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Rebuild should still succeed (missing table in backup is skipped)
+        _rebuild_index(vault, db_path)
+
+        # New DB should have the fresh (empty) concept_aliases table
+        conn = sqlite3.connect(db_path)
+        try:
+            count = conn.execute("SELECT COUNT(*) FROM concept_aliases").fetchone()[0]
+            assert count == 0
+        finally:
+            conn.close()
+
+    def test_side_table_columns_list_is_complete(self, tmp_path):
+        """Guard test: if schema.sql adds a column to domains or
+        concept_aliases, the hardcoded column list in sync.py must be
+        updated too. This test reads the actual schema from a fresh DB and
+        compares against the hardcoded list.
+        """
+        import sqlite3
+        from schist.sync import _SIDE_TABLE_COLUMNS
+
+        vault, db_path = _init_vault_with_schema(tmp_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            for table, expected_cols in _SIDE_TABLE_COLUMNS.items():
+                rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+                actual_cols = tuple(r[1] for r in rows)
+                assert actual_cols == expected_cols, (
+                    f"{table}: schema.sql and sync.py disagree.\n"
+                    f"  schema.sql columns: {actual_cols}\n"
+                    f"  sync.py columns:    {expected_cols}\n"
+                    f"  Update _SIDE_TABLE_COLUMNS in cli/schist/sync.py."
+                )
+        finally:
+            conn.close()
