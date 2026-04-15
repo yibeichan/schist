@@ -644,12 +644,16 @@ def _rebuild_index(vault_path: str, db_path: str) -> None:
     """Delete existing SQLite and re-ingest from markdown files.
 
     Uses rename-on-success: old DB is only removed after ingest succeeds.
-    Before dropping the backup, side tables (`domains`, `concept_aliases`)
-    are copied forward into the new DB — they live alongside
-    docs/concepts/edges in schist.db but are not rebuilt from markdown, so
-    on the commit-path rebuild they survive naturally (ingest.py runs
-    against the existing DB). Here we rename the whole file, so the copy
-    is the only thing keeping them alive.
+    Before dropping the backup, the `concept_aliases` side table is copied
+    forward into the new DB — it lives alongside docs/concepts/edges in
+    schist.db but is not rebuilt from markdown, so on the commit-path
+    rebuild it survives naturally (ingest.py runs against the existing DB).
+    Here we rename the whole file, so the copy is the only thing keeping
+    its rows alive.
+
+    The `domains` table is NOT preserved here. Its source of truth is
+    `vault.yaml`, and ingest.py rebuilds it from that file on every ingest
+    (see `_populate_domains` in `ingestion/ingest.py`).
     """
     db = Path(db_path)
     backup = None
@@ -674,10 +678,13 @@ def _rebuild_index(vault_path: str, db_path: str) -> None:
 # Side tables that live in schist.db but are not populated by ingest.py.
 # Columns are hardcoded (rather than using `SELECT *`) so a schema evolution
 # in `ingestion/schema.sql` cannot silently misalign columns during the copy.
-# If you add a column to either table, update this map too — `test_sync.py`
+# If you add a column to any listed table, update this map too — `test_sync.py`
 # has a guard test that asserts every table column is listed here.
+#
+# `domains` is intentionally NOT here — it's rebuilt by ingest.py from
+# vault.yaml on every rebuild, so preserving rows from the backup would
+# resurrect entries the user just removed from vault.yaml.
 _SIDE_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
-    "domains": ("slug", "label", "description", "parent_slug"),
     "concept_aliases": (
         "duplicate_slug", "canonical_slug", "reason", "created_by", "created_at",
     ),

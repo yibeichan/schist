@@ -9,6 +9,7 @@ import sqlite3
 from pathlib import Path
 
 import frontmatter
+import yaml
 
 SKIP_DIRS = {'.git', '.schist'}
 # Matches #word inside YAML flow sequences — quote them so YAML doesn't treat # as comment
@@ -177,9 +178,63 @@ def ingest(vault_path: str, db_path: str):
             except sqlite3.IntegrityError:
                 pass
 
+    # Populate domains from vault.yaml (the source of truth for domain
+    # taxonomy per `schema/vault-yaml.md`). The `domains` table is in the
+    # DROP list in schema.sql, so it starts fresh on every ingest; this
+    # mirrors how docs/concepts/edges are rebuilt from their source-of-truth
+    # files on every commit.
+    domain_count = _populate_domains(conn, vault)
+
     conn.commit()
     conn.close()
-    print(f'Ingested: {doc_count} docs, {concept_count} concepts, {edge_count} edges')
+    print(f'Ingested: {doc_count} docs, {concept_count} concepts, {edge_count} edges, {domain_count} domains')
+
+
+def _populate_domains(conn: sqlite3.Connection, vault: Path) -> int:
+    """Read `vault.yaml`'s top-level `domains` field and insert rows into the
+    `domains` table. Returns the number of rows inserted.
+
+    Accepts the documented list-of-strings format (`domains: [ai, security]`)
+    where each string becomes both slug and label, with null description and
+    parent_slug. Missing vault.yaml, missing `domains` field, or a malformed
+    YAML file → returns 0 without raising (ingest must not crash the
+    post-commit hook on a bad config file).
+    """
+    vault_yaml = vault / 'vault.yaml'
+    if not vault_yaml.exists():
+        return 0
+    try:
+        with open(vault_yaml, encoding='utf-8') as f:
+            data = yaml.safe_load(f) or {}
+    except (yaml.YAMLError, OSError):
+        return 0
+    raw_domains = data.get('domains')
+    if not isinstance(raw_domains, list):
+        return 0
+
+    count = 0
+    for item in raw_domains:
+        # Spec says list of strings; also accept {slug, label, description,
+        # parent_slug} dicts for future richer metadata. Silently skip any
+        # other shape rather than crash.
+        if isinstance(item, str):
+            slug = label = item
+            description = None
+            parent_slug = None
+        elif isinstance(item, dict) and isinstance(item.get('slug'), str):
+            slug = item['slug']
+            label = item.get('label') or slug
+            description = item.get('description')
+            parent_slug = item.get('parent_slug')
+        else:
+            continue
+        conn.execute(
+            'INSERT OR REPLACE INTO domains (slug, label, description, parent_slug) '
+            'VALUES (?, ?, ?, ?)',
+            (slug, label, description, parent_slug),
+        )
+        count += 1
+    return count
 
 
 if __name__ == '__main__':
