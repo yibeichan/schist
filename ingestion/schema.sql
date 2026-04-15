@@ -5,6 +5,7 @@ DROP TABLE IF EXISTS docs_fts;
 DROP TABLE IF EXISTS edges;
 DROP TABLE IF EXISTS concepts;
 DROP TABLE IF EXISTS docs;
+DROP TABLE IF EXISTS domains;
 
 CREATE TABLE docs (
     id          TEXT PRIMARY KEY,       -- relative path: "notes/2026-03-26-attention.md"
@@ -66,25 +67,31 @@ CREATE INDEX idx_edges_type ON edges(type);
 CREATE INDEX idx_docs_status ON docs(status);
 CREATE INDEX idx_docs_date ON docs(date);
 
--- ── Side tables (survive commit-path rebuilds) ────────────────────────────
--- `domains` and `concept_aliases` live alongside docs/concepts/edges in
--- schist.db. They use CREATE TABLE IF NOT EXISTS and are NOT in the DROP
--- list above, so on the commit-path rebuild (post-commit hook re-runs
--- ingest.py on the existing DB) their rows survive. On the spoke-pull path
--- (`_rebuild_index` in cli/schist/sync.py renames the entire DB file), they
--- are currently lost — tracked as a known issue.
---
--- `agent_memory` and `agent_state` intentionally do NOT live here. They use
--- a separate database (`~/.openclaw/memory/agent-state.db` by default, or
--- `SCHIST_MEMORY_DB`) whose schema is defined inline in
--- `mcp-server/src/sqlite-reader.ts` as the `MEMORY_SCHEMA` constant.
+-- ── Derived from vault.yaml, rebuilt every ingest ─────────────────────────
+-- `domains` mirrors the top-level `domains:` list in vault.yaml (the
+-- source of truth per schema/vault-yaml.md). It's in the DROP list above
+-- and is rebuilt by `_populate_domains()` in ingest.py on every ingest,
+-- so entries added to or removed from vault.yaml propagate automatically.
 
-CREATE TABLE IF NOT EXISTS domains (
+CREATE TABLE domains (
   slug        TEXT PRIMARY KEY,
   label       TEXT NOT NULL,
   description TEXT,
   parent_slug TEXT REFERENCES domains(slug)
 );
+
+-- ── MCP-written side table (survives commit-path rebuilds) ────────────────
+-- `concept_aliases` is written by the MCP `add_concept_alias` tool. It uses
+-- CREATE TABLE IF NOT EXISTS and is NOT in the DROP list above, so on the
+-- commit-path rebuild (post-commit hook re-runs ingest.py on the existing
+-- DB) its rows survive. On the spoke-pull path (`_rebuild_index` in
+-- `cli/schist/sync.py`), rows are copied forward from the backup by
+-- `_preserve_side_tables` — see PR #24.
+--
+-- `agent_memory` and `agent_state` intentionally do NOT live here. They use
+-- a separate database (`~/.openclaw/memory/agent-state.db` by default, or
+-- `SCHIST_MEMORY_DB`) whose schema is defined inline in
+-- `mcp-server/src/sqlite-reader.ts` as the `MEMORY_SCHEMA` constant.
 
 CREATE TABLE IF NOT EXISTS concept_aliases (
   duplicate_slug TEXT NOT NULL REFERENCES concepts(slug),
