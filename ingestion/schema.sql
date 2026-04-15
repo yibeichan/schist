@@ -66,41 +66,18 @@ CREATE INDEX idx_edges_type ON edges(type);
 CREATE INDEX idx_docs_status ON docs(status);
 CREATE INDEX idx_docs_date ON docs(date);
 
--- ── Memory V2 Extension ────────────────────────────────────────────────────
--- These tables are NOT rebuilt on re-ingest. They are persistent state.
-
-CREATE TABLE IF NOT EXISTS agent_memory (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  owner        TEXT NOT NULL,
-  date         TEXT NOT NULL,
-  entry_type   TEXT NOT NULL CHECK(entry_type IN ('decision','lesson','blocker','completion','observation')),
-  content      TEXT NOT NULL,
-  tags         TEXT,
-  related_doc  TEXT,
-  source_ref   TEXT,
-  confidence   TEXT NOT NULL DEFAULT 'medium' CHECK(confidence IN ('low','medium','high')),
-  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS agent_memory_fts USING fts5(owner, entry_type, content, tags, content='agent_memory', content_rowid='id');
-
-CREATE TRIGGER IF NOT EXISTS agent_memory_ai AFTER INSERT ON agent_memory BEGIN
-  INSERT INTO agent_memory_fts(rowid, owner, entry_type, content, tags)
-  VALUES (new.id, new.owner, new.entry_type, new.content, new.tags);
-END;
-
-CREATE TRIGGER IF NOT EXISTS agent_memory_ad AFTER DELETE ON agent_memory BEGIN
-  INSERT INTO agent_memory_fts(agent_memory_fts, rowid, owner, entry_type, content, tags)
-  VALUES ('delete', old.id, old.owner, old.entry_type, old.content, old.tags);
-END;
-
-CREATE TABLE IF NOT EXISTS agent_state (
-  key        TEXT PRIMARY KEY,
-  value      TEXT NOT NULL,
-  owner      TEXT NOT NULL,
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  ttl_hours  INTEGER DEFAULT NULL
-);
+-- ── Side tables (survive commit-path rebuilds) ────────────────────────────
+-- `domains` and `concept_aliases` live alongside docs/concepts/edges in
+-- schist.db. They use CREATE TABLE IF NOT EXISTS and are NOT in the DROP
+-- list above, so on the commit-path rebuild (post-commit hook re-runs
+-- ingest.py on the existing DB) their rows survive. On the spoke-pull path
+-- (`_rebuild_index` in cli/schist/sync.py renames the entire DB file), they
+-- are currently lost — tracked as a known issue.
+--
+-- `agent_memory` and `agent_state` intentionally do NOT live here. They use
+-- a separate database (`~/.openclaw/memory/agent-state.db` by default, or
+-- `SCHIST_MEMORY_DB`) whose schema is defined inline in
+-- `mcp-server/src/sqlite-reader.ts` as the `MEMORY_SCHEMA` constant.
 
 CREATE TABLE IF NOT EXISTS domains (
   slug        TEXT PRIMARY KEY,

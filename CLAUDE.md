@@ -14,7 +14,7 @@ cd mcp-server && npm install        # install deps
 npm run build                        # compile TS → dist/
 npm run dev                          # watch mode
 npm test                             # jest (ESM mode)
-npm test -- --testPathPattern=<pattern>  # run a single test file
+npm test -- --testPathPatterns=<pattern>  # run a single test file (Jest 30+)
 ```
 
 ### CLI (Python, in `cli/`)
@@ -28,7 +28,7 @@ python -m pytest cli/tests/test_acl.py::test_name -v  # single test
 ### Ingestion (Python, in `ingestion/`)
 ```bash
 pip install -r ingestion/requirements.txt
-python ingestion/ingest.py <vault-path>  # rebuild SQLite from markdown
+python ingestion/ingest.py --vault <path> --db <path>  # rebuild SQLite from markdown
 ```
 
 ### Viewer
@@ -87,7 +87,9 @@ ACLs. Create one with `schist init --hub --hub-path /path --name X
 - Full spec: `schema/SCHEMA.md`, vault config spec: `schema/vault-yaml.md`
 
 ### SQLite tables
-`docs`, `concepts`, `edges`, `docs_fts` (FTS5), `agent_memory`, `agent_state`, `domains`, `concept_aliases` — defined in `ingestion/schema.sql`. Memory tables (`agent_memory`, `agent_state`) persist across re-ingestion.
+Vault DB (`<vault>/.schist/schist.db`): `docs`, `concepts`, `edges`, `docs_fts` (FTS5), `domains`, `concept_aliases` — defined in `ingestion/schema.sql`. `docs`/`concepts`/`edges`/`docs_fts` are dropped and rebuilt from markdown on every commit; `domains` and `concept_aliases` use `CREATE TABLE IF NOT EXISTS` and survive commit-path rebuilds.
+
+Memory DB (`~/.openclaw/memory/agent-state.db` by default, or `SCHIST_MEMORY_DB`): `agent_memory`, `agent_memory_fts`, `agent_state` — schema inlined in `mcp-server/src/sqlite-reader.ts` as `MEMORY_SCHEMA`. Separate file from the vault DB, never touched by ingestion.
 
 ## Git Hooks
 - **post-commit** — triggers SQLite ingestion
