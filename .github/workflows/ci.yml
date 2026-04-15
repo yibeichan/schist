@@ -38,8 +38,8 @@ jobs:
           git config --global user.name "schist-ci"
           git config --global init.defaultBranch main
 
-      - name: Run pytest
-        run: python -m pytest cli/tests -v
+      - name: Run pytest (cli + viewer)
+        run: python -m pytest cli/tests viewer/tests -v
 
   mcp-server:
     name: MCP server (TypeScript)

@@ -21,14 +21,26 @@ from pathlib import Path
 def normalize_endpoint(endpoint: str) -> str:
     """Normalise an edge source/target to the canonical node ID.
 
-    Edges may store paths like ``concepts/<slug>.md`` but concept nodes use
-    the bare slug as their ``id``. Strip the directory prefix and ``.md``
-    suffix so the endpoint can be matched against ``doc_ids``.
+    Edges may reference concepts as ``concepts/<slug>.md`` but concept
+    nodes use the bare slug as their ``id``. Note nodes, however, keep
+    their full ``notes/<file>.md`` path as their ``id`` (that IS the note
+    id in the docs table).
+
+    So only the ``concepts/`` prefix case gets normalised — both the
+    prefix and the trailing ``.md`` are stripped to yield the bare slug.
+    Everything else (note paths, papers, external refs) is left alone
+    so it can match ``doc_ids`` byte-for-byte.
+
+    Historical bug (fixed by PR #27): this used to strip ``.md``
+    unconditionally, which silently broke every note-source edge —
+    ``notes/foo.md`` became ``notes/foo`` and no longer matched the note
+    node's id, so the edge was dropped into the skipped count. The
+    graph was rendering with concepts but no note-to-concept links.
     """
     if endpoint.startswith("concepts/"):
         endpoint = endpoint[len("concepts/"):]
-    if endpoint.endswith(".md"):
-        endpoint = endpoint[: -len(".md")]
+        if endpoint.endswith(".md"):
+            endpoint = endpoint[: -len(".md")]
     return endpoint
 
 
