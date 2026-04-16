@@ -74,6 +74,14 @@ outside the pusher's declared scope.
 
 End-to-end setup: [`docs/hub-spoke-setup.md`](./docs/hub-spoke-setup.md).
 
+## Cross-Project Agent Memory
+
+Schist's memory subsystem (`~/.openclaw/memory/agent-state.db`) is shared
+across every Claude project on the same machine, scoped by
+`SCHIST_AGENT_ID`. Any project can wire in the schist MCP server to
+capture lessons and recall them from elsewhere. Details and the
+`project:<slug>` tag convention: [`docs/cross-project-memory.md`](./docs/cross-project-memory.md).
+
 ## Agent Integration
 
 ### Claude Desktop / Claude Code
