@@ -64,12 +64,13 @@ new memory entries; see the Identity section below.
 
 ## Tool surface
 
-The memory subsystem exposes six MCP tools. Read tools are available
-immediately; write tools are gated behind
-`request_capabilities({capability: "write"})`, the same gate that protects
-vault write tools.
+The memory subsystem exposes six MCP tools. All tools are listed by
+`ListTools`; write tools require `request_capabilities({capability:
+"write"})` before calls succeed. The gate is at invocation time, not
+listing time — see `docs/mcp-setup.md` "Tool exposure model" for the
+full rationale.
 
-**Read (always available):**
+**Read (callable immediately):**
 
 - `search_memory` — full-text search with optional `owner`, `entry_type`,
   `date_from`, `date_to`, `limit` filters. FTS5 indexes the `content` and
@@ -78,7 +79,7 @@ vault write tools.
 - `list_domains` — list the research domain taxonomy (separate from memory,
   included here because it shares the read surface).
 
-**Write (after `request_capabilities`):**
+**Write (callable after `request_capabilities`):**
 
 - `add_memory` — store a new entry. Required: `owner`, `entry_type` (one of
   `decision | lesson | blocker | completion | observation`), `content`.
@@ -92,6 +93,10 @@ vault write tools.
 The `owner` field on write is enforced to equal `SCHIST_AGENT_ID`. Writes
 without `SCHIST_AGENT_ID` set fail with `CONFIG_ERROR`; writes with a
 mismatched owner fail with `VALIDATION_ERROR`. Reads are unrestricted.
+
+The `request_capabilities` success response now lists every write tool
+that becomes callable — both vault and memory — in its `message` and
+`tools` fields.
 
 ## Identity: `SCHIST_AGENT_ID`
 

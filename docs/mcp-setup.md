@@ -26,23 +26,38 @@ SCHIST_VAULT_PATH=/path/to/vault node dist/index.js
 
 ## Tool exposure model
 
-<!-- Implementation: mcp-server/src/index.ts — see PR#1 + PR#2 -->
+<!-- Implementation: mcp-server/src/tool-registry.ts + src/index.ts -->
 
-The server starts in read-only mode. Only three tools are available by default:
+The server lists **all** tools at `ListTools` time — read, write, memory,
+and the capability meta-tool. Write-capable tools are gated at **call
+time**, not at listing time: an agent that calls a write tool without
+first calling `request_capabilities` gets a `VALIDATION_ERROR`.
 
-- `get_context` — vault summary (note/concept/edge counts + recent notes). Defaults to `depth: "minimal"`.
-- `search_notes` — full-text search.
-- `request_capabilities` — meta-tool to unlock write tools (see below).
+Always-listed tools (callable immediately):
 
-To unlock write tools (`create_note`, `add_connection`, `get_note`,
-`list_concepts`, `query_graph`), the agent calls:
+- `get_context`, `search_notes` — vault read
+- `search_memory`, `get_agent_state`, `list_domains` — memory read
+- `request_capabilities` — meta-tool to unlock write invocations
+
+Always-listed tools (callable only after `request_capabilities({capability: "write"})`):
+
+- `get_note`, `create_note`, `add_connection`, `list_concepts`, `query_graph` — vault write
+- `add_memory`, `set_agent_state`, `delete_agent_state`, `add_concept_alias` — memory write
+
+To enable write invocations:
 
 ```json
 {"name": "request_capabilities", "arguments": {"capability": "write"}}
 ```
 
-This design minimises token cost for read-only sessions (CLI search, context
-loading) while keeping full write capability available when needed.
+**Why list everything up-front.** MCP clients like Claude Code cache
+tool discovery at session start and never re-fetch. If write tools were
+only listed after the capability unlock (the pre-v0.1.0 design), those
+clients would never see them — `add_memory` and friends would be
+unreachable from Claude Code even after a successful `request_capabilities`
+call. Listing all tools unconditionally costs a few kB in the one-time
+ListTools response in exchange for making write tools actually usable.
+The call-time gate preserves the explicit-opt-in model.
 
 ## Post-commit ingestion
 
