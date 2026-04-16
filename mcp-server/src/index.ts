@@ -191,7 +191,7 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("[schist] MCP server ready (stdio) — default tools: get_context, search_notes");
+  console.error("[schist] MCP server ready (stdio) — all tools listed; write tools require request_capabilities({capability: 'write'}) to invoke");
 }
 
 main().catch((e) => {
