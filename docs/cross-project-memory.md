@@ -123,11 +123,30 @@ matching proves noisy at scale, we can add an indexed `scope` column later
 without breaking existing entries. (Migration would set `scope` by
 parsing `project:*` out of `tags`.)
 
-**Match precision:** FTS5 tokenizes `project:schist` into `project` and
-`schist`, so the match is AND-of-tokens, not exact string. For common
-English project slugs this is fine. If two slugs are substrings of each
-other (`schist` vs. `schist-vault`), pair the query with an `owner`
-filter or use a more distinctive slug.
+**Match precision — read this carefully.** `search_memory` sanitizes its
+`query` by wrapping each whitespace-separated token in FTS5 phrase
+quotes (see `sanitizeFtsQuery` in `mcp-server/src/sqlite-reader.ts`).
+The default `unicode61` tokenizer then strips punctuation (including
+`:` and `-`) and matches the resulting token sequence as an adjacent
+phrase against the JSON-serialized `tags` column.
+
+Practical consequences:
+- `query: "my-other-project"` tokenizes to the phrase `my other project`,
+  which matches a tag array containing `project:my-other-project` because
+  the JSON string tokenizes to `project my other project` (the `my other
+  project` sub-phrase is present). This is the simplest and most robust
+  way to scope recall — **use the slug alone as the query**, not a
+  `project:<slug>` compound.
+- `query: "project:my-other-project"` also works in practice (same
+  tokens, just with an extra leading `project` token), but the match is
+  a phrase match on token order, not a structured key/value lookup. Do
+  not rely on the colon having any semantic meaning to FTS5.
+- Two slugs that are substring-prefixes of each other (`schist` vs.
+  `schist-vault`) cannot be distinguished by FTS alone. Pair with an
+  `owner` filter, or choose distinctive slugs.
+
+If precise tag equality matters, query the DB directly with SQL (or a
+future CLI flag) — FTS is for recall, not for structured lookups.
 
 ## Example flows
 
@@ -154,11 +173,15 @@ MCP: add_memory({
 > cwd: /home/user/code/my-other-project
 
 MCP: search_memory({
-  query: "project:my-other-project fts5",
+  query: "my-other-project fts5",
   entry_type: "lesson",
   limit: 10
 })
 ```
+
+Note the query uses the slug directly (`my-other-project`), not the
+compound `project:my-other-project`. See the "Match precision" note
+above.
 
 **Cross-project recall (no project filter):**
 
@@ -173,22 +196,31 @@ MCP: search_memory({
 
 If an agent cannot speak MCP (e.g. a shell script running outside any
 Claude host), use the compiled CLI that ships with the MCP server. It
-registers as `schist-memory` via the package `bin` (or run
-`node dist/cli/memory-cli.js` directly):
+registers as `schist-memory` via the package `bin`, but the binary is
+only on `$PATH` if you install the package globally — run
+`npm install -g` inside `mcp-server/` (after `npm run build`), or invoke
+`node dist/cli/memory-cli.js` directly:
 
 ```bash
+# After `npm run build && npm install -g` in mcp-server/:
 schist-memory add-memory \
   --agent sansan --type lesson \
   --tags project:my-other-project,topic:fts5 \
   "FTS5 MATCH rejects hyphens inside unquoted queries..."
+
+# Or without a global install:
+node /path/to/schist/mcp-server/dist/cli/memory-cli.js add-memory \
+  --agent sansan --type lesson \
+  --tags project:my-other-project,topic:fts5 \
+  "..."
 ```
 
 Subcommands: `add-memory`, `search`, `state get`, `state set`. Content for
 `add-memory` and `state set` is a positional argument. `--agent` is
 mandatory on writes (the CLI does not fall back to `SCHIST_AGENT_ID` for
-the flag itself, but `SCHIST_AGENT_ID` and `SCHIST_MEMORY_DB` env vars
-still drive validation and DB path respectively, matching the MCP
-server).
+the flag itself, but `SCHIST_AGENT_ID` is still required in the
+environment for write validation; `SCHIST_MEMORY_DB` drives the DB path
+as it does for the MCP server).
 
 ## Privacy notes
 
