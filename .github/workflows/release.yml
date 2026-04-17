@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+\.[0-9]+\.[0-9]+.*'  # Only match semver like v0.1.0, v1.2.3-rc.1
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write   # Required for Trusted Publishing (OIDC)
+      contents: read
+    environment: pypi
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Install build tooling
+        run: pip install build
+
+      - name: Build CLI wheel
+        run: python -m build cli/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: cli/dist
+
+  publish-npm:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    environment: npm
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+          cache-dependency-path: mcp-server/package-lock.json
+
+      - name: Install and build MCP server
+        working-directory: mcp-server
+        run: |
+          npm ci
+          npm run build
+
+      - name: Copy LICENSE to mcp-server (included in published tarball)
+        run: cp LICENSE mcp-server/
+
+      - name: Publish to npm
+        working-directory: mcp-server
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # TODO(post-v0.1.0): Migrate to OIDC Trusted Publishing for npm.
+      # First publish requires NPM_TOKEN because @schist/mcp-server package doesn't
+      # exist yet to configure OIDC against. After v0.1.0 is on npm:
+      # 1. Go to https://www.npmjs.com/package/@schist/mcp-server/access
+      # 2. Enable "Trusted Publishing with GitHub (OIDC)"
+      # 3. Configure: yibeichan/schist, release.yml, npm environment
+      # 4. Add 'id-token: write' permission, remove NODE_AUTH_TOKEN, add --provenance

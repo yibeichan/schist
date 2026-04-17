@@ -5,8 +5,29 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "schist"
 version = "0.1.0"
-requires-python = ">=3.11"
+description = "Agent-first knowledge graph: git is truth, SQLite is query, humans just watch"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [
+    { name = "schist contributors" }
+]
+keywords = ["knowledge-graph", "agents", "mcp", "markdown", "sqlite"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = ["python-frontmatter>=1.1.0", "pyyaml>=6.0.3"]
+
+[project.urls]
+Homepage = "https://github.com/yibeichan/schist"
+Repository = "https://github.com/yibeichan/schist"
+Issues = "https://github.com/yibeichan/schist/issues"
+Changelog = "https://github.com/yibeichan/schist/blob/main/CHANGELOG.md"
 
 [project.scripts]
 schist = "schist.__main__:main"
