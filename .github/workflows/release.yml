@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v[0-9]+\.[0-9]+\.[0-9]+.*'  # Only match semver like v0.1.0, v1.2.3-rc.1
+  workflow_dispatch:  # Allow manual triggering
 
 permissions:
   contents: read
