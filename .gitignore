@@ -33,3 +33,8 @@ Thumbs.db
 # Pre-receive hook audit log (runtime-generated)
 hooks/rejected-pushes.log
 cli/hooks/rejected-pushes.log
+
+# Personal agent tooling (speckit framework + handoff skill — not part of schist)
+.specify/
+.claude/skills/speckit-*/
+.claude/skills/handoff/
