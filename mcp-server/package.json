@@ -1,8 +1,39 @@
 {
   "name": "@schist/mcp-server",
   "version": "0.1.0",
+  "description": "MCP server for schist: agent-first knowledge graph with git + SQLite",
+  "author": "schist contributors",
+  "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yibeichan/schist.git",
+    "directory": "mcp-server"
+  },
+  "bugs": {
+    "url": "https://github.com/yibeichan/schist/issues"
+  },
+  "homepage": "https://github.com/yibeichan/schist#readme",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "knowledge-graph",
+    "agents",
+    "sqlite",
+    "markdown"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
