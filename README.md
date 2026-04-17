@@ -15,15 +15,14 @@ Agent-first knowledge graph. Git is truth, SQLite is query, humans just watch.
 ## Quick Start
 
 ```bash
-# Clone schist
-git clone https://github.com/youruser/schist.git
-cd schist
+# Install CLI and MCP server (published packages)
+pip install schist
+npm install -g @schist/mcp-server
 
-# Install CLI
-pip install -e ./cli
-
-# Install MCP server dependencies
-cd mcp-server && npm install && npm run build && cd ..
+# Or install from source (for contributors):
+# git clone https://github.com/yibeichan/schist.git
+# cd schist && pip install -e ./cli
+# cd mcp-server && npm install && npm run build
 
 # Create a vault
 mkdir -p ~/vaults/research/{notes,papers,concepts,logs,.schist}
@@ -167,11 +166,12 @@ See [schema/SCHEMA.md](./schema/SCHEMA.md) for the markdown schema specification
 
 ## Security Model
 
-- Agents write to `drafts/` branch, not `main`
+- Hub pre-receive hook enforces vault.yaml ACLs per-scope and per-agent
 - No delete, no force-push, no history rewrite via MCP
 - Pre-commit hook rejects commits containing secrets/API keys
 - Web viewer is static only — no server-side execution
-- Vault repo uses scoped deploy keys
+- Write tools gated behind explicit `request_capabilities` unlock
+- `query_graph` rejects non-SELECT SQL
 
 ## Requirements
 
