@@ -10,6 +10,7 @@ dependencies = ["python-frontmatter>=1.1.0", "pyyaml>=6.0.3"]
 
 [project.scripts]
 schist = "schist.__main__:main"
+schist-ingest = "schist.ingest:main"
 
 # Explicit package list — without this, setuptools 82+ flat-layout
 # auto-discovery fails when a local `cli/hooks/` directory exists (as
@@ -21,6 +22,12 @@ schist = "schist.__main__:main"
 # regardless of stray local directories.
 [tool.setuptools]
 packages = ["schist"]
+
+# Ship .sql files (schema.sql, seed-domains.sql) inside the wheel so
+# `schist-ingest` works after `pip install schist` — ingest.py reads
+# schema.sql via Path(__file__).parent / 'schema.sql'.
+[tool.setuptools.package-data]
+schist = ["*.sql"]
 
 [tool.pytest.ini_options]
 markers = [

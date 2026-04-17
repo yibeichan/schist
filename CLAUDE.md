@@ -25,10 +25,12 @@ python -m pytest cli/tests/test_acl.py  # single test file
 python -m pytest cli/tests/test_acl.py::test_name -v  # single test
 ```
 
-### Ingestion (Python, in `ingestion/`)
+### Ingestion (Python, packaged with CLI)
+The ingester ships as part of the `schist` package and is exposed as the
+`schist-ingest` console script (registered in `cli/pyproject.toml`).
 ```bash
-pip install -r ingestion/requirements.txt
-python ingestion/ingest.py --vault <path> --db <path>  # rebuild SQLite from markdown
+pip install -e ./cli                                   # provides schist-ingest
+schist-ingest --vault <path> --db <path>               # rebuild SQLite from markdown
 ```
 
 ### Viewer
@@ -42,7 +44,7 @@ Three-layer design: **Agent Layer** (MCP clients, CLI) → **MCP Server** (tool 
 
 ### Data flow
 1. Agent calls MCP tool (e.g. `create_note`) → MCP server writes markdown file + git commit (serialized via async-mutex)
-2. Post-commit hook → `ingestion/ingest.py` rebuilds SQLite from all markdown files
+2. Post-commit hook → invokes `schist-ingest` (or `$SCHIST_INGEST_SCRIPT`) to rebuild SQLite from all markdown files
 3. Read tools (`search_notes`, `query_graph`) query SQLite directly (read-only)
 4. CI/viewer build: SQLite → `graph.json` + `search-index.json` → static site
 
@@ -77,7 +79,7 @@ ACLs. Create one with `schist init --hub --hub-path /path --name X
 | SQLite Reader | TypeScript | `mcp-server/src/sqlite-reader.ts` | Read-only FTS5 queries |
 | CLI | Python | `cli/schist/__main__.py` | Agent fallback + human CLI |
 | ACL Parser | Python | `cli/schist/acl.py` | vault.yaml scope resolution, rate limits |
-| Ingestion | Python | `ingestion/ingest.py` | Markdown → SQLite rebuild |
+| Ingestion | Python | `cli/schist/ingest.py` (entry: `schist-ingest`) | Markdown → SQLite rebuild |
 | Viewer | Python+JS | `viewer/build.py`, `viewer/src/index.html` | Static D3.js graph + lunr.js search |
 
 ### Schema
@@ -87,7 +89,7 @@ ACLs. Create one with `schist init --hub --hub-path /path --name X
 - Full spec: `schema/SCHEMA.md`, vault config spec: `schema/vault-yaml.md`
 
 ### SQLite tables
-Vault DB (`<vault>/.schist/schist.db`): `docs`, `concepts`, `edges`, `docs_fts` (FTS5), `domains`, `concept_aliases` — defined in `ingestion/schema.sql`. `docs`/`concepts`/`edges`/`docs_fts`/`domains` are dropped and rebuilt on every ingest — the first four from markdown, `domains` from `vault.yaml`'s top-level `domains:` list (source of truth per `schema/vault-yaml.md`). `concept_aliases` uses `CREATE TABLE IF NOT EXISTS` and survives commit-path rebuilds; on spoke-pull rebuilds it's copied forward from the backup by `_preserve_side_tables` in `cli/schist/sync.py`.
+Vault DB (`<vault>/.schist/schist.db`): `docs`, `concepts`, `edges`, `docs_fts` (FTS5), `domains`, `concept_aliases` — defined in `cli/schist/schema.sql` (shipped as package data). `docs`/`concepts`/`edges`/`docs_fts`/`domains` are dropped and rebuilt on every ingest — the first four from markdown, `domains` from `vault.yaml`'s top-level `domains:` list (source of truth per `schema/vault-yaml.md`). `concept_aliases` uses `CREATE TABLE IF NOT EXISTS` and survives commit-path rebuilds; on spoke-pull rebuilds it's copied forward from the backup by `_preserve_side_tables` in `cli/schist/sync.py`.
 
 Memory DB (`~/.openclaw/memory/agent-state.db` by default, or `SCHIST_MEMORY_DB`): `agent_memory`, `agent_memory_fts`, `agent_state` — schema inlined in `mcp-server/src/sqlite-reader.ts` as `MEMORY_SCHEMA`. Separate file from the vault DB, never touched by ingestion.
 

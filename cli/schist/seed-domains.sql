@@ -2,7 +2,9 @@
 -- Run after schema.sql. Safe to re-run (INSERT OR IGNORE).
 --
 -- NOT auto-wired into ingest.py — run manually against your vault DB:
---   sqlite3 /path/to/vault/.schist/schist.db < ingestion/seed-domains.sql
+--   sqlite3 /path/to/vault/.schist/schist.db < cli/schist/seed-domains.sql
+-- (or, after `pip install schist`, locate inside the installed wheel via
+--   python -c "from importlib.resources import files; print(files('schist') / 'seed-domains.sql')")
 
 INSERT OR IGNORE INTO domains (slug, label, description, parent_slug) VALUES
   ('ai',             'Artificial Intelligence',  'ML, LLMs, agents, alignment',                    NULL),

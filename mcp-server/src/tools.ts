@@ -1,7 +1,6 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import { spawn } from "child_process";
-import { fileURLToPath } from "url";
 import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote } from "./git-writer.js";
@@ -95,15 +94,13 @@ export async function loadVaultConfig(vaultRoot: string): Promise<VaultConfig> {
 }
 
 function triggerIngestion(vaultRoot: string): void {
-  // Resolves schist repo root from dist/ runtime path — do not replace with __dirname (ESM)
-  const schist_repo = path.resolve(
-    path.dirname(fileURLToPath(import.meta.url)),
-    "../../"
-  );
   const dbPath = path.join(vaultRoot, ".schist", "schist.db");
-  const scriptPath = path.join(schist_repo, "ingestion", "ingest.py");
 
-  const child = spawn("python3", [scriptPath, "--vault", vaultRoot, "--db", dbPath], {
+  // Spawn the `schist-ingest` console script registered by the schist
+  // CLI package (cli/pyproject.toml). Works for both `pip install schist`
+  // and `pip install -e ./cli` setups; ENOENTs cleanly if the CLI was
+  // never installed (in which case the post-commit hook also can't run).
+  const child = spawn("schist-ingest", ["--vault", vaultRoot, "--db", dbPath], {
     cwd: vaultRoot,
     stdio: "ignore",
   });

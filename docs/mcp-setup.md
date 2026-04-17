@@ -65,10 +65,14 @@ Wire the post-commit hook inside your vault's `.git/hooks/post-commit` to keep
 the SQLite index in sync after every commit. The hook should call:
 
 ```bash
-python3 /path/to/schist/ingestion/ingest.py \
+schist-ingest \
   --vault /path/to/vault \
   --db /path/to/vault/.schist/schist.db
 ```
+
+(`schist-ingest` is the console script installed by `pip install schist`. If you
+work from a clone instead of an installed wheel, use `pip install -e ./cli` to
+register it on your `PATH`.)
 
 The hook file lives in `.git/hooks/` and is never committed to any repository.
 
