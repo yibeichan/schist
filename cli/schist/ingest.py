@@ -60,6 +60,23 @@ def ingest(vault_path: str, db_path: str):
     schema_path = Path(__file__).parent / 'schema.sql'
 
     conn = sqlite3.connect(db_path)
+    try:
+        _ingest_into(conn, vault, schema_path)
+    finally:
+        conn.close()
+
+
+def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> None:
+    """Run the actual ingest against an open connection.
+
+    Split out from `ingest()` so the connection close is guaranteed via
+    try/finally even when the loop raises. The split also lets the
+    schema executescript stay outside the transaction (it commits
+    implicitly), while the data INSERTs are wrapped in a transaction
+    that rolls back on failure — `_run_ingest` then deletes the
+    schema-only DB so the next get_db() rebuilds from scratch instead
+    of trusting an empty index.
+    """
     conn.executescript(schema_path.read_text())
 
     doc_count = 0
@@ -186,7 +203,6 @@ def ingest(vault_path: str, db_path: str):
     domain_count = _populate_domains(conn, vault)
 
     conn.commit()
-    conn.close()
     print(f'Ingested: {doc_count} docs, {concept_count} concepts, {edge_count} edges, {domain_count} domains')
 
 

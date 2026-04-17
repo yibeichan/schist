@@ -37,9 +37,24 @@ def get_db(vault_path: str, db_path: str | None = None) -> sqlite3.Connection:
 
 
 def _run_ingest(vault_path: str, db_path: str):
-    """Run ingestion in-process via schist.ingest."""
+    """Run ingestion in-process via schist.ingest.
+
+    Deletes the partial DB file on failure so a subsequent get_db() call
+    sees needs_ingest=True and rebuilds from scratch instead of trusting
+    an empty schema-only DB. Without this, a failure mid-ingest after
+    `executescript` has committed the schema would leave the docs table
+    present-but-empty, causing get_db() to silently return an empty DB
+    on the next call.
+    """
     from .ingest import ingest
-    ingest(vault_path, db_path)
+    try:
+        ingest(vault_path, db_path)
+    except Exception:
+        try:
+            os.unlink(db_path)
+        except OSError:
+            pass
+        raise
 
 
 def fts_search(db: sqlite3.Connection, query: str, limit: int = 20,

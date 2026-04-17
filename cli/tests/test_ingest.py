@@ -23,7 +23,6 @@ bug this test is here to catch.
 from __future__ import annotations
 
 import os
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -113,13 +112,30 @@ def test_sqlite_query_run_ingest_uses_in_process(tmp_path: Path) -> None:
 
 # ---- Integration: build wheel and invoke the console script --------------
 
-pytestmark_integration = [
-    pytest.mark.integration,
-    pytest.mark.skipif(
-        shutil.which("python3") is None,
-        reason="python3 not available to host a fresh venv",
-    ),
-]
+
+def _run_subprocess(cmd: list, **kwargs) -> subprocess.CompletedProcess:
+    """subprocess.run wrapper that surfaces stdout/stderr on CalledProcessError.
+
+    The integration test silences subprocess output by default (so passing
+    runs don't spam the test report) — but on failure, the default
+    `CalledProcessError("returned non-zero exit status 1")` is uselessly
+    opaque in CI. This wrapper re-raises with the captured streams
+    appended so the failure log shows what pip / venv / schist-ingest
+    actually said.
+    """
+    kwargs.setdefault("check", True)
+    kwargs.setdefault("capture_output", True)
+    try:
+        return subprocess.run(cmd, **kwargs)
+    except subprocess.CalledProcessError as e:
+        stdout = (e.stdout or b"").decode("utf-8", errors="replace")
+        stderr = (e.stderr or b"").decode("utf-8", errors="replace")
+        raise AssertionError(
+            f"subprocess failed: {' '.join(map(str, cmd))}\n"
+            f"exit code: {e.returncode}\n"
+            f"--- stdout ---\n{stdout}\n"
+            f"--- stderr ---\n{stderr}"
+        ) from e
 
 
 def _cli_source_dir() -> Path:
@@ -131,16 +147,12 @@ def _build_wheel(dest: Path) -> Path:
     """Build the schist wheel into dest/. Returns the wheel file path."""
     # Use `pip wheel` instead of `python -m build` so we don't require the
     # `build` package to be pre-installed in the test env.
-    subprocess.run(
-        [
-            sys.executable, "-m", "pip", "wheel",
-            "--no-deps",
-            "--wheel-dir", str(dest),
-            str(_cli_source_dir()),
-        ],
-        check=True,
-        capture_output=True,
-    )
+    _run_subprocess([
+        sys.executable, "-m", "pip", "wheel",
+        "--no-deps",
+        "--wheel-dir", str(dest),
+        str(_cli_source_dir()),
+    ])
     wheels = list(dest.glob("schist-*.whl"))
     assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
     return wheels[0]
@@ -148,11 +160,7 @@ def _build_wheel(dest: Path) -> Path:
 
 def _make_venv(path: Path) -> Path:
     """Create a venv at path and return its python executable."""
-    subprocess.run(
-        [sys.executable, "-m", "venv", str(path)],
-        check=True,
-        capture_output=True,
-    )
+    _run_subprocess([sys.executable, "-m", "venv", str(path)])
     return path / "bin" / "python"
 
 
@@ -175,11 +183,7 @@ def test_wheel_install_ships_schema_and_console_script(tmp_path: Path) -> None:
 
     # Install the wheel into the fresh venv. --no-index would be stricter
     # but we need PyPI for the two runtime deps (python-frontmatter, pyyaml).
-    subprocess.run(
-        [str(venv_py), "-m", "pip", "install", "--quiet", str(wheel)],
-        check=True,
-        capture_output=True,
-    )
+    _run_subprocess([str(venv_py), "-m", "pip", "install", "--quiet", str(wheel)])
 
     schist_ingest = venv_dir / "bin" / "schist-ingest"
     assert schist_ingest.exists(), (
@@ -196,11 +200,51 @@ def test_wheel_install_ships_schema_and_console_script(tmp_path: Path) -> None:
     # deps (frontmatter, yaml) from the venv, not the test-runner env.
     env = os.environ.copy()
     env["PATH"] = f"{venv_dir / 'bin'}{os.pathsep}{env.get('PATH', '')}"
-    subprocess.run(
+    _run_subprocess(
         [str(schist_ingest), "--vault", str(vault), "--db", str(db)],
-        check=True,
-        capture_output=True,
         env=env,
     )
 
     _assert_vault_ingested(db)
+
+
+def test_run_ingest_deletes_partial_db_on_failure(tmp_path: Path) -> None:
+    """Unit: `_run_ingest` removes the schema-only DB if ingest raises.
+
+    Without this cleanup, a failure mid-ingest after the schema
+    `executescript` (which commits implicitly) would leave a docs table
+    on disk. The next `get_db()` call would see the table exists, set
+    needs_ingest=False, and silently return an empty DB to the caller.
+    """
+    from schist.sqlite_query import _run_ingest
+
+    vault = tmp_path / "vault"
+    _write_vault(vault)
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    # Force ingest to raise after `executescript` has already committed
+    # the schema. Patch `_populate_domains` (called near the end of the
+    # ingest body) — it isn't wrapped in a try/except, so the raise
+    # propagates out of `ingest()` and into `_run_ingest`.
+    import schist.ingest as ingest_mod
+
+    original = ingest_mod._populate_domains
+
+    class _Boom(Exception):
+        pass
+
+    def _explode(*_args, **_kwargs):
+        raise _Boom("synthetic ingest failure")
+
+    ingest_mod._populate_domains = _explode
+    try:
+        with pytest.raises(_Boom):
+            _run_ingest(str(vault), str(db))
+    finally:
+        ingest_mod._populate_domains = original
+
+    assert not db.exists(), (
+        f"_run_ingest must delete the partial DB on failure but {db} still exists; "
+        "next get_db() would trust an empty schema-only DB and serve no rows."
+    )
