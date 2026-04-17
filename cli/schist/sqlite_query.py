@@ -3,9 +3,7 @@
 import os
 import re
 import sqlite3
-import subprocess
 import sys
-from pathlib import Path
 
 
 ALLOWED_TABLES = {'docs', 'concepts', 'edges', 'docs_fts'}
@@ -39,15 +37,9 @@ def get_db(vault_path: str, db_path: str | None = None) -> sqlite3.Connection:
 
 
 def _run_ingest(vault_path: str, db_path: str):
-    """Run ingestion script."""
-    ingest_py = Path(__file__).resolve().parent.parent.parent / 'ingestion' / 'ingest.py'
-    if not ingest_py.exists():
-        print(f'Error: ingest.py not found at {ingest_py}', file=sys.stderr)
-        sys.exit(1)
-    subprocess.run(
-        [sys.executable, str(ingest_py), '--vault', vault_path, '--db', db_path],
-        check=True,
-    )
+    """Run ingestion in-process via schist.ingest."""
+    from .ingest import ingest
+    ingest(vault_path, db_path)
 
 
 def fts_search(db: sqlite3.Connection, query: str, limit: int = 20,

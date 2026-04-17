@@ -237,9 +237,13 @@ def _populate_domains(conn: sqlite3.Connection, vault: Path) -> int:
     return count
 
 
-if __name__ == '__main__':
+def main() -> None:
     parser = argparse.ArgumentParser(description='Ingest markdown vault into SQLite')
     parser.add_argument('--vault', required=True, help='Path to vault root')
     parser.add_argument('--db', required=True, help='Path to SQLite database')
     args = parser.parse_args()
     ingest(args.vault, args.db)
+
+
+if __name__ == '__main__':
+    main()

@@ -69,10 +69,8 @@ schist/
 │   │   └── types.ts              # Shared TypeScript types
 │   ├── package.json
 │   └── tsconfig.json
-├── ingestion/
-│   ├── ingest.py                 # Markdown → SQLite ingestion (~100 lines)
-│   ├── schema.sql                # SQLite DDL
-│   └── requirements.txt          # pyyaml, python-frontmatter
+│   # Ingestion ships inside the schist package — see cli/schist/ingest.py,
+│   # cli/schist/schema.sql, cli/schist/seed-domains.sql.
 ├── viewer/
 │   ├── src/
 │   │   ├── graph.js              # D3.js force-directed graph

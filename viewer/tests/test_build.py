@@ -2,7 +2,7 @@
 
 These tests exercise the pure functions (`normalize_endpoint`, `build_graph`,
 `build_search_index`) against an in-memory SQLite database shaped like the
-real vault DB so that a schema drift in `ingestion/schema.sql` or `build.py`
+real vault DB so that a schema drift in `cli/schist/schema.sql` or `build.py`
 would be caught by CI instead of slipping through to a broken static build.
 """
 
