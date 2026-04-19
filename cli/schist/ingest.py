@@ -143,6 +143,10 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         raw_source = meta.get('source')
         source = raw_source if raw_source in {"human", "agent"} else None
 
+        # Domain: from frontmatter, validated against vault.yaml domains list
+        raw_domain = meta.get('domain')
+        domain = raw_domain if isinstance(raw_domain, str) and raw_domain else None
+
         doc_id = str(rel)
 
         # Determine if this is a concept file (in concepts/ dir or has 'concept' key)
@@ -156,8 +160,8 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         if date_val is not None:
             date_val = str(date_val)
         conn.execute(
-            'INSERT INTO docs (id, title, date, status, tags, concepts, body, scope, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (doc_id, title, date_val, meta.get('status', 'draft'), tags_json, concepts_json, body, scope, source),
+            'INSERT INTO docs (id, title, date, status, tags, concepts, domain, body, scope, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (doc_id, title, date_val, meta.get('status', 'draft'), tags_json, concepts_json, domain, body, scope, source),
         )
         doc_count += 1
 

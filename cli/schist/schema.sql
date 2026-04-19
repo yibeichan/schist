@@ -14,6 +14,7 @@ CREATE TABLE docs (
     status      TEXT DEFAULT 'draft',   -- draft | review | final | archived
     tags        TEXT,                   -- JSON array: '["attention", "transformer"]'
     concepts    TEXT,                   -- JSON array of concept slugs
+    domain      TEXT,                   -- research domain from vault.yaml domains list
     body        TEXT NOT NULL,          -- full markdown body (sans frontmatter)
     scope       TEXT DEFAULT 'global', -- derived from directory or frontmatter
     source      TEXT,                  -- "human" | "agent" | null
@@ -45,19 +46,20 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(
     body,
     tags,
     scope UNINDEXED,
+    domain UNINDEXED,
     content='docs',
     content_rowid='rowid'
 );
 
 -- Triggers to keep FTS in sync during ingestion
 CREATE TRIGGER docs_ai AFTER INSERT ON docs BEGIN
-    INSERT INTO docs_fts(rowid, title, body, tags, scope)
-    VALUES (new.rowid, new.title, new.body, new.tags, new.scope);
+    INSERT INTO docs_fts(rowid, title, body, tags, scope, domain)
+    VALUES (new.rowid, new.title, new.body, new.tags, new.scope, new.domain);
 END;
 
 CREATE TRIGGER docs_ad AFTER DELETE ON docs BEGIN
-    INSERT INTO docs_fts(docs_fts, rowid, title, body, tags, scope)
-    VALUES ('delete', old.rowid, old.title, old.body, old.tags, old.scope);
+    INSERT INTO docs_fts(docs_fts, rowid, title, body, tags, scope, domain)
+    VALUES ('delete', old.rowid, old.title, old.body, old.tags, old.scope, old.domain);
 END;
 
 -- Indexes

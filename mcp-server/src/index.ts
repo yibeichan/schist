@@ -11,6 +11,7 @@ import {
   get_note,
   create_note,
   add_connection,
+  assign_domain,
   list_concepts,
   query_graph,
   get_context,
@@ -123,6 +124,11 @@ async function main() {
             result = writeEnabled
               ? await add_connection(vaultRoot, toolArgs as Parameters<typeof add_connection>[1])
               : { error: "VALIDATION_ERROR", message: "add_connection requires write capability. Call request_capabilities first." };
+            break;
+          case "assign_domain":
+            result = writeEnabled
+              ? await assign_domain(vaultRoot, toolArgs as Parameters<typeof assign_domain>[1])
+              : { error: "VALIDATION_ERROR", message: "assign_domain requires write capability. Call request_capabilities first." };
             break;
           case "list_concepts":
             result = writeEnabled

@@ -72,7 +72,7 @@ export function searchNotes(
   try {
     const limit = opts?.limit ?? 20;
     let sql = `
-      SELECT docs.id, docs.title, docs.date, docs.status, docs.tags, docs.scope,
+      SELECT docs.id, docs.title, docs.date, docs.status, docs.tags, docs.domain, docs.scope,
              snippet(docs_fts, 1, '<b>', '</b>', '...', 20) as snippet
       FROM docs_fts
       JOIN docs ON docs.rowid = docs_fts.rowid
@@ -118,6 +118,7 @@ export function searchNotes(
       date: (row.date as string) ?? "",
       status: (row.status as string) ?? "draft",
       tags: row.tags ? JSON.parse(row.tags as string) : [],
+      domain: (row.domain as string) ?? undefined,
       snippet: (row.snippet as string) ?? "",
       scope: (row.scope as string) ?? undefined,
     }));
@@ -142,6 +143,7 @@ export function getNote(vaultRoot: string, id: string): Note | null {
       status: (row.status as string) ?? "draft",
       tags: row.tags ? JSON.parse(row.tags as string) : [],
       concepts: row.concepts ? JSON.parse(row.concepts as string) : [],
+      domain: (row.domain as string) ?? undefined,
       body,
       connections,
       scope: (row.scope as string) ?? undefined,
@@ -517,8 +519,9 @@ export function deleteAgentState(key: string, owner: string): { deleted: boolean
 // ── Domain + alias tools (use schist.db) ──────────────────────────────────
 
 export function listDomains(vaultRoot: string): Domain[] {
-  const db = openDb(vaultRoot);
+  let db: Database.Database | undefined;
   try {
+    db = openDb(vaultRoot);
     const rows = db.prepare("SELECT * FROM domains ORDER BY parent_slug NULLS FIRST, slug").all() as Record<string, unknown>[];
     return rows.map(r => ({
       slug: r.slug as string,
@@ -527,10 +530,10 @@ export function listDomains(vaultRoot: string): Domain[] {
       parent_slug: r.parent_slug == null ? undefined : (r.parent_slug as string),
     }));
   } catch {
-    // Table may not exist in older DBs — return empty
+    // DB may not exist or table may not exist in older DBs — return empty
     return [];
   } finally {
-    db.close();
+    db?.close();
   }
 }
 

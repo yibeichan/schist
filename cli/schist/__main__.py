@@ -31,6 +31,11 @@ def main():
     p_link.add_argument('--type', required=True, dest='link_type')
     p_link.add_argument('--context', default=None)
 
+    # assign-domain
+    p_domain = sub.add_parser('assign-domain', help='Assign a research domain to a note')
+    p_domain.add_argument('--id', required=True, help='Note ID (relative path)')
+    p_domain.add_argument('--domain', required=True, help='Domain slug from vault.yaml')
+
     # search
     p_search = sub.add_parser('search', help='Full-text search')
     p_search.add_argument('query', help='Search query')
@@ -109,6 +114,7 @@ def main():
     dispatch = {
         'add': commands.add,
         'link': commands.link,
+        'assign-domain': commands.assign_domain,
         'search': commands.search,
         'query': commands.query,
         'build': commands.build,

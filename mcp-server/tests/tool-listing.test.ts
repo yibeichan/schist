@@ -20,6 +20,7 @@ describe("listAllTools — unconditional tool exposure", () => {
       "add_concept_alias",
       "add_connection",
       "add_memory",
+      "assign_domain",
       "create_note",
       "delete_agent_state",
       "get_agent_state",

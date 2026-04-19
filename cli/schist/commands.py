@@ -56,6 +56,38 @@ def link(args, vault_path: str, db_path: str):
     print(f'Linked: {args.source} -{args.link_type}-> {args.target}')
 
 
+def assign_domain(args, vault_path: str, db_path: str):
+    """Assign a research domain to a note."""
+    import yaml
+
+    note_path = os.path.join(vault_path, args.id)
+    if not os.path.exists(note_path):
+        print(f'Error: note not found: {args.id}', file=sys.stderr)
+        sys.exit(1)
+
+    # Validate domain exists in vault.yaml
+    vault_yaml = os.path.join(vault_path, 'vault.yaml')
+    if os.path.exists(vault_yaml):
+        with open(vault_yaml, encoding='utf-8') as f:
+            vault_config = yaml.safe_load(f) or {}
+        valid_domains = vault_config.get('domains', [])
+        if valid_domains and args.domain not in valid_domains:
+            print(f'Error: domain "{args.domain}" not in vault.yaml. Valid domains: {valid_domains}', file=sys.stderr)
+            sys.exit(1)
+
+    # Read, update, and write back
+    note = markdown_io.read_note(note_path)
+    fm = note['frontmatter']
+    fm['domain'] = args.domain
+    markdown_io.write_note(note_path, fm, note['body'])
+
+    ok, output = git_ops.commit(vault_path, f'domain: {args.id} -> {args.domain}', [args.id])
+    if not ok:
+        print(f'Warning: git commit failed: {output}', file=sys.stderr)
+
+    print(f'Assigned domain "{args.domain}" to {args.id}')
+
+
 def search(args, vault_path: str, db_path: str):
     """Full-text search across vault documents."""
     db = sqlite_query.get_db(vault_path, db_path)

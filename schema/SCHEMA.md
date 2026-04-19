@@ -20,6 +20,7 @@ All knowledge in a schist vault is stored as markdown files with YAML frontmatte
 | `tags`     | string[]   | no       | `[]`      | Lowercase, hyphenated tags |
 | `status`   | string     | no       | `draft`   | One of: `draft`, `review`, `final`, `archived` |
 | `concepts` | string[]   | no       | `[]`      | Concept slugs this note relates to |
+| `domain`   | string     | no       | `null`    | Research domain from vault.yaml `domains` list |
 | `related`  | string[]   | no       | `[]`      | Relative paths to related notes |
 
 ### Example

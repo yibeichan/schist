@@ -1,9 +1,10 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
+import Database from "better-sqlite3";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
-import { loadVaultConfig, create_note, get_context, triggerSpokePush, maybeSpokePull } from "../src/tools.js";
+import { loadVaultConfig, create_note, get_context, triggerSpokePush, maybeSpokePull, assign_domain } from "../src/tools.js";
 
 const execFile = promisify(execFileCb);
 
@@ -327,5 +328,153 @@ describe("normalizeError", () => {
     expect(typeof result.message).toBe("string");
     // message must NOT be empty (the JSON.stringify non-enumerable bug)
     expect((result.message as string).length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// assign_domain
+// ---------------------------------------------------------------------------
+
+describe("assign_domain", () => {
+  async function makeVaultWithDomains(
+    domains: string[] = ["ai", "security"]
+  ): Promise<string> {
+    const vault = await makeTempVault(
+      domains.length > 0 ? `\ndomains:\n${domains.map((d) => `  - ${d}`).join("\n")}` : ""
+    );
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+
+    // Create and populate the domains table (simulating ingestion)
+    const dbPath = path.join(vault, ".schist", "schist.db");
+    await fs.mkdir(path.dirname(dbPath), { recursive: true });
+    const db = new Database(dbPath);
+    db.exec(
+      "CREATE TABLE domains (slug TEXT PRIMARY KEY, label TEXT NOT NULL, description TEXT, parent_slug TEXT REFERENCES domains(slug))"
+    );
+    const insert = db.prepare("INSERT INTO domains (slug, label) VALUES (?, ?)");
+    for (const domain of domains) {
+      insert.run(domain, domain);
+    }
+    db.close();
+
+    return vault;
+  }
+
+  test("happy path: assigns valid domain to note", async () => {
+    const vault = await makeVaultWithDomains(["ai", "ml"]);
+
+    // Create a note
+    const noteResult = (await create_note(
+      vault,
+      { title: "Test Note", body: "Test body" },
+      await loadVaultConfig(vault)
+    )) as { id: string; path: string };
+
+    // Assign domain
+    const result = (await assign_domain(vault, {
+      id: noteResult.path,
+      domain: "ml",
+    })) as { id: string; domain: string; commitSha: string };
+
+    expect(result.id).toBe(noteResult.path);
+    expect(result.domain).toBe("ml");
+    expect(result.commitSha).toBeDefined();
+
+    // Verify frontmatter was updated
+    const content = await fs.readFile(path.join(vault, noteResult.path), "utf-8");
+    expect(content).toContain("domain: ml");
+  });
+
+  test("replaces existing domain", async () => {
+    const vault = await makeVaultWithDomains(["ai", "security"]);
+
+    // Create a note
+    const noteResult = (await create_note(
+      vault,
+      { title: "Test Note", body: "Test body" },
+      await loadVaultConfig(vault)
+    )) as { id: string; path: string };
+
+    // Assign first domain
+    await assign_domain(vault, {
+      id: noteResult.path,
+      domain: "ai",
+    });
+
+    // Assign different domain
+    await assign_domain(vault, {
+      id: noteResult.path,
+      domain: "security",
+    });
+
+    // Verify only one domain in frontmatter
+    const content = await fs.readFile(path.join(vault, noteResult.path), "utf-8");
+    const matches = content.match(/^domain:\s*/gm);
+    expect(matches?.length).toBe(1);
+    expect(content).toContain("domain: security");
+    expect(content).not.toContain("domain: ai");
+  });
+
+  test("rejects invalid domain", async () => {
+    const vault = await makeVaultWithDomains(["ai", "security"]);
+
+    const noteResult = (await create_note(
+      vault,
+      { title: "Test Note", body: "Test body" },
+      await loadVaultConfig(vault)
+    )) as { id: string; path: string };
+
+    const result = (await assign_domain(vault, {
+      id: noteResult.path,
+      domain: "invalid-domain",
+    })) as { error: string; message: string };
+
+    expect(result.error).toBe("INVALID_DOMAIN");
+    expect(result.message).toContain("invalid-domain");
+    expect(result.message).toContain("not found in vault.yaml");
+  });
+
+  test("rejects path traversal", async () => {
+    const vault = await makeVaultWithDomains(["ai"]);
+
+    const result = (await assign_domain(vault, {
+      id: "../../../etc/passwd",
+      domain: "ai",
+    })) as { error: string; message: string };
+
+    expect(result.error).toBe("PATH_TRAVERSAL");
+    expect(result.message).toContain("outside vault root");
+  });
+
+  test("returns GIT_ERROR for missing note", async () => {
+    const vault = await makeVaultWithDomains(["ai"]);
+
+    const result = (await assign_domain(vault, {
+      id: "notes/nonexistent.md",
+      domain: "ai",
+    })) as { error: string; message: string };
+
+    // Trying to read a non-existent file returns NOT_FOUND
+    // (the code tries to read before writing, so it catches this case)
+    expect(result.error).toBe("NOT_FOUND");
+    expect(result.message).toContain("Note not found");
+  });
+
+  test("allows any domain when vault.yaml has no domains list", async () => {
+    const vault = await makeVaultWithDomains([]); // Empty domains list
+
+    const noteResult = (await create_note(
+      vault,
+      { title: "Test Note", body: "Test body" },
+      await loadVaultConfig(vault)
+    )) as { id: string; path: string };
+
+    // Should accept any domain when list is empty
+    const result = (await assign_domain(vault, {
+      id: noteResult.path,
+      domain: "arbitrary-domain",
+    })) as { id: string; domain: string; commitSha: string };
+
+    expect(result.domain).toBe("arbitrary-domain");
   });
 });

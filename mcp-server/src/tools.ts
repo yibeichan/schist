@@ -243,6 +243,7 @@ export async function get_note(
       status: (meta.status as string) ?? "draft",
       tags: Array.isArray(meta.tags) ? meta.tags : [],
       concepts: Array.isArray(meta.concepts) ? meta.concepts : [],
+      domain: (meta.domain as string) ?? undefined,
       body,
       connections,
     };
@@ -366,6 +367,56 @@ export async function add_connection(
     triggerSpokePush(vaultRoot);
 
     return { source: args.source, target: args.target, type: args.type, commitSha: result.commitSha };
+  } catch (e: unknown) {
+    return normalizeError(e, "GIT_ERROR");
+  }
+}
+
+export async function assign_domain(
+  vaultRoot: string,
+  args: { id: string; domain: string }
+): Promise<unknown> {
+  try {
+    const filePath = path.join(vaultRoot, args.id);
+    const absVaultRoot = path.resolve(vaultRoot);
+    const absFilePath = path.resolve(filePath);
+    if (!absFilePath.startsWith(absVaultRoot + path.sep)) {
+      return { error: "PATH_TRAVERSAL", message: "Note path is outside vault root" } satisfies ToolError;
+    }
+
+    // Validate domain exists in vault.yaml domains list
+    const domains = sqliteReader.listDomains(vaultRoot);
+    const validSlugs = new Set(domains.map((d: { slug: string }) => d.slug));
+    // If no domains are defined, allow any domain (matches CLI behavior)
+    if (validSlugs.size > 0 && !validSlugs.has(args.domain)) {
+      return {
+        error: "INVALID_DOMAIN",
+        message: `Domain "${args.domain}" not found in vault.yaml. Valid domains: ${[...validSlugs].join(", ")}`,
+      } satisfies ToolError;
+    }
+
+    let content: string;
+    try {
+      content = await fs.readFile(filePath, "utf-8");
+    } catch {
+      return { error: "NOT_FOUND", message: `Note not found: ${args.id}` } satisfies ToolError;
+    }
+
+    // Use gray-matter to modify frontmatter
+    const matter = (await import("./markdown-parser.js")).parseNote;
+    const { metadata, body, connections } = matter(content);
+    const { buildNote } = await import("./markdown-parser.js");
+
+    // Update domain in metadata
+    const newMetadata = { ...metadata, domain: args.domain };
+    const newContent = buildNote(newMetadata, body, connections);
+
+    const result = await writeNote(vaultRoot, args.id, newContent);
+
+    triggerIngestion(vaultRoot);
+    triggerSpokePush(vaultRoot);
+
+    return { id: args.id, domain: args.domain, commitSha: result.commitSha };
   } catch (e: unknown) {
     return normalizeError(e, "GIT_ERROR");
   }

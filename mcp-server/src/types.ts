@@ -13,6 +13,7 @@ export interface Note {
   status: string;
   tags: string[];
   concepts: string[];
+  domain?: string;     // research domain from vault.yaml domains list
   body: string;
   connections: Connection[];
   scope?: string;      // e.g., "global", "decisions", "research/ai"
@@ -33,6 +34,7 @@ export interface SearchResult {
   date: string;
   status: string;
   tags: string[];
+  domain?: string;
   snippet: string;
   scope?: string;
 }

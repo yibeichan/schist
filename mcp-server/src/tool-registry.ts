@@ -186,6 +186,18 @@ export function makeWriteTools(config: VaultConfig) {
       },
     },
     {
+      name: "assign_domain",
+      description: "Assign a research domain to a note. Domain must exist in vault.yaml domains list.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          id: { type: "string", description: "Note ID (relative path)" },
+          domain: { type: "string", description: "Domain slug from vault.yaml domains list" },
+        },
+        required: ["id", "domain"],
+      },
+    },
+    {
       name: "list_concepts",
       description: "List all concepts in the knowledge graph",
       inputSchema: {
