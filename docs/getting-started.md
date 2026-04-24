@@ -77,14 +77,21 @@ sqlite3 --version   # expect 3.39+
 
 ## Stage 2: Install schist
 
-### Option A: Published packages
+### Option A: Published packages (stable release)
 
 ```bash
 pip install schist
 npm install -g @schist/mcp-server
 ```
 
-### Option B: From source (clone)
+> **Note:** `pip install schist` installs the latest published release.
+> For unreleased changes on `main`, install directly from git:
+> ```bash
+> pip install git+https://github.com/yibeichan/schist.git
+> ```
+> Or from a local clone (see Option B below).
+
+### Option B: From source (latest development)
 
 ```bash
 git clone https://github.com/yibeichan/schist.git
