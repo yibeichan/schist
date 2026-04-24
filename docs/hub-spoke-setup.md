@@ -4,6 +4,9 @@ Walk-through for wiring up a schist hub and one or more spokes so that agents
 on different machines (laptop, HPC cluster, Raspberry Pi, etc.) share a single
 knowledge graph.
 
+> **Setting up Pi + HPC + Mac?** See the [Pi/HPC/Mac topology guide](hub-spoke-pi-hpc-mac.md)
+> for an opinionated, copy-paste-ready walkthrough for that specific setup.
+
 ## Topology
 
 ```

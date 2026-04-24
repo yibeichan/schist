@@ -5,7 +5,7 @@ import argparse
 import os
 import sys
 
-from . import commands, sync
+from . import commands, doctor as doctor_mod, sync
 
 
 def main():
@@ -60,6 +60,11 @@ def main():
     p_schema = sub.add_parser('schema', help='Print or validate schema')
     p_schema.add_argument('--validate', action='store_true')
 
+    # doctor
+    p_doctor = sub.add_parser('doctor', help='Health check for schist setup')
+    p_doctor.add_argument('--json', action='store_true', dest='as_json',
+                          help='Output results as JSON')
+
     # init
     p_init = sub.add_parser('init', help='Initialize a vault (standalone, hub, or spoke)')
     p_init.add_argument('path', nargs='?', default=None,
@@ -74,6 +79,13 @@ def main():
     p_init.add_argument('--name', help='(hub/standalone) Vault name for vault.yaml')
     p_init.add_argument('--participant', action='append',
                         help='(hub) Participant name (repeatable)')
+    p_init.add_argument('--print-mcp-config', action='store_true', dest='print_mcp_config',
+                        help='Print MCP server config and exit (no vault creation)')
+    p_init.add_argument('--format', choices=['claude', 'cursor'], default='claude',
+                        dest='mcp_format',
+                        help='MCP config format (default: claude)')
+    p_init.add_argument('--mcp-server-path', default=None, dest='mcp_server_path',
+                        help='Path to mcp-server/dist/index.js (auto-detected if omitted)')
 
     # sync
     p_sync = sub.add_parser('sync', help='Sync spoke vault with hub')
@@ -91,6 +103,11 @@ def main():
     # the conflict matrix lives in one place.
     if args.command == 'init':
         sync._dispatch_init(args)
+        sys.exit(0)
+
+    # doctor: tolerates missing vault, runs before vault-required check
+    if args.command == 'doctor':
+        doctor_mod.doctor(args)
         sys.exit(0)
 
     vault_path = args.vault

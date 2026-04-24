@@ -99,7 +99,7 @@ Memory DB (`~/.openclaw/memory/agent-state.db` by default, or `SCHIST_MEMORY_DB`
 - **pre-receive** — server-side validation (ACLs, rate limits, schema)
 
 ## Requirements
-- Node.js >= 22, Python >= 3.12, SQLite >= 3.39 (FTS5), Git >= 2.30
+- Node.js >= 20, Python >= 3.12, SQLite >= 3.39 (FTS5), Git >= 2.30
 
 ## Environment
 - `SCHIST_VAULT_PATH` — path to the vault directory (required by MCP server)

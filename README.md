@@ -14,6 +14,8 @@ Agent-first knowledge graph. Git is truth, SQLite is query, humans just watch.
 
 ## Quick Start
 
+> **New?** See the [Getting Started Guide](docs/getting-started.md) for a complete setup walkthrough with platform-specific instructions.
+
 ```bash
 # Install CLI and MCP server (published packages)
 pip install schist
@@ -25,7 +27,10 @@ npm install -g @schist/mcp-server
 # cd mcp-server && npm install && npm run build
 
 # Create a vault
-mkdir -p ~/vaults/research/{notes,papers,concepts,logs,.schist}
+schist init ~/vaults/research --name research --identity local
+
+# Verify setup
+schist doctor --vault ~/vaults/research
 
 # Add your first note
 schist add --vault ~/vaults/research \
@@ -33,11 +38,8 @@ schist add --vault ~/vaults/research \
   --tags getting-started \
   --body "Hello, knowledge graph."
 
-# Search it
-schist search --vault ~/vaults/research "knowledge"
-
-# Get graph context (useful for agent session start)
-schist context --vault ~/vaults/research
+# Configure MCP server for your agent
+schist --vault ~/vaults/research init --print-mcp-config --identity local
 ```
 
 ## Multi-Machine (Hub & Spokes)
@@ -175,7 +177,7 @@ See [schema/SCHEMA.md](./schema/SCHEMA.md) for the markdown schema specification
 
 ## Requirements
 
-- Node.js ≥ 22
+- Node.js ≥ 20
 - Python ≥ 3.12
 - SQLite ≥ 3.39 (FTS5 support)
 - Git ≥ 2.30

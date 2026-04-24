@@ -676,6 +676,54 @@ def _build_standalone_vault(name: str, identity: str) -> dict:
     }
 
 
+def _print_mcp_config(args) -> None:
+    """Print a ready-to-paste MCP server config. Does not create files."""
+    import json as _json
+
+    vault_path = args.vault or os.environ.get("SCHIST_VAULT_PATH")
+    if not vault_path:
+        print("Error: --vault or SCHIST_VAULT_PATH required for --print-mcp-config",
+              file=sys.stderr)
+        sys.exit(1)
+    vault_path = os.path.abspath(vault_path)
+
+    identity = getattr(args, "identity", None) or os.environ.get("SCHIST_IDENTITY", "")
+
+    # Find mcp-server/dist/index.js
+    mcp_path = getattr(args, "mcp_server_path", None)
+    if not mcp_path:
+        # Auto-detect from source checkout
+        pkg_dir = Path(__file__).resolve().parents[2]
+        candidate = pkg_dir / "mcp-server" / "dist" / "index.js"
+        if candidate.exists():
+            mcp_path = str(candidate)
+    if not mcp_path:
+        print("Error: cannot find mcp-server/dist/index.js. "
+              "Use --mcp-server-path to specify.", file=sys.stderr)
+        sys.exit(1)
+    mcp_path = os.path.abspath(mcp_path)
+
+    config = {
+        "mcpServers": {
+            "schist": {
+                "command": "node",
+                "args": [mcp_path],
+                "env": {
+                    "SCHIST_VAULT_PATH": vault_path,
+                    **({"SCHIST_AGENT_ID": identity} if identity else {}),
+                },
+            }
+        }
+    }
+
+    fmt = getattr(args, "mcp_format", "claude")
+    if fmt == "claude":
+        print("# Paste into ~/.claude/settings.json or project .claude/settings.json:")
+    elif fmt == "cursor":
+        print("# Paste into .cursor/mcp.json in your project:")
+    print(_json.dumps(config, indent=2))
+
+
 def _dispatch_init(args) -> None:
     """Route `schist init` to the right mode based on arg combination.
 
@@ -689,6 +737,9 @@ def _dispatch_init(args) -> None:
     and with standalone init added would silently run as standalone and drop
     the hub URL. Both are rejected up front.
     """
+    if getattr(args, "print_mcp_config", False):
+        _print_mcp_config(args)
+        return
     hub_path = getattr(args, "hub_path", None)
     spoke = getattr(args, "spoke", False)
     hub_url = getattr(args, "hub", None)

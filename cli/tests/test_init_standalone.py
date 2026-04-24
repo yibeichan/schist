@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -34,6 +35,9 @@ def _args(**kwargs) -> SimpleNamespace:
         "participant": None,
         "vault": None,
         "db": None,
+        "print_mcp_config": False,
+        "mcp_format": "claude",
+        "mcp_server_path": None,
     }
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
@@ -418,3 +422,67 @@ class TestDispatchInit:
         )
         assert called["vault_path"] == "foo"
         assert called["db_path"] == os.path.join("foo", ".schist", "schist.db")
+
+
+class TestPrintMcpConfig:
+    def test_prints_valid_json(self, tmp_path, capsys):
+        from schist.sync import _dispatch_init
+
+        _dispatch_init(_args(
+            print_mcp_config=True,
+            mcp_format="claude",
+            vault=str(tmp_path),
+            identity="test-agent",
+        ))
+        captured = capsys.readouterr()
+        assert "# Paste into" in captured.out
+        # Find the JSON part (after the comment line)
+        json_start = captured.out.index("{")
+        data = json.loads(captured.out[json_start:])
+        assert "mcpServers" in data
+        assert "schist" in data["mcpServers"]
+        assert data["mcpServers"]["schist"]["env"]["SCHIST_AGENT_ID"] == "test-agent"
+
+    def test_cursor_format(self, tmp_path, capsys):
+        from schist.sync import _dispatch_init
+
+        _dispatch_init(_args(
+            print_mcp_config=True,
+            mcp_format="cursor",
+            vault=str(tmp_path),
+            identity="mac",
+        ))
+        captured = capsys.readouterr()
+        assert ".cursor/mcp.json" in captured.out
+
+    def test_no_files_created(self, tmp_path, capsys):
+        from schist.sync import _dispatch_init
+
+        before = set(tmp_path.rglob("*"))
+        _dispatch_init(_args(
+            print_mcp_config=True,
+            vault=str(tmp_path),
+            identity="test",
+        ))
+        after = set(tmp_path.rglob("*"))
+        assert before == after
+
+    def test_requires_vault(self, capsys):
+        from schist.sync import _dispatch_init
+
+        with pytest.raises(SystemExit):
+            _dispatch_init(_args(print_mcp_config=True, vault=None))
+
+    def test_explicit_mcp_path(self, tmp_path, capsys):
+        from schist.sync import _dispatch_init
+
+        fake_mcp = tmp_path / "fake-index.js"
+        fake_mcp.write_text("// fake")
+        _dispatch_init(_args(
+            print_mcp_config=True,
+            vault=str(tmp_path),
+            identity="test",
+            mcp_server_path=str(fake_mcp),
+        ))
+        captured = capsys.readouterr()
+        assert str(fake_mcp) in captured.out

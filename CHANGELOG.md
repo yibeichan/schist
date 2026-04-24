@@ -5,6 +5,17 @@ All notable changes to schist are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - Unreleased
+
+### Added
+- `schist doctor` command — one-command health check for schist setup (Python, Node, Git, vault, SQLite, hooks, MCP config)
+- `schist init --print-mcp-config` — generates ready-to-paste MCP server config for Claude Code and Cursor
+- `docs/getting-started.md` — linear onboarding guide with platform-specific instructions (Linux, macOS, HPC)
+- `docs/hub-spoke-pi-hpc-mac.md` — opinionated topology guide for Pi hub + HPC/Mac spoke setup
+
+### Changed
+- Node.js minimum version relaxed from >=22 to >=20 (no Node 22-specific features used)
+
 ## [0.1.0] - Unreleased
 
 ### Added
