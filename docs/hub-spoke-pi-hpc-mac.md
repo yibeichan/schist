@@ -2,7 +2,7 @@
 
 Opinionated setup guide for a three-node schist hub-spoke deployment:
 - **Pi** as the hub (bare git repo with pre-receive hook ACL enforcement)
-- **HPC** as a spoke (containerized with Singularity/Apptainer)
+- **HPC** as a spoke (uv + venv, or Singularity as fallback)
 - **Mac** (Apple Silicon) as a spoke
 - **GitHub** as an optional backup mirror
 
@@ -178,11 +178,54 @@ git -C ~/schist-vault push --dry-run
 ls -la ~/schist-vault/.schist/schist.db
 ```
 
-## 5. HPC Spoke Setup (Containerized)
+## 5. HPC Spoke Setup
 
-HPC clusters typically require Singularity/Apptainer containers. This section assumes your cluster uses Apptainer (the successor to Singularity) and SLURM.
+### Option A: uv (recommended)
 
-### Singularity/Apptainer definition file
+Most HPC clusters provide Python and Git via environment modules. Use `uv` to install schist into a venv — no root, no containers.
+
+```bash
+# Load available modules (adjust names to your cluster)
+module load python/3.12 git sqlite 2>/dev/null || true
+
+# Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source ~/.bashrc
+
+# Create venv and install schist
+uv venv ~/schist-venv
+source ~/schist-venv/bin/activate
+uv pip install git+https://github.com/yibeichan/schist.git
+```
+
+If Node.js >= 20 is not available via modules:
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+source ~/.bashrc
+nvm install 20
+```
+
+#### Initialize the spoke
+
+```bash
+schist init --spoke \
+  --hub schist-hub:~/git/schist-vault.git \
+  --scope research/hpc \
+  --identity hpc
+```
+
+#### Verify
+
+```bash
+schist doctor --vault ~/schist-vault
+```
+
+### Option B: Singularity/Apptainer (fallback)
+
+Use this only if the cluster lacks Python 3.12+ or Node 20+ and you cannot install them.
+
+#### Definition file
 
 Create `schist.def`:
 
@@ -213,42 +256,49 @@ apptainer build schist-hpc.sif schist.def
 scp schist-hpc.sif login-node:/scratch/$USER/
 ```
 
-### Initialize the spoke
-
-```bash
-apptainer run --bind /scratch/$USER/vault:/data/vault \
-              --bind $HOME/.ssh:/root/.ssh:ro \
-              schist-hpc.sif \
-              schist init --spoke \
-                --hub schist-hub:~/git/schist-vault.git \
-                --scope research/hpc \
-                --identity hpc
-```
-
-The `--bind` flags:
-- `/scratch/$USER/vault:/data/vault` -- persistent vault data on the cluster's scratch filesystem
-- `$HOME/.ssh:/root/.ssh:ro` -- SSH key for hub access (read-only inside the container)
-
 ### SSH key handling for HPC
 
-Three options, in order of preference:
+Applies to both uv and Singularity setups.
 
-1. **Mount from `$HOME/.ssh`** (shown above). Simplest. Requires the key to exist on the login node.
-
-2. **Forward agent through SLURM**. Start from a machine with the key:
+1. **Generate a key on the login node:**
    ```bash
-   ssh -A login-node
-   sbatch schist-job.sh  # agent forwarding carries the key
+   ssh-keygen -t ed25519 -f ~/.ssh/schist_spoke
+   cat ~/.ssh/schist_spoke.pub >> ~/.ssh/authorized_keys  # on Pi
    ```
 
-3. **Pre-populate known_hosts**. Avoids interactive host key prompts inside the container:
-   ```bash
-   ssh-keyscan <pi-ip-or-hostname> >> $HOME/.ssh/known_hosts
+2. **Add to `~/.ssh/config`:**
+   ```
+   Host schist-hub
+       HostName <pi-ip-or-hostname>
+       User <pi-username>
+       IdentityFile ~/.ssh/schist_spoke
    ```
 
-### SLURM job wrapper
+3. **Pre-populate known_hosts** (avoids interactive prompts):
+   ```bash
+   ssh-keyscan <pi-ip-or-hostname> >> ~/.ssh/known_hosts
+   ```
 
-Create `schist-note.sh`:
+### SLURM job wrappers
+
+#### Option A (uv)
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=schist-note
+#SBATCH --time=00:05:00
+#SBATCH --output=schist-note-%j.log
+
+source ~/schist-venv/bin/activate
+export SCHIST_IDENTITY=hpc
+
+schist add --vault ~/schist-vault \
+  --title "Training results $(date +%F)" \
+  --body "Loss: $TRAIN_LOSS, Accuracy: $TRAIN_ACC" \
+  --dir research/hpc
+```
+
+#### Option B (Singularity)
 
 ```bash
 #!/bin/bash
@@ -276,26 +326,20 @@ For a multi-note batch job, write several notes then push once at the end:
 #SBATCH --job-name=schist-batch
 #SBATCH --time=00:10:00
 
+source ~/schist-venv/bin/activate  # for uv; remove if using Singularity
 export SCHIST_IDENTITY=hpc
 
 for run in /scratch/$USER/runs/*.log; do
-    apptainer run --bind /scratch/$USER/vault:/data/vault \
-                  --bind $HOME/.ssh:/root/.ssh:ro \
-                  schist-hpc.sif \
-                  schist add --vault /data/vault \
-                    --title "Run $(basename $run .log)" \
-                    --body "$(tail -5 "$run")" \
-                    --dir research/hpc
+    schist add --vault ~/schist-vault \
+      --title "Run $(basename $run .log)" \
+      --body "$(tail -5 "$run")" \
+      --dir research/hpc
 done
 
-# Single push at the end
-apptainer run --bind /scratch/$USER/vault:/data/vault \
-              --bind $HOME/.ssh:/root/.ssh:ro \
-              schist-hpc.sif \
-              schist sync push --vault /data/vault
+schist sync push --vault ~/schist-vault
 ```
 
-### Verify
+### Verify (Option B)
 
 ```bash
 apptainer run --bind /scratch/$USER/vault:/data/vault \

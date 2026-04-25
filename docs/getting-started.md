@@ -40,29 +40,33 @@ nvm install 20
 brew install python@3.13 node git sqlite
 ```
 
-### HPC (Singularity/Apptainer)
+### HPC (uv)
 
-Save as `schist.def` and build with `singularity build schist.sif schist.def`:
+Most HPC clusters provide Python and Git via modules. Use `uv` to install schist without root or containers:
 
-```singularity
-Bootstrap: docker
-From: python:3.12-slim
+```bash
+# Load available modules (adjust names to your cluster)
+module load python/3.12 git sqlite 2>/dev/null || true
 
-%post
-    apt-get update && apt-get install -y --no-install-recommends \
-        git sqlite3 curl ca-certificates && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y nodejs && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
-    pip install --no-cache-dir schist
+# Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source ~/.bashrc
 
-%environment
-    export SCHIST_VAULT_PATH=/vault
-    export PATH=/usr/local/bin:$PATH
-
-%runscript
-    exec "$@"
+# Create venv and install schist
+uv venv ~/schist-venv
+source ~/schist-venv/bin/activate
+uv pip install git+https://github.com/yibeichan/schist.git
 ```
+
+If Node.js >= 20 is not available via modules, install with nvm:
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+source ~/.bashrc
+nvm install 20
+```
+
+If neither Python 3.12+ nor Node 20+ is available, use the Singularity fallback (see below).
 
 ### Verify Stage 1
 
@@ -282,7 +286,29 @@ xcode-select --install                           # macOS
 npm install --build-from-source=false better-sqlite3
 ```
 
-If building from source is not an option, use the Singularity image from Stage 1.
+If building from source is not an option, use the Singularity fallback:
+
+```singularity
+Bootstrap: docker
+From: python:3.12-slim
+
+%post
+    apt-get update && apt-get install -y --no-install-recommends \
+        git sqlite3 curl ca-certificates && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+    pip install --no-cache-dir schist
+
+%environment
+    export SCHIST_VAULT_PATH=/vault
+    export PATH=/usr/local/bin:$PATH
+
+%runscript
+    exec "$@"
+```
+
+Build with `singularity build schist.sif schist.def`.
 
 ### 8. `Hub unreachable from spoke`
 
