@@ -428,11 +428,14 @@ class TestPrintMcpConfig:
     def test_prints_valid_json(self, tmp_path, capsys):
         from schist.sync import _dispatch_init
 
+        fake_mcp = tmp_path / "fake-index.js"
+        fake_mcp.write_text("// fake")
         _dispatch_init(_args(
             print_mcp_config=True,
             mcp_format="claude",
             vault=str(tmp_path),
             identity="test-agent",
+            mcp_server_path=str(fake_mcp),
         ))
         captured = capsys.readouterr()
         assert "# Paste into" in captured.out
@@ -446,11 +449,14 @@ class TestPrintMcpConfig:
     def test_cursor_format(self, tmp_path, capsys):
         from schist.sync import _dispatch_init
 
+        fake_mcp = tmp_path / "fake-index.js"
+        fake_mcp.write_text("// fake")
         _dispatch_init(_args(
             print_mcp_config=True,
             mcp_format="cursor",
             vault=str(tmp_path),
             identity="mac",
+            mcp_server_path=str(fake_mcp),
         ))
         captured = capsys.readouterr()
         assert ".cursor/mcp.json" in captured.out
@@ -458,11 +464,14 @@ class TestPrintMcpConfig:
     def test_no_files_created(self, tmp_path, capsys):
         from schist.sync import _dispatch_init
 
+        fake_mcp = tmp_path / "fake-index.js"
+        fake_mcp.write_text("// fake")
         before = set(tmp_path.rglob("*"))
         _dispatch_init(_args(
             print_mcp_config=True,
             vault=str(tmp_path),
             identity="test",
+            mcp_server_path=str(fake_mcp),
         ))
         after = set(tmp_path.rglob("*"))
         assert before == after
