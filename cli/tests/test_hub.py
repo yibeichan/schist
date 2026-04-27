@@ -172,3 +172,70 @@ class TestInitHub:
         )
         assert result.returncode != 0
         assert "REJECTED" in result.stderr or "rejected" in result.stderr
+
+    # --- --scope-prefix tests (Issue #34) ---
+
+    def test_scope_prefix_default(self, tmp_path):
+        """Without --scope-prefix, vault.yaml uses research/<name> (backwards compat)."""
+        from schist.sync import init_hub
+
+        hub = tmp_path / "hub.git"
+        args = SimpleNamespace(name="v", participant=["alpha"], scope_prefix="research")
+        init_hub(args, str(hub))
+
+        result = subprocess.run(
+            ["git", "show", "main:vault.yaml"],
+            cwd=hub, capture_output=True, text=True, check=True,
+        )
+        content = result.stdout
+        assert "research/alpha" in content
+        assert "vault_version: 1" in content
+
+    def test_scope_prefix_override(self, tmp_path):
+        """With --scope-prefix vault, vault.yaml uses vault/<name> instead of research/<name>."""
+        from schist.sync import init_hub
+
+        hub = tmp_path / "hub.git"
+        args = SimpleNamespace(name="v", participant=["alpha", "beta"], scope_prefix="vault")
+        init_hub(args, str(hub))
+
+        result = subprocess.run(
+            ["git", "show", "main:vault.yaml"],
+            cwd=hub, capture_output=True, text=True, check=True,
+        )
+        content = result.stdout
+        assert "vault/alpha" in content
+        assert "vault/beta" in content
+        assert "research/" not in content
+
+    def test_scope_prefix_invalid(self, tmp_path, capsys):
+        """Invalid --scope-prefix (spaces, dots, uppercase) is rejected."""
+        from schist.sync import init_hub
+
+        for bad in ["BAD NAME", "../evil", "has.dots", "UPPER"]:
+            hub = tmp_path / f"hub-{bad.replace('/', '_')}"
+            args = SimpleNamespace(name="v", participant=["alpha"], scope_prefix=bad)
+            with pytest.raises(SystemExit):
+                init_hub(args, str(hub))
+            assert not hub.exists(), f"hub created despite invalid prefix '{bad}'"
+            capsys.readouterr()  # clear output
+
+    def test_scope_prefix_seeded_yaml_passes_acl(self, tmp_path):
+        """Vault.yaml with custom scope_prefix passes ACL validation."""
+        from schist.acl import parse_vault_yaml
+        from schist.sync import init_hub
+
+        hub = tmp_path / "hub.git"
+        args = SimpleNamespace(name="v", participant=["a", "b"], scope_prefix="my-vault")
+        init_hub(args, str(hub))
+
+        work = tmp_path / "work"
+        subprocess.run(
+            ["git", "clone", str(hub), str(work)],
+            capture_output=True, text=True, check=True,
+        )
+        acl = parse_vault_yaml(work / "vault.yaml")
+        assert acl.name == "v"
+        assert acl.can_write("a", "my-vault/a")
+        assert not acl.can_write("a", "my-vault/b")
+        assert acl.can_read("a", "my-vault/b")
