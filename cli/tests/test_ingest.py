@@ -23,6 +23,7 @@ bug this test is here to catch.
 from __future__ import annotations
 
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -143,16 +144,27 @@ def _cli_source_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _has_uv() -> bool:
+    """Check whether uv is available on PATH."""
+    return shutil.which("uv") is not None
+
+
 def _build_wheel(dest: Path) -> Path:
     """Build the schist wheel into dest/. Returns the wheel file path."""
-    # Use `pip wheel` instead of `python -m build` so we don't require the
-    # `build` package to be pre-installed in the test env.
-    _run_subprocess([
-        sys.executable, "-m", "pip", "wheel",
-        "--no-deps",
-        "--wheel-dir", str(dest),
-        str(_cli_source_dir()),
-    ])
+    if _has_uv():
+        _run_subprocess([
+            "uv", "build",
+            "--wheel",
+            "--out-dir", str(dest),
+            str(_cli_source_dir()),
+        ])
+    else:
+        _run_subprocess([
+            sys.executable, "-m", "pip", "wheel",
+            "--no-deps",
+            "--wheel-dir", str(dest),
+            str(_cli_source_dir()),
+        ])
     wheels = list(dest.glob("schist-*.whl"))
     assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
     return wheels[0]
@@ -160,7 +172,12 @@ def _build_wheel(dest: Path) -> Path:
 
 def _make_venv(path: Path) -> Path:
     """Create a venv at path and return its python executable."""
-    _run_subprocess([sys.executable, "-m", "venv", str(path)])
+    if _has_uv():
+        _run_subprocess(["uv", "venv", "--python", sys.executable, str(path)])
+        # uv venvs lack pip — install it so the wheel-install step works.
+        _run_subprocess(["uv", "pip", "install", "--python", str(path / "bin" / "python"), "pip"])
+    else:
+        _run_subprocess([sys.executable, "-m", "venv", str(path)])
     return path / "bin" / "python"
 
 
