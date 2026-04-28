@@ -344,13 +344,21 @@ def init_hub(args, hub_path: str) -> None:
         print("Error: at least one --participant is required", file=sys.stderr)
         sys.exit(1)
 
+    scope_prefix = getattr(args, "scope_prefix", None) or "research"
+    if scope_prefix and not NAME_RE.match(scope_prefix):
+        print(
+            f"Error: --scope-prefix '{scope_prefix}' must match ^[a-z][a-z0-9-]*$",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     hub = Path(hub_path).resolve()
     if hub.exists() and any(hub.iterdir()):
         print(f"Error: hub path '{hub_path}' already exists and is not empty", file=sys.stderr)
         sys.exit(1)
 
     # Build vault.yaml data and validate before touching the filesystem.
-    vault_data = _build_seed_vault(name, participants)
+    vault_data = _build_seed_vault(name, participants, scope_prefix=scope_prefix)
     try:
         parse_vault_data(vault_data)
     except ACLError as e:
@@ -485,16 +493,16 @@ def _build_hub_in_staging(
                 raise _InitError(f"{' '.join(cmd)} failed: {r.stderr.strip()}")
 
 
-def _build_seed_vault(name: str, participants: list[str]) -> dict:
+def _build_seed_vault(name: str, participants: list[str], scope_prefix: str = "research") -> dict:
     """Construct a minimal valid vault.yaml data dict for the seed commit.
 
-    Each participant gets a default scope of `research/<name>` and a matching
+    Each participant gets a default scope of `{scope_prefix}/{name}` and a matching
     write grant, plus read:* so any participant can see the full graph.
     """
     participant_entries = []
     access = {}
     for p in participants:
-        scope = f"research/{p}"
+        scope = f"{scope_prefix}/{p}"
         participant_entries.append({
             "name": p,
             "type": "spoke",
