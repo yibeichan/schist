@@ -113,6 +113,35 @@ class TestInitSpoke:
         assert not dest.exists()
         assert "clone failed" in capsys.readouterr().err
 
+    @patch("schist.sync.git_ops.clone_shallow", return_value=(True, ""))
+    @patch("schist.sync.git_ops.setup_sparse_checkout", return_value=(True, ""))
+    @patch("schist.sync._rebuild_index")
+    def test_installs_local_hooks(self, mock_ingest, mock_sparse, mock_clone, tmp_path):
+        """Spoke init must install the post-commit + pre-commit hooks so the
+        spoke behaves like a standalone vault for local commits — without
+        them, post-commit ingest never fires and staged secrets aren't blocked.
+        """
+        from schist.sync import init_spoke
+
+        dest = str(tmp_path / "spoke")
+
+        def create_dir(*a, **kw):
+            Path(dest).mkdir(parents=True, exist_ok=True)
+            (Path(dest) / ".git" / "info").mkdir(parents=True)
+            return True, ""
+        mock_clone.side_effect = create_dir
+
+        args = MagicMock(hub="git@pi:vault.git", scope="research/x", identity="x")
+        init_spoke(args, dest, str(tmp_path / "db.sqlite"))
+
+        post = Path(dest) / ".git" / "hooks" / "post-commit"
+        pre = Path(dest) / ".git" / "hooks" / "pre-commit"
+        assert post.is_file() and "schist post-commit" in post.read_text()
+        assert pre.is_file() and "schist pre-commit" in pre.read_text()
+        # Hooks must be executable for git to invoke them.
+        assert post.stat().st_mode & 0o111
+        assert pre.stat().st_mode & 0o111
+
 
 # ---------------------------------------------------------------------------
 # sync_pull

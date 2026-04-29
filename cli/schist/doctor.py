@@ -206,6 +206,10 @@ def check_spoke(vault_path: Optional[str]) -> CheckResult:
 def check_mcp_config(vault_path: Optional[str]) -> CheckResult:
     """Check if schist is configured in Claude Code or Cursor settings."""
     candidates = [
+        # Claude Code (active product) stores user-scope MCP servers here.
+        # Same `mcpServers` shape as Claude Desktop, different path.
+        Path.home() / ".claude.json",
+        # Claude Desktop / settings.json paths (legacy and project-scoped).
         Path.home() / ".claude" / "settings.json",
         Path.home() / ".claude" / "settings.local.json",
     ]
@@ -240,7 +244,8 @@ def check_mcp_config(vault_path: Optional[str]) -> CheckResult:
             pass
 
     return CheckResult("WARN", "MCP", "no schist entry found",
-                       "Run `schist init --print-mcp-config` for a ready-to-paste config.")
+                       "Run `schist init --print-mcp-config --identity <name>` and "
+                       "execute the printed `claude mcp add` command.")
 
 
 def run_doctor(vault_path: Optional[str], db_path: Optional[str],
