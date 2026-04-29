@@ -83,6 +83,23 @@ exit 0
 """
 
 
+def _install_local_hooks(vault_path) -> None:
+    """Write the post-commit and pre-commit hooks into a working-tree repo.
+
+    Shared by standalone and spoke init so either flavor of vault gets the
+    SQLite auto-rebuild and the staged-secret guard. Caller must have already
+    created `<vault>/.git/`.
+    """
+    hooks_dir = Path(vault_path) / ".git" / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    post = hooks_dir / "post-commit"
+    post.write_text(POST_COMMIT_HOOK)
+    post.chmod(0o755)
+    pre = hooks_dir / "pre-commit"
+    pre.write_text(PRE_COMMIT_HOOK)
+    pre.chmod(0o755)
+
+
 def init_spoke(args, vault_path: str, db_path: str) -> None:
     """Initialize a spoke vault from hub via shallow clone + sparse checkout."""
     hub = args.hub
@@ -131,7 +148,11 @@ def init_spoke(args, vault_path: str, db_path: str) -> None:
     with open(exclude_path, "a") as f:
         f.write(f"\n# schist spoke config (never pushed to hub)\n{'.schist/spoke.yaml'}\n")
 
-    # Step 5: Rebuild SQLite index
+    # Step 5: Install commit hooks (post-commit re-ingests SQLite, pre-commit
+    # rejects staged secrets — same hooks standalone init writes).
+    _install_local_hooks(vault_path)
+
+    # Step 6: Rebuild SQLite index
     _rebuild_index(vault_path, db_path)
 
     # Summary
@@ -653,14 +674,7 @@ def _build_standalone_in_staging(
         if r.returncode != 0:
             raise _InitError(f"{' '.join(cmd)} failed: {r.stderr.strip()}")
 
-    hooks_dir = staging / ".git" / "hooks"
-    hooks_dir.mkdir(parents=True, exist_ok=True)
-    post = hooks_dir / "post-commit"
-    post.write_text(POST_COMMIT_HOOK)
-    post.chmod(0o755)
-    pre = hooks_dir / "pre-commit"
-    pre.write_text(PRE_COMMIT_HOOK)
-    pre.chmod(0o755)
+    _install_local_hooks(staging)
 
 
 def _build_standalone_vault(name: str, identity: str) -> dict:
@@ -711,25 +725,39 @@ def _print_mcp_config(args) -> None:
         sys.exit(1)
     mcp_path = os.path.abspath(mcp_path)
 
-    config = {
-        "mcpServers": {
-            "schist": {
-                "command": "node",
-                "args": [mcp_path],
-                "env": {
-                    "SCHIST_VAULT_PATH": vault_path,
-                    **({"SCHIST_AGENT_ID": identity} if identity else {}),
-                },
-            }
-        }
-    }
+    # Both env vars are needed: SCHIST_AGENT_ID gates MCP write tools (memory
+    # ownership), SCHIST_IDENTITY is what the hub's pre-receive hook reads
+    # when the MCP server's auto-push fires. Set both when an identity is
+    # provided so the user doesn't have to discover the second one later.
+    env = {"SCHIST_VAULT_PATH": vault_path}
+    if identity:
+        env["SCHIST_AGENT_ID"] = identity
+        env["SCHIST_IDENTITY"] = identity
 
     fmt = getattr(args, "mcp_format", "claude")
     if fmt == "claude":
-        print("# Paste into ~/.claude/settings.json or project .claude/settings.json:")
+        # Claude Code stores user-scope MCP servers in ~/.claude.json (not the
+        # ~/.claude/settings.json file that Claude Desktop uses). The CLI is
+        # the supported way to register one — emit a copy-paste-runnable
+        # `claude mcp add` command instead of raw JSON.
+        env_flags = " ".join(f"-e {k}={v}" for k, v in env.items())
+        print("# Run to register schist with Claude Code (user scope):")
+        print(f"claude mcp add --scope user schist {env_flags} -- node {mcp_path}")
     elif fmt == "cursor":
+        config = {
+            "mcpServers": {
+                "schist": {
+                    "command": "node",
+                    "args": [mcp_path],
+                    "env": env,
+                }
+            }
+        }
         print("# Paste into .cursor/mcp.json in your project:")
-    print(_json.dumps(config, indent=2))
+        print(_json.dumps(config, indent=2))
+    else:
+        print(f"Error: unknown --format value '{fmt}'", file=sys.stderr)
+        sys.exit(1)
 
 
 def _dispatch_init(args) -> None:

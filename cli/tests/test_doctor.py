@@ -242,15 +242,26 @@ class TestCheckSpoke:
 
 
 class TestCheckMcpConfig:
-    def test_found_in_claude_settings(self, tmp_path, monkeypatch):
-        settings = tmp_path / "settings.json"
-        settings.write_text(json.dumps({
+    def test_found_in_claude_code_user_config(self, tmp_path, monkeypatch):
+        """Claude Code (the active product) stores user-scope MCP servers in
+        ~/.claude.json — distinct from Claude Desktop's ~/.claude/settings.json.
+        """
+        (tmp_path / ".claude.json").write_text(json.dumps({
             "mcpServers": {"schist": {"command": "node", "args": ["/path/to/index.js"]}}
         }))
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         r = check_mcp_config(None)
-        assert r.status == "WARN"  # won't find because home patching is tricky
+        assert r.status == "PASS"
+        assert ".claude.json" in r.message
+
+    def test_found_in_claude_desktop_settings(self, tmp_path, monkeypatch):
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "settings.json").write_text(json.dumps({
+            "mcpServers": {"schist": {"command": "node", "args": ["/path/to/index.js"]}}
+        }))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_config(None)
+        assert r.status == "PASS"
 
     def test_not_found(self, tmp_path, monkeypatch):
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
