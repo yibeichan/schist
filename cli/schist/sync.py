@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -740,9 +741,12 @@ def _print_mcp_config(args) -> None:
         # ~/.claude/settings.json file that Claude Desktop uses). The CLI is
         # the supported way to register one — emit a copy-paste-runnable
         # `claude mcp add` command instead of raw JSON.
-        env_flags = " ".join(f"-e {k}={v}" for k, v in env.items())
+        # Shell-quote each value so paths/identities containing spaces or
+        # metacharacters survive copy-paste-run (e.g. macOS
+        # '~/Library/Application Support/...').
+        env_flags = " ".join("-e " + shlex.quote(f"{k}={v}") for k, v in env.items())
         print("# Run to register schist with Claude Code (user scope):")
-        print(f"claude mcp add --scope user schist {env_flags} -- node {mcp_path}")
+        print(f"claude mcp add --scope user schist {env_flags} -- node {shlex.quote(mcp_path)}")
     elif fmt == "cursor":
         config = {
             "mcpServers": {

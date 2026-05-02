@@ -490,6 +490,48 @@ class TestPrintMcpConfig:
         captured = capsys.readouterr()
         assert ".cursor/mcp.json" in captured.out
 
+    def test_unknown_format_errors(self, tmp_path, capsys):
+        """Unknown --format value exits 1 with a stderr message — guards the
+        dispatch's else branch against silent no-ops on typos."""
+        from schist.sync import _dispatch_init
+
+        fake_mcp = tmp_path / "fake-index.js"
+        fake_mcp.write_text("// fake")
+        with pytest.raises(SystemExit) as exc:
+            _dispatch_init(_args(
+                print_mcp_config=True,
+                mcp_format="bogus",
+                vault=str(tmp_path),
+                identity="test-agent",
+                mcp_server_path=str(fake_mcp),
+            ))
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "unknown --format value" in err
+        assert "bogus" in err
+
+    def test_claude_quotes_paths_with_spaces(self, tmp_path, capsys):
+        """Vault paths or mcp paths containing spaces must be shell-quoted so
+        the printed `claude mcp add` line is safe to paste-run (real-world
+        case: macOS '~/Library/Application Support/...')."""
+        from schist.sync import _dispatch_init
+
+        spaced_dir = tmp_path / "with space"
+        spaced_dir.mkdir()
+        fake_mcp = spaced_dir / "fake-index.js"
+        fake_mcp.write_text("// fake")
+        _dispatch_init(_args(
+            print_mcp_config=True,
+            mcp_format="claude",
+            vault=str(spaced_dir),
+            identity="alice",
+            mcp_server_path=str(fake_mcp),
+        ))
+        out = capsys.readouterr().out
+        # shlex.quote wraps space-containing values in single quotes.
+        assert f"'SCHIST_VAULT_PATH={spaced_dir}'" in out
+        assert f"node '{fake_mcp}'" in out
+
     def test_no_files_created(self, tmp_path, capsys):
         from schist.sync import _dispatch_init
 
