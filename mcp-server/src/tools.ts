@@ -273,10 +273,17 @@ export async function create_note(
         message: "Invalid directory: must be relative and not contain ..",
       } satisfies ToolError;
     }
-    if (!config.directories.includes(directory)) {
+    // Top-level segment match so callers can pass nested paths like
+    // `projects/brain-states-friends` without having to enumerate every
+    // subdirectory in schist.yaml. Mirrors the ACL's parent-grants-child
+    // rule (see cli/schist/acl.py:_scope_matches). The `..` and absolute-
+    // path guard above is what enforces safety; this check is content
+    // configuration, not a security boundary.
+    const topLevel = directory.split("/")[0];
+    if (!config.directories.includes(topLevel)) {
       return {
         error: "VALIDATION_ERROR",
-        message: `Directory "${directory}" not configured. Allowed: ${config.directories.join(", ")}`,
+        message: `Directory "${directory}" not configured. Allowed top-level: ${config.directories.join(", ")}`,
       } satisfies ToolError;
     }
 

@@ -107,6 +107,82 @@ describe("create_note filename collision", () => {
 });
 
 // ---------------------------------------------------------------------------
+// create_note — directory validation (top-level-segment match)
+// ---------------------------------------------------------------------------
+
+describe("create_note directory validation", () => {
+  // makeTempVault appends `extraYaml` after `connection_types:`, which would
+  // mis-parse a stray `- projects` as a connection type. So these tests
+  // overwrite schist.yaml directly with the directories list they need.
+  async function vaultWithDirectories(dirs: string[]): Promise<string> {
+    const vault = await makeTempVault();
+    const yaml = [
+      "name: Test Vault",
+      "write_branch: drafts",
+      "directories:",
+      ...dirs.map((d) => `  - ${d}`),
+      "statuses: [draft, review, final]",
+      "connection_types: [extends, supports]",
+    ].join("\n") + "\n";
+    await fs.writeFile(path.join(vault, "schist.yaml"), yaml);
+    await execFile("git", ["add", "schist.yaml"], { cwd: vault });
+    await execFile("git", ["commit", "-m", "update directories"], { cwd: vault });
+    return vault;
+  }
+
+  test("accepts nested path when top-level segment is configured", async () => {
+    // schist.yaml lists 'projects' as a top-level dir; nested per-project
+    // subdirs (projects/<name>/) should be accepted without enumerating each.
+    const vault = await vaultWithDirectories(["notes", "papers", "projects"]);
+    const config = await loadVaultConfig(vault);
+
+    const result = await create_note(
+      vault,
+      { title: "Nested Path Note", body: "lives under projects/foo", directory: "projects/foo" },
+      config
+    ) as { id: string; path: string; commitSha: string };
+
+    expect(result.path).toBeDefined();
+    expect(result.path.startsWith("projects/foo/")).toBe(true);
+    expect(result.commitSha).toBeDefined();
+    const onDisk = await fs.readFile(path.join(vault, result.path), "utf-8");
+    expect(onDisk).toContain("lives under projects/foo");
+  }, 30000);
+
+  test("rejects nested path when top-level segment is not configured", async () => {
+    // schist.yaml does NOT list 'projects'; create_note must reject
+    // 'projects/foo' rather than silently accepting via prefix match.
+    const vault = await vaultWithDirectories(["notes", "papers"]);
+    const config = await loadVaultConfig(vault);
+
+    const result = await create_note(
+      vault,
+      { title: "Should Fail", body: "x", directory: "projects/foo" },
+      config
+    ) as { error: string; message: string };
+
+    expect(result.error).toBe("VALIDATION_ERROR");
+    expect(result.message).toContain("projects/foo");
+    expect(result.message).toContain("Allowed top-level");
+  }, 30000);
+
+  test("path-traversal guard still rejects ..", async () => {
+    // The top-level-match change must not weaken the existing safety guard.
+    const vault = await vaultWithDirectories(["notes", "papers", "projects"]);
+    const config = await loadVaultConfig(vault);
+
+    const result = await create_note(
+      vault,
+      { title: "Traversal Attempt", body: "x", directory: "projects/../etc" },
+      config
+    ) as { error: string; message: string };
+
+    expect(result.error).toBe("VALIDATION_ERROR");
+    expect(result.message).toContain("..");
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
 // Lazy capabilities — index-level behaviour (unit test via tools layer)
 // ---------------------------------------------------------------------------
 
