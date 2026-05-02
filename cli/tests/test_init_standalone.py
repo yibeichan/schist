@@ -425,7 +425,11 @@ class TestDispatchInit:
 
 
 class TestPrintMcpConfig:
-    def test_prints_valid_json(self, tmp_path, capsys):
+    def test_claude_emits_mcp_add_command(self, tmp_path, capsys):
+        """`--format claude` prints a runnable `claude mcp add` command — Claude
+        Code's user-scope config lives in ~/.claude.json, registered via the
+        CLI rather than by hand-editing JSON.
+        """
         from schist.sync import _dispatch_init
 
         fake_mcp = tmp_path / "fake-index.js"
@@ -437,14 +441,39 @@ class TestPrintMcpConfig:
             identity="test-agent",
             mcp_server_path=str(fake_mcp),
         ))
-        captured = capsys.readouterr()
-        assert "# Paste into" in captured.out
-        # Find the JSON part (after the comment line)
-        json_start = captured.out.index("{")
-        data = json.loads(captured.out[json_start:])
-        assert "mcpServers" in data
-        assert "schist" in data["mcpServers"]
-        assert data["mcpServers"]["schist"]["env"]["SCHIST_AGENT_ID"] == "test-agent"
+        out = capsys.readouterr().out
+        assert "claude mcp add --scope user schist" in out
+        assert "-e SCHIST_VAULT_PATH=" in out
+        assert "-e SCHIST_AGENT_ID=test-agent" in out
+        # Both identity vars are needed: SCHIST_AGENT_ID for MCP write
+        # validation, SCHIST_IDENTITY for the auto-push to the hub.
+        assert "-e SCHIST_IDENTITY=test-agent" in out
+        assert f"node {fake_mcp}" in out
+        # Output should NOT be raw JSON (that was the Claude Desktop format).
+        assert "mcpServers" not in out
+
+    def test_claude_without_identity_omits_agent_vars(self, tmp_path, capsys, monkeypatch):
+        from schist.sync import _dispatch_init
+
+        # _print_mcp_config falls back to SCHIST_IDENTITY in the env when
+        # --identity isn't passed. Strip it so this test exercises the
+        # genuinely-no-identity branch regardless of the dev's shell.
+        monkeypatch.delenv("SCHIST_IDENTITY", raising=False)
+        monkeypatch.delenv("SCHIST_AGENT_ID", raising=False)
+
+        fake_mcp = tmp_path / "fake-index.js"
+        fake_mcp.write_text("// fake")
+        _dispatch_init(_args(
+            print_mcp_config=True,
+            mcp_format="claude",
+            vault=str(tmp_path),
+            identity=None,
+            mcp_server_path=str(fake_mcp),
+        ))
+        out = capsys.readouterr().out
+        assert "-e SCHIST_VAULT_PATH=" in out
+        assert "SCHIST_AGENT_ID" not in out
+        assert "SCHIST_IDENTITY" not in out
 
     def test_cursor_format(self, tmp_path, capsys):
         from schist.sync import _dispatch_init
@@ -460,6 +489,48 @@ class TestPrintMcpConfig:
         ))
         captured = capsys.readouterr()
         assert ".cursor/mcp.json" in captured.out
+
+    def test_unknown_format_errors(self, tmp_path, capsys):
+        """Unknown --format value exits 1 with a stderr message — guards the
+        dispatch's else branch against silent no-ops on typos."""
+        from schist.sync import _dispatch_init
+
+        fake_mcp = tmp_path / "fake-index.js"
+        fake_mcp.write_text("// fake")
+        with pytest.raises(SystemExit) as exc:
+            _dispatch_init(_args(
+                print_mcp_config=True,
+                mcp_format="bogus",
+                vault=str(tmp_path),
+                identity="test-agent",
+                mcp_server_path=str(fake_mcp),
+            ))
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "unknown --format value" in err
+        assert "bogus" in err
+
+    def test_claude_quotes_paths_with_spaces(self, tmp_path, capsys):
+        """Vault paths or mcp paths containing spaces must be shell-quoted so
+        the printed `claude mcp add` line is safe to paste-run (real-world
+        case: macOS '~/Library/Application Support/...')."""
+        from schist.sync import _dispatch_init
+
+        spaced_dir = tmp_path / "with space"
+        spaced_dir.mkdir()
+        fake_mcp = spaced_dir / "fake-index.js"
+        fake_mcp.write_text("// fake")
+        _dispatch_init(_args(
+            print_mcp_config=True,
+            mcp_format="claude",
+            vault=str(spaced_dir),
+            identity="alice",
+            mcp_server_path=str(fake_mcp),
+        ))
+        out = capsys.readouterr().out
+        # shlex.quote wraps space-containing values in single quotes.
+        assert f"'SCHIST_VAULT_PATH={spaced_dir}'" in out
+        assert f"node '{fake_mcp}'" in out
 
     def test_no_files_created(self, tmp_path, capsys):
         from schist.sync import _dispatch_init
