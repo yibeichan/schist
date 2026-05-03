@@ -64,7 +64,7 @@ python3 "$INGEST" --vault "$VAULT_ROOT" --db "$DB_PATH"
 PRE_COMMIT_HOOK = r"""#!/bin/sh
 # schist pre-commit hook — reject staged files containing secrets
 
-PATTERNS='sk-|ghp_|ghs_|AKIA|-----BEGIN|password\s*=|api_key\s*='
+PATTERNS='sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|ghs_[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16}|-----BEGIN|password\s*=|api_key\s*='
 
 STAGED_FILES=$(git diff --cached --name-only)
 if [ -z "$STAGED_FILES" ]; then
