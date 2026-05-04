@@ -329,6 +329,65 @@ class TestInitStandalone:
             "repo reference."
         )
 
+    def _run_pre_commit(self, tmp_path, file_contents):
+        """Helper: init a git repo, stage a file with file_contents, run the
+        installed pre-commit hook directly, return the CompletedProcess."""
+        from schist.sync import init_standalone
+
+        target = tmp_path / "v"
+        init_standalone(_args(path=str(target)))
+
+        note = target / "notes" / "case.md"
+        note.write_text(file_contents)
+        subprocess.run(["git", "add", "notes/case.md"], cwd=target, check=True)
+
+        hook = target / ".git" / "hooks" / "pre-commit"
+        return subprocess.run(
+            [str(hook)], cwd=target, capture_output=True, text=True,
+        )
+
+    def test_pre_commit_does_not_match_sk_substrings(self, tmp_path):
+        """Issue #48: 'sk-' inside ordinary words must not trigger the hook.
+
+        Real prefix `sk-` is preceded by a non-alpha char (whitespace, =, ")
+        and followed by 20+ key-shaped chars. Words like 'Task-specific',
+        'risky-foo', 'disk-cache' contain 'sk-' but with too few trailing
+        key-shaped chars to look like an actual key.
+        """
+        contents = (
+            "# Notes\n\n"
+            "This is a Task-specific approach. risky-foo and disk-cache work.\n"
+            "Also flask-app, mask-rcnn, ask-me, brisk-walk.\n"
+        )
+        result = self._run_pre_commit(tmp_path, contents)
+        assert result.returncode == 0, (
+            f"False positive on common 'sk-' substrings:\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+    def test_pre_commit_blocks_real_looking_keys(self, tmp_path):
+        """The hook still blocks lines that look like real API keys."""
+        contents = (
+            "# Notes\n\n"
+            "Anthropic key: sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz1234567890\n"
+        )
+        result = self._run_pre_commit(tmp_path, contents)
+        assert result.returncode == 1, (
+            f"False negative — real-looking key was not blocked:\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert "Potential secret detected" in result.stdout
+
+    def test_pre_commit_blocks_github_pat(self, tmp_path):
+        contents = "token = ghp_abcdefghijklmnop1234567890ABCDEFGH\n"
+        result = self._run_pre_commit(tmp_path, contents)
+        assert result.returncode == 1
+
+    def test_pre_commit_blocks_aws_access_key(self, tmp_path):
+        contents = "AKIAIOSFODNN7EXAMPLE\n"
+        result = self._run_pre_commit(tmp_path, contents)
+        assert result.returncode == 1
+
 
 class TestDispatchInit:
     """Conflict matrix for `schist init` across all three modes."""
