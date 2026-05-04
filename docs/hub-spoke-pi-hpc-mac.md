@@ -77,6 +77,28 @@ Host schist-hub
 
 Test it: `ssh schist-hub echo ok` should print `ok` without a password prompt.
 
+> **Pi behind a home NAT?** If a spoke can't reach the Pi directly (typical when the spoke is on a remote network — an HPC cluster, a coffee-shop laptop, etc.), use a NAT-traversed transport. See the [Tailscale transport appendix](#appendix-network-transport-tailscale).
+
+### SCHIST_IDENTITY propagation
+
+The hub's pre-receive hook reads `SCHIST_IDENTITY` (or `GL_USER`) from the *server-side* environment to validate the push. Because spokes run `git push` over SSH, the var must travel across the connection:
+
+1. **On each spoke**, export the identity in `~/.bashrc` (or wherever your shell sources from on non-interactive SSH invocations):
+   ```bash
+   export SCHIST_IDENTITY=<spoke-name>   # e.g. hpc, mac
+   ```
+2. **On each spoke**, ask SSH to forward the var. Add to the `Host schist-hub` block in `~/.ssh/config`:
+   ```
+   SendEnv SCHIST_IDENTITY
+   ```
+3. **On the Pi**, allow sshd to receive it. Append to `/etc/ssh/sshd_config`:
+   ```
+   AcceptEnv SCHIST_IDENTITY
+   ```
+   then `sudo systemctl restart ssh`.
+
+Without all three, pushes are rejected with `REJECTED: cannot determine push identity`.
+
 ### Optional GitHub mirror
 
 ```bash
@@ -397,3 +419,133 @@ Run these in order after initial setup. All five should pass before declaring th
 - [ ] **HPC writes, Mac reads**: `schist add` on HPC, then `schist sync pull` on Mac -- the note appears
 
 If the cross-write tests fail, check SSH connectivity first (`ssh schist-hub echo ok` from each spoke), then check that `SCHIST_IDENTITY` is set correctly in each environment.
+
+## Appendix: Network transport (Tailscale)
+
+The setup in section 2 assumes the spoke can reach the Pi by IP — fine on a LAN, but not when the Pi is behind home NAT and the spoke is on a remote network (HPC cluster, traveling laptop). This appendix covers a Tailscale-based transport that handles NAT traversal without exposing the Pi to the public internet.
+
+### When you need this
+
+Use Tailscale (or equivalent overlay) if **any** of:
+
+- The Pi is behind a home router with no port-forwarded SSH.
+- A spoke runs on a network you don't control (HPC, conference Wi-Fi).
+- You don't want to publish the Pi's home IP via DDNS.
+
+If all your spokes are on the same LAN as the Pi, skip this appendix.
+
+### Why Tailscale (vs alternatives)
+
+| Option | Tradeoff |
+|---|---|
+| **Tailscale** (recommended) | NAT punch-through with DERP fallback. Encrypted. No router config. Free for ~100 nodes. Static binary, runs without root. |
+| Port-forward SSH on home router | Simple, but exposes your Pi to public scanners; needs DDNS for IP changes. |
+| Cloudflare Tunnel | Works without root on the Pi, but adds an external service in the path; more setup. |
+| Plain VPN (WireGuard, OpenVPN) | Lower-level; you manage keys, configs, restart logic. |
+
+### Install on a spoke (no root)
+
+Tailscale ships a static Linux binary tarball; no system packages needed. On the spoke (HPC login node, etc.):
+
+```bash
+# Find the latest version, then:
+curl -fsSL -o tailscale.tgz \
+  https://pkgs.tailscale.com/stable/tailscale_<VERSION>_amd64.tgz
+tar -xzf tailscale.tgz
+install -m 0755 tailscale_<VERSION>_amd64/tailscale  ~/.local/bin/tailscale
+install -m 0755 tailscale_<VERSION>_amd64/tailscaled ~/.local/bin/tailscaled
+mkdir -p ~/.tailscale-state
+```
+
+(macOS spokes: install via the App Store or `brew install tailscale` — these scenarios don't need the userspace dance.)
+
+### On-demand daemon wrapper (HPC / shared hosts)
+
+On a shared login node, you don't want a persistent VPN daemon. Wrap the SSH ProxyCommand so `tailscaled` starts on first use and stops when you `~/.local/bin/schist-tailscale-down`:
+
+```bash
+# ~/.local/bin/schist-tailscale-nc
+#!/usr/bin/env bash
+set -e
+STATEDIR="$HOME/.tailscale-state"
+SOCKET="$STATEDIR/tailscaled.sock"
+PIDFILE="$STATEDIR/tailscaled.pid"
+LOGFILE="$STATEDIR/tailscaled.log"
+TAILSCALED="$HOME/.local/bin/tailscaled"
+TAILSCALE="$HOME/.local/bin/tailscale"
+
+mkdir -p "$STATEDIR"
+
+if ! "$TAILSCALE" --socket="$SOCKET" status >/dev/null 2>&1; then
+    rm -f "$PIDFILE"
+    nohup "$TAILSCALED" \
+        --tun=userspace-networking \
+        --statedir="$STATEDIR" \
+        --socket="$SOCKET" \
+        >"$LOGFILE" 2>&1 &
+    echo $! > "$PIDFILE"
+    for _ in $(seq 1 20); do
+        sleep 0.5
+        "$TAILSCALE" --socket="$SOCKET" status >/dev/null 2>&1 && break
+    done
+fi
+
+exec "$TAILSCALE" --socket="$SOCKET" nc "$1" "$2"
+```
+
+```bash
+# ~/.local/bin/schist-tailscale-down
+#!/usr/bin/env bash
+PIDFILE="$HOME/.tailscale-state/tailscaled.pid"
+if [ -f "$PIDFILE" ]; then
+    kill "$(cat "$PIDFILE")" 2>/dev/null
+    rm -f "$PIDFILE"
+fi
+```
+
+`chmod 755` both. The `--tun=userspace-networking` flag skips the kernel TUN device (no root) and `tailscale nc` pipes the SSH connection through the userspace stack — no listening SOCKS port that other users on a shared host could hijack.
+
+### Authenticate the spoke
+
+```bash
+~/.local/bin/schist-tailscale-nc trigger nothing  # forces the daemon up
+~/.local/bin/tailscale --socket=$HOME/.tailscale-state/tailscaled.sock up \
+  --hostname=<spoke-name> --shields-up --accept-dns=false
+```
+
+`tailscale up` prints a `https://login.tailscale.com/a/...` URL — open it in a browser logged into the Tailscale account that owns the Pi. After approval, `tailscale status` lists both the spoke and the hub.
+
+`--shields-up` rejects all incoming tailnet connections to this node — appropriate for HPC where the spoke only initiates outbound git pushes/pulls.
+
+### Wire SSH through the proxy
+
+Replace the `Host schist-hub` block in `~/.ssh/config` with:
+
+```
+Host schist-hub
+    HostName <pi-tailnet-name>      # e.g. eleven-party (MagicDNS) or the 100.x.y.z IP
+    User <pi-username>
+    IdentityFile ~/.ssh/schist_spoke
+    ProxyCommand /home/<you>/.local/bin/schist-tailscale-nc %h %p
+    SendEnv SCHIST_IDENTITY
+    StrictHostKeyChecking accept-new
+```
+
+Verify:
+
+```bash
+ssh schist-hub echo ok        # should print "ok"
+schist sync push              # should land a commit on the Pi
+```
+
+### Connectivity & troubleshooting
+
+- `tailscale ping <pi-name>` shows whether traffic is routed direct (UDP punch-through) or via DERP (Tailscale's relay). HPC clusters often block outbound UDP, so DERP is normal — adds ~30-100ms but otherwise transparent.
+- If `ssh schist-hub` hangs: `~/.local/bin/schist-tailscale-down`, then re-run. The wrapper restarts the daemon on next use.
+- If the daemon dies between sessions: pidfile is stale; the wrapper detects that via `tailscale status` and respawns.
+- `~/.tailscale-state/tailscaled.log` has the daemon's output if anything fails to start.
+
+### Checking with your HPC operator
+
+User-run VPN tunnels on shared HPC infrastructure can violate AUPs. Before installing on a managed cluster (MIT ORCD, etc.), confirm the practice is permitted — even though userspace mode requires no root and runs only when invoked. Outbound-only sync (which this setup is) is lower-profile than persistent inbound services.
+
