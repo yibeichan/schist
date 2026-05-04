@@ -13,6 +13,7 @@ import yaml
 from schist.doctor import (
     CheckResult,
     check_git,
+    check_hooks_path,
     check_ingest_available,
     check_mcp_config,
     check_node,
@@ -179,6 +180,44 @@ class TestCheckPostCommitHook:
         assert r.status == "FAIL"
 
 
+class TestCheckHooksPath:
+    """Issue #40 — warn when core.hooksPath redirects git away from
+    .git/hooks/ so schist's installed hooks are silently bypassed."""
+
+    def test_no_path(self):
+        r = check_hooks_path(None)
+        assert r.status == "SKIP"
+
+    def test_unset_returns_pass(self, tmp_path):
+        # Init a fresh repo with no core.hooksPath set.
+        subprocess.run(["git", "init", str(tmp_path)], check=True,
+                       capture_output=True)
+        r = check_hooks_path(str(tmp_path))
+        assert r.status == "PASS"
+        assert r.label == "Hooks path"
+
+    def test_set_returns_warn(self, tmp_path):
+        """When core.hooksPath is set to a non-default value, the schist
+        hooks at .git/hooks/ are bypassed — warn loudly."""
+        subprocess.run(["git", "init", str(tmp_path)], check=True,
+                       capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "config", "core.hooksPath", "/tmp/elsewhere"],
+            check=True, capture_output=True,
+        )
+        r = check_hooks_path(str(tmp_path))
+        assert r.status == "WARN"
+        assert "core.hooksPath" in r.message
+        assert "/tmp/elsewhere" in r.message
+        assert r.fix is not None
+
+    def test_not_a_git_repo(self, tmp_path):
+        """If the vault path isn't a git repo at all, SKIP (other doctor
+        checks will FAIL appropriately for the missing .git/)."""
+        r = check_hooks_path(str(tmp_path))
+        assert r.status == "SKIP"
+
+
 class TestCheckIngestAvailable:
     def test_no_path(self):
         r = check_ingest_available(None)
@@ -246,27 +285,118 @@ class TestCheckMcpConfig:
         """Claude Code (the active product) stores user-scope MCP servers in
         ~/.claude.json — distinct from Claude Desktop's ~/.claude/settings.json.
         """
+        fake_mcp = tmp_path / "fake-mcp" / "dist" / "index.js"
+        fake_mcp.parent.mkdir(parents=True)
+        fake_mcp.write_text("// stub\n")
         (tmp_path / ".claude.json").write_text(json.dumps({
-            "mcpServers": {"schist": {"command": "node", "args": ["/path/to/index.js"]}}
+            "mcpServers": {"schist": {"command": "node", "args": [str(fake_mcp)]}}
         }))
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-        r = check_mcp_config(None)
+        # Patch auto-detect so sub-check 3 doesn't fire for a stale fake path.
+        with patch("schist.doctor._auto_detect_mcp_path", return_value=None):
+            r = check_mcp_config(None)
         assert r.status == "PASS"
         assert ".claude.json" in r.message
 
     def test_found_in_claude_desktop_settings(self, tmp_path, monkeypatch):
+        fake_mcp = tmp_path / "fake-mcp" / "dist" / "index.js"
+        fake_mcp.parent.mkdir(parents=True)
+        fake_mcp.write_text("// stub\n")
         (tmp_path / ".claude").mkdir()
         (tmp_path / ".claude" / "settings.json").write_text(json.dumps({
-            "mcpServers": {"schist": {"command": "node", "args": ["/path/to/index.js"]}}
+            "mcpServers": {"schist": {"command": "node", "args": [str(fake_mcp)]}}
         }))
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-        r = check_mcp_config(None)
+        # Patch auto-detect so sub-check 3 doesn't fire for a stale fake path.
+        with patch("schist.doctor._auto_detect_mcp_path", return_value=None):
+            r = check_mcp_config(None)
         assert r.status == "PASS"
 
     def test_not_found(self, tmp_path, monkeypatch):
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         r = check_mcp_config(None)
         assert r.status == "WARN"
+
+    def test_args0_missing_returns_warn(self, tmp_path, monkeypatch):
+        """Issue #43 sub-check 1: WARN when args[0] doesn't exist on disk."""
+        (tmp_path / ".claude.json").write_text(json.dumps({
+            "mcpServers": {"schist": {
+                "command": "node",
+                "args": [str(tmp_path / "nope" / "missing.js")],
+            }}
+        }))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_config(None)
+        assert r.status == "WARN"
+        assert "does not exist" in r.message
+
+    def test_vault_path_env_mismatch_returns_warn(self, tmp_path, monkeypatch):
+        """Issue #43 sub-check 2: WARN when entry's SCHIST_VAULT_PATH env
+        differs from the current vault_path passed to the doctor."""
+        fake_mcp = tmp_path / "fake-mcp" / "dist" / "index.js"
+        fake_mcp.parent.mkdir(parents=True)
+        fake_mcp.write_text("// stub\n")
+        current_vault = tmp_path / "current-vault"
+        current_vault.mkdir()
+        wrong_vault = tmp_path / "old-vault"
+        wrong_vault.mkdir()
+        (tmp_path / ".claude.json").write_text(json.dumps({
+            "mcpServers": {"schist": {
+                "command": "node",
+                "args": [str(fake_mcp)],
+                "env": {"SCHIST_VAULT_PATH": str(wrong_vault)},
+            }}
+        }))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_config(str(current_vault))
+        assert r.status == "WARN"
+        assert "SCHIST_VAULT_PATH" in r.message
+
+    def test_aggregates_multiple_warnings(self, tmp_path, monkeypatch):
+        """Multiple sub-check failures aggregate into ONE WARN result whose
+        message lists each failure (joined with '; ')."""
+        # Both args[0] missing AND env mismatch in the same entry.
+        current_vault = tmp_path / "current"
+        current_vault.mkdir()
+        (tmp_path / ".claude.json").write_text(json.dumps({
+            "mcpServers": {"schist": {
+                "command": "node",
+                "args": [str(tmp_path / "nope.js")],
+                "env": {"SCHIST_VAULT_PATH": str(tmp_path / "old")},
+            }}
+        }))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_config(str(current_vault))
+        assert r.status == "WARN"
+        assert "does not exist" in r.message
+        assert "SCHIST_VAULT_PATH" in r.message
+        assert "; " in r.message  # aggregated, not just one reason
+
+    def test_auto_detect_drift_returns_warn(self, tmp_path, monkeypatch):
+        """Issue #43 sub-check 3: WARN when the entry's args[0] differs from
+        the auto-detected current mcp-server/dist/index.js."""
+        # Set up a real-on-disk args[0] (so sub-check 1 passes)
+        entry_mcp = tmp_path / "old-checkout" / "dist" / "index.js"
+        entry_mcp.parent.mkdir(parents=True)
+        entry_mcp.write_text("// stale\n")
+
+        # Patch the auto-detect helper to return a different path.
+        # The enhanced check_mcp_config calls a private helper for this; the
+        # test patches that helper to return a synthetic 'current' path.
+        # If implementation uses an inline auto-detect, the patch target is
+        # `schist.doctor._auto_detect_mcp_path` (extract one in Task 5).
+        with patch("schist.doctor._auto_detect_mcp_path",
+                   return_value=str(tmp_path / "fresh-checkout" / "dist" / "index.js")):
+            (tmp_path / ".claude.json").write_text(json.dumps({
+                "mcpServers": {"schist": {
+                    "command": "node",
+                    "args": [str(entry_mcp)],
+                }}
+            }))
+            monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+            r = check_mcp_config(None)
+            assert r.status == "WARN"
+            assert "auto-detected" in r.message or "differs" in r.message
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +444,6 @@ class TestRunDoctor:
         assert "[PASS] SQLite:" in captured.out
         # Vault-specific checks should all pass
         vault_labels = {"Vault", "Git repo", "schist.yaml", "SQLite",
-                        "Post-commit hook", "Ingest"}
+                        "Post-commit hook", "Hooks path", "Ingest"}
         vault_results = [r for r in results if r.label in vault_labels]
         assert all(r.status == "PASS" for r in vault_results)
