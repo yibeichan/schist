@@ -45,12 +45,18 @@ Mirror the standalone-init pattern at `sync.py:588-616`:
 
 ### Refactor shape
 
-Extract the six steps into a helper
-`_build_spoke_in_staging(staging, hub, scope, identity, db_path)`
+Extract the configuration steps into a helper
+`_build_spoke_in_staging(staging, hub, scope, identity)`
 that raises `_InitError` on any step failure (parallel to the
 existing `_build_standalone_in_staging`). Keep the user-visible
 output (`Cloning from ...`, `Setting up sparse checkout ...`)
 inside the helper — the staging path is an implementation detail.
+
+The SQLite rebuild is intentionally **not** in this helper — it
+runs in `init_spoke` against the final vault path *after* the
+atomic rename, so `db_path` (set by the caller against the
+user-visible vault path) doesn't need rewriting. Five steps in
+the helper, one step (rebuild) in the caller post-rename.
 
 `init_spoke` becomes the thin orchestrator: validate args → make
 staging path → call helper in try/except → atomic rename → print
