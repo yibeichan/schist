@@ -80,12 +80,13 @@ class TestInitSpoke:
         dest = str(tmp_path / "spoke")
         args = MagicMock(hub="git@pi:vault.git", scope="research/mario", identity="cluster-mario")
 
-        # clone_shallow creates the directory
-        def create_dir(*a, **kw):
-            Path(dest).mkdir(parents=True, exist_ok=True)
-            (Path(dest) / ".git" / "info").mkdir(parents=True)
+        # clone_shallow now receives the staging path (not `dest`); create
+        # whatever path the caller passes so the mock works regardless.
+        def create_at_arg(hub_url, dest_path, *a, **kw):
+            Path(dest_path).mkdir(parents=True, exist_ok=True)
+            (Path(dest_path) / ".git" / "info").mkdir(parents=True)
             return True, ""
-        mock_clone.side_effect = create_dir
+        mock_clone.side_effect = create_at_arg
 
         init_spoke(args, dest, str(tmp_path / "db.sqlite"))
 
@@ -113,6 +114,104 @@ class TestInitSpoke:
         assert not dest.exists()
         assert "clone failed" in capsys.readouterr().err
 
+    @patch("schist.sync.git_ops.clone_shallow")
+    @patch("schist.sync.git_ops.setup_sparse_checkout",
+           return_value=(False, "scope path produces empty checkout"))
+    def test_sparse_checkout_failure_leaves_no_target_dir(
+        self, mock_sparse, mock_clone, tmp_path, capsys
+    ):
+        """Issue #41: failure mid-init must leave the target dir absent so
+        the user can re-run init without `rm -rf`."""
+        from schist.sync import init_spoke
+
+        dest = tmp_path / "spoke"
+
+        # clone_shallow gets called with the staging path, not `dest`.
+        # Create whatever directory the function asks for, return success.
+        def create_at_arg(hub_url, dest_path, *a, **kw):
+            Path(dest_path).mkdir(parents=True, exist_ok=True)
+            (Path(dest_path) / ".git" / "info").mkdir(parents=True)
+            return True, ""
+        mock_clone.side_effect = create_at_arg
+
+        args = MagicMock(
+            hub="git@pi:vault.git", scope="bad/scope", identity="cluster",
+        )
+        with pytest.raises(SystemExit):
+            init_spoke(args, str(dest), str(tmp_path / "db.sqlite"))
+
+        # Target dir absent (or empty) — user can re-run.
+        assert not dest.exists() or not any(dest.iterdir())
+
+        # No leftover staging dir in the parent.
+        leftovers = [
+            p for p in tmp_path.iterdir()
+            if p.name.startswith(".spoke.init-")
+        ]
+        assert leftovers == [], f"staging leftovers: {leftovers}"
+
+        assert "sparse checkout failed" in capsys.readouterr().err
+
+    @patch("schist.sync.git_ops.clone_shallow")
+    @patch("schist.sync.git_ops.setup_sparse_checkout", return_value=(True, ""))
+    @patch("schist.sync._install_local_hooks", side_effect=OSError("disk full"))
+    def test_hook_install_failure_leaves_no_target_dir(
+        self, mock_hooks, mock_sparse, mock_clone, tmp_path, capsys
+    ):
+        """Failure in a step that today has NO cleanup (hooks install) must
+        also leave the target dir absent under the staging refactor."""
+        from schist.sync import init_spoke
+
+        dest = tmp_path / "spoke"
+
+        def create_at_arg(hub_url, dest_path, *a, **kw):
+            Path(dest_path).mkdir(parents=True, exist_ok=True)
+            (Path(dest_path) / ".git" / "info").mkdir(parents=True)
+            return True, ""
+        mock_clone.side_effect = create_at_arg
+
+        args = MagicMock(
+            hub="git@pi:vault.git", scope="research/x", identity="cluster",
+        )
+        with pytest.raises(SystemExit):
+            init_spoke(args, str(dest), str(tmp_path / "db.sqlite"))
+
+        assert not dest.exists() or not any(dest.iterdir())
+        leftovers = [
+            p for p in tmp_path.iterdir()
+            if p.name.startswith(".spoke.init-")
+        ]
+        assert leftovers == []
+
+    @patch("schist.sync.git_ops.clone_shallow")
+    @patch("schist.sync.git_ops.setup_sparse_checkout", return_value=(True, ""))
+    @patch("schist.sync._install_local_hooks", side_effect=OSError("disk full"))
+    @patch("schist.sync.shutil.rmtree", side_effect=OSError("rmtree denied"))
+    def test_cleanup_failure_surfaces_manual_fix_hint(
+        self, mock_rmtree, mock_hooks, mock_sparse, mock_clone, tmp_path, capsys
+    ):
+        """When BOTH the build and the cleanup fail, surface a 'Manual fix:
+        rm -rf <path>' hint so the user can recover."""
+        from schist.sync import init_spoke
+
+        dest = tmp_path / "spoke"
+
+        def create_at_arg(hub_url, dest_path, *a, **kw):
+            Path(dest_path).mkdir(parents=True, exist_ok=True)
+            (Path(dest_path) / ".git" / "info").mkdir(parents=True)
+            return True, ""
+        mock_clone.side_effect = create_at_arg
+
+        args = MagicMock(
+            hub="git@pi:vault.git", scope="research/x", identity="cluster",
+        )
+        with pytest.raises(SystemExit):
+            init_spoke(args, str(dest), str(tmp_path / "db.sqlite"))
+
+        err = capsys.readouterr().err
+        assert "disk full" in err  # original error preserved
+        assert "Manual fix: rm -rf" in err  # cleanup-failure hint
+
     @patch("schist.sync.git_ops.clone_shallow", return_value=(True, ""))
     @patch("schist.sync.git_ops.setup_sparse_checkout", return_value=(True, ""))
     @patch("schist.sync._rebuild_index")
@@ -125,11 +224,13 @@ class TestInitSpoke:
 
         dest = str(tmp_path / "spoke")
 
-        def create_dir(*a, **kw):
-            Path(dest).mkdir(parents=True, exist_ok=True)
-            (Path(dest) / ".git" / "info").mkdir(parents=True)
+        # clone_shallow now receives the staging path (not `dest`); create
+        # whatever path the caller passes so the mock works regardless.
+        def create_at_arg(hub_url, dest_path, *a, **kw):
+            Path(dest_path).mkdir(parents=True, exist_ok=True)
+            (Path(dest_path) / ".git" / "info").mkdir(parents=True)
             return True, ""
-        mock_clone.side_effect = create_dir
+        mock_clone.side_effect = create_at_arg
 
         args = MagicMock(hub="git@pi:vault.git", scope="research/x", identity="x")
         init_spoke(args, dest, str(tmp_path / "db.sqlite"))
