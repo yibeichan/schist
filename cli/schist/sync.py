@@ -102,7 +102,12 @@ def _install_local_hooks(vault_path) -> None:
 
 
 def init_spoke(args, vault_path: str, db_path: str) -> None:
-    """Initialize a spoke vault from hub via shallow clone + sparse checkout."""
+    """Initialize a spoke vault from hub via shallow clone + sparse checkout.
+
+    Mirrors init_standalone's staging-dir + atomic-rename pattern so a
+    half-initialized target dir never exists on disk. On failure, only the
+    staging directory is touched and it is cleaned up before exit.
+    """
     hub = args.hub
     scope = args.scope
     identity = args.identity
@@ -117,49 +122,85 @@ def init_spoke(args, vault_path: str, db_path: str) -> None:
         print("Error: --identity is required (or set SCHIST_IDENTITY)", file=sys.stderr)
         sys.exit(1)
 
-    if Path(vault_path).exists() and any(Path(vault_path).iterdir()):
-        print(f"Error: directory '{vault_path}' already exists and is not empty", file=sys.stderr)
+    target = Path(vault_path).resolve()
+    if target.exists() and any(target.iterdir()):
+        print(
+            f"Error: directory '{vault_path}' already exists and is not empty",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
-    # Step 1: Shallow clone (no checkout)
+    # Stage in a sibling so the final os.rename is atomic (same FS).
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = target.parent / f".{target.name}.init-{os.getpid()}"
+    if staging.exists():
+        shutil.rmtree(staging)
+
+    try:
+        _build_spoke_in_staging(staging, hub, scope, identity)
+    except (_InitError, OSError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        try:
+            if staging.exists():
+                shutil.rmtree(staging)
+        except OSError as cleanup_err:
+            print(
+                f"Warning: could not clean up staging dir {staging}: {cleanup_err}\n"
+                f"  Manual fix: rm -rf {staging}",
+                file=sys.stderr,
+            )
+        sys.exit(1)
+
+    # Atomic rename: either target points at a complete spoke, or nothing.
+    if target.exists():
+        target.rmdir()
+    os.rename(staging, target)
+
+    # Rebuild SQLite index against the final path (best-effort post-rename).
+    # If this step fails the spoke is still usable; user can re-run rebuild.
+    _rebuild_index(str(target), db_path)
+
+    scope_path = target / scope
+    file_count = sum(1 for _ in scope_path.rglob("*.md")) if scope_path.exists() else 0
+    print(f"Spoke initialized: identity={identity} scope={scope} ({file_count} files)")
+
+
+def _build_spoke_in_staging(
+    staging: Path,
+    hub: str,
+    scope: str,
+    identity: str,
+) -> None:
+    """Build the spoke working-tree repo entirely inside `staging`.
+
+    Mirrors `_build_standalone_in_staging` for the spoke flavor: clone,
+    sparse-checkout, write spoke.yaml, write .git/info/exclude, install
+    hooks. Raises `_InitError` with a descriptive message on any failure;
+    caller is responsible for cleaning up `staging`.
+
+    SQLite rebuild is intentionally NOT in this helper — it runs against
+    the final vault path AFTER the atomic rename so `db_path` (set by the
+    caller against the user-visible vault path) doesn't need rewriting.
+    """
     print(f"Cloning from {hub}...")
-    ok, output = git_ops.clone_shallow(hub, vault_path)
+    ok, output = git_ops.clone_shallow(hub, str(staging))
     if not ok:
-        print(f"Error: clone failed: {output}", file=sys.stderr)
-        # Clean up partial clone
-        if Path(vault_path).exists():
-            shutil.rmtree(vault_path)
-        sys.exit(1)
+        raise _InitError(f"clone failed: {output}")
 
-    # Step 2: Sparse checkout for scope
     print(f"Setting up sparse checkout for scope '{scope}'...")
-    ok, output = git_ops.setup_sparse_checkout(vault_path, scope)
+    ok, output = git_ops.setup_sparse_checkout(str(staging), scope)
     if not ok:
-        print(f"Error: sparse checkout failed: {output}", file=sys.stderr)
-        shutil.rmtree(vault_path)
-        sys.exit(1)
+        raise _InitError(f"sparse checkout failed: {output}")
 
-    # Step 3: Write spoke config
     config = SpokeConfig(hub=hub, identity=identity, scope=scope)
-    save_spoke_config(vault_path, config)
+    save_spoke_config(str(staging), config)
 
-    # Step 4: Exclude spoke config from git
-    exclude_path = Path(vault_path) / ".git" / "info" / "exclude"
+    exclude_path = staging / ".git" / "info" / "exclude"
     exclude_path.parent.mkdir(parents=True, exist_ok=True)
     with open(exclude_path, "a") as f:
         f.write(f"\n# schist spoke config (never pushed to hub)\n{'.schist/spoke.yaml'}\n")
 
-    # Step 5: Install commit hooks (post-commit re-ingests SQLite, pre-commit
-    # rejects staged secrets — same hooks standalone init writes).
-    _install_local_hooks(vault_path)
-
-    # Step 6: Rebuild SQLite index
-    _rebuild_index(vault_path, db_path)
-
-    # Summary
-    scope_path = Path(vault_path) / scope
-    file_count = sum(1 for _ in scope_path.rglob("*.md")) if scope_path.exists() else 0
-    print(f"Spoke initialized: identity={identity} scope={scope} ({file_count} files)")
+    _install_local_hooks(str(staging))
 
 
 def sync_pull(args, vault_path: str, db_path: str) -> None:
