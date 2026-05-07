@@ -788,6 +788,23 @@ def _print_mcp_config(args) -> None:
         env_flags = " ".join("-e " + shlex.quote(f"{k}={v}") for k, v in env.items())
         print("# Run to register schist with Claude Code (user scope):")
         print(f"claude mcp add --scope user schist {env_flags} -- node {shlex.quote(mcp_path)}")
+        # Fallback for older Claude Code CLIs that predate `mcp add` /
+        # `--scope` — emit a commented JSON block the user can hand-merge
+        # under the top-level `mcpServers` key in ~/.claude.json. See #42.
+        fallback = {
+            "mcpServers": {
+                "schist": {
+                    "command": "node",
+                    "args": [mcp_path],
+                    "env": env,
+                }
+            }
+        }
+        print()
+        print("# Fallback (older Claude Code without `mcp add`):")
+        print("# merge under `mcpServers` in ~/.claude.json")
+        for line in _json.dumps(fallback, indent=2).splitlines():
+            print(f"# {line}")
     elif fmt == "cursor":
         config = {
             "mcpServers": {

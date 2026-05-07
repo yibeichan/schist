@@ -140,19 +140,14 @@ export SCHIST_VAULT_PATH=~/my-vault
 schist --vault ~/my-vault init --print-mcp-config --format claude --identity local
 ```
 
-This prints a JSON block. Paste the `mcpServers` object into the appropriate config file:
+This prints a runnable `claude mcp add` command — paste-and-run to register
+schist as a user-scope MCP server (stored in `~/.claude.json`). It also emits
+a commented-out JSON fallback below the command for older Claude Code CLIs
+that predate `mcp add` / `--scope`; in that case, uncomment the block and
+hand-merge it under the `mcpServers` key in `~/.claude.json`.
 
-**Claude Code** (global):
-```
-~/.claude/settings.json
-```
-
-**Claude Code** (project-scoped):
-```
-<project>/.claude/settings.json
-```
-
-**Claude Desktop** (macOS):
+**Claude Desktop** (macOS) — uses a different config file; merge the
+commented JSON under `mcpServers` in:
 ```
 ~/Library/Application Support/Claude/claude_desktop_config.json
 ```
