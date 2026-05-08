@@ -543,13 +543,19 @@ class TestPrintMcpConfig:
         assert "~/.claude.json" in out
         assert "Fallback" in out or "fallback" in out
 
-        # Strip leading "# " from comment lines and parse — proves the JSON
-        # is well-formed and matches the structure ~/.claude.json expects.
-        comment_lines = [
-            line[2:] for line in out.splitlines()
-            if line.startswith("# {") or line.startswith("#   ") or line.startswith("# }")
-        ]
-        parsed = _json.loads("\n".join(comment_lines))
+        # Locate the JSON fallback block by its opening "# {" line, then
+        # walk consecutive "# "-prefixed lines until the comment block ends.
+        # Robust to json.dumps indent changes (was previously coupled to
+        # indent=2 via prefix-string filters that silently dropped lines on
+        # other indents).
+        lines = out.splitlines()
+        start = lines.index("# {")
+        block = []
+        for line in lines[start:]:
+            if not line.startswith("# "):
+                break
+            block.append(line[2:])
+        parsed = _json.loads("\n".join(block))
         assert parsed == {
             "mcpServers": {
                 "schist": {
