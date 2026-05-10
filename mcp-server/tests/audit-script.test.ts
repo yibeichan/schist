@@ -34,19 +34,36 @@ describe("measureResponse", () => {
 describe("runAudit (end-to-end)", () => {
   let tmpVault: string;
   let tmpMemoryDb: string;
-  let originalMemoryDb: string | undefined;
+  // Snapshot of any SCHIST_* env vars present at suite start. Restored
+  // verbatim in afterAll so the suite is hermetic against the surrounding
+  // shell (developer machines often have SCHIST_AGENT_NAME / SCHIST_IDENTITY
+  // set; without isolation those leak into searchNotes scope-inherit, the
+  // ingest script's identity resolution, etc).
+  const schistEnvKeys = [
+    "SCHIST_AGENT_ID",
+    "SCHIST_AGENT_NAME",
+    "SCHIST_IDENTITY",
+    "SCHIST_INGEST_SCRIPT",
+    "SCHIST_MEMORY_DB",
+    "SCHIST_VAULT_PATH",
+  ] as const;
+  const originalEnv: Record<string, string | undefined> = {};
+
+  // Inherit stderr so ENOENT / permission errors from the spawned schist /
+  // schist-ingest binaries surface in the test output instead of being
+  // swallowed by the failed-execSync wrapper.
+  const stdio: ["pipe", "pipe", "inherit"] = ["pipe", "pipe", "inherit"];
 
   beforeAll(async () => {
+    for (const k of schistEnvKeys) {
+      originalEnv[k] = process.env[k];
+      delete process.env[k];
+    }
     tmpVault = await fs.mkdtemp(path.join(os.tmpdir(), "schist-audit-"));
     tmpMemoryDb = path.join(tmpVault, "agent-state.db");
-
-    // Isolate the memory DB so the test never touches the user's real
-    // ~/.openclaw/memory/agent-state.db. Stash the prior value so afterAll
-    // can restore the env exactly as we found it.
-    originalMemoryDb = process.env.SCHIST_MEMORY_DB;
     process.env.SCHIST_MEMORY_DB = tmpMemoryDb;
 
-    execSync(`schist init ${tmpVault} --name audit-test`, { stdio: "pipe" });
+    execSync(`schist init ${tmpVault} --name audit-test`, { stdio });
     for (let i = 0; i < 5; i++) {
       const noteFile = path.join(tmpVault, "notes", `2026-05-04-fixture-${i}.md`);
       await fs.mkdir(path.dirname(noteFile), { recursive: true });
@@ -55,13 +72,15 @@ describe("runAudit (end-to-end)", () => {
         `---\ntitle: Fixture ${i}\ndate: 2026-05-04\nstatus: draft\ntags: [audit]\n---\n\nBody for fixture note ${i}, ${"x".repeat(200)}.\n`
       );
     }
-    execSync(`git -C ${tmpVault} add -A && git -C ${tmpVault} commit -m fixtures`, { stdio: "pipe" });
-    execSync(`schist-ingest --vault ${tmpVault} --db ${tmpVault}/.schist/schist.db`, { stdio: "pipe" });
+    execSync(`git -C ${tmpVault} add -A && git -C ${tmpVault} commit -m fixtures`, { stdio });
+    execSync(`schist-ingest --vault ${tmpVault} --db ${tmpVault}/.schist/schist.db`, { stdio });
   });
 
   afterAll(async () => {
-    if (originalMemoryDb === undefined) delete process.env.SCHIST_MEMORY_DB;
-    else process.env.SCHIST_MEMORY_DB = originalMemoryDb;
+    for (const k of schistEnvKeys) {
+      if (originalEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = originalEnv[k];
+    }
     await fs.rm(tmpVault, { recursive: true, force: true });
   });
 
@@ -92,14 +111,23 @@ describe("runAudit (end-to-end)", () => {
     // Without this, the audit "succeeds" even when better-sqlite3 fails to
     // load and every tool returns { error, message } — measureResponse
     // dutifully measures the error envelope and bytes>0/entryCount>=1
-    // both still pass. Probe two read tools that should always return
-    // arrays on a fresh fixture vault.
+    // both still pass. Probe one tool per distinct DB / executor path so
+    // a broken binding can't silently fail any subset:
+    //   - list_concepts / list_domains / search_memory: array return
+    //   - query_graph:                                   { columns, rows, rowCount }
+    //   - search_memory:                                  separate memory DB file
     const tools = await import("../../mcp-server/dist/tools.js");
-    const probes: Array<[string, unknown]> = [
-      ["list_concepts", await tools.list_concepts(tmpVault, {})],
-      ["list_domains", await tools.list_domains(tmpVault, {})],
+    type ShapeCheck = (resp: unknown) => boolean;
+    const isArrayShape: ShapeCheck = (r) => Array.isArray(r);
+    const isQueryGraphShape: ShapeCheck = (r) =>
+      !!r && typeof r === "object" && Array.isArray((r as { rows?: unknown }).rows);
+    const probes: Array<[string, unknown, ShapeCheck]> = [
+      ["list_concepts", await tools.list_concepts(tmpVault, {}), isArrayShape],
+      ["list_domains", await tools.list_domains(tmpVault, {}), isArrayShape],
+      ["query_graph", await tools.query_graph(tmpVault, { sql: "SELECT 1 AS x" }), isQueryGraphShape],
+      ["search_memory", await tools.search_memory(tmpVault, { limit: 1 }), isArrayShape],
     ];
-    for (const [name, resp] of probes) {
+    for (const [name, resp, shapeOk] of probes) {
       if (resp && typeof resp === "object" && "error" in resp) {
         const err = resp as { error: string; message?: string };
         throw new Error(
@@ -107,7 +135,18 @@ describe("runAudit (end-to-end)", () => {
           `${err.error}: ${err.message ?? ""}`
         );
       }
-      expect(Array.isArray(resp)).toBe(true);
+      expect(shapeOk(resp)).toBe(true);
     }
+  });
+
+  it("honors searchQuery override (not just the default)", async () => {
+    // The default "fixture" path is exercised by the two specs above. This
+    // pins the override pathway so a future refactor can't silently drop
+    // the parameter — e.g. by accidentally re-hardcoding "fixture" inside
+    // runAudit. The fixture corpus contains no "nonexistent-token-zzz"
+    // notes, so search_notes must return an empty result (0 entries) when
+    // the override is honored.
+    const report = await runAudit({ vault: tmpVault, searchQuery: "nonexistent-token-zzz" });
+    expect(report.measurements.search_notes.entryCount).toBe(0);
   });
 });
