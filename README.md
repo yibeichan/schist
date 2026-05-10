@@ -85,9 +85,27 @@ capture lessons and recall them from elsewhere. Details and the
 
 ## Agent Integration
 
-### Claude Desktop / Claude Code
+### Claude Code
 
-Add to `~/.claude/settings.json`:
+Register schist as a user-scope MCP server with the printed `claude mcp add`
+command:
+
+```bash
+schist --vault /absolute/path/to/vault init --print-mcp-config --format claude --identity local
+# then run the printed `claude mcp add ...` line
+```
+
+Claude Code stores user-scope MCP servers in `~/.claude.json`. On older
+Claude Code CLIs that predate `mcp add` / `--scope`, `--print-mcp-config`
+also emits a commented JSON fallback below the command — uncomment it and
+hand-merge the block under the top-level `mcpServers` key in
+`~/.claude.json`.
+
+### Claude Desktop
+
+Claude Desktop reads `~/Library/Application Support/Claude/claude_desktop_config.json`
+(macOS). Run the same `--print-mcp-config --format claude` and merge the
+commented JSON block under `mcpServers` in that file. The shape is:
 
 ```json
 {

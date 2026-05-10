@@ -116,7 +116,20 @@ talks to the hub. Without it, the pre-receive hook rejects every push.
 
 ## Step 3. Point the MCP server at the spoke
 
-In the spoke's `~/.claude/settings.json` (or equivalent for your agent):
+Generate and register the MCP config for this spoke. `--print-mcp-config`
+emits a runnable `claude mcp add` line that registers schist as a
+user-scope server (stored in `~/.claude.json`):
+
+```bash
+schist --vault ~/vault init --print-mcp-config --format claude --identity laptop
+# then run the printed `claude mcp add ...` line
+```
+
+The command bakes in `SCHIST_VAULT_PATH`, `SCHIST_AGENT_ID`, and
+`SCHIST_IDENTITY` from the flags above. On older Claude Code CLIs that
+predate `mcp add`, the same output also includes a commented JSON
+fallback — uncomment that block and hand-merge it under the top-level
+`mcpServers` key in `~/.claude.json`. The fallback shape is:
 
 ```json
 {
@@ -126,6 +139,7 @@ In the spoke's `~/.claude/settings.json` (or equivalent for your agent):
       "args": ["/path/to/schist/mcp-server/dist/index.js"],
       "env": {
         "SCHIST_VAULT_PATH": "/home/you/vault",
+        "SCHIST_AGENT_ID": "laptop",
         "SCHIST_IDENTITY": "laptop"
       }
     }

@@ -168,7 +168,11 @@ schist init --spoke \
 schist --vault ~/schist-vault init --print-mcp-config --format claude --identity mac
 ```
 
-Paste the output into `~/.claude/settings.json`. The result looks like:
+Run the printed `claude mcp add` line — Claude Code stores user-scope MCP
+servers in `~/.claude.json` and registers them via the CLI. The command
+also emits a commented JSON fallback for older CLIs without `mcp add`;
+merge that under the `mcpServers` key in `~/.claude.json` if the runnable
+form errors with `unknown command: mcp`. The fallback shape is:
 
 ```json
 {
@@ -178,6 +182,7 @@ Paste the output into `~/.claude/settings.json`. The result looks like:
       "args": ["/path/to/schist/mcp-server/dist/index.js"],
       "env": {
         "SCHIST_VAULT_PATH": "/Users/yibei/schist-vault",
+        "SCHIST_AGENT_ID": "mac",
         "SCHIST_IDENTITY": "mac"
       }
     }

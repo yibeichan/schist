@@ -508,8 +508,67 @@ class TestPrintMcpConfig:
         # validation, SCHIST_IDENTITY for the auto-push to the hub.
         assert "-e SCHIST_IDENTITY=test-agent" in out
         assert f"node {fake_mcp}" in out
-        # Output should NOT be raw JSON (that was the Claude Desktop format).
-        assert "mcpServers" not in out
+        # The runnable `claude mcp add` line must not be raw JSON (that was
+        # the pre-#39 Claude Desktop format). The commented JSON fallback
+        # added for #42 is fine; check `mcpServers` only appears in comment
+        # lines, never as runnable output.
+        for line in out.splitlines():
+            if "mcpServers" in line:
+                assert line.lstrip().startswith("#"), \
+                    f"raw (uncommented) JSON leaked into output: {line!r}"
+
+    def test_claude_emits_commented_json_fallback(self, tmp_path, capsys):
+        """`--format claude` also prints a commented-out JSON snippet so users
+        on older Claude Code CLIs (predating `mcp add` / `--scope`) can fall
+        back to hand-editing ~/.claude.json. Surfaced by issue #42 — the move
+        from raw JSON to `claude mcp add` in #39 left those users with no
+        path forward when the runnable command errored.
+        """
+        import json as _json
+        from schist.sync import _dispatch_init
+
+        fake_mcp = tmp_path / "fake-index.js"
+        fake_mcp.write_text("// fake")
+        _dispatch_init(_args(
+            print_mcp_config=True,
+            mcp_format="claude",
+            vault=str(tmp_path),
+            identity="test-agent",
+            mcp_server_path=str(fake_mcp),
+        ))
+        out = capsys.readouterr().out
+
+        # Fallback header references ~/.claude.json (the actual user-scope
+        # config file) and signals it's for older CLIs.
+        assert "~/.claude.json" in out
+        assert "Fallback" in out or "fallback" in out
+
+        # Locate the JSON fallback block by its opening "# {" line, then
+        # walk consecutive "# "-prefixed lines until the comment block ends.
+        # Robust to json.dumps indent changes (was previously coupled to
+        # indent=2 via prefix-string filters that silently dropped lines on
+        # other indents).
+        lines = out.splitlines()
+        start = lines.index("# {")
+        block = []
+        for line in lines[start:]:
+            if not line.startswith("# "):
+                break
+            block.append(line[2:])
+        parsed = _json.loads("\n".join(block))
+        assert parsed == {
+            "mcpServers": {
+                "schist": {
+                    "command": "node",
+                    "args": [str(fake_mcp)],
+                    "env": {
+                        "SCHIST_VAULT_PATH": str(tmp_path),
+                        "SCHIST_AGENT_ID": "test-agent",
+                        "SCHIST_IDENTITY": "test-agent",
+                    },
+                }
+            }
+        }
 
     def test_claude_without_identity_omits_agent_vars(self, tmp_path, capsys, monkeypatch):
         from schist.sync import _dispatch_init
