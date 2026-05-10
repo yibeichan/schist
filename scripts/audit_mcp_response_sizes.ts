@@ -34,12 +34,18 @@ export interface AuditReport {
   measurements: Record<string, ResponseMeasurement>;
 }
 
-export async function runAudit(opts: { vault: string }): Promise<AuditReport> {
+export async function runAudit(opts: {
+  vault: string;
+  searchQuery?: string;
+}): Promise<AuditReport> {
   const measurements: Record<string, ResponseMeasurement> = {};
+  const searchQuery = opts.searchQuery ?? "fixture";
 
-  // search_notes — typical "find what I worked on" query.
+  // search_notes — typical "find what I worked on" query. The default
+  // hits the test-fixture corpus; live audits should pass a query
+  // representative of the target vault to exercise the FTS5 path.
   measurements.search_notes = measureResponse(
-    await tools.search_notes(opts.vault, { query: "fixture" })
+    await tools.search_notes(opts.vault, { query: searchQuery })
   );
 
   // list_concepts — default limit 50 in current code.
@@ -83,11 +89,15 @@ export async function runAudit(opts: { vault: string }): Promise<AuditReport> {
 if (import.meta.url === `file://${process.argv[1]}`) {
   const vaultIdx = process.argv.indexOf("--vault");
   if (vaultIdx === -1) {
-    console.error("Usage: tsx scripts/audit_mcp_response_sizes.ts --vault <path>");
+    console.error(
+      "Usage: tsx scripts/audit_mcp_response_sizes.ts --vault <path> [--search-query <q>]"
+    );
     process.exit(2);
   }
   const vault = process.argv[vaultIdx + 1];
-  runAudit({ vault }).then(
+  const sqIdx = process.argv.indexOf("--search-query");
+  const searchQuery = sqIdx === -1 ? undefined : process.argv[sqIdx + 1];
+  runAudit({ vault, searchQuery }).then(
     (r) => console.log(JSON.stringify(r, null, 2)),
     (err) => {
       console.error(err);
