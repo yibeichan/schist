@@ -51,21 +51,20 @@ The schist MCP server (`@schist/mcp-server`) is published separately on npm:
 npm install -g @schist/mcp-server
 ```
 
-Add to `~/.claude/settings.json`:
+Register it as a user-scope MCP server:
 
-```json
-{
-  "mcpServers": {
-    "schist": {
-      "command": "node",
-      "args": ["/absolute/path/to/schist/mcp-server/dist/index.js"],
-      "env": {
-        "SCHIST_VAULT_PATH": "/absolute/path/to/vault"
-      }
-    }
-  }
-}
+```bash
+schist --vault /absolute/path/to/vault init --print-mcp-config --format claude --identity local
+# then run the printed `claude mcp add ...` line
 ```
+
+Claude Code stores user-scope MCP servers in `~/.claude.json` (managed
+by the CLI). On older Claude Code CLIs without `mcp add`,
+`--print-mcp-config` also emits a commented JSON fallback — uncomment
+the block and hand-merge it under the top-level `mcpServers` key in
+`~/.claude.json`. Claude Desktop uses
+`~/Library/Application Support/Claude/claude_desktop_config.json`
+instead; the JSON shape is the same.
 
 See the [full README](https://github.com/yibeichan/schist#readme) for architecture docs, hub & spoke setup, and MCP tool reference.
 
