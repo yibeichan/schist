@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "@jest/globals";
 import { measureResponse, runAudit } from "../../scripts/audit_mcp_response_sizes.js";
+import { encode } from "gpt-tokenizer";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
@@ -12,10 +13,27 @@ describe("measureResponse", () => {
     expect(result.bytes).toBe(36);
   });
 
-  it("returns approximate token count using 4-bytes-per-token heuristic", () => {
+  it("returns a positive integer token count for non-empty responses", () => {
+    // We don't hardcode the count — that would couple the test to one
+    // specific tokenizer's BPE table. Instead assert the relationship
+    // we actually care about: tokens are positive, integer, and smaller
+    // than the byte count for any JSON-shaped ASCII content (BPE merges
+    // common substrings like `":"`, `","`, `"}"` into single tokens).
     const result = measureResponse({ a: "x".repeat(40) });
-    // {"a":"xxxx...xxxx"} = 48 bytes ≈ 12 tokens
-    expect(result.approxTokens).toBe(12);
+    expect(Number.isInteger(result.approxTokens)).toBe(true);
+    expect(result.approxTokens).toBeGreaterThan(0);
+    expect(result.approxTokens).toBeLessThan(result.bytes);
+  });
+
+  it("delegates to the configured tokenizer (gpt-tokenizer / o200k_base)", () => {
+    // Lock the wiring so a regression that silently reverts to bytes/4
+    // is caught. The tokenizer's exact value at any given input may
+    // shift across tokenizer-library versions, so we compute the
+    // expected value the same way the implementation does, rather than
+    // hardcoding a constant.
+    const payload = { id: "x", title: "y", snippet: "z" };
+    const expected = encode(JSON.stringify(payload)).length;
+    expect(measureResponse(payload).approxTokens).toBe(expected);
   });
 
   it("handles array responses (e.g. searchNotes return)", () => {
