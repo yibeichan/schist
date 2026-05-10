@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "baseUrl": ".",
+    "paths": {
+      "gpt-tokenizer": ["./node_modules/gpt-tokenizer"]
+    }
+  },
+  "include": ["src/**/*", "tests/**/*", "../scripts/**/*"]
+}
