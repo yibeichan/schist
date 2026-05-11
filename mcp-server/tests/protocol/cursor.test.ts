@@ -5,6 +5,9 @@ import {
   decodeCursor,
   resetForTesting,
   CURSOR_TTL_SECONDS,
+  checkRefusal,
+  recordIssued,
+  CURSOR_LRU_SIZE,
 } from "../../src/protocol/cursor.js";
 
 describe("canonicalizeQueryHash", () => {
@@ -305,5 +308,128 @@ describe("decodeCursor — log-injection defense", () => {
       expect(match).not.toBeNull();
       if (match) expect(match[1]).toMatch(/^[\w?-]+$/);
     }
+  });
+});
+
+describe("checkRefusal — identical-query refusal", () => {
+  beforeEach(() => resetForTesting());
+
+  it("returns refuse:false when no prior identical call recorded", () => {
+    const r = checkRefusal({ tool: "search_notes", queryHash: "h1", owner: "yibei", verboseEnabled: false });
+    expect(r).toEqual({ refuse: false });
+  });
+
+  it("returns refuse:true with CURSOR_REQUIRED on identical (tool, queryHash, owner) within TTL", () => {
+    recordIssued({ tool: "search_notes", queryHash: "h1", owner: "yibei", verboseEnabled: false });
+    const r = checkRefusal({ tool: "search_notes", queryHash: "h1", owner: "yibei", verboseEnabled: false });
+    expect(r).toEqual({
+      refuse: true,
+      error: {
+        error: "CURSOR_REQUIRED",
+        message: expect.stringContaining("pass the cursor"),
+      },
+    });
+  });
+
+  it("returns refuse:false on different queryHash (refined query)", () => {
+    recordIssued({ tool: "search_notes", queryHash: "h1", owner: "yibei", verboseEnabled: false });
+    const r = checkRefusal({ tool: "search_notes", queryHash: "h2", owner: "yibei", verboseEnabled: false });
+    expect(r).toEqual({ refuse: false });
+  });
+
+  it("returns refuse:false on different owner", () => {
+    recordIssued({ tool: "search_notes", queryHash: "h1", owner: "yibei", verboseEnabled: false });
+    const r = checkRefusal({ tool: "search_notes", queryHash: "h1", owner: "claude", verboseEnabled: false });
+    expect(r).toEqual({ refuse: false });
+  });
+
+  it("returns refuse:false on different tool (cross-tool cursors are independent)", () => {
+    recordIssued({ tool: "search_notes", queryHash: "h1", owner: "yibei", verboseEnabled: false });
+    const r = checkRefusal({ tool: "search_memory", queryHash: "h1", owner: "yibei", verboseEnabled: false });
+    expect(r).toEqual({ refuse: false });
+  });
+});
+
+describe("checkRefusal — verbose-newly-set bypass", () => {
+  beforeEach(() => resetForTesting());
+
+  it("bypasses refusal when prior had verboseEnabled=false and now verboseEnabled=true", () => {
+    recordIssued({ tool: "search_memory", queryHash: "h1", owner: "yibei", verboseEnabled: false });
+    const r = checkRefusal({ tool: "search_memory", queryHash: "h1", owner: "yibei", verboseEnabled: true });
+    expect(r).toEqual({ refuse: false });
+  });
+
+  it("STILL REFUSES when prior had verboseEnabled=true and now verboseEnabled=true (identical+verbose retry)", () => {
+    recordIssued({ tool: "search_memory", queryHash: "h1", owner: "yibei", verboseEnabled: true });
+    const r = checkRefusal({ tool: "search_memory", queryHash: "h1", owner: "yibei", verboseEnabled: true });
+    expect(r).toEqual({
+      refuse: true,
+      error: { error: "CURSOR_REQUIRED", message: expect.any(String) },
+    });
+  });
+
+  it("STILL REFUSES on downgrade (prior verboseEnabled=true, now verboseEnabled=false) — see Locked policy", () => {
+    recordIssued({ tool: "search_memory", queryHash: "h1", owner: "yibei", verboseEnabled: true });
+    const r = checkRefusal({ tool: "search_memory", queryHash: "h1", owner: "yibei", verboseEnabled: false });
+    expect(r).toEqual({
+      refuse: true,
+      error: { error: "CURSOR_REQUIRED", message: expect.any(String) },
+    });
+  });
+});
+
+describe("checkRefusal — TTL expiry on LRU entry", () => {
+  beforeEach(() => resetForTesting());
+
+  it("returns refuse:false once the LRU entry's issuedAt is older than TTL", () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date("2026-05-10T00:00:00Z"));
+    recordIssued({ tool: "search_notes", queryHash: "h1", owner: "yibei", verboseEnabled: false });
+    // Within TTL: refused
+    expect(checkRefusal({ tool: "search_notes", queryHash: "h1", owner: "yibei", verboseEnabled: false }).refuse).toBe(true);
+    // Past TTL: not refused
+    jest.setSystemTime(new Date(Date.now() + (CURSOR_TTL_SECONDS + 1) * 1000));
+    expect(checkRefusal({ tool: "search_notes", queryHash: "h1", owner: "yibei", verboseEnabled: false }).refuse).toBe(false);
+    jest.useRealTimers();
+  });
+});
+
+describe("LRU eviction (best-effort refusal)", () => {
+  beforeEach(() => resetForTesting());
+
+  it("evicts the oldest entry when CURSOR_LRU_SIZE is exceeded", () => {
+    // Fill the LRU to capacity
+    for (let i = 0; i < CURSOR_LRU_SIZE; i++) {
+      recordIssued({ tool: "search_notes", queryHash: `h${i}`, owner: "yibei", verboseEnabled: false });
+    }
+    // The oldest (h0) is still in the LRU
+    expect(checkRefusal({ tool: "search_notes", queryHash: "h0", owner: "yibei", verboseEnabled: false }).refuse).toBe(true);
+    // Insert one more — h0 evicts
+    recordIssued({ tool: "search_notes", queryHash: "hOverflow", owner: "yibei", verboseEnabled: false });
+    expect(checkRefusal({ tool: "search_notes", queryHash: "h0", owner: "yibei", verboseEnabled: false }).refuse).toBe(false);
+    // hOverflow is still tracked
+    expect(checkRefusal({ tool: "search_notes", queryHash: "hOverflow", owner: "yibei", verboseEnabled: false }).refuse).toBe(true);
+  });
+
+  it("promotes an entry to MRU on recordIssued (no premature eviction)", () => {
+    // Fill LRU
+    for (let i = 0; i < CURSOR_LRU_SIZE; i++) {
+      recordIssued({ tool: "search_notes", queryHash: `h${i}`, owner: "yibei", verboseEnabled: false });
+    }
+    // Re-record h0 — promotes to MRU
+    recordIssued({ tool: "search_notes", queryHash: "h0", owner: "yibei", verboseEnabled: false });
+    // Insert one more — now h1 (the new oldest) evicts, not h0
+    recordIssued({ tool: "search_notes", queryHash: "hOverflow", owner: "yibei", verboseEnabled: false });
+    expect(checkRefusal({ tool: "search_notes", queryHash: "h0", owner: "yibei", verboseEnabled: false }).refuse).toBe(true);
+    expect(checkRefusal({ tool: "search_notes", queryHash: "h1", owner: "yibei", verboseEnabled: false }).refuse).toBe(false);
+  });
+});
+
+describe("resetForTesting — clears LRU too", () => {
+  it("clears the LRU so subsequent checkRefusal returns refuse:false", () => {
+    recordIssued({ tool: "search_notes", queryHash: "h1", owner: "yibei", verboseEnabled: false });
+    expect(checkRefusal({ tool: "search_notes", queryHash: "h1", owner: "yibei", verboseEnabled: false }).refuse).toBe(true);
+    resetForTesting();
+    expect(checkRefusal({ tool: "search_notes", queryHash: "h1", owner: "yibei", verboseEnabled: false }).refuse).toBe(false);
   });
 });

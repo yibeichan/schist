@@ -278,9 +278,88 @@ function timingSafeEqualStrings(a: string, b: string): boolean {
   return crypto.timingSafeEqual(ab, bb);
 }
 
+// ── LRU for identical-query refusal ───────────────────────────────────────
+
+interface LruEntry {
+  issuedAt: number;   // unix seconds
+  verboseEnabled: boolean;
+}
+
+// JS Map preserves insertion order — re-insertion (delete + set) promotes to MRU.
+const refusalLru = new Map<string, LruEntry>();
+
+function lruKey(tool: string, queryHash: string, owner: string): string {
+  return `${tool}\x00${queryHash}\x00${owner}`;
+}
+
+// ── recordIssued ──────────────────────────────────────────────────────────
+
+export interface RecordIssuedInput {
+  tool: string;
+  queryHash: string;
+  owner: string;
+  verboseEnabled: boolean;
+}
+
+export function recordIssued(input: RecordIssuedInput): void {
+  const key = lruKey(input.tool, input.queryHash, input.owner);
+  // Delete-then-set to promote to MRU (Map iteration order = insertion order)
+  if (refusalLru.has(key)) refusalLru.delete(key);
+  refusalLru.set(key, {
+    issuedAt: Math.floor(Date.now() / 1000),
+    verboseEnabled: input.verboseEnabled,
+  });
+  // Best-effort eviction
+  while (refusalLru.size > CURSOR_LRU_SIZE) {
+    const oldestKey = refusalLru.keys().next().value;
+    if (oldestKey === undefined) break;
+    refusalLru.delete(oldestKey);
+  }
+}
+
+// ── checkRefusal ──────────────────────────────────────────────────────────
+
+export interface CheckRefusalInput {
+  tool: string;
+  queryHash: string;
+  owner: string;
+  verboseEnabled: boolean;
+}
+
+export type RefusalResult =
+  | { refuse: false }
+  | { refuse: true; error: CursorError };
+
+export function checkRefusal(input: CheckRefusalInput): RefusalResult {
+  const key = lruKey(input.tool, input.queryHash, input.owner);
+  const entry = refusalLru.get(key);
+  if (!entry) return { refuse: false };
+
+  // TTL expiry: treat as missing (caller will record fresh on this call)
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (entry.issuedAt + CURSOR_TTL_SECONDS < nowSec) {
+    return { refuse: false };
+  }
+
+  // Verbose-newly-set bypass: prior false → current true
+  // (Strict: only this transition bypasses. See plan's Spec clarification.)
+  if (!entry.verboseEnabled && input.verboseEnabled) {
+    return { refuse: false };
+  }
+
+  return {
+    refuse: true,
+    error: {
+      error: "CURSOR_REQUIRED",
+      message: `Identical query within ${CURSOR_TTL_SECONDS}s — pass the cursor you received on the previous response, or refine the query.`,
+    },
+  };
+}
+
 // ── Test-only ─────────────────────────────────────────────────────────────
 
-/** Rotates the HMAC secret. LRU clearing is added in Task 2.3. */
+/** Rotates the HMAC secret and clears the LRU. */
 export function resetForTesting(): void {
   HMAC_SECRET = crypto.randomBytes(32);
+  refusalLru.clear();
 }
