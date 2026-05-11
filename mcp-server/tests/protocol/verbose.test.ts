@@ -22,10 +22,16 @@ describe("parseVerbose — not-verbose paths (no error)", () => {
     expect(parseVerbose("\t\n  ")).toEqual({ enabled: false });
   });
 
-  it("returns enabled:false for whitespace-only via NBSP / ZWS / BOM", () => {
-    expect(parseVerbose("            ")).toEqual({ enabled: false });
-    expect(parseVerbose("​​​​​​​​​​​​")).toEqual({ enabled: false });
-    expect(parseVerbose("﻿")).toEqual({ enabled: false });
+  it("returns enabled:false for NBSP-only string (U+00A0)", () => {
+    expect(parseVerbose(" ".repeat(12))).toEqual({ enabled: false });
+  });
+
+  it("returns enabled:false for ZWS-only string (U+200B)", () => {
+    expect(parseVerbose("​".repeat(12))).toEqual({ enabled: false });
+  });
+
+  it("returns enabled:false for BOM-only string (U+FEFF)", () => {
+    expect(parseVerbose("﻿".repeat(12))).toEqual({ enabled: false });
   });
 });
 
