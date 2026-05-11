@@ -288,6 +288,12 @@ interface LruEntry {
 // JS Map preserves insertion order — re-insertion (delete + set) promotes to MRU.
 const refusalLru = new Map<string, LruEntry>();
 
+/**
+ * Builds the LRU map key from (tool, queryHash, owner) using NUL bytes as
+ * separator. Callers must ensure none of the three inputs contain `\x00`
+ * (queryHash is hex from canonicalizeQueryHash, tool is a fixed registry
+ * name, owner comes from vault config — all NUL-free in practice).
+ */
 function lruKey(tool: string, queryHash: string, owner: string): string {
   return `${tool}\x00${queryHash}\x00${owner}`;
 }
@@ -309,11 +315,11 @@ export function recordIssued(input: RecordIssuedInput): void {
     issuedAt: Math.floor(Date.now() / 1000),
     verboseEnabled: input.verboseEnabled,
   });
-  // Best-effort eviction
-  while (refusalLru.size > CURSOR_LRU_SIZE) {
+  // Best-effort eviction. Each recordIssued adds at most one entry, so size
+  // exceeds CURSOR_LRU_SIZE by at most 1 — `if` is sufficient.
+  if (refusalLru.size > CURSOR_LRU_SIZE) {
     const oldestKey = refusalLru.keys().next().value;
-    if (oldestKey === undefined) break;
-    refusalLru.delete(oldestKey);
+    if (oldestKey !== undefined) refusalLru.delete(oldestKey);
   }
 }
 
