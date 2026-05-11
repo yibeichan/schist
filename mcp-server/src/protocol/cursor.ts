@@ -222,6 +222,9 @@ export function decodeCursor(token: string, expectedTool: string): DecodeCursorR
   }
 
   // Decode payload
+  // Defense in depth: HMAC verification above already rejected anything not
+  // signed by this process, so reaching here with non-JSON payload requires
+  // either internal corruption or future cursor format changes.
   let payload: CursorPayload;
   try {
     const json = Buffer.from(payloadB64, "base64url").toString("utf-8");
@@ -233,11 +236,15 @@ export function decodeCursor(token: string, expectedTool: string): DecodeCursorR
 
   // Tool match
   if (payload.tool !== expectedTool) {
+    // Sanitize before interpolation: payload.tool is server-signed, but defense
+    // in depth against any future caller passing partly attacker-controlled input
+    // to issueCursor. Replace non-[A-Za-z0-9_-] chars with '?' and cap length.
+    const safeTool = payload.tool.replace(/[^\w-]/g, "?").slice(0, 64);
     return {
       ok: false,
       error: {
         error: "CURSOR_WRONG_TOOL",
-        message: `cursor was issued for tool '${payload.tool}', presented to '${expectedTool}'`,
+        message: `cursor was issued for tool '${safeTool}', presented to '${expectedTool}'`,
       },
     };
   }

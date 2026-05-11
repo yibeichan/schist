@@ -285,3 +285,25 @@ describe("resetForTesting — secret rotation", () => {
     if (!r.ok) expect(r.error.error).toBe("CURSOR_INVALID_SIGNATURE");
   });
 });
+
+describe("decodeCursor — log-injection defense", () => {
+  beforeEach(() => resetForTesting());
+
+  it("sanitizes payload.tool in CURSOR_WRONG_TOOL message (defense in depth)", () => {
+    // Forge a cursor whose tool contains newline-and-bracket injection
+    const token = issueCursor({ tool: "evil\n[ERROR] admin override", queryHash: "h", offset: 0 });
+    const r = decodeCursor(token, "search_notes");
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.error).toBe("CURSOR_WRONG_TOOL");
+      // The dangerous chars (newline, brackets, spaces) must be replaced with '?'.
+      expect(r.error.message).not.toContain("\n");
+      expect(r.error.message).not.toContain("[ERROR]");
+      // The tool name in the message must only use the sanitized character set.
+      // Extract the quoted tool name and verify alphabet.
+      const match = r.error.message.match(/'([^']*)'/);
+      expect(match).not.toBeNull();
+      if (match) expect(match[1]).toMatch(/^[\w?-]+$/);
+    }
+  });
+});
