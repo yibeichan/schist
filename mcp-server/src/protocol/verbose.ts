@@ -4,6 +4,19 @@ export const VERBOSE_MIN_CODE_POINTS = 12;
 export const VERBOSE_RATE_LIMIT_PER_MIN = 30;
 export const VERBOSE_RATE_LIMIT_WINDOW_MS = 60_000;
 
+/**
+ * Result of parseVerbose. The error variant shares `enabled: false` with the
+ * silent-off variant, so consumers must narrow with `"error" in r` (not
+ * `!r.enabled`) to distinguish "explicitly off / not requested" from
+ * "invalid input."
+ *
+ * Consumer pattern (PRs 3+ tool wiring):
+ *
+ *   const v = parseVerbose(args.verbose);
+ *   if ("error" in v) return v.error;                 // INVALID_ARG envelope
+ *   if (v.enabled) logVerbose({ tool, owner, reason: v.reason });
+ *   // v.enabled === false: proceed in non-verbose mode
+ */
 export type ParseVerboseResult =
   | { enabled: false }
   | { enabled: true; reason: string }
