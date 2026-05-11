@@ -1,5 +1,11 @@
-import { describe, it, expect } from "@jest/globals";
+import { describe, it, expect, beforeEach, jest } from "@jest/globals";
 import { canonicalizeQueryHash } from "../../src/protocol/cursor.js";
+import {
+  issueCursor,
+  decodeCursor,
+  resetForTesting,
+  CURSOR_TTL_SECONDS,
+} from "../../src/protocol/cursor.js";
 
 describe("canonicalizeQueryHash", () => {
   it("produces identical hashes for argument-order-independent inputs", () => {
@@ -163,5 +169,119 @@ describe("canonicalizeQueryHash", () => {
     const c = canonicalizeQueryHash({ q: "foo", myMeta: "x" }, "yibei");
     const d = canonicalizeQueryHash({ q: "foo" }, "yibei");
     expect(c.ok && d.ok && c.queryHash !== d.queryHash).toBe(true);
+  });
+});
+
+describe("issueCursor + decodeCursor round-trip", () => {
+  beforeEach(() => resetForTesting());
+
+  it("issues a cursor that decodeCursor accepts for the same tool", () => {
+    const token = issueCursor({ tool: "search_notes", queryHash: "abc123", offset: 20 });
+    const r = decodeCursor(token, "search_notes");
+    expect(r).toEqual({ ok: true, offset: 20, queryHash: "abc123" });
+  });
+
+  it("encodes as base64url-payload `.` base64url-signature (unpadded, two segments)", () => {
+    const token = issueCursor({ tool: "search_notes", queryHash: "abc", offset: 20 });
+    const segments = token.split(".");
+    expect(segments).toHaveLength(2);
+    // base64url alphabet: A–Z, a–z, 0–9, -, _ — no padding
+    expect(token).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+  });
+
+  it("preserves arbitrary integer offsets including 0", () => {
+    for (const offset of [0, 1, 100, 100_000]) {
+      const token = issueCursor({ tool: "x", queryHash: "h", offset });
+      const r = decodeCursor(token, "x");
+      if (r.ok) expect(r.offset).toBe(offset);
+    }
+  });
+});
+
+describe("decodeCursor — error paths", () => {
+  beforeEach(() => resetForTesting());
+
+  it("returns CURSOR_WRONG_TOOL when token's tool differs from expectedTool", () => {
+    const token = issueCursor({ tool: "search_notes", queryHash: "h", offset: 20 });
+    const r = decodeCursor(token, "query_graph");
+    expect(r).toEqual({
+      ok: false,
+      error: { error: "CURSOR_WRONG_TOOL", message: expect.any(String) },
+    });
+  });
+
+  it("returns CURSOR_INVALID_SIGNATURE when signature is tampered", () => {
+    const token = issueCursor({ tool: "search_notes", queryHash: "h", offset: 20 });
+    const [payload, sig] = token.split(".");
+    // Flip a character in the signature
+    const tampered = sig[0] === "A" ? "B" + sig.slice(1) : "A" + sig.slice(1);
+    const r = decodeCursor(`${payload}.${tampered}`, "search_notes");
+    expect(r).toEqual({
+      ok: false,
+      error: { error: "CURSOR_INVALID_SIGNATURE", message: expect.any(String) },
+    });
+  });
+
+  it("returns CURSOR_INVALID_SIGNATURE when payload is tampered (signature no longer matches)", () => {
+    const token = issueCursor({ tool: "search_notes", queryHash: "h", offset: 20 });
+    const [payload, sig] = token.split(".");
+    const tampered = payload[0] === "A" ? "B" + payload.slice(1) : "A" + payload.slice(1);
+    const r = decodeCursor(`${tampered}.${sig}`, "search_notes");
+    expect(r).toEqual({
+      ok: false,
+      error: { error: "CURSOR_INVALID_SIGNATURE", message: expect.any(String) },
+    });
+  });
+
+  it("returns CURSOR_INVALID_SIGNATURE when token has wrong segment count", () => {
+    for (const bad of ["", "onlyonesegment", "a.b.c", "a.b.c.d"]) {
+      const r = decodeCursor(bad, "search_notes");
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.error).toBe("CURSOR_INVALID_SIGNATURE");
+    }
+  });
+
+  it("returns CURSOR_INVALID_SIGNATURE when payload is not valid base64url JSON", () => {
+    // Construct a syntactically OK-looking but undecodable payload
+    const r = decodeCursor("!!!notbase64!!!.sig", "search_notes");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.error).toBe("CURSOR_INVALID_SIGNATURE");
+  });
+
+  it("returns CURSOR_EXPIRED when issuedAt + ttlSeconds < now", () => {
+    // Forge a stale token by issuing one, then advancing the clock past TTL.
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date("2026-05-10T00:00:00Z"));
+    const token = issueCursor({ tool: "search_notes", queryHash: "h", offset: 20 });
+    // Advance past TTL
+    jest.setSystemTime(new Date(Date.now() + (CURSOR_TTL_SECONDS + 1) * 1000));
+    const r = decodeCursor(token, "search_notes");
+    expect(r).toEqual({
+      ok: false,
+      error: { error: "CURSOR_EXPIRED", message: expect.any(String) },
+    });
+    jest.useRealTimers();
+  });
+
+  it("accepts a token issued exactly at TTL boundary (< not ≤)", () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date("2026-05-10T00:00:00Z"));
+    const token = issueCursor({ tool: "search_notes", queryHash: "h", offset: 20 });
+    jest.setSystemTime(new Date(Date.now() + CURSOR_TTL_SECONDS * 1000));
+    const r = decodeCursor(token, "search_notes");
+    // Exactly at TTL: still valid (issuedAt + ttl >= now).
+    expect(r.ok).toBe(true);
+    jest.useRealTimers();
+  });
+});
+
+describe("resetForTesting — secret rotation", () => {
+  it("rotates the HMAC secret so old cursors fail verification", () => {
+    const token = issueCursor({ tool: "search_notes", queryHash: "h", offset: 20 });
+    expect(decodeCursor(token, "search_notes").ok).toBe(true);
+    resetForTesting();
+    const r = decodeCursor(token, "search_notes");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.error).toBe("CURSOR_INVALID_SIGNATURE");
   });
 });

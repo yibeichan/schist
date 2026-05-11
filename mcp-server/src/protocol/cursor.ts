@@ -150,3 +150,130 @@ function normalizeAndSort(v: unknown): unknown {
   }
   return out;
 }
+
+// ── Cursor error codes ────────────────────────────────────────────────────
+
+export type CursorErrorCode =
+  | "CURSOR_REQUIRED"
+  | "CURSOR_EXPIRED"
+  | "CURSOR_INVALID_SIGNATURE"
+  | "CURSOR_WRONG_TOOL";
+
+export interface CursorError {
+  error: CursorErrorCode;
+  message: string;
+}
+
+// ── HMAC secret (per-process, rotates on resetForTesting) ─────────────────
+
+let HMAC_SECRET: Buffer = crypto.randomBytes(32);
+
+// ── issueCursor ───────────────────────────────────────────────────────────
+
+export interface IssueCursorInput {
+  tool: string;
+  queryHash: string;
+  offset: number;
+}
+
+interface CursorPayload {
+  tool: string;
+  queryHash: string;
+  offset: number;
+  issuedAt: number;
+  ttlSeconds: number;
+}
+
+export function issueCursor(input: IssueCursorInput): string {
+  const payload: CursorPayload = {
+    tool: input.tool,
+    queryHash: input.queryHash,
+    offset: input.offset,
+    issuedAt: Math.floor(Date.now() / 1000),
+    ttlSeconds: CURSOR_TTL_SECONDS,
+  };
+  const payloadJson = JSON.stringify(payload);
+  const payloadB64 = Buffer.from(payloadJson, "utf-8").toString("base64url");
+  const sigB64 = crypto.createHmac("sha256", HMAC_SECRET).update(payloadB64).digest("base64url");
+  return `${payloadB64}.${sigB64}`;
+}
+
+// ── decodeCursor ──────────────────────────────────────────────────────────
+
+export type DecodeCursorResult =
+  | { ok: true; offset: number; queryHash: string }
+  | { ok: false; error: CursorError };
+
+export function decodeCursor(token: string, expectedTool: string): DecodeCursorResult {
+  // Structural validation
+  const segments = token.split(".");
+  if (segments.length !== 2) {
+    return invalidSignature("malformed cursor (expected `payload.signature`)");
+  }
+  const [payloadB64, sigB64] = segments;
+  if (!payloadB64 || !sigB64) {
+    return invalidSignature("malformed cursor (empty segment)");
+  }
+
+  // HMAC verification (timing-safe)
+  const expectedSig = crypto.createHmac("sha256", HMAC_SECRET).update(payloadB64).digest("base64url");
+  if (!timingSafeEqualStrings(sigB64, expectedSig)) {
+    return invalidSignature("cursor signature mismatch");
+  }
+
+  // Decode payload
+  let payload: CursorPayload;
+  try {
+    const json = Buffer.from(payloadB64, "base64url").toString("utf-8");
+    payload = JSON.parse(json) as CursorPayload;
+  } catch {
+    // Signature verified but payload undecodable — shouldn't happen in practice
+    return invalidSignature("cursor payload not valid base64url JSON");
+  }
+
+  // Tool match
+  if (payload.tool !== expectedTool) {
+    return {
+      ok: false,
+      error: {
+        error: "CURSOR_WRONG_TOOL",
+        message: `cursor was issued for tool '${payload.tool}', presented to '${expectedTool}'`,
+      },
+    };
+  }
+
+  // TTL check (issuedAt + ttlSeconds >= nowSeconds; exact boundary still valid)
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (payload.issuedAt + payload.ttlSeconds < nowSec) {
+    return {
+      ok: false,
+      error: {
+        error: "CURSOR_EXPIRED",
+        message: `cursor expired (issued ${nowSec - payload.issuedAt}s ago, TTL ${payload.ttlSeconds}s)`,
+      },
+    };
+  }
+
+  return { ok: true, offset: payload.offset, queryHash: payload.queryHash };
+}
+
+function invalidSignature(message: string): DecodeCursorResult {
+  return { ok: false, error: { error: "CURSOR_INVALID_SIGNATURE", message } };
+}
+
+function timingSafeEqualStrings(a: string, b: string): boolean {
+  // timingSafeEqual requires equal-length Buffers. Length mismatch → fail
+  // (still constant time per call, just not constant-time across mismatches —
+  // but length is public, so this leaks nothing meaningful).
+  if (a.length !== b.length) return false;
+  const ab = Buffer.from(a, "utf-8");
+  const bb = Buffer.from(b, "utf-8");
+  return crypto.timingSafeEqual(ab, bb);
+}
+
+// ── Test-only ─────────────────────────────────────────────────────────────
+
+/** Rotates the HMAC secret. LRU clearing is added in Task 2.3. */
+export function resetForTesting(): void {
+  HMAC_SECRET = crypto.randomBytes(32);
+}
