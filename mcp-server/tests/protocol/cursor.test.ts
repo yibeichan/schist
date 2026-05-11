@@ -117,6 +117,13 @@ describe("canonicalizeQueryHash", () => {
     expect(r.ok).toBe(false);
   });
 
+  it("accepts diamond references (same object at two distinct paths, no cycle)", () => {
+    const shared = { x: 1, y: "foo" };
+    const args = { a: shared, b: shared };
+    const r = canonicalizeQueryHash(args, "yibei");
+    expect(r.ok).toBe(true);
+  });
+
   it("defends against __proto__ key injection (no prototype pollution)", () => {
     // The canonicalizer must use Object.create(null) for intermediate objects.
     // Test: passing { __proto__: { polluted: true } } as an arg must not
@@ -140,5 +147,21 @@ describe("canonicalizeQueryHash", () => {
   it("produces 64-character lowercase hex output (SHA-256)", () => {
     const r = canonicalizeQueryHash({ q: "foo" }, "yibei");
     if (r.ok) expect(r.queryHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("opts.excludeKeys overrides the default (cursor, verbose) exclusion list", () => {
+    // Custom excludeKeys: drop "myMeta" instead of cursor/verbose
+    const a = canonicalizeQueryHash(
+      { q: "foo", myMeta: "x" },
+      "yibei",
+      { excludeKeys: ["myMeta"] },
+    );
+    const b = canonicalizeQueryHash({ q: "foo" }, "yibei", { excludeKeys: ["myMeta"] });
+    expect(a.ok && b.ok && a.queryHash === b.queryHash).toBe(true);
+
+    // With default excludeKeys, "myMeta" is included → different hash
+    const c = canonicalizeQueryHash({ q: "foo", myMeta: "x" }, "yibei");
+    const d = canonicalizeQueryHash({ q: "foo" }, "yibei");
+    expect(c.ok && d.ok && c.queryHash !== d.queryHash).toBe(true);
   });
 });

@@ -124,12 +124,16 @@ function validateHashable(v: unknown, path: string, seen: WeakSet<object>): void
         throw new InvalidArgErrorImpl(`circular reference at ${path}`);
       }
       seen.add(v as object);
-      if (Array.isArray(v)) {
-        v.forEach((x, i) => validateHashable(x, `${path}[${i}]`, seen));
-      } else {
-        for (const k of Object.keys(v as object)) {
-          validateHashable((v as Record<string, unknown>)[k], `${path}.${k}`, seen);
+      try {
+        if (Array.isArray(v)) {
+          v.forEach((x, i) => validateHashable(x, `${path}[${i}]`, seen));
+        } else {
+          for (const k of Object.keys(v as object)) {
+            validateHashable((v as Record<string, unknown>)[k], `${path}.${k}`, seen);
+          }
         }
+      } finally {
+        seen.delete(v as object);
       }
       return;
   }
