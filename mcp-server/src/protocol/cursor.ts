@@ -234,6 +234,23 @@ export function decodeCursor(token: string, expectedTool: string): DecodeCursorR
     return invalidSignature("cursor payload not valid base64url JSON");
   }
 
+  // Schema guard: JSON.parse on "null", "[]", or "42" would succeed and yield
+  // payload values that crash on property access (`null.tool` → TypeError) or
+  // mis-typed (`offset: "10"`, `ttlSeconds: undefined` → NaN-arithmetic). Each
+  // field must be the expected type after the HMAC-trusted decode.
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    Array.isArray(payload) ||
+    typeof payload.tool !== "string" ||
+    typeof payload.queryHash !== "string" ||
+    typeof payload.offset !== "number" ||
+    typeof payload.issuedAt !== "number" ||
+    typeof payload.ttlSeconds !== "number"
+  ) {
+    return invalidSignature("cursor payload schema invalid");
+  }
+
   // Tool match
   if (payload.tool !== expectedTool) {
     // Sanitize before interpolation: payload.tool is server-signed, but defense

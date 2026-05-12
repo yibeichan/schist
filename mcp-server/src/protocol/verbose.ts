@@ -3,6 +3,7 @@ import * as crypto from "crypto";
 export const VERBOSE_MIN_CODE_POINTS = 12;
 export const VERBOSE_RATE_LIMIT_PER_MIN = 30;
 export const VERBOSE_RATE_LIMIT_WINDOW_MS = 60_000;
+export const VERBOSE_FREQ_LRU_SIZE = 256;
 
 /**
  * Result of parseVerbose. The error variant shares `enabled: false` with the
@@ -83,12 +84,17 @@ export interface LogVerboseInput {
  *
  * Reason and owner are passed through JSON.stringify so newlines, control
  * chars, and other non-printable bytes can't inject fake stderr lines. The
- * line ends with a real newline so individual records are still separable.
+ * `tool` field is server-controlled in practice but is sanitized the same
+ * way decodeCursor sanitizes payload.tool — non-[\w-] chars collapse to '?',
+ * capped at 64 — so a buggy future caller passing `tool: "x\n[ERROR]"` can't
+ * inject a fake audit line either. The line ends with a real newline so
+ * individual records are still separable.
  */
 export function logVerbose(input: LogVerboseInput): void {
+  const safeTool = input.tool.replace(/[^\w-]/g, "?").slice(0, 64);
   const ownerDisplay = input.owner === "" ? "<anonymous>" : JSON.stringify(input.owner);
   const reasonDisplay = JSON.stringify(input.reason);
-  process.stderr.write(`[verbose] ${input.tool} by ${ownerDisplay}: ${reasonDisplay}\n`);
+  process.stderr.write(`[verbose] ${safeTool} by ${ownerDisplay}: ${reasonDisplay}\n`);
 }
 
 // ── noteHighFrequency — sliding 60s window per (tool, owner, sha256(reason)) ─
@@ -106,6 +112,10 @@ function freqKey(tool: string, owner: string, reason: string): string {
  * over VERBOSE_RATE_LIMIT_PER_MIN within the last VERBOSE_RATE_LIMIT_WINDOW_MS.
  * Otherwise returns null. The bucket is sliding, not cumulative — timestamps
  * older than the window are dropped on each call.
+ *
+ * Map keys are capped at VERBOSE_FREQ_LRU_SIZE with LRU eviction (delete-then-
+ * set on every touch promotes to MRU). Bounds memory growth on long-running
+ * servers even when callers pass many distinct reason strings.
  */
 export function noteHighFrequency(input: LogVerboseInput): string | null {
   const key = freqKey(input.tool, input.owner, input.reason);
@@ -114,7 +124,15 @@ export function noteHighFrequency(input: LogVerboseInput): string | null {
   const prior = frequencyBuckets.get(key) ?? [];
   const fresh = prior.filter((t) => t >= cutoff);
   fresh.push(now);
+  // Delete-then-set to promote to MRU (Map iteration order = insertion order).
+  if (frequencyBuckets.has(key)) frequencyBuckets.delete(key);
   frequencyBuckets.set(key, fresh);
+  // Best-effort eviction. Each call adds at most one new key, so size exceeds
+  // the cap by at most 1.
+  if (frequencyBuckets.size > VERBOSE_FREQ_LRU_SIZE) {
+    const oldestKey = frequencyBuckets.keys().next().value;
+    if (oldestKey !== undefined) frequencyBuckets.delete(oldestKey);
+  }
   if (fresh.length > VERBOSE_RATE_LIMIT_PER_MIN) {
     return "reason pattern is frequent — consider sampling at operator level";
   }

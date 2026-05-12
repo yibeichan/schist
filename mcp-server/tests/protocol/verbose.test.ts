@@ -126,6 +126,7 @@ import {
   resetForTesting,
   VERBOSE_RATE_LIMIT_PER_MIN,
   VERBOSE_RATE_LIMIT_WINDOW_MS,
+  VERBOSE_FREQ_LRU_SIZE,
 } from "../../src/protocol/verbose.js";
 
 describe("logVerbose — stderr audit log", () => {
@@ -247,5 +248,95 @@ describe("verbose.resetForTesting", () => {
     }
     resetForTesting();
     expect(noteHighFrequency({ tool: "x", owner: "y", reason: "investigating bug" })).toBeNull();
+  });
+});
+
+describe("logVerbose — tool sanitization (defense in depth)", () => {
+  let stderrSpy: ReturnType<typeof jest.spyOn>;
+  beforeEach(() => {
+    stderrSpy = jest.spyOn(process.stderr, "write").mockImplementation(() => true);
+  });
+  afterEach(() => {
+    stderrSpy.mockRestore();
+  });
+
+  it("sanitizes input.tool — newline in tool name cannot inject a fake stderr line", () => {
+    logVerbose({ tool: "evil\n[ERROR] root pwned", owner: "yibei", reason: "investigating bug" });
+    const calls = (stderrSpy.mock.calls as unknown[][]).map((c) => String(c[0]));
+    const matched = calls.find((s) => s.includes("[verbose]"));
+    expect(matched).toBeDefined();
+    // The newline must be replaced (sanitized to '?'), so the line should
+    // contain only ONE \n (the trailing one) — split by \n gives 2 parts (line + empty).
+    expect(matched!.split("\n")).toHaveLength(2);
+    // The injected "[ERROR]" sequence must be sanitized away
+    expect(matched).not.toContain("[ERROR]");
+  });
+
+  it("preserves alphanumerics, underscores, and hyphens in tool name", () => {
+    logVerbose({ tool: "search_memory-v2", owner: "yibei", reason: "investigating bug" });
+    const calls = (stderrSpy.mock.calls as unknown[][]).map((c) => String(c[0]));
+    expect(calls.find((s) => s.includes("search_memory-v2"))).toBeDefined();
+  });
+
+  it("caps sanitized tool name at 64 chars", () => {
+    const longTool = "x".repeat(200);
+    logVerbose({ tool: longTool, owner: "yibei", reason: "investigating bug" });
+    const calls = (stderrSpy.mock.calls as unknown[][]).map((c) => String(c[0]));
+    const matched = calls.find((s) => s.includes("[verbose]"));
+    expect(matched).toBeDefined();
+    // The "x" run in the message should be exactly 64 chars
+    const xRun = matched!.match(/x+/);
+    expect(xRun).not.toBeNull();
+    expect(xRun![0].length).toBe(64);
+  });
+});
+
+describe("noteHighFrequency — bucket-map LRU eviction (memory bound)", () => {
+  beforeEach(() => resetForTesting());
+
+  it("evicts the oldest bucket key when the map exceeds VERBOSE_FREQ_LRU_SIZE", () => {
+    // Fill to capacity with distinct reasons.
+    for (let i = 0; i < VERBOSE_FREQ_LRU_SIZE; i++) {
+      noteHighFrequency({ tool: "x", owner: "y", reason: `reason-${i}-padding-to-12-chars` });
+    }
+    // The oldest (reason-0) is still tracked — re-call with same reason should NOT count as a new key.
+    // Add one more distinct reason → triggers eviction of reason-0.
+    noteHighFrequency({ tool: "x", owner: "y", reason: `overflow-reason-padding` });
+    // After eviction, calling reason-0 again would re-create the bucket from scratch
+    // (counter starts at 1, not previous count). We can't directly observe the eviction,
+    // but we can verify the size stays bounded by adding many more and checking no growth:
+    for (let i = VERBOSE_FREQ_LRU_SIZE; i < VERBOSE_FREQ_LRU_SIZE + 50; i++) {
+      noteHighFrequency({ tool: "x", owner: "y", reason: `reason-${i}-padding-to-12-chars` });
+    }
+    // No assertion on exact size since Map size isn't externally observable,
+    // but if eviction were broken this test would still pass — better assertion:
+    // Verify that an evicted-then-resurrected bucket starts fresh.
+    // After 256 + 51 distinct reasons, reason-0 was evicted. Re-querying it now
+    // starts a NEW bucket at count=1, so 30 more calls below threshold should
+    // return null, NOT a warning.
+    for (let i = 0; i < VERBOSE_RATE_LIMIT_PER_MIN; i++) {
+      expect(noteHighFrequency({ tool: "x", owner: "y", reason: `reason-0-padding-to-12-chars` })).toBeNull();
+    }
+    // The 31st call within the now-fresh window should warn.
+    expect(noteHighFrequency({ tool: "x", owner: "y", reason: `reason-0-padding-to-12-chars` })).toMatch(/frequent/);
+  });
+
+  it("re-recording an existing key promotes it to MRU (not evicted prematurely)", () => {
+    // Fill to capacity
+    for (let i = 0; i < VERBOSE_FREQ_LRU_SIZE; i++) {
+      noteHighFrequency({ tool: "x", owner: "y", reason: `reason-${i}-padding-to-12-chars` });
+    }
+    // Re-record reason-0 → promotes to MRU
+    noteHighFrequency({ tool: "x", owner: "y", reason: `reason-0-padding-to-12-chars` });
+    // Add one more distinct reason → evicts the new oldest, which is reason-1 (NOT reason-0)
+    noteHighFrequency({ tool: "x", owner: "y", reason: `overflow-distinct-padding` });
+    // Hammer reason-0 to threshold from its existing count (filled 1 + 1 promotion = 2 so far)
+    // Within the same 60s window. We need 31 total to warn; we have 2 so far so 29 more.
+    let saw: string | null = null;
+    for (let i = 0; i < VERBOSE_RATE_LIMIT_PER_MIN - 1; i++) {
+      saw = noteHighFrequency({ tool: "x", owner: "y", reason: `reason-0-padding-to-12-chars` });
+    }
+    // Last one should fire the warning (31st total: 2 + 29 = 31)
+    expect(saw).toMatch(/frequent/);
   });
 });

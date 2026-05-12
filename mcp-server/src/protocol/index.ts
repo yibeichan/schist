@@ -29,6 +29,7 @@ export {
   VERBOSE_MIN_CODE_POINTS,
   VERBOSE_RATE_LIMIT_PER_MIN,
   VERBOSE_RATE_LIMIT_WINDOW_MS,
+  VERBOSE_FREQ_LRU_SIZE,
   parseVerbose,
   logVerbose,
   noteHighFrequency,

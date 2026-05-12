@@ -433,3 +433,4 @@ describe("resetForTesting — clears LRU too", () => {
     expect(checkRefusal({ tool: "search_notes", queryHash: "h1", owner: "yibei", verboseEnabled: false }).refuse).toBe(false);
   });
 });
+
