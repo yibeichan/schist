@@ -182,6 +182,31 @@ must surface them as separate codes:
 All four are returned as `{ error: "<code>", message: "<human-readable>" }`
 tool envelopes — no cursor field on any of them.
 
+### Cursor binding to queryHash
+
+When an agent presents a cursor on a follow-up call, the tool computes the
+current call's `queryHash` from the current args + active owner (excluding
+`cursor` and `verbose` as per the canonicalization rule) and compares it
+to the cursor's encoded `queryHash`. **Mismatch → `CURSOR_INVALID_SIGNATURE`**
+with message `"cursor was issued for a different query — restart pagination
+from page 1"`.
+
+Rationale: the cursor's `queryHash` is part of the signed payload so the
+tool can verify the cursor binds to *this* query, not some other query
+whose pagination state happens to be valid. Allowing the cursor's payload
+to override args silently turns a query-refinement attempt into a
+continuation of the prior query — which weakens the structural property
+the protocol exists to enforce.
+
+Mismatch is folded into `CURSOR_INVALID_SIGNATURE` rather than a new error
+code because the agent action is identical to the existing
+`CURSOR_INVALID_SIGNATURE` path: drop the cursor, restart from page 1. The
+specific root cause (queryHash mismatch vs HMAC mismatch vs payload-schema
+mismatch) is communicated through the `message` string, not the error code
+constant.
+
+This policy is normative for PRs 3–7 (every cursor-adopting tool).
+
 ### Multi-process cursor scope
 
 Cursors are bound to the **specific MCP server process** that issued
@@ -412,7 +437,8 @@ this checklist before starting each PR 2–7 plan.
   - PR 2 → "Cursor protocol" + "queryHash canonicalization" + "Cursor
     error codes" + "Reason-string verbose" + rate-limit note.
   - PR 3 → "search_memory" rows in cursor-adoption table + Default
-    limits + Reason-string adopters + verbose-newly-set bypass.
+    limits + Reason-string adopters + verbose-newly-set bypass +
+    "Cursor binding to queryHash".
   - PR 4 → "query_graph" rows + "query_graph cursor wrapping" subsection
     + Default limits + Compatibility breaking change.
   - PR 5 → "search_notes" rows + tiebreaker requirement.
@@ -430,6 +456,9 @@ this checklist before starting each PR 2–7 plan.
 - [x] Cursor error codes split into `CURSOR_REQUIRED` /
   `CURSOR_EXPIRED` / `CURSOR_INVALID_SIGNATURE` / `CURSOR_WRONG_TOOL`
   with distinct agent actions.
+- [x] Cursor binding to queryHash: current call's computed queryHash must
+  equal cursor's encoded queryHash; mismatch returns `CURSOR_INVALID_SIGNATURE`
+  with explanatory message.
 - [x] No cursor reissue on `CURSOR_REQUIRED` — agent must echo the
   original cursor or refine the query.
 - [x] LRU refusal labelled as best-effort (not a security boundary);
