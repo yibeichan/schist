@@ -490,8 +490,24 @@ export async function get_context(
 
 // ── Memory V2 Tools ────────────────────────────────────────────────────────
 
-/** Helper: validate SCHIST_AGENT_ID matches owner (skip if env var not set) */
+/** Helper: validate owner against allowed agent identities.
+ *
+ *  - If neither SCHIST_AGENT_ID nor SCHIST_ALLOWED_AGENTS is set: no enforcement (any owner accepted).
+ *  - If SCHIST_ALLOWED_AGENTS is set: owner must be in the comma-separated allowlist.
+ *  - If only SCHIST_AGENT_ID is set (legacy): owner must match exactly.
+ *
+ *  This supports both single-agent (legacy) and multi-agent (OpenClaw shared MCP)
+ *  deployments without losing per-entry attribution.
+ */
 function assertAgentIdentity(owner: string): void {
+  const allowedAgents = process.env.SCHIST_ALLOWED_AGENTS;
+  if (allowedAgents) {
+    const allowed = allowedAgents.split(",").map(s => s.trim()).filter(Boolean);
+    if (allowed.length > 0 && !allowed.includes(owner)) {
+      throw { error: "VALIDATION_ERROR", message: `Owner '${owner}' not in SCHIST_ALLOWED_AGENTS '${allowedAgents}'` };
+    }
+    return;
+  }
   const agentId = process.env.SCHIST_AGENT_ID;
   if (agentId && agentId !== owner) {
     throw { error: "VALIDATION_ERROR", message: `Owner '${owner}' does not match SCHIST_AGENT_ID '${agentId}'` };
