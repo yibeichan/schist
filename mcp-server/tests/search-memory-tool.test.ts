@@ -52,12 +52,18 @@ describe("search_memory tool — verbose input parsing", () => {
     seed("sansan", 2);
     const r = await search_memory(VAULT_ROOT, { verbose: "" } as never);
     expect(r).toHaveProperty("entries");
+    if ("entries" in r) {
+      expect(r.entries.length).toBe(2);
+    }
   });
 
   it("treats omitted verbose as not-verbose", async () => {
     seed("sansan", 2);
     const r = await search_memory(VAULT_ROOT, {} as never);
     expect(r).toHaveProperty("entries");
+    if ("entries" in r) {
+      expect(r.entries.length).toBe(2);
+    }
   });
 });
 

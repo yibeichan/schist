@@ -26,7 +26,17 @@ export function measureResponse(response: unknown): ResponseMeasurement {
   const json = JSON.stringify(response);
   const bytes = Buffer.byteLength(json, "utf-8");
   const approxTokens = encode(json).length;
-  const entryCount = Array.isArray(response) ? response.length : 1;
+  let entryCount = 1;
+  if (Array.isArray(response)) {
+    entryCount = response.length;
+  } else if (
+    response !== null &&
+    typeof response === "object" &&
+    "entries" in response &&
+    Array.isArray((response as { entries: unknown }).entries)
+  ) {
+    entryCount = (response as { entries: unknown[] }).entries.length;
+  }
   return { bytes, approxTokens, entryCount };
 }
 

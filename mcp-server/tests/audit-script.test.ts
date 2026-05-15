@@ -131,9 +131,10 @@ describe("runAudit (end-to-end)", () => {
     // dutifully measures the error envelope and bytes>0/entryCount>=1
     // both still pass. Probe one tool per distinct DB / executor path so
     // a broken binding can't silently fail any subset:
-    //   - list_concepts / list_domains / search_memory: array return
-    //   - query_graph:                                   { columns, rows, rowCount }
-    //   - search_memory:                                  separate memory DB file
+    //   - list_concepts / list_domains: array return
+    //   - query_graph:                  { columns, rows, rowCount } object return
+    //   - search_memory:                { entries: MemoryEntry[], cursor?, verboseNote? } object return
+    //                                   (separate memory DB file — distinct sqlite stack from vault DB)
     const tools = await import("../../mcp-server/dist/tools.js");
     type ShapeCheck = (resp: unknown) => boolean;
     const isArrayShape: ShapeCheck = (r) => Array.isArray(r);

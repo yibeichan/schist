@@ -505,6 +505,20 @@ export async function get_context(
 
 // READ-ONLY memory tools (no capability gate)
 
+/**
+ * search_memory tool handler. Runs the protocol pipeline:
+ *
+ *   parseVerbose → canonicalizeQueryHash → (cursor decode + binding OR
+ *   identical-query refusal) → SQL fetch → recordIssued + issueCursor on
+ *   capped results → logVerbose + noteHighFrequency on verbose →
+ *   { entries, cursor?, verboseNote? }.
+ *
+ * Stages 3-8 land incrementally in Tasks 3.6, 3.7, 3.8. The current scaffold
+ * implements parseVerbose + canonicalize only; SQL fetch + response shape
+ * use a placeholder body until Task 3.8.
+ *
+ * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
+ */
 export async function search_memory(
   _vaultRoot: string,
   args: {
@@ -530,17 +544,14 @@ export async function search_memory(
   if (!ch.ok) return ch.error;
   const queryHash = ch.queryHash;
 
-  // Cursor + refusal + SQL + recordIssued + verbose log + response shape land
-  // in Tasks 3.6, 3.7, 3.8. Until then return a minimal valid response so
-  // Task 3.5 tests pass.
-  void queryHash;
-  void verboseEnabled;
-  void verboseReason;
+  // queryHash, verboseEnabled, verboseReason captured here; consumed by
+  // Tasks 3.6 (cursor decode + binding), 3.7 (checkRefusal), and 3.8 (SQL +
+  // record/issue + log/freq + response shape).
   try {
     const entries = sqliteReader.searchMemory(args);
     return { entries };
   } catch (e: unknown) {
-    return normalizeError(e, "INVALID_SQL") as { error: string; message: string };
+    return normalizeError(e, "INVALID_SQL");
   }
 }
 
