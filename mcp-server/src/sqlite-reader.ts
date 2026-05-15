@@ -422,6 +422,7 @@ export function searchMemory(opts: {
       if (opts.entry_type) { sql += " AND m.entry_type = ?"; params.push(opts.entry_type); }
       if (opts.date_from) { sql += " AND m.date >= ?"; params.push(opts.date_from); }
       if (opts.date_to) { sql += " AND m.date <= ?"; params.push(opts.date_to); }
+      // id ASC tiebreaker — required for OFFSET pagination stability when bm25 ties (see docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md).
       sql += " ORDER BY bm25(agent_memory_fts), m.id ASC LIMIT ? OFFSET ?";
       params.push(limit, offset);
       const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
@@ -432,6 +433,7 @@ export function searchMemory(opts: {
       if (opts.entry_type) { sql += " AND entry_type = ?"; params.push(opts.entry_type); }
       if (opts.date_from) { sql += " AND date >= ?"; params.push(opts.date_from); }
       if (opts.date_to) { sql += " AND date <= ?"; params.push(opts.date_to); }
+      // id ASC tiebreaker — required for OFFSET pagination stability when created_at ties (see docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md).
       sql += " ORDER BY created_at DESC, id ASC LIMIT ? OFFSET ?";
       params.push(limit, offset);
       const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];

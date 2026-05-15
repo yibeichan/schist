@@ -178,20 +178,28 @@ describe("searchMemory", () => {
   });
 
   it("non-FTS path orders by created_at DESC then id ASC (tiebreaker is deterministic)", () => {
-    // Insert two entries with the same content; created_at granularity is 1s,
-    // so two rapid inserts share the same created_at — id ASC must order them.
-    addMemoryAs("sansan", { entry_type: "decision", content: "same-content-tiebreaker" });
-    addMemoryAs("sansan", { entry_type: "decision", content: "same-content-tiebreaker" });
+    // Force a created_at tie by inserting via raw SQL with an explicit timestamp.
+    // addMemoryAs uses datetime('now') (1-second granularity), which on a slow
+    // runner could roll across the second-boundary and skip exercising the
+    // id-ASC tiebreaker. Direct insert with a fixed created_at pins the test.
+    const db = new Database(process.env.SCHIST_MEMORY_DB!);
+    try {
+      const stmt = db.prepare(`
+        INSERT INTO agent_memory (owner, date, entry_type, content, tags, confidence, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      const fixed = "2026-05-15 12:00:00";
+      stmt.run("sansan", "2026-05-15", "decision", "same-content-tiebreaker", null, "medium", fixed);
+      stmt.run("sansan", "2026-05-15", "decision", "same-content-tiebreaker", null, "medium", fixed);
+    } finally {
+      db.close();
+    }
     const both = searchMemory({ owner: "sansan", entry_type: "decision" });
     const sameContentRows = both.filter(r => r.content === "same-content-tiebreaker");
     expect(sameContentRows.length).toBe(2);
-    // When created_at ties, the LOWER id should appear earlier (id ASC tiebreaker
-    // within the created_at DESC primary). The first-inserted has lower id and
-    // appears earlier (because both share created_at — DESC has no effect on the
-    // tie, so id ASC takes over).
-    if (sameContentRows[0].created_at === sameContentRows[1].created_at) {
-      expect(sameContentRows[0].id).toBeLessThan(sameContentRows[1].id);
-    }
+    // Both rows share the same fixed created_at — id ASC tiebreaker must apply.
+    expect(sameContentRows[0].created_at).toBe(sameContentRows[1].created_at);
+    expect(sameContentRows[0].id).toBeLessThan(sameContentRows[1].id);
   });
 
   it("FTS path orders by bm25 then id ASC (tiebreaker is deterministic)", () => {
@@ -203,6 +211,24 @@ describe("searchMemory", () => {
     const matches = rows.filter(r => r.content === "identical relevance fixture");
     expect(matches.length).toBe(2);
     expect(matches[0].id).toBeLessThan(matches[1].id);
+  });
+
+  it("SQL layer: limit: 0 returns zero rows (tool layer is responsible for 0 → default collapse)", () => {
+    // Documents the locked contract: searchMemory passes limit through to SQL,
+    // does NOT collapse 0 → 50. The tool layer (tools.ts) handles the collapse
+    // so the queryHash semantics match (per spec canonicalize rule that
+    // limit:0 ↔ limit:undefined in the hash).
+    addMemoryAs("sansan", { entry_type: "decision", content: "pass-through-fixture" });
+    const rows = searchMemory({ owner: "sansan", limit: 0 });
+    expect(rows).toEqual([]);
+  });
+
+  it("SQL layer: negative offset is tolerated by SQLite (no throw)", () => {
+    // Documents the locked contract: searchMemory does NOT validate offset.
+    // The tool layer is responsible for normalising. Verifies SQLite's
+    // tolerance of negative OFFSET (treated as 0, no error).
+    addMemoryAs("sansan", { entry_type: "decision", content: "neg-offset-fixture" });
+    expect(() => searchMemory({ owner: "sansan", offset: -1 })).not.toThrow();
   });
 });
 
