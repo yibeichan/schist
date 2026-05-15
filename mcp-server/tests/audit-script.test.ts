@@ -139,11 +139,13 @@ describe("runAudit (end-to-end)", () => {
     const isArrayShape: ShapeCheck = (r) => Array.isArray(r);
     const isQueryGraphShape: ShapeCheck = (r) =>
       !!r && typeof r === "object" && Array.isArray((r as { rows?: unknown }).rows);
+    const isSearchMemoryShape: ShapeCheck = (r) =>
+      !!r && typeof r === "object" && Array.isArray((r as { entries?: unknown }).entries);
     const probes: Array<[string, unknown, ShapeCheck]> = [
       ["list_concepts", await tools.list_concepts(tmpVault, {}), isArrayShape],
       ["list_domains", await tools.list_domains(tmpVault, {}), isArrayShape],
       ["query_graph", await tools.query_graph(tmpVault, { sql: "SELECT 1 AS x" }), isQueryGraphShape],
-      ["search_memory", await tools.search_memory(tmpVault, { limit: 1 }), isArrayShape],
+      ["search_memory", await tools.search_memory(tmpVault, { limit: 1 }), isSearchMemoryShape],
     ];
     for (const [name, resp, shapeOk] of probes) {
       if (resp && typeof resp === "object" && "error" in resp) {

@@ -6,7 +6,18 @@ import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote } from "./git-writer.js";
 import { buildNote, buildConnectionLine } from "./markdown-parser.js";
 import { validateOwner } from "./agent-identity.js";
-import type { VaultConfig, ToolError } from "./types.js";
+import type { VaultConfig, ToolError, SearchMemoryResponse } from "./types.js";
+import {
+  canonicalizeQueryHash,
+  decodeCursor,
+  issueCursor,
+  recordIssued,
+  checkRefusal,
+  parseVerbose,
+  logVerbose,
+  noteHighFrequency,
+  snippetContent,
+} from "./protocol/index.js";
 
 function slugify(title: string): string {
   return (
@@ -496,12 +507,40 @@ export async function get_context(
 
 export async function search_memory(
   _vaultRoot: string,
-  args: { query?: string; owner?: string; entry_type?: string; date_from?: string; date_to?: string; limit?: number }
-): Promise<unknown> {
+  args: {
+    query?: string;
+    owner?: string;
+    entry_type?: string;
+    date_from?: string;
+    date_to?: string;
+    limit?: number;
+    cursor?: string;
+    verbose?: string;
+  }
+): Promise<SearchMemoryResponse | { error: string; message: string }> {
+  // Step 1: parseVerbose. Reject INVALID_ARG before any SQL or canonicalize work.
+  const v = parseVerbose(args.verbose);
+  if ("error" in v) return v.error;
+  const verboseEnabled = v.enabled;
+  const verboseReason: string | undefined = v.enabled ? v.reason : undefined;
+
+  // Step 2: canonicalizeQueryHash. Active owner is SCHIST_AGENT_ID or "".
+  const activeOwner = process.env.SCHIST_AGENT_ID ?? "";
+  const ch = canonicalizeQueryHash(args as Record<string, unknown>, activeOwner);
+  if (!ch.ok) return ch.error;
+  const queryHash = ch.queryHash;
+
+  // Cursor + refusal + SQL + recordIssued + verbose log + response shape land
+  // in Tasks 3.6, 3.7, 3.8. Until then return a minimal valid response so
+  // Task 3.5 tests pass.
+  void queryHash;
+  void verboseEnabled;
+  void verboseReason;
   try {
-    return sqliteReader.searchMemory(args);
+    const entries = sqliteReader.searchMemory(args);
+    return { entries };
   } catch (e: unknown) {
-    return normalizeError(e, "INVALID_SQL");
+    return normalizeError(e, "INVALID_SQL") as { error: string; message: string };
   }
 }
 

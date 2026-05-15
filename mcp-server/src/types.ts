@@ -74,6 +74,14 @@ export interface MemoryEntry {
   created_at: string;
 }
 
+export interface SearchMemoryResponse {
+  entries: MemoryEntry[];
+  /** Opaque cursor token for the next page; absent when this is the last page. */
+  cursor?: string;
+  /** Soft warning when the verbose reason pattern has exceeded the rate limit. */
+  verboseNote?: string;
+}
+
 export interface AgentStateEntry {
   key: string;
   value: unknown;
