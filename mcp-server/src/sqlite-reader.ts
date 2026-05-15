@@ -392,6 +392,7 @@ export function searchMemory(opts: {
   date_from?: string;
   date_to?: string;
   limit?: number;
+  offset?: number;
 }): MemoryEntry[] {
   const db = openMemoryDb();
   try {
@@ -400,6 +401,7 @@ export function searchMemory(opts: {
       datetime(updated_at, '+' || ttl_hours || ' hours') < datetime('now')`);
 
     const limit = opts.limit ?? 50;
+    const offset = opts.offset ?? 0;
     const params: unknown[] = [];
 
     let useFts = false;
@@ -420,8 +422,8 @@ export function searchMemory(opts: {
       if (opts.entry_type) { sql += " AND m.entry_type = ?"; params.push(opts.entry_type); }
       if (opts.date_from) { sql += " AND m.date >= ?"; params.push(opts.date_from); }
       if (opts.date_to) { sql += " AND m.date <= ?"; params.push(opts.date_to); }
-      sql += " LIMIT ?";
-      params.push(limit);
+      sql += " ORDER BY bm25(agent_memory_fts), m.id ASC LIMIT ? OFFSET ?";
+      params.push(limit, offset);
       const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
       return rows.map(rowToMemoryEntry);
     } else {
@@ -430,8 +432,8 @@ export function searchMemory(opts: {
       if (opts.entry_type) { sql += " AND entry_type = ?"; params.push(opts.entry_type); }
       if (opts.date_from) { sql += " AND date >= ?"; params.push(opts.date_from); }
       if (opts.date_to) { sql += " AND date <= ?"; params.push(opts.date_to); }
-      sql += " ORDER BY created_at DESC LIMIT ?";
-      params.push(limit);
+      sql += " ORDER BY created_at DESC, id ASC LIMIT ? OFFSET ?";
+      params.push(limit, offset);
       const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
       return rows.map(rowToMemoryEntry);
     }

@@ -144,6 +144,66 @@ describe("searchMemory", () => {
     expect(results.length).toBeGreaterThanOrEqual(1);
     expect(results.some(r => r.content.includes("SQLite"))).toBe(true);
   });
+
+  it("returns rows starting from the requested offset (non-FTS path)", () => {
+    // Seed 5 entries with deterministic content (in addition to beforeEach's 3)
+    for (let i = 0; i < 5; i++) {
+      addMemoryAs("sansan", { entry_type: "decision", content: `pad-entry-${i}` });
+    }
+    const all = searchMemory({ owner: "sansan", limit: 50 });
+    expect(all.length).toBeGreaterThanOrEqual(7); // 2 from beforeEach + 5
+    const page1 = searchMemory({ owner: "sansan", limit: 3, offset: 0 });
+    const page2 = searchMemory({ owner: "sansan", limit: 3, offset: 3 });
+    expect(page1.length).toBe(3);
+    expect(page2.length).toBeGreaterThanOrEqual(1);
+    // Pages disjoint by id
+    const ids1 = new Set(page1.map(r => r.id));
+    for (const r of page2) {
+      expect(ids1.has(r.id)).toBe(false);
+    }
+  });
+
+  it("returns rows starting from the requested offset (FTS path)", () => {
+    addMemoryAs("sansan", { entry_type: "decision", content: "tiebreaker fixture alpha" });
+    addMemoryAs("sansan", { entry_type: "decision", content: "tiebreaker fixture beta" });
+    addMemoryAs("sansan", { entry_type: "decision", content: "tiebreaker fixture gamma" });
+    const page1 = searchMemory({ query: "tiebreaker fixture", limit: 2, offset: 0 });
+    const page2 = searchMemory({ query: "tiebreaker fixture", limit: 2, offset: 2 });
+    expect(page1.length).toBe(2);
+    expect(page2.length).toBeGreaterThanOrEqual(1);
+    const ids1 = new Set(page1.map(r => r.id));
+    for (const r of page2) {
+      expect(ids1.has(r.id)).toBe(false);
+    }
+  });
+
+  it("non-FTS path orders by created_at DESC then id ASC (tiebreaker is deterministic)", () => {
+    // Insert two entries with the same content; created_at granularity is 1s,
+    // so two rapid inserts share the same created_at — id ASC must order them.
+    addMemoryAs("sansan", { entry_type: "decision", content: "same-content-tiebreaker" });
+    addMemoryAs("sansan", { entry_type: "decision", content: "same-content-tiebreaker" });
+    const both = searchMemory({ owner: "sansan", entry_type: "decision" });
+    const sameContentRows = both.filter(r => r.content === "same-content-tiebreaker");
+    expect(sameContentRows.length).toBe(2);
+    // When created_at ties, the LOWER id should appear earlier (id ASC tiebreaker
+    // within the created_at DESC primary). The first-inserted has lower id and
+    // appears earlier (because both share created_at — DESC has no effect on the
+    // tie, so id ASC takes over).
+    if (sameContentRows[0].created_at === sameContentRows[1].created_at) {
+      expect(sameContentRows[0].id).toBeLessThan(sameContentRows[1].id);
+    }
+  });
+
+  it("FTS path orders by bm25 then id ASC (tiebreaker is deterministic)", () => {
+    // Two entries with identical bm25 rank against a generic query — id ASC
+    // breaks ties.
+    addMemoryAs("sansan", { entry_type: "decision", content: "identical relevance fixture" });
+    addMemoryAs("sansan", { entry_type: "decision", content: "identical relevance fixture" });
+    const rows = searchMemory({ query: "identical relevance fixture" });
+    const matches = rows.filter(r => r.content === "identical relevance fixture");
+    expect(matches.length).toBe(2);
+    expect(matches[0].id).toBeLessThan(matches[1].id);
+  });
 });
 
 // ---------------------------------------------------------------------------
