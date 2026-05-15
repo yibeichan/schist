@@ -5,6 +5,7 @@ import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote } from "./git-writer.js";
 import { buildNote, buildConnectionLine } from "./markdown-parser.js";
+import { validateOwner } from "./agent-identity.js";
 import type { VaultConfig, ToolError } from "./types.js";
 
 function slugify(title: string): string {
@@ -490,30 +491,6 @@ export async function get_context(
 
 // ── Memory V2 Tools ────────────────────────────────────────────────────────
 
-/** Helper: validate owner against allowed agent identities.
- *
- *  - If neither SCHIST_AGENT_ID nor SCHIST_ALLOWED_AGENTS is set: no enforcement (any owner accepted).
- *  - If SCHIST_ALLOWED_AGENTS is set: owner must be in the comma-separated allowlist.
- *  - If only SCHIST_AGENT_ID is set (legacy): owner must match exactly.
- *
- *  This supports both single-agent (legacy) and multi-agent (OpenClaw shared MCP)
- *  deployments without losing per-entry attribution.
- */
-function assertAgentIdentity(owner: string): void {
-  const allowedAgents = process.env.SCHIST_ALLOWED_AGENTS;
-  if (allowedAgents) {
-    const allowed = allowedAgents.split(",").map(s => s.trim()).filter(Boolean);
-    if (allowed.length > 0 && !allowed.includes(owner)) {
-      throw { error: "VALIDATION_ERROR", message: `Owner '${owner}' not in SCHIST_ALLOWED_AGENTS '${allowedAgents}'` };
-    }
-    return;
-  }
-  const agentId = process.env.SCHIST_AGENT_ID;
-  if (agentId && agentId !== owner) {
-    throw { error: "VALIDATION_ERROR", message: `Owner '${owner}' does not match SCHIST_AGENT_ID '${agentId}'` };
-  }
-}
-
 // READ-ONLY memory tools (no capability gate)
 
 export async function search_memory(
@@ -565,7 +542,7 @@ export async function add_memory(
   }
 ): Promise<unknown> {
   try {
-    assertAgentIdentity(args.owner);
+    validateOwner(args.owner);
     return sqliteReader.addMemory(args);
   } catch (e: unknown) {
     return normalizeError(e, "VALIDATION_ERROR");
@@ -577,7 +554,7 @@ export async function set_agent_state(
   args: { key: string; value: unknown; owner: string; ttl_hours?: number }
 ): Promise<unknown> {
   try {
-    assertAgentIdentity(args.owner);
+    validateOwner(args.owner);
     return sqliteReader.setAgentState(args.key, args.value, args.owner, args.ttl_hours);
   } catch (e: unknown) {
     return normalizeError(e, "VALIDATION_ERROR");
@@ -589,7 +566,7 @@ export async function delete_agent_state(
   args: { key: string; owner: string }
 ): Promise<unknown> {
   try {
-    assertAgentIdentity(args.owner);
+    validateOwner(args.owner);
     return sqliteReader.deleteAgentState(args.key, args.owner);
   } catch (e: unknown) {
     return normalizeError(e, "VALIDATION_ERROR");
@@ -601,7 +578,7 @@ export async function add_concept_alias(
   args: { duplicate_slug: string; canonical_slug: string; reason?: string; created_by: string }
 ): Promise<unknown> {
   try {
-    assertAgentIdentity(args.created_by);
+    validateOwner(args.created_by);
     return sqliteReader.addConceptAlias(vaultRoot, args.duplicate_slug, args.canonical_slug, args.reason, args.created_by);
   } catch (e: unknown) {
     return normalizeError(e, "VALIDATION_ERROR");

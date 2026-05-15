@@ -5,6 +5,7 @@ import * as fs from "fs";
 import { load as yamlLoad } from "js-yaml";
 import type { SearchResult, Note, Concept, Connection, MemoryEntry, AgentStateEntry, Domain, ConceptAlias } from "./types.js";
 import { CONNECTION_RE, parseConnections as parseConnectionsSync } from "./markdown-parser.js";
+import { validateOwner } from "./agent-identity.js";
 
 // ── Agent scope map (loaded from vault.yaml) ─────────────────────────────
 
@@ -340,17 +341,6 @@ function openMemoryDb(): Database.Database {
   return db;
 }
 
-/** Validate caller identity — SCHIST_AGENT_ID must be set and must match owner */
-function assertOwner(owner: string): void {
-  const agentId = process.env.SCHIST_AGENT_ID;
-  if (!agentId) {
-    throw Object.assign(new Error("SCHIST_AGENT_ID env var is required for write operations"), { error: "CONFIG_ERROR" });
-  }
-  if (agentId !== owner) {
-    throw Object.assign(new Error(`Owner '${owner}' does not match SCHIST_AGENT_ID '${agentId}'`), { error: "VALIDATION_ERROR" });
-  }
-}
-
 /** Validate agent_state key prefix (Ninjia fix) */
 function assertKeyPrefix(key: string, owner: string): void {
   const keyPrefix = key.split(".")[0];
@@ -372,7 +362,7 @@ export function addMemory(entry: {
   source_ref?: string;
   confidence?: string;
 }): { id: number; created_at: string } {
-  assertOwner(entry.owner);
+  validateOwner(entry.owner);
   const db = openMemoryDb();
   try {
     const date = entry.date ?? new Date().toISOString().split("T")[0];
@@ -482,7 +472,7 @@ export function getAgentState(key: string): AgentStateEntry | null {
 }
 
 export function setAgentState(key: string, value: unknown, owner: string, ttl_hours?: number): { key: string; updated_at: string } {
-  assertOwner(owner);
+  validateOwner(owner);
   assertKeyPrefix(key, owner);
   const db = openMemoryDb();
   try {
@@ -505,7 +495,7 @@ export function setAgentState(key: string, value: unknown, owner: string, ttl_ho
 }
 
 export function deleteAgentState(key: string, owner: string): { deleted: boolean } {
-  assertOwner(owner);
+  validateOwner(owner);
   assertKeyPrefix(key, owner);
   const db = openMemoryDb();
   try {
@@ -544,7 +534,7 @@ export function addConceptAlias(
   reason: string | undefined,
   created_by: string
 ): ConceptAlias {
-  assertOwner(created_by);
+  validateOwner(created_by);
   const db = openDb(vaultRoot, { readonly: false });
   try {
     db.prepare(`

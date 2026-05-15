@@ -70,7 +70,7 @@ export function makeMemoryWriteTools(_config: VaultConfig) {
   return [
     {
       name: "add_memory",
-      description: "Add a memory entry (decision, lesson, blocker, completion, or observation). owner must match SCHIST_AGENT_ID.",
+      description: "Add a memory entry (decision, lesson, blocker, completion, or observation). owner must match SCHIST_AGENT_ID, or appear in SCHIST_ALLOWED_AGENTS for multi-agent shared deployments.",
       inputSchema: {
         type: "object" as const,
         properties: {
