@@ -22,7 +22,7 @@ import {
   searchMemory,
   getAgentState,
 } from "../src/sqlite-reader.js";
-import { add_memory, set_agent_state, delete_agent_state } from "../src/tools.js";
+import { add_memory, set_agent_state, delete_agent_state, add_concept_alias } from "../src/tools.js";
 
 let tempDir: string;
 
@@ -156,5 +156,21 @@ describe("MCP tool layer (add_memory / set_agent_state / delete_agent_state)", (
       owner: "octopus",
     });
     expect(isErrorResult(delRes)).toBe(false);
+  });
+
+  it("add_concept_alias rejects non-allowlisted created_by via tool layer", async () => {
+    // validateOwner runs before any DB touch, so the negative path doesn't
+    // need a real vault — /tmp/unused-vault is never opened.
+    process.env.SCHIST_ALLOWED_AGENTS = "eleven,octopus";
+    const result = await add_concept_alias("/tmp/unused-vault", {
+      duplicate_slug: "foo",
+      canonical_slug: "bar",
+      created_by: "ninjia",
+    });
+    expect(isErrorResult(result)).toBe(true);
+    if (isErrorResult(result)) {
+      expect(result.error).toBe("VALIDATION_ERROR");
+      expect(result.message).toMatch(/not in SCHIST_ALLOWED_AGENTS/);
+    }
   });
 });

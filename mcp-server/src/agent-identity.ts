@@ -4,10 +4,12 @@
  * policy lives in one place.
  *
  * Resolution order:
- *   1. SCHIST_ALLOWED_AGENTS set → owner must appear in the
+ *   1. SCHIST_ALLOWED_AGENTS defined → owner must appear in the
  *      comma-separated allowlist. Used by multi-agent shared-MCP
  *      deployments (e.g. OpenClaw) where one server process serves
  *      several agents and per-entry attribution is preserved by `owner`.
+ *      Defined-but-empty ('') or all-whitespace values throw CONFIG_ERROR —
+ *      to disable allowlist mode, unset the variable.
  *   2. SCHIST_ALLOWED_AGENTS unset, SCHIST_AGENT_ID set → owner must
  *      match exactly. Legacy single-agent path.
  *   3. Neither set → CONFIG_ERROR. Writes always require identity to
@@ -15,7 +17,7 @@
  */
 export function validateOwner(owner: string): void {
   const allowedAgents = process.env.SCHIST_ALLOWED_AGENTS;
-  if (allowedAgents) {
+  if (allowedAgents !== undefined) {
     const allowed = allowedAgents
       .split(",")
       .map((s) => s.trim())
@@ -23,7 +25,7 @@ export function validateOwner(owner: string): void {
     if (allowed.length === 0) {
       throw Object.assign(
         new Error(
-          `SCHIST_ALLOWED_AGENTS is set but parses to an empty list (value: '${allowedAgents}')`
+          `SCHIST_ALLOWED_AGENTS is defined but parses to an empty list (value: '${allowedAgents}'). To disable allowlist mode, unset the variable.`
         ),
         { error: "CONFIG_ERROR" }
       );

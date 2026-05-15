@@ -90,24 +90,69 @@ full rationale.
   requires `owner=eleven`.
 - `delete_agent_state` — remove a keyed state value.
 
-The `owner` field on write is enforced to equal `SCHIST_AGENT_ID`. Writes
-without `SCHIST_AGENT_ID` set fail with `CONFIG_ERROR`; writes with a
-mismatched owner fail with `VALIDATION_ERROR`. Reads are unrestricted.
+The `owner` field on write is enforced against the configured agent
+identity (see [Identity](#identity-schist_agent_id-vs-schist_allowed_agents)
+below). Writes without identity configured fail with `CONFIG_ERROR`; writes
+with a mismatched owner fail with `VALIDATION_ERROR`. Reads are unrestricted.
 
 The `request_capabilities` success response now lists every write tool
 that becomes callable — both vault and memory — in its `message` and
 `tools` fields.
 
-## Identity: `SCHIST_AGENT_ID`
+## Identity: `SCHIST_AGENT_ID` vs `SCHIST_ALLOWED_AGENTS`
 
-Every memory row carries an `owner` column. Set `SCHIST_AGENT_ID` once per
-project (same value across projects if you want a shared identity) and all
-writes from that project will be attributed to it. The ID is free-form —
-we recommend matching the agent identity you use for vault writes
-(`sansan`, `eleven`, `claude`, etc.).
+Every memory row carries an `owner` column. schist supports two
+deployment shapes:
+
+### Single-agent (legacy): `SCHIST_AGENT_ID`
+
+Set `SCHIST_AGENT_ID` once per project. Every write must declare
+`owner == SCHIST_AGENT_ID`; mismatches return `VALIDATION_ERROR`. Use this
+when one machine runs one agent identity.
+
+```bash
+SCHIST_AGENT_ID=sansan
+```
+
+### Multi-agent shared MCP: `SCHIST_ALLOWED_AGENTS`
+
+For deployments where several agents share one schist MCP server process
+(e.g. OpenClaw, where `eleven`, `octopus`, `sansan`, `ninjia`, ... all
+talk to the same subprocess), set `SCHIST_ALLOWED_AGENTS` to a
+comma-separated allowlist instead:
+
+```bash
+SCHIST_ALLOWED_AGENTS=eleven,octopus,sansan,ninjia,atwood,alpha
+```
+
+Each write supplies its own `owner`; the call succeeds iff `owner` is in
+the allowlist. Per-entry attribution is preserved (every row keeps the
+calling agent's id in the `owner` column).
+
+### Resolution order
+
+1. `SCHIST_ALLOWED_AGENTS` defined → owner must be in the allowlist. Wins
+   over `SCHIST_AGENT_ID` if both are set.
+2. `SCHIST_ALLOWED_AGENTS` unset, `SCHIST_AGENT_ID` set → owner must
+   match exactly (legacy).
+3. Neither set → `CONFIG_ERROR`. Writes always require identity to be
+   configured.
+
+`SCHIST_ALLOWED_AGENTS=""` (defined but empty) also throws
+`CONFIG_ERROR` — to disable allowlist mode, **unset** the variable
+rather than setting it empty.
+
+The ID is free-form — we recommend matching the agent identity you use
+for vault writes (`sansan`, `eleven`, `claude`, etc.).
 
 `search_memory` can filter by owner, so cross-identity retrieval works if
 you need it.
+
+> **Read-path note (#62):** scope-inheritance for `search_notes` still
+> resolves the calling agent via `SCHIST_AGENT_NAME ?? SCHIST_AGENT_ID`.
+> Under a pure-allowlist deployment (only `SCHIST_ALLOWED_AGENTS` set),
+> scope-inherit searches fall back to `"global"`. Keep `SCHIST_AGENT_ID`
+> set per-process as a workaround until the read-path threading is fixed.
 
 ## Project scoping: the `project:<slug>` tag convention
 

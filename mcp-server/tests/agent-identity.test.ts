@@ -62,7 +62,7 @@ describe("validateOwner", () => {
       expectThrow(
         () => validateOwner("anyone"),
         "CONFIG_ERROR",
-        /SCHIST_ALLOWED_AGENTS is set but parses to an empty list/
+        /SCHIST_ALLOWED_AGENTS is defined but parses to an empty list/
       );
     });
 
@@ -79,15 +79,17 @@ describe("validateOwner", () => {
       );
     });
 
-    it("ignores empty-string SCHIST_ALLOWED_AGENTS (falls through to legacy path)", () => {
-      // Empty string is falsy — treated as "unset" so legacy SCHIST_AGENT_ID path applies
+    it("throws CONFIG_ERROR on defined-but-empty SCHIST_ALLOWED_AGENTS, even if SCHIST_AGENT_ID is set", () => {
+      // Operators may intuitively set SCHIST_ALLOWED_AGENTS="" to "disable" the
+      // allowlist, expecting it to fall back to single-agent mode. That's a
+      // footgun — fail loudly instead so the operator unsets the variable
+      // when they want legacy semantics.
       process.env.SCHIST_ALLOWED_AGENTS = "";
       process.env.SCHIST_AGENT_ID = "eleven";
-      expect(() => validateOwner("eleven")).not.toThrow();
       expectThrow(
-        () => validateOwner("octopus"),
-        "VALIDATION_ERROR",
-        /does not match SCHIST_AGENT_ID/
+        () => validateOwner("eleven"),
+        "CONFIG_ERROR",
+        /SCHIST_ALLOWED_AGENTS is defined but parses to an empty list/
       );
     });
   });
