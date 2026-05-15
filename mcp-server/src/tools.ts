@@ -544,11 +544,28 @@ export async function search_memory(
   if (!ch.ok) return ch.error;
   const queryHash = ch.queryHash;
 
-  // queryHash, verboseEnabled, verboseReason captured here; consumed by
-  // Tasks 3.6 (cursor decode + binding), 3.7 (checkRefusal), and 3.8 (SQL +
-  // record/issue + log/freq + response shape).
+  // Step 3: Cursor decoding + queryHash binding check.
+  // Binding policy: current call's computed queryHash MUST equal the cursor's
+  // encoded queryHash. Mismatch → CURSOR_INVALID_SIGNATURE with explanatory
+  // message. Locked in Task 3.0 spec amendment ("Cursor binding to queryHash").
+  let offset = 0;
+  if (typeof args.cursor === "string" && args.cursor.length > 0) {
+    const d = decodeCursor(args.cursor, "search_memory");
+    if (!d.ok) return d.error;
+    if (d.queryHash !== queryHash) {
+      return {
+        error: "CURSOR_INVALID_SIGNATURE",
+        message: "cursor was issued for a different query — restart pagination from page 1",
+      };
+    }
+    offset = d.offset;
+  }
+
+  // verboseEnabled, verboseReason captured here; consumed by Tasks 3.7
+  // (checkRefusal) and 3.8 (SQL + record/issue + log/freq + response shape).
+  // offset will be threaded into the SQL call in Task 3.8.
   try {
-    const entries = sqliteReader.searchMemory(args);
+    const entries = sqliteReader.searchMemory({ ...args, offset });
     return { entries };
   } catch (e: unknown) {
     return normalizeError(e, "INVALID_SQL");
