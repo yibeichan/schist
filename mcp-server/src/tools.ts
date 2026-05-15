@@ -561,9 +561,9 @@ export async function search_memory(
     offset = d.offset;
   }
 
-  // verboseEnabled, verboseReason captured here; consumed by Tasks 3.7
-  // (checkRefusal) and 3.8 (SQL + record/issue + log/freq + response shape).
-  // offset will be threaded into the SQL call in Task 3.8.
+  // offset is now threaded into the SQL call below. verboseEnabled and
+  // verboseReason are captured for Tasks 3.7 (checkRefusal) and 3.8
+  // (SQL clamp + record/issue + log/freq + response shape).
   try {
     const entries = sqliteReader.searchMemory({ ...args, offset });
     return { entries };
