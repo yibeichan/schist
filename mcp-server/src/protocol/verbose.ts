@@ -47,9 +47,12 @@ export function parseVerbose(input: unknown): ParseVerboseResult {
     };
   }
   // Whitespace-only or empty → not verbose, no error.
-  // \s covers ASCII whitespace + NBSP (U+00A0); we also strip ZWS (U+200B)
-  // and BOM (U+FEFF) which are invisible but not matched by \s in V8.
-  const stripped = input.replace(/[​﻿]/gu, "");
+  // \s covers ASCII whitespace + NBSP (U+00A0); we also strip invisible
+  // format-class chars not matched by \s in V8:
+  //   U+200B ZWS, U+200C ZWNJ, U+200D ZWJ, U+2060 WORD JOINER, U+FEFF BOM.
+  // Strip before length check so a string of 12 ZWJs can't satisfy the
+  // ≥12 code-point gate with no actual rationale.
+  const stripped = input.replace(/[​-‍⁠﻿]/gu, "");
   if (/^\s*$/u.test(stripped)) return { enabled: false };
 
   const trimmed = stripped.trim();
