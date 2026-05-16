@@ -200,7 +200,7 @@ export async function maybeSpokePull(vaultRoot: string, timeoutMs = 5000): Promi
 
 export async function search_notes(
   vaultRoot: string,
-  args: { query: string; limit?: number; status?: string; tags?: string[]; scope?: string }
+  args: { query: string; limit?: number; status?: string; tags?: string[]; scope?: string; owner?: string }
 ): Promise<unknown> {
   try {
     return sqliteReader.searchNotes(vaultRoot, args.query, {
@@ -208,6 +208,7 @@ export async function search_notes(
       status: args.status,
       tags: args.tags,
       scope: args.scope,
+      owner: args.owner,
     });
   } catch (e: unknown) {
     return normalizeError(e, "INGEST_ERROR");
