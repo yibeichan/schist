@@ -549,6 +549,7 @@ export async function search_memory(
   // encoded queryHash. Mismatch → CURSOR_INVALID_SIGNATURE with explanatory
   // message. Locked in Task 3.0 spec amendment ("Cursor binding to queryHash").
   let offset = 0;
+  let consumingCursor = false;
   if (typeof args.cursor === "string" && args.cursor.length > 0) {
     const d = decodeCursor(args.cursor, "search_memory");
     if (!d.ok) return d.error;
@@ -559,10 +560,24 @@ export async function search_memory(
       };
     }
     offset = d.offset;
+    consumingCursor = true;
   }
 
-  // offset is now threaded into the SQL call below. verboseEnabled and
-  // verboseReason are captured for Tasks 3.7 (checkRefusal) and 3.8
+  // Step 4: Identical-query refusal (only when no cursor was presented).
+  // The verbose-newly-set bypass is enforced inside checkRefusal — false→true
+  // bypasses, true→true and true→false remain refused (spec line 145 + the
+  // PR 2 protocol unit tests at protocol/cursor.test.ts).
+  if (!consumingCursor) {
+    const refusal = checkRefusal({
+      tool: "search_memory",
+      queryHash,
+      owner: activeOwner,
+      verboseEnabled,
+    });
+    if (refusal.refuse) return refusal.error;
+  }
+
+  // verboseEnabled, verboseReason captured here; consumed by Task 3.8
   // (SQL clamp + record/issue + log/freq + response shape).
   try {
     const entries = sqliteReader.searchMemory({ ...args, offset });

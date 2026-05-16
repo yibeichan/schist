@@ -119,3 +119,90 @@ describe("search_memory tool — cursor decoding", () => {
     expect(r).not.toHaveProperty("error");
   });
 });
+
+describe("search_memory tool — identical-query refusal", () => {
+  // Helper pattern: drive the handler into "results were capped" state by
+  // calling recordIssued directly. The actual record/issue wiring lands in
+  // Task 3.8 — for Task 3.7 we just need to verify checkRefusal is wired
+  // correctly when there's a prior LRU entry.
+
+  it("returns CURSOR_REQUIRED on identical (tool, queryHash, activeOwner) within TTL", async () => {
+    seed("sansan", 10);
+    const { canonicalizeQueryHash, recordIssued } = await import("../src/protocol/index.js");
+    const args = { owner: "sansan", limit: 3 };
+    const ch = canonicalizeQueryHash(args, "");
+    if (!ch.ok) throw new Error("canonicalize failed in test setup");
+    recordIssued({ tool: "search_memory", queryHash: ch.queryHash, owner: "", verboseEnabled: false });
+    // Second identical call (no cursor) must be refused
+    const r = await search_memory(VAULT_ROOT, args as never);
+    expect(r).toEqual({
+      error: "CURSOR_REQUIRED",
+      message: expect.stringContaining("Identical query"),
+    });
+  });
+
+  it("does NOT refuse when activeOwner differs (different owner namespace)", async () => {
+    seed("sansan", 10);
+    const { canonicalizeQueryHash, recordIssued } = await import("../src/protocol/index.js");
+    const args = { owner: "sansan", limit: 3 };
+    // Record under owner "yibei"
+    const ch = canonicalizeQueryHash(args, "yibei");
+    if (!ch.ok) throw new Error("canonicalize failed in test setup");
+    recordIssued({ tool: "search_memory", queryHash: ch.queryHash, owner: "yibei", verboseEnabled: false });
+    // Current call's activeOwner is "" (SCHIST_AGENT_ID not set) — different
+    // namespace, no refusal expected. Both queryHash AND owner differ in the
+    // LRU key, so checkRefusal returns refuse:false.
+    delete process.env.SCHIST_AGENT_ID;
+    const r = await search_memory(VAULT_ROOT, args as never);
+    expect(r).toHaveProperty("entries");
+  });
+
+  it("verbose-newly-set bypasses refusal (false -> true)", async () => {
+    seed("sansan", 10);
+    const { canonicalizeQueryHash, recordIssued } = await import("../src/protocol/index.js");
+    const args = { owner: "sansan", limit: 3 };
+    const ch = canonicalizeQueryHash(args, "");
+    if (!ch.ok) throw new Error("canonicalize failed in test setup");
+    recordIssued({ tool: "search_memory", queryHash: ch.queryHash, owner: "", verboseEnabled: false });
+    // Now retry the identical query with verbose newly set
+    const r = await search_memory(VAULT_ROOT, {
+      ...args,
+      verbose: "user requested full content for review",
+    } as never);
+    expect(r).toHaveProperty("entries");
+    expect(r).not.toHaveProperty("error");
+  });
+
+  it("STILL refuses on verbose true -> true (identical+verbose retry)", async () => {
+    seed("sansan", 10);
+    const { canonicalizeQueryHash, recordIssued } = await import("../src/protocol/index.js");
+    const args = { owner: "sansan", limit: 3 };
+    const ch = canonicalizeQueryHash(args, "");
+    if (!ch.ok) throw new Error("canonicalize failed in test setup");
+    // Record with verboseEnabled=true (prior verbose call)
+    recordIssued({ tool: "search_memory", queryHash: ch.queryHash, owner: "", verboseEnabled: true });
+    const r = await search_memory(VAULT_ROOT, {
+      ...args,
+      verbose: "user requested full content for review",
+    } as never);
+    expect(r).toEqual({
+      error: "CURSOR_REQUIRED",
+      message: expect.any(String),
+    });
+  });
+
+  it("STILL refuses on verbose true -> false (downgrade)", async () => {
+    seed("sansan", 10);
+    const { canonicalizeQueryHash, recordIssued } = await import("../src/protocol/index.js");
+    const args = { owner: "sansan", limit: 3 };
+    const ch = canonicalizeQueryHash(args, "");
+    if (!ch.ok) throw new Error("canonicalize failed in test setup");
+    recordIssued({ tool: "search_memory", queryHash: ch.queryHash, owner: "", verboseEnabled: true });
+    // Current call has NO verbose — downgrade should still refuse
+    const r = await search_memory(VAULT_ROOT, args as never);
+    expect(r).toEqual({
+      error: "CURSOR_REQUIRED",
+      message: expect.any(String),
+    });
+  });
+});
