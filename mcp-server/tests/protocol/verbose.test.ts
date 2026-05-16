@@ -33,6 +33,18 @@ describe("parseVerbose — not-verbose paths (no error)", () => {
   it("returns enabled:false for BOM-only string (U+FEFF)", () => {
     expect(parseVerbose("﻿".repeat(12))).toEqual({ enabled: false });
   });
+
+  it("returns enabled:false for ZWNJ-only string (U+200C)", () => {
+    expect(parseVerbose("‌".repeat(12))).toEqual({ enabled: false });
+  });
+
+  it("returns enabled:false for ZWJ-only string (U+200D)", () => {
+    expect(parseVerbose("‍".repeat(12))).toEqual({ enabled: false });
+  });
+
+  it("returns enabled:false for WORD-JOINER-only string (U+2060)", () => {
+    expect(parseVerbose("⁠".repeat(12))).toEqual({ enabled: false });
+  });
 });
 
 describe("parseVerbose — INVALID_ARG paths", () => {
@@ -84,6 +96,21 @@ describe("parseVerbose — INVALID_ARG paths", () => {
 
   it("counts surrounding-whitespace-stripped length", () => {
     const r = parseVerbose("           hi          "); // padded
+    expect(r.enabled).toBe(false);
+    if ("error" in r) expect(r.error.error).toBe("INVALID_ARG");
+  });
+
+  it("rejects mixed visible+zero-width when stripped length is <12 (ZWJ padding)", () => {
+    // "foo" + 9 × U+200D — looks like 12 chars but strips to 3 visible.
+    const r = parseVerbose("foo" + "‍".repeat(9));
+    expect(r.enabled).toBe(false);
+    if ("error" in r) expect(r.error.error).toBe("INVALID_ARG");
+  });
+
+  it("rejects mixed visible+zero-width when stripped length is <12 (mixed Cf padding)", () => {
+    // 4 visible + 8 mixed zero-widths (ZWS, ZWNJ, ZWJ, WJ, BOM) = 12 surface chars,
+    // 4 after strip. Must fail the ≥12 gate.
+    const r = parseVerbose("real" + "​‌‍⁠﻿​‌‍");
     expect(r.enabled).toBe(false);
     if ("error" in r) expect(r.error.error).toBe("INVALID_ARG");
   });
