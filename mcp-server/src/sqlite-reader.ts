@@ -67,7 +67,7 @@ function openDb(vaultRoot: string, opts?: { readonly?: boolean }): Database.Data
 export function searchNotes(
   vaultRoot: string,
   query: string,
-  opts?: { limit?: number; status?: string; tags?: string[]; scope?: string }
+  opts?: { limit?: number; status?: string; tags?: string[]; scope?: string; owner?: string }
 ): SearchResult[] {
   const db = openDb(vaultRoot);
   try {
@@ -95,9 +95,13 @@ export function searchNotes(
 
     if (opts?.scope) {
       if (opts.scope === "inherit") {
-        // Resolve calling scope: explicit param > agent default from vault.yaml > "global"
+        // Resolve calling scope: per-call owner > SCHIST_AGENT_NAME > SCHIST_AGENT_ID > "".
+        // Per-call owner is the only signal under SCHIST_ALLOWED_AGENTS-only
+        // deployments (shared MCP server, no per-process env identity); without
+        // it, scope-inherit silently collapses to "global" for every agent.
         const scopeMap = loadAgentScopeMap(vaultRoot);
-        const agentName = process.env.SCHIST_AGENT_NAME ?? process.env.SCHIST_AGENT_ID;
+        const agentName =
+          opts.owner ?? process.env.SCHIST_AGENT_NAME ?? process.env.SCHIST_AGENT_ID;
         const callingScope = scopeMap.get(agentName ?? "") ?? "global";
         sql += ` AND (docs.scope = 'global' OR docs.scope = ? OR docs.scope LIKE ? || '/%')`;
         params.push(callingScope, callingScope);

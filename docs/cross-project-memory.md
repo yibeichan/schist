@@ -148,11 +148,22 @@ for vault writes (`sansan`, `eleven`, `claude`, etc.).
 `search_memory` can filter by owner, so cross-identity retrieval works if
 you need it.
 
-> **Read-path note (#62):** scope-inheritance for `search_notes` still
-> resolves the calling agent via `SCHIST_AGENT_NAME ?? SCHIST_AGENT_ID`.
-> Under a pure-allowlist deployment (only `SCHIST_ALLOWED_AGENTS` set),
-> scope-inherit searches fall back to `"global"`. Keep `SCHIST_AGENT_ID`
-> set per-process as a workaround until the read-path threading is fixed.
+> **Read-path identity (formerly #62):** `search_notes(scope: "inherit")`
+> resolves the calling agent in this order:
+>
+>     args.owner > SCHIST_AGENT_NAME > SCHIST_AGENT_ID > "" (→ "global")
+>
+> Under an allowlist-only deployment (only `SCHIST_ALLOWED_AGENTS` set, no
+> per-process env identity), pass `owner` per-call so scope-inherit resolves
+> to the calling agent rather than collapsing to `"global"`:
+>
+> ```json
+> { "query": "...", "scope": "inherit", "owner": "octopus" }
+> ```
+>
+> The `owner` arg is not validated against the allowlist — scope is a
+> convenience filter, not a privacy boundary (any agent can already query
+> any scope explicitly via `scope: "<name>"`).
 
 ## Project scoping: the `project:<slug>` tag convention
 

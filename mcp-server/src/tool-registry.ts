@@ -25,6 +25,7 @@ export function makeReadTools(config: VaultConfig) {
           status: { type: "string", enum: config.statuses },
           tags: { type: "array", items: { type: "string" } },
           scope: { type: "string", description: 'Filter by scope. Use "inherit" to search agent default scope + global.' },
+          owner: { type: "string", description: "Calling agent's id. Required for scope='inherit' under SCHIST_ALLOWED_AGENTS-only deployments where the env has no per-process identity; otherwise optional (falls back to SCHIST_AGENT_NAME / SCHIST_AGENT_ID)." },
         },
         required: ["query"],
       },
