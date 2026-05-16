@@ -1607,14 +1607,14 @@ cd /orcd/home/002/yibei/schist
 SCHIST_MEMORY_DB="$HOME/.openclaw/memory/agent-state.db" \
   npx tsx scripts/audit_mcp_response_sizes.ts \
   --vault ~/schist-vault \
-  --output docs/superpowers/specs/audit-2026-05-12-mcp-response-sizes-pr3.md
+  --output docs/superpowers/specs/audit-2026-05-14-mcp-response-sizes-pr3.md
 ```
 
 Expected: a markdown table showing per-tool byte and token counts. `search_memory` should drop from the ~42 KB baseline to ~10–15 KB (default snippet mode, no verbose).
 
 - [ ] **Step 2: Read the audit output**
 
-Open `docs/superpowers/specs/audit-2026-05-12-mcp-response-sizes-pr3.md` and verify:
+Open `docs/superpowers/specs/audit-2026-05-14-mcp-response-sizes-pr3.md` and verify:
 - `search_memory` byte count: target ≤ 15 KB (vs baseline ~42 KB)
 - Token count: target ≤ 4K tokens (vs baseline ~10.6K)
 - `search_memory(verbose=...)` byte count: comparable to or slightly higher than baseline (full content returned)
@@ -1638,7 +1638,7 @@ Open `docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md` and confirm:
 - [ ] **Step 4: Commit the audit output**
 
 ```bash
-git add docs/superpowers/specs/audit-2026-05-12-mcp-response-sizes-pr3.md
+git add docs/superpowers/specs/audit-2026-05-14-mcp-response-sizes-pr3.md
 git commit -m "$(cat <<'EOF'
 docs(audit): search_memory PR 3 response-size measurements (#50)
 
@@ -1697,7 +1697,7 @@ appended to `docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md`
 
 **No new runtime dependencies.** No changes to other tools' behavior.
 Audit re-measurement in
-`docs/superpowers/specs/audit-2026-05-12-mcp-response-sizes-pr3.md`.
+`docs/superpowers/specs/audit-2026-05-14-mcp-response-sizes-pr3.md`.
 
 Closes #60.
 Refs #50.

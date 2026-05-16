@@ -531,7 +531,7 @@ export async function search_memory(
     cursor?: string;
     verbose?: string;
   }
-): Promise<SearchMemoryResponse | { error: string; message: string }> {
+): Promise<SearchMemoryResponse | ToolError> {
   const TOOL_NAME = "search_memory" as const;
 
   // Step 1: parseVerbose. Reject INVALID_ARG before any SQL or canonicalize work.
