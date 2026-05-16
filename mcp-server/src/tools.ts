@@ -509,13 +509,13 @@ export async function get_context(
  * search_memory tool handler. Runs the protocol pipeline:
  *
  *   parseVerbose → canonicalizeQueryHash → (cursor decode + binding OR
- *   identical-query refusal) → SQL fetch → recordIssued + issueCursor on
- *   capped results → logVerbose + noteHighFrequency on verbose →
- *   { entries, cursor?, verboseNote? }.
+ *   identical-query refusal) → SQL fetch (limit+1) → snippet vs full content
+ *   → recordIssued + issueCursor on capped results → logVerbose +
+ *   noteHighFrequency on verbose → { entries, cursor?, verboseNote? }.
  *
- * Stages 3-8 land incrementally in Tasks 3.6, 3.7, 3.8. The current scaffold
- * implements parseVerbose + canonicalize only; SQL fetch + response shape
- * use a placeholder body until Task 3.8.
+ * All 8 stages are implemented in this file; see the numbered Step comments
+ * inline. This handler is the prototype for PRs 4–7 (search_notes,
+ * query_graph, list_concepts, list_domains, get_context).
  *
  * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
  */
@@ -532,6 +532,8 @@ export async function search_memory(
     verbose?: string;
   }
 ): Promise<SearchMemoryResponse | { error: string; message: string }> {
+  const TOOL_NAME = "search_memory" as const;
+
   // Step 1: parseVerbose. Reject INVALID_ARG before any SQL or canonicalize work.
   const v = parseVerbose(args.verbose);
   if ("error" in v) return v.error;
@@ -551,7 +553,7 @@ export async function search_memory(
   let offset = 0;
   let consumingCursor = false;
   if (typeof args.cursor === "string" && args.cursor.length > 0) {
-    const d = decodeCursor(args.cursor, "search_memory");
+    const d = decodeCursor(args.cursor, TOOL_NAME);
     if (!d.ok) return d.error;
     if (d.queryHash !== queryHash) {
       return {
@@ -569,7 +571,7 @@ export async function search_memory(
   // PR 2 protocol unit tests at protocol/cursor.test.ts).
   if (!consumingCursor) {
     const refusal = checkRefusal({
-      tool: "search_memory",
+      tool: TOOL_NAME,
       queryHash,
       owner: activeOwner,
       verboseEnabled,
@@ -581,9 +583,12 @@ export async function search_memory(
   // (max 200, 0 → default 50 to match the canonicalize collapse rule so the
   // queryHash on `limit: 0` equals the queryHash on omitted limit).
   const requested = args.limit;
-  const effectiveLimit = (requested === undefined || requested === null || requested === 0)
+  // Negative / zero / missing limit all collapse to the default 50; matches
+  // canonicalize's collapse rule for `limit: 0` and gives a sensible default
+  // for malformed inputs. Positive requests are clamped to the spec cap (200).
+  const effectiveLimit = (requested === undefined || requested === null || requested <= 0)
     ? 50
-    : Math.max(1, Math.min(requested, 200));
+    : Math.min(requested, 200);
 
   let rows: import("./types.js").MemoryEntry[];
   try {
@@ -615,14 +620,18 @@ export async function search_memory(
   // issued the cursor) — checkRefusal compares it to the next call's state.
   let cursor: string | undefined;
   if (hasMore) {
+    // recordIssued runs before issueCursor. issueCursor is pure (HMAC + base64
+    // encoding of a known-good payload) and cannot throw under normal
+    // operation. If a future implementer makes issueCursor fallible, flip
+    // these two so the LRU isn't left with a phantom record.
     recordIssued({
-      tool: "search_memory",
+      tool: TOOL_NAME,
       queryHash,
       owner: activeOwner,
       verboseEnabled,
     });
     cursor = issueCursor({
-      tool: "search_memory",
+      tool: TOOL_NAME,
       queryHash,
       offset: offset + effectiveLimit,
     });
@@ -630,10 +639,14 @@ export async function search_memory(
 
   // Step 8: Verbose audit log + frequency tracker.
   let verboseNote: string | undefined;
+  // The verboseReason !== undefined check is defensive — when v.enabled is
+  // true, parseVerbose guarantees v.reason is a string. Keeping the explicit
+  // check helps TypeScript narrow `verboseReason` to `string` inside the
+  // block without an assertion. Copy-paste this pattern into PRs 4–7.
   if (verboseEnabled && verboseReason !== undefined) {
-    logVerbose({ tool: "search_memory", owner: activeOwner, reason: verboseReason });
+    logVerbose({ tool: TOOL_NAME, owner: activeOwner, reason: verboseReason });
     const note = noteHighFrequency({
-      tool: "search_memory",
+      tool: TOOL_NAME,
       owner: activeOwner,
       reason: verboseReason,
     });

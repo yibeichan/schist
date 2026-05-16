@@ -319,6 +319,15 @@ describe("search_memory tool — pagination + cursor issuance", () => {
     expect(r.entries.length).toBe(50);
     expect(r.cursor).toBeDefined();
   });
+
+  it("returns empty entries + no cursor when no rows match", async () => {
+    // No seed; the entire memory DB is empty. The handler must still return
+    // a valid SearchMemoryResponse with an empty entries array.
+    const r = await search_memory(VAULT_ROOT, { owner: "nobody-here" } as never);
+    if (!("entries" in r)) throw new Error("expected entries");
+    expect(r.entries).toEqual([]);
+    expect(r.cursor).toBeUndefined();
+  });
 });
 
 describe("search_memory tool — verbose logging + frequency tracker", () => {
