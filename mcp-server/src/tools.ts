@@ -577,14 +577,73 @@ export async function search_memory(
     if (refusal.refuse) return refusal.error;
   }
 
-  // verboseEnabled, verboseReason captured here; consumed by Task 3.8
-  // (SQL clamp + record/issue + log/freq + response shape).
+  // Step 5: SQL fetch with limit + 1 to detect hasMore. Server clamps limit
+  // (max 200, 0 → default 50 to match the canonicalize collapse rule so the
+  // queryHash on `limit: 0` equals the queryHash on omitted limit).
+  const requested = args.limit;
+  const effectiveLimit = (requested === undefined || requested === null || requested === 0)
+    ? 50
+    : Math.max(1, Math.min(requested, 200));
+
+  let rows: import("./types.js").MemoryEntry[];
   try {
-    const entries = sqliteReader.searchMemory({ ...args, offset });
-    return { entries };
+    rows = sqliteReader.searchMemory({
+      query: args.query,
+      owner: args.owner,
+      entry_type: args.entry_type,
+      date_from: args.date_from,
+      date_to: args.date_to,
+      limit: effectiveLimit + 1,
+      offset,
+    });
   } catch (e: unknown) {
     return normalizeError(e, "INVALID_SQL");
   }
+
+  const hasMore = rows.length > effectiveLimit;
+  const pageRows = hasMore ? rows.slice(0, effectiveLimit) : rows;
+
+  // Step 6: Snippet vs full content. Default response carries a 200-cp
+  // snippet; verbose mode returns the full content. snippetContent preserves
+  // the original string when it fits (no decompose/recompose round-trip).
+  const entries = verboseEnabled
+    ? pageRows
+    : pageRows.map(r => ({ ...r, content: snippetContent(r.content) }));
+
+  // Step 7: Cursor issuance + recordIssued (only when this page was capped).
+  // recordIssued's verboseEnabled is the state of THIS call (the call that
+  // issued the cursor) — checkRefusal compares it to the next call's state.
+  let cursor: string | undefined;
+  if (hasMore) {
+    recordIssued({
+      tool: "search_memory",
+      queryHash,
+      owner: activeOwner,
+      verboseEnabled,
+    });
+    cursor = issueCursor({
+      tool: "search_memory",
+      queryHash,
+      offset: offset + effectiveLimit,
+    });
+  }
+
+  // Step 8: Verbose audit log + frequency tracker.
+  let verboseNote: string | undefined;
+  if (verboseEnabled && verboseReason !== undefined) {
+    logVerbose({ tool: "search_memory", owner: activeOwner, reason: verboseReason });
+    const note = noteHighFrequency({
+      tool: "search_memory",
+      owner: activeOwner,
+      reason: verboseReason,
+    });
+    if (note !== null) verboseNote = note;
+  }
+
+  const response: SearchMemoryResponse = { entries };
+  if (cursor !== undefined) response.cursor = cursor;
+  if (verboseNote !== undefined) response.verboseNote = verboseNote;
+  return response;
 }
 
 export async function get_agent_state(

@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, afterEach } from "@jest/globals";
+import { describe, expect, it, beforeEach, afterEach, jest } from "@jest/globals";
 import * as os from "os";
 import * as path from "path";
 import * as fs from "fs/promises";
@@ -204,5 +204,160 @@ describe("search_memory tool — identical-query refusal", () => {
       error: "CURSOR_REQUIRED",
       message: expect.any(String),
     });
+  });
+});
+
+describe("search_memory tool — snippet vs full content", () => {
+  it("returns 200-cp snippet by default (verbose off)", async () => {
+    const long = "x".repeat(500);
+    const prev = process.env.SCHIST_AGENT_ID;
+    process.env.SCHIST_AGENT_ID = "sansan";
+    addMemory({ owner: "sansan", entry_type: "lesson", content: long });
+    if (prev === undefined) delete process.env.SCHIST_AGENT_ID;
+    else process.env.SCHIST_AGENT_ID = prev;
+    const r = await search_memory(VAULT_ROOT, { owner: "sansan", limit: 50 } as never);
+    expect(r).toHaveProperty("entries");
+    if (!("entries" in r)) throw new Error("expected entries");
+    // 200 code points + 1 ellipsis = 201 total
+    expect([...r.entries[0].content].length).toBeLessThanOrEqual(201);
+    expect(r.entries[0].content.endsWith("…")).toBe(true);
+  });
+
+  it("returns full content when verbose is set with a valid reason", async () => {
+    const long = "x".repeat(500);
+    const prev = process.env.SCHIST_AGENT_ID;
+    process.env.SCHIST_AGENT_ID = "sansan";
+    addMemory({ owner: "sansan", entry_type: "lesson", content: long });
+    if (prev === undefined) delete process.env.SCHIST_AGENT_ID;
+    else process.env.SCHIST_AGENT_ID = prev;
+    const r = await search_memory(VAULT_ROOT, {
+      owner: "sansan",
+      limit: 50,
+      verbose: "manually inspecting full lesson content",
+    } as never);
+    expect(r).toHaveProperty("entries");
+    if (!("entries" in r)) throw new Error("expected entries");
+    expect(r.entries[0].content).toBe(long);
+  });
+
+  it("does NOT append ellipsis when content fits within 200 cp", async () => {
+    const short = "this is a short lesson";
+    const prev = process.env.SCHIST_AGENT_ID;
+    process.env.SCHIST_AGENT_ID = "sansan";
+    addMemory({ owner: "sansan", entry_type: "lesson", content: short });
+    if (prev === undefined) delete process.env.SCHIST_AGENT_ID;
+    else process.env.SCHIST_AGENT_ID = prev;
+    const r = await search_memory(VAULT_ROOT, { owner: "sansan", limit: 50 } as never);
+    if (!("entries" in r)) throw new Error("expected entries");
+    expect(r.entries[0].content).toBe(short);
+    expect(r.entries[0].content.endsWith("…")).toBe(false);
+  });
+});
+
+describe("search_memory tool — pagination + cursor issuance", () => {
+  it("returns a cursor when results are capped and rows.length === limit", async () => {
+    seed("sansan", 10);
+    const r = await search_memory(VAULT_ROOT, { owner: "sansan", limit: 3 } as never);
+    if (!("entries" in r)) throw new Error("expected entries");
+    expect(r.entries.length).toBe(3);
+    expect(typeof r.cursor).toBe("string");
+  });
+
+  it("does NOT return a cursor when results fit (rows.length < limit)", async () => {
+    seed("sansan", 2);
+    const r = await search_memory(VAULT_ROOT, { owner: "sansan", limit: 50 } as never);
+    if (!("entries" in r)) throw new Error("expected entries");
+    expect(r.entries.length).toBe(2);
+    expect(r.cursor).toBeUndefined();
+  });
+
+  it("cursor advances pagination — page 1 + cursor → page 2", async () => {
+    seed("sansan", 10);
+    const r1 = await search_memory(VAULT_ROOT, { owner: "sansan", limit: 3 } as never);
+    if (!("entries" in r1)) throw new Error("expected entries");
+    expect(r1.cursor).toBeDefined();
+    const r2 = await search_memory(VAULT_ROOT, {
+      owner: "sansan",
+      limit: 3,
+      cursor: r1.cursor,
+    } as never);
+    if (!("entries" in r2)) throw new Error("expected entries");
+    expect(r2.entries.length).toBe(3);
+    const ids1 = new Set(r1.entries.map(e => e.id));
+    for (const e of r2.entries) {
+      expect(ids1.has(e.id)).toBe(false);
+    }
+  });
+
+  it("the last page does NOT return a cursor", async () => {
+    seed("sansan", 5);
+    // page-1 has 3 rows + cursor; page-2 has 2 rows + no cursor
+    const r1 = await search_memory(VAULT_ROOT, { owner: "sansan", limit: 3 } as never);
+    if (!("entries" in r1) || !r1.cursor) throw new Error("expected page-1 cursor");
+    const r2 = await search_memory(VAULT_ROOT, {
+      owner: "sansan",
+      limit: 3,
+      cursor: r1.cursor,
+    } as never);
+    if (!("entries" in r2)) throw new Error("expected entries");
+    expect(r2.entries.length).toBe(2);
+    expect(r2.cursor).toBeUndefined();
+  });
+
+  it("clamps limit at 200 (cap from spec)", async () => {
+    seed("sansan", 50);
+    const r = await search_memory(VAULT_ROOT, { owner: "sansan", limit: 9999 } as never);
+    if (!("entries" in r)) throw new Error("expected entries");
+    expect(r.entries.length).toBeLessThanOrEqual(200);
+  });
+
+  it("collapses limit: 0 to default 50", async () => {
+    seed("sansan", 60);
+    const r = await search_memory(VAULT_ROOT, { owner: "sansan", limit: 0 } as never);
+    if (!("entries" in r)) throw new Error("expected entries");
+    // limit collapsed to default 50, so we get 50 entries + a cursor
+    expect(r.entries.length).toBe(50);
+    expect(r.cursor).toBeDefined();
+  });
+});
+
+describe("search_memory tool — verbose logging + frequency tracker", () => {
+  it("emits a verboseNote when the same reason exceeds 30 hits in 60 s", async () => {
+    seed("sansan", 5);
+    const reason = "manually inspecting full lesson content";
+    // Call 31 times with varying query (to avoid identical-query refusal)
+    // — only the 31st call should trip the rate limit.
+    let last: unknown;
+    for (let i = 0; i < 31; i++) {
+      last = await search_memory(VAULT_ROOT, {
+        owner: "sansan",
+        limit: 50,
+        query: `vary-${i}`,
+        verbose: reason,
+      } as never);
+    }
+    expect(last).toHaveProperty("entries");
+    if (last && typeof last === "object" && "verboseNote" in last) {
+      expect((last as { verboseNote: string }).verboseNote).toMatch(/frequent/);
+    } else {
+      throw new Error(`expected verboseNote on the 31st call, got ${JSON.stringify(last)}`);
+    }
+  });
+
+  it("writes a [verbose] audit line to stderr when verbose is enabled", async () => {
+    seed("sansan", 2);
+    const spy = jest.spyOn(process.stderr, "write").mockImplementation((() => true) as never);
+    try {
+      await search_memory(VAULT_ROOT, {
+        owner: "sansan",
+        limit: 50,
+        verbose: "auditing this memory query for completeness",
+      } as never);
+      const calls = spy.mock.calls.map(c => String(c[0]));
+      const verboseLines = calls.filter(s => s.startsWith("[verbose] search_memory"));
+      expect(verboseLines.length).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
