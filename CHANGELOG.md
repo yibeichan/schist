@@ -12,10 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `schist init --print-mcp-config` — generates ready-to-paste MCP server config for Claude Code and Cursor
 - `docs/getting-started.md` — linear onboarding guide with platform-specific instructions (Linux, macOS, HPC)
 - `docs/hub-spoke-pi-hpc-mac.md` — opinionated topology guide for Pi hub + HPC/Mac spoke setup
+- `schist doctor` reports `uv` availability (WARN if missing — pip still works as a fallback). Note: hosts without `uv` will now show one new `[WARN] uv: not found` line in the default check output; downstream scripts that scrape doctor output to assert "no warnings" may need adjustment.
+- `cli/uv.lock` — checked in for reproducible source installs across Mac / Pi / HPC. CI enforces freshness via `uv lock --check` to catch pyproject.toml edits that forget to regenerate the lock.
 
 ### Changed
 - Node.js minimum version relaxed from >=22 to >=20 (no Node 22-specific features used)
 - MCP server no longer requires `request_capabilities` before write tools — the gate provided no real access control and added friction in shared-MCP deployments (PR #76, closes #72, #73). Memory-write authorization continues to be enforced at the data layer by `validateOwner` against `SCHIST_AGENT_ID` / `SCHIST_ALLOWED_AGENTS`. Vault-write identity enforcement is tracked in #63.
+- Recommended Python package manager for source installs is now [uv](https://docs.astral.sh/uv/) — faster installs, lockfile-aware. The published `pip install schist` end-user path is unchanged; dev installs should prefer `uv pip install --system -e ./cli`. Docs, CI, and error messages updated accordingly. pip remains a supported fallback.
 
 ### Removed
 - `request_capabilities` MCP meta-tool. Calling it now returns `VALIDATION_ERROR: Unknown tool: request_capabilities` (PR #76).

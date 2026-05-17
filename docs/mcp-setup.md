@@ -65,8 +65,8 @@ schist-ingest \
 ```
 
 (`schist-ingest` is the console script installed by `pip install schist`. If you
-work from a clone instead of an installed wheel, use `pip install -e ./cli` to
-register it on your `PATH`.)
+work from a clone instead of an installed wheel, use `uv pip install --system -e ./cli`
+(or `pip install -e ./cli`) to register it on your `PATH`.)
 
 The hook file lives in `.git/hooks/` and is never committed to any repository.
 

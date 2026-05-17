@@ -41,7 +41,7 @@ On **every** machine (hub and spokes):
 
 ```bash
 git clone https://github.com/youruser/schist.git /path/to/schist
-pip install -e /path/to/schist/cli
+uv pip install --system -e /path/to/schist/cli   # or: pip install -e /path/to/schist/cli
 ```
 
 The pre-receive hook on the hub imports `schist.pre_receive`, so the package
@@ -221,7 +221,7 @@ local view until the hub comes back.
 ### "pre-receive: ModuleNotFoundError: schist.pre_receive"
 
 The schist package isn't installed for the `python3` the hook uses. On the
-hub, `pip install -e /path/to/schist/cli` and re-test with a dry push.
+hub, `uv pip install --system -e /path/to/schist/cli` (or `pip install -e /path/to/schist/cli`) and re-test with a dry push.
 
 ### "Can I use GitHub / Gitea / GitLab SaaS as the hub?"
 

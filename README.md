@@ -23,7 +23,7 @@ npm install -g @schist/mcp-server
 
 # Or install from source (for contributors):
 # git clone https://github.com/yibeichan/schist.git
-# cd schist && pip install -e ./cli
+# cd schist && uv pip install --system -e ./cli   # or: pip install -e ./cli
 # cd mcp-server && npm install && npm run build
 
 # Create a vault
