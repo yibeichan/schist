@@ -65,12 +65,10 @@ new memory entries; see the Identity section below.
 ## Tool surface
 
 The memory subsystem exposes six MCP tools. All tools are listed by
-`ListTools`; write tools require `request_capabilities({capability:
-"write"})` before calls succeed. The gate is at invocation time, not
-listing time — see `docs/mcp-setup.md` "Tool exposure model" for the
-full rationale.
+`ListTools` and callable without any opt-in meta-tool — see
+`docs/mcp-setup.md` "Tool exposure model" for the full rationale.
 
-**Read (callable immediately):**
+**Read:**
 
 - `search_memory` — full-text search with optional `owner`, `entry_type`,
   `date_from`, `date_to`, `limit` filters. FTS5 indexes the `content` and
@@ -79,7 +77,7 @@ full rationale.
 - `list_domains` — list the research domain taxonomy (separate from memory,
   included here because it shares the read surface).
 
-**Write (callable after `request_capabilities`):**
+**Write:**
 
 - `add_memory` — store a new entry. Required: `owner`, `entry_type` (one of
   `decision | lesson | blocker | completion | observation`), `content`.
@@ -94,10 +92,6 @@ The `owner` field on write is enforced against the configured agent
 identity (see [Identity](#identity-schist_agent_id-vs-schist_allowed_agents)
 below). Writes without identity configured fail with `CONFIG_ERROR`; writes
 with a mismatched owner fail with `VALIDATION_ERROR`. Reads are unrestricted.
-
-The `request_capabilities` success response now lists every write tool
-that becomes callable — both vault and memory — in its `message` and
-`tools` fields.
 
 ## Identity: `SCHIST_AGENT_ID` vs `SCHIST_ALLOWED_AGENTS`
 
@@ -218,7 +212,6 @@ future CLI flag) — FTS is for recall, not for structured lookups.
 > cwd: /home/user/code/my-other-project  (git repo)
 > project slug: my-other-project
 
-MCP: request_capabilities({capability: "write"})
 MCP: add_memory({
   owner: "sansan",
   entry_type: "lesson",

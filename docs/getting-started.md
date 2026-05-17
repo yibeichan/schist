@@ -198,7 +198,7 @@ schist search --vault ~/my-vault "test"
 # View vault summary
 schist context --vault ~/my-vault --depth minimal
 
-# Connect from MCP: call get_context, then request_capabilities({capability: "write"})
+# Connect from MCP: call get_context to see the vault, then call any read/write tool directly
 ```
 
 All four commands should return without error. `schist doctor` should show PASS for every check.

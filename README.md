@@ -190,7 +190,7 @@ See [schema/SCHEMA.md](./schema/SCHEMA.md) for the markdown schema specification
 - No delete, no force-push, no history rewrite via MCP
 - Pre-commit hook rejects commits containing secrets/API keys
 - Web viewer is static only — no server-side execution
-- Write tools gated behind explicit `request_capabilities` unlock
+- Write authorization enforced by `validateOwner` against `SCHIST_AGENT_ID` / `SCHIST_ALLOWED_AGENTS`
 - `query_graph` rejects non-SELECT SQL
 
 ## Requirements

@@ -28,36 +28,30 @@ SCHIST_VAULT_PATH=/path/to/vault node dist/index.js
 
 <!-- Implementation: mcp-server/src/tool-registry.ts + src/index.ts -->
 
-The server lists **all** tools at `ListTools` time — read, write, memory,
-and the capability meta-tool. Write-capable tools are gated at **call
-time**, not at listing time: an agent that calls a write tool without
-first calling `request_capabilities` gets a `VALIDATION_ERROR`.
+The server lists **all** tools at `ListTools` time and accepts calls to
+any of them unconditionally. There is no opt-in meta-tool.
 
-Always-listed tools (callable immediately):
+Read tools:
 
-- `get_context`, `search_notes` — vault read
+- `get_context`, `search_notes`, `get_note`, `list_concepts`, `query_graph` — vault read
 - `search_memory`, `get_agent_state`, `list_domains` — memory read
-- `request_capabilities` — meta-tool to unlock write invocations
 
-Always-listed tools (callable only after `request_capabilities({capability: "write"})`):
+Write tools:
 
-- `get_note`, `create_note`, `add_connection`, `list_concepts`, `query_graph` — vault write
+- `create_note`, `add_connection`, `assign_domain` — vault write
 - `add_memory`, `set_agent_state`, `delete_agent_state`, `add_concept_alias` — memory write
 
-To enable write invocations:
+**Where authorization lives.** Writes are authorized at the data layer by
+`validateOwner` (see `mcp-server/src/agent-identity.ts`), which checks the
+incoming `owner` against `SCHIST_AGENT_ID` / `SCHIST_ALLOWED_AGENTS`. A
+mismatched or missing owner produces `CONFIG_ERROR` or `VALIDATION_ERROR`.
+Reads are unrestricted.
 
-```json
-{"name": "request_capabilities", "arguments": {"capability": "write"}}
-```
-
-**Why list everything up-front.** MCP clients like Claude Code cache
-tool discovery at session start and never re-fetch. If write tools were
-only listed after the capability unlock (the pre-v0.1.0 design), those
-clients would never see them — `add_memory` and friends would be
-unreachable from Claude Code even after a successful `request_capabilities`
-call. Listing all tools unconditionally costs a few kB in the one-time
-ListTools response in exchange for making write tools actually usable.
-The call-time gate preserves the explicit-opt-in model.
+**Why no capability meta-tool.** Earlier versions required agents to call
+`request_capabilities({capability: "write"})` before writes would succeed.
+That gate was unauthenticated (any caller could flip it) and provided no
+real access control — it was a UX speed bump that conflicted with both
+agent ergonomics and the actual authorization model. Removed in #72.
 
 ## Post-commit ingestion
 

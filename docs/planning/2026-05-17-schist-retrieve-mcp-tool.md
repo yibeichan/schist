@@ -70,8 +70,10 @@ manually orchestrating multiple schist calls.
 
 ### Step 1: Add tool definition to `tool-registry.ts`
 
-New entry in `makeReadTools()` — this is a READ tool and does NOT require
-the capability gate. All agents can call it at session start.
+New entry in `makeReadTools()` — this is a READ tool. (As of #72 the
+capability gate has been removed entirely; all tools are callable
+without any opt-in. Write authorization is enforced at the data layer
+by `validateOwner`.) All agents can call it at session start.
 
 ### Step 2: Implement handler in `tools.ts`
 

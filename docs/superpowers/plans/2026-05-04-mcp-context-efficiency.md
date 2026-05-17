@@ -572,8 +572,10 @@ Most are already sensible; `list_domains` and `query_graph` are the changes.]
 
 ## Out-of-scope for this rollout
 
-- Authentication / authorization changes (the existing capability gate
-  already covers writes).
+- Authentication / authorization changes (write auth is enforced by
+  `validateOwner` against `SCHIST_AGENT_ID` / `SCHIST_ALLOWED_AGENTS`;
+  the pre-#72 `request_capabilities` gate was removed as it provided no
+  real access control).
 - Streaming responses (would require MCP protocol-level changes).
 - Caching tool responses across sessions (out of scope; orthogonal).
 ```
