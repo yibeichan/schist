@@ -97,11 +97,15 @@ npm install -g @schist/mcp-server
 
 ### Option B: From source (latest development)
 
+schist recommends [uv](https://docs.astral.sh/uv/) for source installs — faster
+than pip and reproducible via the checked-in `cli/uv.lock`. pip still works as
+a fallback.
+
 ```bash
 git clone https://github.com/yibeichan/schist.git
 cd schist
 
-pip install -e ./cli
+uv pip install --system -e ./cli   # or:  pip install -e ./cli
 cd mcp-server && npm install && npm run build && cd ..
 ```
 
@@ -218,9 +222,9 @@ Add to `~/.bashrc` or `~/.zshrc` for persistence.
 ### 2. `schist-ingest: command not found`
 
 ```bash
-pip install -e ./cli    # from source
-# or
-pip install schist      # published
+uv pip install --system -e ./cli   # from source (or: pip install -e ./cli)
+# or, for end users:
+pip install schist                 # published
 ```
 
 Verify: `which schist-ingest`. If installed but not found, check that pip's bin directory is on `$PATH`.

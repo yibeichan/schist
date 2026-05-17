@@ -22,6 +22,7 @@ from schist.doctor import (
     check_schist_yaml,
     check_spoke,
     check_sqlite,
+    check_uv,
     check_vault_exists,
     check_vault_is_git,
     run_doctor,
@@ -67,6 +68,29 @@ class TestCheckNode:
                 )
                 r = check_node()
                 assert r.status == "FAIL"
+
+
+class TestCheckUv:
+    def test_pass_when_installed(self):
+        with patch("shutil.which", return_value="/usr/local/bin/uv"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout="uv 0.5.24\n"
+                )
+                r = check_uv()
+                assert r.status == "PASS"
+                assert r.label == "uv"
+                assert "0.5.24" in r.message
+
+    def test_warn_when_missing(self):
+        with patch("shutil.which", return_value=None):
+            r = check_uv()
+            assert r.status == "WARN"
+            assert r.label == "uv"
+            assert "not found" in r.message
+            # Recommendation should mention uv install + pip fallback so users
+            # know they can keep going either way.
+            assert r.fix and "astral.sh" in r.fix and "pip" in r.fix
 
 
 class TestCheckGit:

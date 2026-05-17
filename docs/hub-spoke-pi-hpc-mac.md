@@ -139,7 +139,7 @@ brew install python@3.13 node git
 
 ```bash
 pip install schist
-# Or from source: pip install -e /path/to/schist/cli
+# Or from source: uv pip install --system -e /path/to/schist/cli (or pip install -e ...)
 ```
 
 ### Initialize spoke

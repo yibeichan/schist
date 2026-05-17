@@ -66,6 +66,30 @@ def check_node() -> CheckResult:
                            "Install Node.js 20+ from nodejs.org or via nvm.")
 
 
+def check_uv() -> CheckResult:
+    """Check for `uv` — schist's recommended Python package manager.
+
+    Reports PASS when uv is available with version info, WARN when missing
+    (pip still works as a fallback for the documented install paths). Not
+    a FAIL because end-users installing the published `schist` wheel from
+    PyPI never need uv; the recommendation is for source/development use.
+    """
+    uv = shutil.which("uv")
+    if not uv:
+        return CheckResult(
+            "WARN", "uv", "not found",
+            "Recommended: install uv from https://docs.astral.sh/uv/getting-started/installation/ "
+            "(pip continues to work as a fallback).",
+        )
+    try:
+        raw = subprocess.run([uv, "--version"], capture_output=True, text=True, timeout=5)
+        ver_str = raw.stdout.strip()
+        return CheckResult("PASS", "uv", ver_str)
+    except Exception as e:
+        return CheckResult("WARN", "uv", f"error: {e}",
+                           "Reinstall uv from https://docs.astral.sh/uv/getting-started/installation/.")
+
+
 def check_git() -> CheckResult:
     git = shutil.which("git")
     if not git:
@@ -206,7 +230,7 @@ def check_ingest_available(vault_path: Optional[str]) -> CheckResult:
         return CheckResult("PASS", "Ingest", "schist-ingest on PATH")
 
     return CheckResult("FAIL", "Ingest", "schist-ingest not found",
-                       "Set SCHIST_INGEST_SCRIPT or run `pip install -e ./cli`.")
+                       "Set SCHIST_INGEST_SCRIPT or run `uv pip install -e ./cli` (or `pip install -e ./cli`).")
 
 
 def check_spoke(vault_path: Optional[str]) -> CheckResult:
@@ -356,6 +380,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
     checks = [
         check_python(),
         check_node(),
+        check_uv(),
         check_git(),
         check_vault_exists(vault_path),
         check_vault_is_git(vault_path),

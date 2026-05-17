@@ -26,7 +26,8 @@ PRE_RECEIVE_HOOK = """\
 \"\"\"Git pre-receive hook — enforces vault.yaml ACL on pushes.
 
 Installed by `schist init --hub`. Requires the schist package to be
-importable by `python3` on this host (pip install -e <schist>/cli).
+importable by `python3` on this host
+(uv pip install --system -e <schist>/cli, or pip install -e <schist>/cli).
 \"\"\"
 
 import sys
@@ -512,7 +513,7 @@ def _build_hub_in_staging(
             "  The pre-receive hook will reject all pushes until the schist\n"
             "  package is installed on the path that git-receive-pack uses\n"
             "  (check sshd/gitolite env, not just your interactive shell):\n"
-            "  pip install -e <schist>/cli",
+            "  uv pip install --system -e <schist>/cli   (or: pip install -e <schist>/cli)",
             file=sys.stderr,
         )
 

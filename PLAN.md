@@ -373,7 +373,7 @@ One-paragraph definition. Concept files are reference nodes — stable anchors t
 
 ## CLI Command Reference
 
-Installed as `schist` via `pip install -e ./cli`.
+Installed as `schist` via `uv pip install --system -e ./cli` (or `pip install -e ./cli`).
 
 ### `schist add`
 ```

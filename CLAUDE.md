@@ -18,18 +18,27 @@ npm test -- --testPathPatterns=<pattern>  # run a single test file (Jest 30+)
 ```
 
 ### CLI (Python, in `cli/`)
+schist uses [uv](https://docs.astral.sh/uv/) as its recommended Python
+package manager — faster installs + reproducible builds via `cli/uv.lock`.
+pip still works as a fallback for users without uv.
 ```bash
-pip install -e ./cli                 # editable install
+uv pip install --system -e ./cli     # editable install (uv-fast path)
+# or:  pip install -e ./cli          # pip fallback
 python -m pytest cli/tests/          # run all tests
 python -m pytest cli/tests/test_acl.py  # single test file
 python -m pytest cli/tests/test_acl.py::test_name -v  # single test
+```
+
+For one-shot test runs without modifying the active env, use:
+```bash
+cd cli && uv run --with pytest --with . python -m pytest tests/
 ```
 
 ### Ingestion (Python, packaged with CLI)
 The ingester ships as part of the `schist` package and is exposed as the
 `schist-ingest` console script (registered in `cli/pyproject.toml`).
 ```bash
-pip install -e ./cli                                   # provides schist-ingest
+uv pip install --system -e ./cli                       # provides schist-ingest
 schist-ingest --vault <path> --db <path>               # rebuild SQLite from markdown
 ```
 
