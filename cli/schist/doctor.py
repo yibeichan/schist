@@ -230,7 +230,7 @@ def check_ingest_available(vault_path: Optional[str]) -> CheckResult:
         return CheckResult("PASS", "Ingest", "schist-ingest on PATH")
 
     return CheckResult("FAIL", "Ingest", "schist-ingest not found",
-                       "Set SCHIST_INGEST_SCRIPT or run `uv pip install -e ./cli` (or `pip install -e ./cli`).")
+                       "Set SCHIST_INGEST_SCRIPT or run `uv pip install --system -e ./cli` (or `pip install -e ./cli`).")
 
 
 def check_spoke(vault_path: Optional[str]) -> CheckResult:

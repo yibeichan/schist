@@ -92,6 +92,18 @@ class TestCheckUv:
             # know they can keep going either way.
             assert r.fix and "astral.sh" in r.fix and "pip" in r.fix
 
+    def test_warn_when_subprocess_raises(self):
+        # uv binary present but `uv --version` throws (timeout, broken install,
+        # permission error, etc.) — surface a WARN with an install pointer
+        # rather than crashing the whole doctor run.
+        with patch("shutil.which", return_value="/usr/local/bin/uv"):
+            with patch("subprocess.run", side_effect=OSError("permission denied")):
+                r = check_uv()
+                assert r.status == "WARN"
+                assert r.label == "uv"
+                assert "error" in r.message
+                assert r.fix and "astral.sh" in r.fix
+
 
 class TestCheckGit:
     def test_pass(self):

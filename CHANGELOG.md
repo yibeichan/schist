@@ -12,8 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `schist init --print-mcp-config` — generates ready-to-paste MCP server config for Claude Code and Cursor
 - `docs/getting-started.md` — linear onboarding guide with platform-specific instructions (Linux, macOS, HPC)
 - `docs/hub-spoke-pi-hpc-mac.md` — opinionated topology guide for Pi hub + HPC/Mac spoke setup
-- `schist doctor` reports `uv` availability (WARN if missing — pip still works as a fallback)
-- `cli/uv.lock` — checked in for reproducible source installs across Mac / Pi / HPC
+- `schist doctor` reports `uv` availability (WARN if missing — pip still works as a fallback). Note: hosts without `uv` will now show one new `[WARN] uv: not found` line in the default check output; downstream scripts that scrape doctor output to assert "no warnings" may need adjustment.
+- `cli/uv.lock` — checked in for reproducible source installs across Mac / Pi / HPC. CI enforces freshness via `uv lock --check` to catch pyproject.toml edits that forget to regenerate the lock.
 
 ### Changed
 - Node.js minimum version relaxed from >=22 to >=20 (no Node 22-specific features used)
