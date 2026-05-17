@@ -144,6 +144,92 @@ describe("searchMemory", () => {
     expect(results.length).toBeGreaterThanOrEqual(1);
     expect(results.some(r => r.content.includes("SQLite"))).toBe(true);
   });
+
+  it("returns rows starting from the requested offset (non-FTS path)", () => {
+    // Seed 5 entries with deterministic content (in addition to beforeEach's 3)
+    for (let i = 0; i < 5; i++) {
+      addMemoryAs("sansan", { entry_type: "decision", content: `pad-entry-${i}` });
+    }
+    const all = searchMemory({ owner: "sansan", limit: 50 });
+    expect(all.length).toBeGreaterThanOrEqual(7); // 2 from beforeEach + 5
+    const page1 = searchMemory({ owner: "sansan", limit: 3, offset: 0 });
+    const page2 = searchMemory({ owner: "sansan", limit: 3, offset: 3 });
+    expect(page1.length).toBe(3);
+    expect(page2.length).toBeGreaterThanOrEqual(1);
+    // Pages disjoint by id
+    const ids1 = new Set(page1.map(r => r.id));
+    for (const r of page2) {
+      expect(ids1.has(r.id)).toBe(false);
+    }
+  });
+
+  it("returns rows starting from the requested offset (FTS path)", () => {
+    addMemoryAs("sansan", { entry_type: "decision", content: "tiebreaker fixture alpha" });
+    addMemoryAs("sansan", { entry_type: "decision", content: "tiebreaker fixture beta" });
+    addMemoryAs("sansan", { entry_type: "decision", content: "tiebreaker fixture gamma" });
+    const page1 = searchMemory({ query: "tiebreaker fixture", limit: 2, offset: 0 });
+    const page2 = searchMemory({ query: "tiebreaker fixture", limit: 2, offset: 2 });
+    expect(page1.length).toBe(2);
+    expect(page2.length).toBeGreaterThanOrEqual(1);
+    const ids1 = new Set(page1.map(r => r.id));
+    for (const r of page2) {
+      expect(ids1.has(r.id)).toBe(false);
+    }
+  });
+
+  it("non-FTS path orders by created_at DESC then id ASC (tiebreaker is deterministic)", () => {
+    // Force a created_at tie by inserting via raw SQL with an explicit timestamp.
+    // addMemoryAs uses datetime('now') (1-second granularity), which on a slow
+    // runner could roll across the second-boundary and skip exercising the
+    // id-ASC tiebreaker. Direct insert with a fixed created_at pins the test.
+    const db = new Database(process.env.SCHIST_MEMORY_DB!);
+    try {
+      const stmt = db.prepare(`
+        INSERT INTO agent_memory (owner, date, entry_type, content, tags, confidence, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      const fixed = "2026-05-15 12:00:00";
+      stmt.run("sansan", "2026-05-15", "decision", "same-content-tiebreaker", null, "medium", fixed);
+      stmt.run("sansan", "2026-05-15", "decision", "same-content-tiebreaker", null, "medium", fixed);
+    } finally {
+      db.close();
+    }
+    const both = searchMemory({ owner: "sansan", entry_type: "decision" });
+    const sameContentRows = both.filter(r => r.content === "same-content-tiebreaker");
+    expect(sameContentRows.length).toBe(2);
+    // Both rows share the same fixed created_at — id ASC tiebreaker must apply.
+    expect(sameContentRows[0].created_at).toBe(sameContentRows[1].created_at);
+    expect(sameContentRows[0].id).toBeLessThan(sameContentRows[1].id);
+  });
+
+  it("FTS path orders by bm25 then id ASC (tiebreaker is deterministic)", () => {
+    // Two entries with identical bm25 rank against a generic query — id ASC
+    // breaks ties.
+    addMemoryAs("sansan", { entry_type: "decision", content: "identical relevance fixture" });
+    addMemoryAs("sansan", { entry_type: "decision", content: "identical relevance fixture" });
+    const rows = searchMemory({ query: "identical relevance fixture" });
+    const matches = rows.filter(r => r.content === "identical relevance fixture");
+    expect(matches.length).toBe(2);
+    expect(matches[0].id).toBeLessThan(matches[1].id);
+  });
+
+  it("SQL layer: limit: 0 returns zero rows (tool layer is responsible for 0 → default collapse)", () => {
+    // Documents the locked contract: searchMemory passes limit through to SQL,
+    // does NOT collapse 0 → 50. The tool layer (tools.ts) handles the collapse
+    // so the queryHash semantics match (per spec canonicalize rule that
+    // limit:0 ↔ limit:undefined in the hash).
+    addMemoryAs("sansan", { entry_type: "decision", content: "pass-through-fixture" });
+    const rows = searchMemory({ owner: "sansan", limit: 0 });
+    expect(rows).toEqual([]);
+  });
+
+  it("SQL layer: negative offset is tolerated by SQLite (no throw)", () => {
+    // Documents the locked contract: searchMemory does NOT validate offset.
+    // The tool layer is responsible for normalising. Verifies SQLite's
+    // tolerance of negative OFFSET (treated as 0, no error).
+    addMemoryAs("sansan", { entry_type: "decision", content: "neg-offset-fixture" });
+    expect(() => searchMemory({ owner: "sansan", offset: -1 })).not.toThrow();
+  });
 });
 
 // ---------------------------------------------------------------------------

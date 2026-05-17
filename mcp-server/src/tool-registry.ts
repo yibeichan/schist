@@ -37,7 +37,7 @@ export function makeMemoryReadTools(_config: VaultConfig) {
   return [
     {
       name: "search_memory",
-      description: "Search agent memory entries by text, owner, type, or date range.",
+      description: "Search agent memory entries by text, owner, type, or date range. Returns content snippets (200 code points) by default; pass verbose: \"<reason ≥12 chars>\" to get full content. Paginated: when results are capped, the response includes a `cursor` token — echo it back on the next call to advance, or refine the query. Identical queries within 300s without a cursor are refused with CURSOR_REQUIRED.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -46,7 +46,9 @@ export function makeMemoryReadTools(_config: VaultConfig) {
           entry_type: { type: "string", enum: ["decision", "lesson", "blocker", "completion", "observation"] },
           date_from: { type: "string" },
           date_to: { type: "string" },
-          limit: { type: "number" },
+          limit: { type: "number", description: "Default 50, capped at 200." },
+          cursor: { type: "string", description: "Opaque pagination cursor returned by a prior call. Echo verbatim; do not modify." },
+          verbose: { type: "string", description: "Reason (≥12 Unicode code points after trim) gating full-content return. Logged to server stderr for audit." },
         },
       },
     },

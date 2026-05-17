@@ -40,3 +40,8 @@ export type {
   ParseVerboseResult,
   LogVerboseInput,
 } from "./verbose.js";
+
+export {
+  SNIPPET_MAX_CODE_POINTS,
+  snippetContent,
+} from "./snippet.js";

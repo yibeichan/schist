@@ -6,7 +6,18 @@ import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote } from "./git-writer.js";
 import { buildNote, buildConnectionLine } from "./markdown-parser.js";
 import { validateOwner } from "./agent-identity.js";
-import type { VaultConfig, ToolError } from "./types.js";
+import type { VaultConfig, ToolError, SearchMemoryResponse } from "./types.js";
+import {
+  canonicalizeQueryHash,
+  decodeCursor,
+  issueCursor,
+  recordIssued,
+  checkRefusal,
+  parseVerbose,
+  logVerbose,
+  noteHighFrequency,
+  snippetContent,
+} from "./protocol/index.js";
 
 function slugify(title: string): string {
   return (
@@ -494,15 +505,158 @@ export async function get_context(
 
 // READ-ONLY memory tools (no capability gate)
 
+/**
+ * search_memory tool handler. Runs the protocol pipeline:
+ *
+ *   parseVerbose → canonicalizeQueryHash → (cursor decode + binding OR
+ *   identical-query refusal) → SQL fetch (limit+1) → snippet vs full content
+ *   → recordIssued + issueCursor on capped results → logVerbose +
+ *   noteHighFrequency on verbose → { entries, cursor?, verboseNote? }.
+ *
+ * All 8 stages are implemented in this file; see the numbered Step comments
+ * inline. This handler is the prototype for PRs 4–7 (search_notes,
+ * query_graph, list_concepts, list_domains, get_context).
+ *
+ * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
+ */
 export async function search_memory(
   _vaultRoot: string,
-  args: { query?: string; owner?: string; entry_type?: string; date_from?: string; date_to?: string; limit?: number }
-): Promise<unknown> {
+  args: {
+    query?: string;
+    owner?: string;
+    entry_type?: string;
+    date_from?: string;
+    date_to?: string;
+    limit?: number;
+    cursor?: string;
+    verbose?: string;
+  }
+): Promise<SearchMemoryResponse | ToolError> {
+  const TOOL_NAME = "search_memory" as const;
+
+  // Step 1: parseVerbose. Reject INVALID_ARG before any SQL or canonicalize work.
+  const v = parseVerbose(args.verbose);
+  if ("error" in v) return v.error;
+  const verboseEnabled = v.enabled;
+  const verboseReason: string | undefined = v.enabled ? v.reason : undefined;
+
+  // Step 2: canonicalizeQueryHash. Active owner is SCHIST_AGENT_ID or "".
+  const activeOwner = process.env.SCHIST_AGENT_ID ?? "";
+  const ch = canonicalizeQueryHash(args as Record<string, unknown>, activeOwner);
+  if (!ch.ok) return ch.error;
+  const queryHash = ch.queryHash;
+
+  // Step 3: Cursor decoding + queryHash binding check.
+  // Binding policy: current call's computed queryHash MUST equal the cursor's
+  // encoded queryHash. Mismatch → CURSOR_INVALID_SIGNATURE with explanatory
+  // message. Locked in Task 3.0 spec amendment ("Cursor binding to queryHash").
+  let offset = 0;
+  let consumingCursor = false;
+  if (typeof args.cursor === "string" && args.cursor.length > 0) {
+    const d = decodeCursor(args.cursor, TOOL_NAME);
+    if (!d.ok) return d.error;
+    if (d.queryHash !== queryHash) {
+      return {
+        error: "CURSOR_INVALID_SIGNATURE",
+        message: "cursor was issued for a different query — restart pagination from page 1",
+      };
+    }
+    offset = d.offset;
+    consumingCursor = true;
+  }
+
+  // Step 4: Identical-query refusal (only when no cursor was presented).
+  // The verbose-newly-set bypass is enforced inside checkRefusal — false→true
+  // bypasses, true→true and true→false remain refused (spec line 145 + the
+  // PR 2 protocol unit tests at protocol/cursor.test.ts).
+  if (!consumingCursor) {
+    const refusal = checkRefusal({
+      tool: TOOL_NAME,
+      queryHash,
+      owner: activeOwner,
+      verboseEnabled,
+    });
+    if (refusal.refuse) return refusal.error;
+  }
+
+  // Step 5: SQL fetch with limit + 1 to detect hasMore. Server clamps limit
+  // (max 200, 0 → default 50 to match the canonicalize collapse rule so the
+  // queryHash on `limit: 0` equals the queryHash on omitted limit).
+  const requested = args.limit;
+  // Negative / zero / missing limit all collapse to the default 50; matches
+  // canonicalize's collapse rule for `limit: 0` and gives a sensible default
+  // for malformed inputs. Positive requests are clamped to the spec cap (200).
+  const effectiveLimit = (requested === undefined || requested === null || requested <= 0)
+    ? 50
+    : Math.min(requested, 200);
+
+  let rows: import("./types.js").MemoryEntry[];
   try {
-    return sqliteReader.searchMemory(args);
+    rows = sqliteReader.searchMemory({
+      query: args.query,
+      owner: args.owner,
+      entry_type: args.entry_type,
+      date_from: args.date_from,
+      date_to: args.date_to,
+      limit: effectiveLimit + 1,
+      offset,
+    });
   } catch (e: unknown) {
     return normalizeError(e, "INVALID_SQL");
   }
+
+  const hasMore = rows.length > effectiveLimit;
+  const pageRows = hasMore ? rows.slice(0, effectiveLimit) : rows;
+
+  // Step 6: Snippet vs full content. Default response carries a 200-cp
+  // snippet; verbose mode returns the full content. snippetContent preserves
+  // the original string when it fits (no decompose/recompose round-trip).
+  const entries = verboseEnabled
+    ? pageRows
+    : pageRows.map(r => ({ ...r, content: snippetContent(r.content) }));
+
+  // Step 7: Cursor issuance + recordIssued (only when this page was capped).
+  // recordIssued's verboseEnabled is the state of THIS call (the call that
+  // issued the cursor) — checkRefusal compares it to the next call's state.
+  let cursor: string | undefined;
+  if (hasMore) {
+    // recordIssued runs before issueCursor. issueCursor is pure (HMAC + base64
+    // encoding of a known-good payload) and cannot throw under normal
+    // operation. If a future implementer makes issueCursor fallible, flip
+    // these two so the LRU isn't left with a phantom record.
+    recordIssued({
+      tool: TOOL_NAME,
+      queryHash,
+      owner: activeOwner,
+      verboseEnabled,
+    });
+    cursor = issueCursor({
+      tool: TOOL_NAME,
+      queryHash,
+      offset: offset + effectiveLimit,
+    });
+  }
+
+  // Step 8: Verbose audit log + frequency tracker.
+  let verboseNote: string | undefined;
+  // The verboseReason !== undefined check is defensive — when v.enabled is
+  // true, parseVerbose guarantees v.reason is a string. Keeping the explicit
+  // check helps TypeScript narrow `verboseReason` to `string` inside the
+  // block without an assertion. Copy-paste this pattern into PRs 4–7.
+  if (verboseEnabled && verboseReason !== undefined) {
+    logVerbose({ tool: TOOL_NAME, owner: activeOwner, reason: verboseReason });
+    const note = noteHighFrequency({
+      tool: TOOL_NAME,
+      owner: activeOwner,
+      reason: verboseReason,
+    });
+    if (note !== null) verboseNote = note;
+  }
+
+  const response: SearchMemoryResponse = { entries };
+  if (cursor !== undefined) response.cursor = cursor;
+  if (verboseNote !== undefined) response.verboseNote = verboseNote;
+  return response;
 }
 
 export async function get_agent_state(
