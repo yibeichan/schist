@@ -231,9 +231,14 @@ export function makeWriteTools(config: VaultConfig) {
  * Return the full set of tool definitions exposed by the schist MCP server.
  *
  * All tools are listed unconditionally and callable without any opt-in
- * meta-tool. Write authorization is enforced at the data layer by
- * `validateOwner` (see `agent-identity.ts`), which checks the incoming
- * `owner` against `SCHIST_AGENT_ID` / `SCHIST_ALLOWED_AGENTS`.
+ * meta-tool. Authorization is split between two tiers:
+ *
+ *   - Memory writes (add_memory, set_agent_state, delete_agent_state,
+ *     add_concept_alias) call `validateOwner` (see `agent-identity.ts`)
+ *     against the configured SCHIST_AGENT_ID / SCHIST_ALLOWED_AGENTS.
+ *   - Vault writes (create_note, add_connection, assign_domain) do not
+ *     yet enforce identity — every commit attributes to source_agent: "mcp"
+ *     regardless of caller. Tracked as issue #63.
  */
 export function listAllTools(config: VaultConfig) {
   return [
