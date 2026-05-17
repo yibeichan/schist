@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Node.js minimum version relaxed from >=22 to >=20 (no Node 22-specific features used)
+- MCP server no longer requires `request_capabilities` before write tools — the gate provided no real access control and added friction in shared-MCP deployments (PR #76, closes #72, #73). Memory-write authorization continues to be enforced at the data layer by `validateOwner` against `SCHIST_AGENT_ID` / `SCHIST_ALLOWED_AGENTS`. Vault-write identity enforcement is tracked in #63.
+
+### Removed
+- `request_capabilities` MCP meta-tool. Calling it now returns `VALIDATION_ERROR: Unknown tool: request_capabilities` (PR #76).
 
 ## [0.1.0] - Unreleased
 

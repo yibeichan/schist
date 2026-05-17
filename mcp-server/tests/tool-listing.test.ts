@@ -13,7 +13,7 @@ function testConfig(): VaultConfig {
 }
 
 describe("listAllTools — unconditional tool exposure", () => {
-  test("lists every read, write, memory, and capability tool", () => {
+  test("lists every read, write, and memory tool", () => {
     const names = listAllTools(testConfig()).map((t) => t.name).sort();
 
     const expected = [
@@ -29,7 +29,6 @@ describe("listAllTools — unconditional tool exposure", () => {
       "list_concepts",
       "list_domains",
       "query_graph",
-      "request_capabilities",
       "search_memory",
       "search_notes",
       "set_agent_state",
@@ -38,11 +37,10 @@ describe("listAllTools — unconditional tool exposure", () => {
     expect(names).toEqual(expected);
   });
 
-  test("write tools appear in the listing even without prior capability unlock", () => {
-    // listAllTools has no knowledge of writeEnabled state — it is invoked by
-    // the ListTools handler unconditionally. If this assertion ever regresses,
-    // MCP clients that cache tool discovery (Claude Code) will silently lose
-    // the ability to call any write tool.
+  test("write tools appear in the listing unconditionally", () => {
+    // MCP clients like Claude Code cache tool discovery at session start and
+    // never re-fetch; if writes ever stopped being listed, those clients would
+    // permanently lose the ability to call them.
     const names = listAllTools(testConfig()).map((t) => t.name);
 
     for (const tool of [
@@ -57,10 +55,11 @@ describe("listAllTools — unconditional tool exposure", () => {
     }
   });
 
-  test("request_capabilities description mentions invocation gate, not listing gate", () => {
-    const reqCap = listAllTools(testConfig()).find((t) => t.name === "request_capabilities");
-    expect(reqCap).toBeDefined();
-    // The description must convey that the gate is at call time, not list time.
-    expect(reqCap!.description?.toLowerCase()).toMatch(/invocation|calls? to|succeed/);
+  test("no request_capabilities meta-tool is exposed", () => {
+    // The pre-#72 design required agents to call request_capabilities before
+    // any write. It provided no security (unauthenticated) and was removed —
+    // validateOwner in agent-identity.ts is the real authorization layer.
+    const names = listAllTools(testConfig()).map((t) => t.name);
+    expect(names).not.toContain("request_capabilities");
   });
 });

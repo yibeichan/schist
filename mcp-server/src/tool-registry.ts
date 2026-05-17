@@ -227,42 +227,23 @@ export function makeWriteTools(config: VaultConfig) {
   ];
 }
 
-export function makeCapabilityTool() {
-  return {
-    name: "request_capabilities",
-    description:
-      "Enable write-capable tools for this session. Pass capability='write' to " +
-      "allow invocation of: get_note, create_note, add_connection, list_concepts, " +
-      "query_graph, add_memory, set_agent_state, delete_agent_state, " +
-      "add_concept_alias. These tools are always listed by ListTools so MCP " +
-      "clients that cache discovery can see them; the gate here controls " +
-      "whether calls to them succeed. Read-only sessions (search + context) " +
-      "do not need to call this.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        capability: { type: "string", enum: ["write"] },
-      },
-      required: ["capability"],
-    },
-  };
-}
-
 /**
  * Return the full set of tool definitions exposed by the schist MCP server.
  *
- * All tools are listed unconditionally. Write-capable tools still require
- * `request_capabilities({capability: "write"})` to succeed at invocation
- * time — the capability gate is per-call, not per-list. This matters because
- * MCP clients like Claude Code cache tool discovery at session start and
- * never re-fetch; conditional listing made write tools unreachable for
- * those clients.
+ * All tools are listed unconditionally and callable without any opt-in
+ * meta-tool. Authorization is split between two tiers:
+ *
+ *   - Memory writes (add_memory, set_agent_state, delete_agent_state,
+ *     add_concept_alias) call `validateOwner` (see `agent-identity.ts`)
+ *     against the configured SCHIST_AGENT_ID / SCHIST_ALLOWED_AGENTS.
+ *   - Vault writes (create_note, add_connection, assign_domain) do not
+ *     yet enforce identity — every commit attributes to source_agent: "mcp"
+ *     regardless of caller. Tracked as issue #63.
  */
 export function listAllTools(config: VaultConfig) {
   return [
     ...makeReadTools(config),
     ...makeMemoryReadTools(config),
-    makeCapabilityTool(),
     ...makeWriteTools(config),
     ...makeMemoryWriteTools(config),
   ];
