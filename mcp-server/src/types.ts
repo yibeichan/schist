@@ -39,6 +39,12 @@ export interface SearchResult {
   scope?: string;
 }
 
+export interface SearchNotesResponse {
+  results: SearchResult[];
+  /** Opaque cursor token for the next page; absent when this is the last page. */
+  cursor?: string;
+}
+
 export interface VaultConfig {
   name: string;
   path: string;

@@ -245,6 +245,50 @@ primary sort.
 `get_note` does NOT use cursors — single-doc fetch by ID.
 `get_context` does NOT use cursors — fixed-shape summary, not a list.
 
+#### Concurrent-ingest limitation (OFFSET pagination)
+
+All vault-DB-backed cursor tools (`search_notes`, `query_graph`,
+`list_concepts`, `list_domains`) paginate via SQL `OFFSET` over tables
+that schist's post-commit hook **drops and rebuilds** on every commit
+(per `CLAUDE.md` — `docs`/`docs_fts`/`concepts`/`edges`/`domains`).
+The memory-DB tools (`search_memory`) are unaffected — `agent_memory`
+is never touched by ingest.
+
+If a commit lands between page N and page N+1 of a cursor pagination,
+the rebuilt table's row ordering can shift relative to the cursor's
+encoded `offset`:
+
+- **Skip**: a new doc whose `bm25` rank places it before the previous
+  page boundary pushes later rows past the offset; the agent never
+  sees them on page N+1.
+- **Duplicate**: a delete (via `git rm` + commit) ahead of the offset
+  pulls page N+1 rows back into positions already returned on page N.
+
+Mitigations baked into the protocol:
+
+- Cursor TTL is 300 s, bounding the corruption window.
+- Single-agent pagination typically completes in seconds.
+- The `bm25(...) + id ASC` tiebreaker keeps ordering deterministic
+  *within* a single ingest snapshot — the issue is strictly cross-snapshot.
+
+Not mitigated in this rollout:
+
+- A keyset cursor (`id > last_id` instead of `OFFSET n`) would be
+  rebuild-stable for tools whose primary ORDER BY is `id`-monotonic.
+  It does NOT trivially compose with `bm25` ranking — page boundaries
+  computed on stale bm25 scores would still misorder against new rows.
+  Tracked as a follow-up issue, out of scope for the current rollout.
+
+Callers should treat cursor pagination as snapshot-at-best-effort —
+adequate for reading the current state of the vault, not for building
+total-ordered exports across long pagination sessions. Long-pagination
+exporters should run `query_graph` with a caller-specified LIMIT large
+enough to one-shot the result, or use the CLI / direct SQLite path.
+
+This limitation is shared by every vault-DB cursor tool — call it out
+once here so future PRs (5–7) can reference this section without
+repeating the rationale.
+
 #### `query_graph` cursor wrapping
 
 To make pagination implementable safely over arbitrary user SQL — no
@@ -439,9 +483,15 @@ this checklist before starting each PR 2–7 plan.
   - PR 3 → "search_memory" rows in cursor-adoption table + Default
     limits + Reason-string adopters + verbose-newly-set bypass +
     "Cursor binding to queryHash".
-  - PR 4 → "query_graph" rows + "query_graph cursor wrapping" subsection
-    + Default limits + Compatibility breaking change.
-  - PR 5 → "search_notes" rows + tiebreaker requirement.
+  - PR 4 → "search_notes" rows + tiebreaker requirement. **Reordered**
+    from the original "PR 4 = query_graph" plan: `search_notes` is
+    structurally `search_memory`'s twin (no breaking change, no
+    verbose, no subquery wrap) and lands as the second cursor consumer
+    before the breaking change in PR 5. Audit:
+    `audit-2026-05-17-mcp-response-sizes-pr4.md`.
+  - PR 5 → "query_graph" rows + "query_graph cursor wrapping" subsection
+    + Default limits + Compatibility breaking change. (Swapped with PR 4
+    above — same scope, different integer.)
   - PR 6 → "list_concepts" + "list_domains" rows + Default limits.
   - PR 7 → "get_context" reason-string adopters.
   - PR 8 → "Migration steps" section.

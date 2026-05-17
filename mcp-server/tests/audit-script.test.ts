@@ -36,11 +36,26 @@ describe("measureResponse", () => {
     expect(measureResponse(payload).approxTokens).toBe(expected);
   });
 
-  it("handles array responses (e.g. searchNotes return)", () => {
+  it("handles array responses (e.g. legacy bare-array returns)", () => {
     const result = measureResponse([{ id: "a" }, { id: "b" }]);
     // [{"id":"a"},{"id":"b"}] = 23 bytes
     expect(result.bytes).toBe(23);
     expect(result.entryCount).toBe(2);
+  });
+
+  it("recognises { entries: [...] } shape (search_memory)", () => {
+    const result = measureResponse({ entries: [{ id: 1 }, { id: 2 }, { id: 3 }] });
+    expect(result.entryCount).toBe(3);
+  });
+
+  it("recognises { results: [...] } shape (search_notes post-PR4)", () => {
+    // search_notes returns { results: SearchResult[], cursor? } after PR 4.
+    // measureResponse must report the row count, not the wrapper count.
+    const result = measureResponse({
+      results: [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }],
+      cursor: "abc.def",
+    });
+    expect(result.entryCount).toBe(4);
   });
 
   it("reports entryCount: 1 for non-array responses", () => {

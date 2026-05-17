@@ -6,7 +6,7 @@ import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote } from "./git-writer.js";
 import { buildNote, buildConnectionLine } from "./markdown-parser.js";
 import { validateOwner } from "./agent-identity.js";
-import type { VaultConfig, ToolError, SearchMemoryResponse } from "./types.js";
+import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse } from "./types.js";
 import {
   canonicalizeQueryHash,
   decodeCursor,
@@ -209,21 +209,115 @@ export async function maybeSpokePull(vaultRoot: string, timeoutMs = 5000): Promi
   });
 }
 
+/**
+ * search_notes tool handler. Runs the cursor pipeline:
+ *
+ *   canonicalizeQueryHash → (cursor decode + binding OR identical-query
+ *   refusal) → SQL fetch (limit+1, with id-ASC tiebreaker in sqlite-reader)
+ *   → recordIssued + issueCursor on capped results → { results, cursor? }.
+ *
+ * No verbose mode — per spec, full bodies are obtained via `get_note`, which
+ * is already an explicit two-step protocol. The FTS5 `snippet()` column on
+ * each row is fixed-size and adequate for the search-result surface.
+ *
+ * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
+ */
 export async function search_notes(
   vaultRoot: string,
-  args: { query: string; limit?: number; status?: string; tags?: string[]; scope?: string; owner?: string }
-): Promise<unknown> {
+  args: {
+    query: string;
+    limit?: number;
+    status?: string;
+    tags?: string[];
+    scope?: string;
+    owner?: string;
+    cursor?: string;
+  }
+): Promise<SearchNotesResponse | ToolError> {
+  const TOOL_NAME = "search_notes" as const;
+
+  // Step 1: canonicalizeQueryHash. Active owner is per-call owner first
+  // (matches sqlite-reader's scope=inherit resolution order), then env.
+  const activeOwner =
+    args.owner ?? process.env.SCHIST_AGENT_NAME ?? process.env.SCHIST_AGENT_ID ?? "";
+  const ch = canonicalizeQueryHash(args as Record<string, unknown>, activeOwner);
+  if (!ch.ok) return ch.error;
+  const queryHash = ch.queryHash;
+
+  // Step 2: Cursor decoding + queryHash binding check. Spec: "Cursor binding
+  // to queryHash" — current call's computed queryHash MUST equal the cursor's
+  // encoded queryHash. Mismatch → CURSOR_INVALID_SIGNATURE.
+  let offset = 0;
+  let consumingCursor = false;
+  if (typeof args.cursor === "string" && args.cursor.length > 0) {
+    const d = decodeCursor(args.cursor, TOOL_NAME);
+    if (!d.ok) return d.error;
+    if (d.queryHash !== queryHash) {
+      return {
+        error: "CURSOR_INVALID_SIGNATURE",
+        message: "cursor was issued for a different query — restart pagination from page 1",
+      };
+    }
+    offset = d.offset;
+    consumingCursor = true;
+  }
+
+  // Step 3: Identical-query refusal (only when no cursor was presented).
+  // verboseEnabled is always false here — search_notes has no verbose mode.
+  if (!consumingCursor) {
+    const refusal = checkRefusal({
+      tool: TOOL_NAME,
+      queryHash,
+      owner: activeOwner,
+      verboseEnabled: false,
+    });
+    if (refusal.refuse) return refusal.error;
+  }
+
+  // Step 4: SQL fetch with limit + 1 to detect hasMore. Default 20, cap 100.
+  // Negative / zero / missing all collapse to 20 (mirrors canonicalize's
+  // limit:0 → missing rule so the queryHash on `limit: 0` matches omitted).
+  const requested = args.limit;
+  const effectiveLimit = (requested === undefined || requested === null || requested <= 0)
+    ? 20
+    : Math.min(requested, 100);
+
+  let rows: import("./types.js").SearchResult[];
   try {
-    return sqliteReader.searchNotes(vaultRoot, args.query, {
-      limit: args.limit,
+    rows = sqliteReader.searchNotes(vaultRoot, args.query, {
+      limit: effectiveLimit + 1,
       status: args.status,
       tags: args.tags,
       scope: args.scope,
       owner: args.owner,
+      offset,
     });
   } catch (e: unknown) {
     return normalizeError(e, "INGEST_ERROR");
   }
+
+  const hasMore = rows.length > effectiveLimit;
+  const pageRows = hasMore ? rows.slice(0, effectiveLimit) : rows;
+
+  // Step 5: Cursor issuance + recordIssued (only when this page was capped).
+  let cursor: string | undefined;
+  if (hasMore) {
+    recordIssued({
+      tool: TOOL_NAME,
+      queryHash,
+      owner: activeOwner,
+      verboseEnabled: false,
+    });
+    cursor = issueCursor({
+      tool: TOOL_NAME,
+      queryHash,
+      offset: offset + effectiveLimit,
+    });
+  }
+
+  const response: SearchNotesResponse = { results: pageRows };
+  if (cursor !== undefined) response.cursor = cursor;
+  return response;
 }
 
 export async function get_note(
@@ -514,8 +608,9 @@ export async function get_context(
  *   noteHighFrequency on verbose → { entries, cursor?, verboseNote? }.
  *
  * All 8 stages are implemented in this file; see the numbered Step comments
- * inline. This handler is the prototype for PRs 4–7 (search_notes,
- * query_graph, list_concepts, list_domains, get_context).
+ * inline. This handler is the prototype for the cursor-adopting tools:
+ * search_notes (landed in PR 4 — see `export async function search_notes`
+ * above), then query_graph, list_concepts, list_domains, get_context.
  *
  * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
  */

@@ -16,16 +16,17 @@ export function makeReadTools(config: VaultConfig) {
     },
     {
       name: "search_notes",
-      description: "Full-text search across all notes in the knowledge graph",
+      description: "Full-text search across all notes in the knowledge graph. Returns id+title+snippet rows; call `get_note` for the full body. Paginated: when results are capped, the response includes a `cursor` token — echo it back on the next call to advance, or refine the query. Identical queries within 300s without a cursor are refused with CURSOR_REQUIRED.",
       inputSchema: {
         type: "object" as const,
         properties: {
           query: { type: "string" },
-          limit: { type: "number" },
+          limit: { type: "number", description: "Default 20, capped at 100." },
           status: { type: "string", enum: config.statuses },
           tags: { type: "array", items: { type: "string" } },
           scope: { type: "string", description: 'Filter by scope. Use "inherit" to search agent default scope + global.' },
           owner: { type: "string", description: "Calling agent's id. Required for scope='inherit' under SCHIST_ALLOWED_AGENTS-only deployments where the env has no per-process identity; otherwise optional (falls back to SCHIST_AGENT_NAME / SCHIST_AGENT_ID)." },
+          cursor: { type: "string", description: "Opaque pagination cursor returned by a prior call. Echo verbatim; do not modify." },
         },
         required: ["query"],
       },
