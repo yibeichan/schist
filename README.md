@@ -1,57 +1,100 @@
 # schist
 
-Agent-first knowledge graph. Git is truth, SQLite is query, humans just watch.
+**Agent-first knowledge graph. Git is truth, SQLite is query, humans just watch.**
 
-**schist** is a generic, domain-agnostic knowledge graph where AI agents are the primary writers. Content is markdown + YAML frontmatter, version-controlled in git. SQLite provides the query layer. A static web viewer (D3.js + lunr.js) gives humans a read-only visualization.
+Your AI agents write code, run ops, do research. But between sessions, they forget everything. Chat history isn't memory. Vector databases aren't knowledge. You need structure — notes, concepts, connections — that agents can write to and read from, across projects, across machines, across time.
 
-## Why
+**schist** is that structure. A markdown-native knowledge graph where agents are the primary writers. Content lives in git (versioned, branched, merged). SQLite gives you instant search and graph queries. A static web viewer lets humans see what agents know.
 
-- Agents need structured knowledge, not just chat history
-- Git gives you version control, branching, and collaboration for free
-- SQLite gives you instant full-text search and graph queries without a server
-- Markdown is readable by both agents and humans
-- No vendor lock-in — it's just files
+No vendor lock-in. No cloud dependency. No server to run. Just files.
 
-## Quick Start
+## Why schist
 
-> **New?** See the [Getting Started Guide](docs/getting-started.md) for a complete setup walkthrough with platform-specific instructions.
+If you're using AI agents for real work, you've hit these problems:
+
+- **Agents repeat research** they did last session because context windows don't persist
+- **Decisions get lost** — that architecture choice from Tuesday? Gone.
+- **No cross-project memory** — your coding agent doesn't know what your ops agent learned
+- **Tool output isn't knowledge** — logs, search results, and transcripts aren't structured
+
+schist gives agents a persistent, queryable knowledge base that survives session restarts.
+
+## 30-Second Demo
 
 ```bash
-# Install CLI and MCP server (published packages)
+# Install
 pip install schist
 npm install -g @schist/mcp-server
 
-# Or install from source (for contributors):
-# git clone https://github.com/yibeichan/schist.git
-# cd schist && uv pip install --system -e ./cli   # or: pip install -e ./cli
-# cd mcp-server && npm install && npm run build
 
 # Create a vault
-schist init ~/vaults/research --name research --identity local
+schist init ~/vaults/my-project --name my-project --identity local
 
-# Verify setup
-schist doctor --vault ~/vaults/research
+# Verify everything works
+schist doctor --vault ~/vaults/my-project
 
-# Add your first note
-schist add --vault ~/vaults/research \
-  --title "First Note" \
-  --tags getting-started \
-  --body "Hello, knowledge graph."
+# Add a note (you or your agent)
+schist add --vault ~/vaults/my-project \
+  --title "Why we chose SQLite over Postgres" \
+  --tags architecture,decision \
+  --body "SQLite is file-based, zero-config, and fast enough for our read patterns."
 
-# Configure MCP server for your agent
-schist --vault ~/vaults/research init --print-mcp-config --identity local
+# Search it
+schist search --vault ~/vaults/my-project "sqlite"
 ```
+
+Then plug it into your agent with one command:
+
+```bash
+schist --vault ~/vaults/my-project init --print-mcp-config --identity local
+```
+
+Your agent now has `search_notes`, `create_note`, `get_context`, and more — persistent knowledge across every session.
+
+## What It Looks Like
+
+Notes are markdown + YAML frontmatter:
+
+```markdown
+---
+title: Why we chose SQLite over Postgres
+date: 2026-05-17
+tags: [architecture, decision]
+status: final
+connections:
+  - target: concepts/sqlite
+    type: supports
+---
+
+SQLite is file-based, zero-config, and fast enough for our read patterns...
+```
+
+The static viewer renders a D3.js force graph of your knowledge:
+
+```
+   [SQLite] ──supports──▶ [Why we chose SQLite]
+       │                        │
+   extends                    supports
+       │                        │
+       ▼                        ▼
+   [Database] ────────▶ [Architecture Decisions]
+```
+
+## How It's Different
+
+| | schist | Obsidian | Notion | Raw markdown |
+|--|--------|----------|--------|-------------|
+| **Primary writer** | AI agents | Humans | Humans | Anyone |
+| **Version control** | Git (built-in) | Manual sync | Cloud | Manual |
+| **Query engine** | SQLite + FTS5 | Plugin-based | API | grep |
+| **Multi-machine sync** | Hub + spoke (git) | Sync service | Cloud | Manual |
+| **Agent interface** | MCP + CLI | None | API | None |
+| **Offline** | Fully | Mostly | No | Yes |
+| **Vendor lock-in** | None (it's files) | Vault format | Proprietary | None |
 
 ## Multi-Machine (Hub & Spokes)
 
-A single laptop is fine. The real value comes when several machines share one
-knowledge graph — e.g. Claude running on a laptop, on an HPC cluster, and on a
-Raspberry Pi all writing into the same vault and seeing each other's notes.
-
-schist uses a **hub + spokes** topology. The hub is a bare git repo (on any
-machine reachable by SSH) that holds the canonical vault and enforces an ACL
-on every push. Each spoke is a sparse-checkout clone of the hub tied to one
-scope and one identity.
+A single laptop works. The real power comes when multiple machines share one knowledge graph — Claude on your laptop, an agent on an HPC cluster, a Raspberry Pi running ops, all writing into the same vault.
 
 ```
                ┌─────────────┐
@@ -68,62 +111,22 @@ scope and one identity.
     └─────────┘  └─────────┘  └─────────┘
 ```
 
-On a write, the spoke's MCP server commits locally and pushes to the hub in
-the background. On a read, it pulls from the hub first (bounded, falls
-through on failure). The hub's pre-receive hook rejects any push that writes
-outside the pusher's declared scope.
-
-End-to-end setup: [`docs/hub-spoke-setup.md`](./docs/hub-spoke-setup.md).
-
-## Cross-Project Agent Memory
-
-Schist's memory subsystem (`~/.openclaw/memory/agent-state.db`) is shared
-across every Claude project on the same machine, scoped by
-`SCHIST_AGENT_ID`. Any project can wire in the schist MCP server to
-capture lessons and recall them from elsewhere. Details and the
-`project:<slug>` tag convention: [`docs/cross-project-memory.md`](./docs/cross-project-memory.md).
+Each spoke commits locally and pushes to the hub. The hub's pre-receive hook enforces ACLs — agents can only write within their declared scope. Setup guide: [`docs/hub-spoke-setup.md`](./docs/hub-spoke-setup.md).
 
 ## Agent Integration
 
+schist speaks [MCP](https://modelcontextprotocol.io/) — works with any MCP-compatible agent.
+
 ### Claude Code
 
-Register schist as a user-scope MCP server with the printed `claude mcp add`
-command:
-
 ```bash
-schist --vault /absolute/path/to/vault init --print-mcp-config --format claude --identity local
-# then run the printed `claude mcp add ...` line
-```
-
-Claude Code stores user-scope MCP servers in `~/.claude.json`. On older
-Claude Code CLIs that predate `mcp add` / `--scope`, `--print-mcp-config`
-also emits a commented JSON fallback below the command — uncomment it and
-hand-merge the block under the top-level `mcpServers` key in
-`~/.claude.json`.
-
-### Claude Desktop
-
-Claude Desktop reads `~/Library/Application Support/Claude/claude_desktop_config.json`
-(macOS). Run the same `--print-mcp-config --format claude` and merge the
-commented JSON block under `mcpServers` in that file. The shape is:
-
-```json
-{
-  "mcpServers": {
-    "schist": {
-      "command": "node",
-      "args": ["/absolute/path/to/schist/mcp-server/dist/index.js"],
-      "env": {
-        "SCHIST_VAULT_PATH": "/absolute/path/to/vault"
-      }
-    }
-  }
-}
+schist --vault /path/to/vault init --print-mcp-config --format claude --identity local
+# Run the printed `claude mcp add` command
 ```
 
 ### Cursor
 
-Add to `.cursor/mcp.json` in your project:
+Add to `.cursor/mcp.json`:
 
 ```json
 {
@@ -131,9 +134,21 @@ Add to `.cursor/mcp.json` in your project:
     "schist": {
       "command": "node",
       "args": ["./schist/mcp-server/dist/index.js"],
-      "env": {
-        "SCHIST_VAULT_PATH": "./vault"
-      }
+      "env": { "SCHIST_VAULT_PATH": "./vault" }
+    }
+  }
+}
+```
+
+### Any MCP Client
+
+```json
+{
+  "mcpServers": {
+    "schist": {
+      "command": "node",
+      "args": ["/path/to/schist/mcp-server/dist/index.js"],
+      "env": { "SCHIST_VAULT_PATH": "/path/to/vault" }
     }
   }
 }
@@ -141,7 +156,7 @@ Add to `.cursor/mcp.json` in your project:
 
 ### Session Start Hook
 
-For any agent, add this to the system prompt or session init:
+Add to your system prompt or session init:
 
 ```
 On session start, run: schist context --vault /path/to/vault
@@ -160,11 +175,15 @@ This gives the agent a snapshot of graph stats, recent notes, and hot concepts.
 | `list_concepts` | List all concept nodes |
 | `query_graph` | Run read-only SQL against the graph database |
 | `get_context` | Dump graph context for agent session init |
+| `search_memory` | Search cross-project agent memory |
+| `add_memory` | Add a memory entry (decision, lesson, blocker, etc.) |
 
 ## CLI Commands
 
 | Command | Description |
 |---------|-------------|
+| `schist init` | Create a new vault |
+| `schist doctor` | Verify setup health |
 | `schist add` | Create a new note |
 | `schist link` | Add a connection between nodes |
 | `schist search` | Full-text search |
@@ -175,30 +194,49 @@ This gives the agent a snapshot of graph stats, recent notes, and hot concepts.
 
 ## Architecture
 
-- **MCP Server** (Node.js + TypeScript) — primary agent interface via `@modelcontextprotocol/sdk`
-- **CLI** (Python) — agent fallback + human command line
-- **Ingestion** (Python) — markdown → SQLite, triggered by git post-commit hook
-- **Viewer** (static HTML/JS) — D3.js force graph + lunr.js search, deployed to GitHub Pages
-- **Git hooks** — post-commit triggers ingestion, pre-commit rejects secrets
+```
+Agent ──MCP──▶ ┌─────────────────────────┐
+               │     MCP Server (Node)    │
+               │  tools → git-writer      │
+               │          → sqlite-reader │
+               └──────┬──────────┬────────┘
+                      │ writes   │ reads
+               ┌──────▼──┐  ┌────▼──────┐
+               │ Git repo│  │ SQLite DB │
+               │ (truth) │  │ (query)   │
+               └──────┬──┘  └───────────┘
+                      │ ingest (post-commit hook)
+               ┌──────▼──────────┐
+               │ Static Viewer   │
+               │ D3.js + lunr.js │
+               └─────────────────┘
+```
 
-See [PLAN.md](./PLAN.md) for the full architecture document.
-See [schema/SCHEMA.md](./schema/SCHEMA.md) for the markdown schema specification.
+- **Git is truth** — markdown + YAML, versioned, branched, mergeable
+- **SQLite is query** — rebuilt from markdown on every commit, disposable
+- **MCP is the interface** — agents read and write through standard protocol
+- **Viewer is optional** — humans can browse, but agents don't need it
 
-## Security Model
+Full architecture: [PLAN.md](./PLAN.md). Schema: [schema/SCHEMA.md](./schema/SCHEMA.md).
+
+## Security
 
 - Hub pre-receive hook enforces vault.yaml ACLs per-scope and per-agent
 - No delete, no force-push, no history rewrite via MCP
 - Pre-commit hook rejects commits containing secrets/API keys
 - Web viewer is static only — no server-side execution
-- Write authorization enforced by `validateOwner` against `SCHIST_AGENT_ID` / `SCHIST_ALLOWED_AGENTS`
+- Write authorization enforced against `SCHIST_AGENT_ID` / `SCHIST_ALLOWED_AGENTS`
 - `query_graph` rejects non-SELECT SQL
 
-## Requirements
+## Cross-Project Agent Memory
 
-- Node.js ≥ 20
-- Python ≥ 3.12
-- SQLite ≥ 3.39 (FTS5 support)
-- Git ≥ 2.30
+schist includes a shared memory subsystem scoped by agent identity. Any project using the schist MCP server can capture lessons, decisions, and blockers — and recall them from any other project on the same machine. Details: [`docs/cross-project-memory.md`](./docs/cross-project-memory.md).
+
+## Getting Started
+
+Full platform-specific setup guide: [`docs/getting-started.md`](./docs/getting-started.md)
+
+**Requirements:** Node.js ≥ 20, Python ≥ 3.12, SQLite ≥ 3.39 (FTS5), Git ≥ 2.30
 
 ## License
 
