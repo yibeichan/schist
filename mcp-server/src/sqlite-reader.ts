@@ -67,11 +67,12 @@ function openDb(vaultRoot: string, opts?: { readonly?: boolean }): Database.Data
 export function searchNotes(
   vaultRoot: string,
   query: string,
-  opts?: { limit?: number; status?: string; tags?: string[]; scope?: string; owner?: string }
+  opts?: { limit?: number; status?: string; tags?: string[]; scope?: string; owner?: string; offset?: number }
 ): SearchResult[] {
   const db = openDb(vaultRoot);
   try {
     const limit = opts?.limit ?? 20;
+    const offset = opts?.offset ?? 0;
     let sql = `
       SELECT docs.id, docs.title, docs.date, docs.status, docs.tags, docs.domain, docs.scope,
              snippet(docs_fts, 1, '<b>', '</b>', '...', 20) as snippet
@@ -93,6 +94,14 @@ export function searchNotes(
       }
     }
 
+    // ORDER BY is assembled in three layers so OFFSET pagination is stable:
+    //   1. scope=inherit prepends a `CASE WHEN scope=callingScope THEN 0 ELSE 1`
+    //      so the agent's own scope outranks 'global'.
+    //   2. bm25(docs_fts) provides FTS relevance ordering.
+    //   3. docs.id ASC is the deterministic tiebreaker (required for stable
+    //      LIMIT/OFFSET — see docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md).
+    const orderClauses: string[] = [];
+
     if (opts?.scope) {
       if (opts.scope === "inherit") {
         // Resolve calling scope: per-call owner > SCHIST_AGENT_NAME > SCHIST_AGENT_ID > "".
@@ -105,7 +114,7 @@ export function searchNotes(
         const callingScope = scopeMap.get(agentName ?? "") ?? "global";
         sql += ` AND (docs.scope = 'global' OR docs.scope = ? OR docs.scope LIKE ? || '/%')`;
         params.push(callingScope, callingScope);
-        sql += ` ORDER BY CASE WHEN docs.scope = ? THEN 0 ELSE 1 END`;
+        orderClauses.push(`CASE WHEN docs.scope = ? THEN 0 ELSE 1 END`);
         params.push(callingScope);
       } else {
         sql += ` AND docs.scope = ?`;
@@ -113,8 +122,12 @@ export function searchNotes(
       }
     }
 
-    sql += ` LIMIT ?`;
-    params.push(limit);
+    orderClauses.push("bm25(docs_fts)");
+    orderClauses.push("docs.id ASC");
+    sql += ` ORDER BY ${orderClauses.join(", ")}`;
+
+    sql += ` LIMIT ? OFFSET ?`;
+    params.push(limit, offset);
 
     const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
     return rows.map((row) => ({

@@ -439,9 +439,15 @@ this checklist before starting each PR 2–7 plan.
   - PR 3 → "search_memory" rows in cursor-adoption table + Default
     limits + Reason-string adopters + verbose-newly-set bypass +
     "Cursor binding to queryHash".
-  - PR 4 → "query_graph" rows + "query_graph cursor wrapping" subsection
-    + Default limits + Compatibility breaking change.
-  - PR 5 → "search_notes" rows + tiebreaker requirement.
+  - PR 4 → "search_notes" rows + tiebreaker requirement. **Reordered**
+    from the original "PR 4 = query_graph" plan: `search_notes` is
+    structurally `search_memory`'s twin (no breaking change, no
+    verbose, no subquery wrap) and lands as the second cursor consumer
+    before the breaking change in PR 5. Audit:
+    `audit-2026-05-17-mcp-response-sizes-pr4.md`.
+  - PR 5 → "query_graph" rows + "query_graph cursor wrapping" subsection
+    + Default limits + Compatibility breaking change. (Swapped with PR 4
+    above — same scope, different integer.)
   - PR 6 → "list_concepts" + "list_domains" rows + Default limits.
   - PR 7 → "get_context" reason-string adopters.
   - PR 8 → "Migration steps" section.

@@ -29,13 +29,18 @@ export function measureResponse(response: unknown): ResponseMeasurement {
   let entryCount = 1;
   if (Array.isArray(response)) {
     entryCount = response.length;
-  } else if (
-    response !== null &&
-    typeof response === "object" &&
-    "entries" in response &&
-    Array.isArray((response as { entries: unknown }).entries)
-  ) {
-    entryCount = (response as { entries: unknown[] }).entries.length;
+  } else if (response !== null && typeof response === "object") {
+    // Cursor-protocol responses wrap rows in a top-level array field:
+    //   { entries: [...] }  → search_memory
+    //   { results: [...] }  → search_notes
+    // Other tools return arrays directly (counted above) or single-shape
+    // objects (entryCount stays 1).
+    const obj = response as Record<string, unknown>;
+    if (Array.isArray(obj.entries)) {
+      entryCount = obj.entries.length;
+    } else if (Array.isArray(obj.results)) {
+      entryCount = obj.results.length;
+    }
   }
   return { bytes, approxTokens, entryCount };
 }
