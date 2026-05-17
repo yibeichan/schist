@@ -262,6 +262,105 @@ describe("search_notes tool — pagination + cursor issuance", () => {
 
 // ── tiebreaker stability ───────────────────────────────────────────────────
 
+// ── scope=inherit interaction with cursor pipeline ─────────────────────────
+
+describe("search_notes tool — scope=inherit + cursor", () => {
+  // The orderClauses refactor moved the scope-inherit `CASE WHEN scope=...` from
+  // a string concat into an array layered with bm25 + id-ASC. This test pins
+  // that pagination over scope=inherit returns each row exactly once, with the
+  // CASE prefix still ranking the caller's scope above 'global'.
+
+  async function makeScopedVault(): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-sn-scope-test-"));
+    const dbDir = path.join(dir, ".schist");
+    await fs.mkdir(dbDir, { recursive: true });
+    const dbPath = path.join(dbDir, "schist.db");
+
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE docs (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        date TEXT,
+        status TEXT DEFAULT 'draft',
+        tags TEXT,
+        concepts TEXT,
+        domain TEXT,
+        body TEXT NOT NULL DEFAULT '',
+        scope TEXT DEFAULT 'global',
+        source TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+      CREATE VIRTUAL TABLE docs_fts USING fts5(
+        title, body, tags, scope UNINDEXED, domain UNINDEXED,
+        content='docs', content_rowid='rowid'
+      );
+      CREATE TRIGGER docs_ai AFTER INSERT ON docs BEGIN
+        INSERT INTO docs_fts(rowid, title, body, tags, scope, domain)
+        VALUES (new.rowid, new.title, new.body, new.tags, new.scope, new.domain);
+      END;
+    `);
+    // Seed 5 global + 5 octopus + 5 sansan notes, all matching "haystack"
+    const stmt = db.prepare(
+      `INSERT INTO docs (id, title, body, scope) VALUES (?, ?, 'haystack body', ?)`,
+    );
+    for (const scope of ["global", "octopus", "sansan"] as const) {
+      for (let i = 0; i < 5; i++) {
+        const idx = String(i).padStart(3, "0");
+        stmt.run(`notes/${scope}-${idx}.md`, `${scope} ${idx}`, scope);
+      }
+    }
+    db.close();
+
+    await fs.writeFile(
+      path.join(dir, "vault.yaml"),
+      "name: scope-test\nparticipants:\n  - { name: octopus, default_scope: octopus }\n  - { name: sansan, default_scope: sansan }\n",
+    );
+    return dir;
+  }
+
+  it("paginates scope=inherit results exactly once across pages, with caller's scope ranked above global", async () => {
+    const scopedVault = await makeScopedVault();
+    try {
+      const seen = new Set<string>();
+      let cursor: string | undefined;
+      const firstPageIds: string[] = [];
+      let page = 0;
+      while (page < 10) {
+        const r: import("../src/types.js").SearchNotesResponse | import("../src/types.js").ToolError =
+          await search_notes(scopedVault, {
+            query: "haystack",
+            scope: "inherit",
+            owner: "octopus",
+            limit: 3,
+            cursor,
+          });
+        if (!("results" in r)) throw new Error(`unexpected error on page ${page}: ${JSON.stringify(r)}`);
+        for (const row of r.results) {
+          expect(seen.has(row.id)).toBe(false);
+          seen.add(row.id);
+          if (page === 0) firstPageIds.push(row.id);
+        }
+        cursor = r.cursor;
+        page++;
+        if (cursor === undefined) break;
+      }
+      // octopus should see 5 octopus notes + 5 global notes = 10 total
+      // (sansan-scoped notes are filtered out by the WHERE clause).
+      expect(seen.size).toBe(10);
+      // First page (3 rows) must be all octopus — the CASE prefix ranks
+      // scope==callingScope above scope=='global'. If the CASE layer were
+      // dropped or re-ordered, global rows could leak into page 1.
+      for (const id of firstPageIds) {
+        expect(id.startsWith("notes/octopus-")).toBe(true);
+      }
+    } finally {
+      await fs.rm(scopedVault, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("search_notes tool — id-ASC tiebreaker stability", () => {
   // When bm25 scores tie (e.g. identical body content), the id-ASC tiebreaker
   // is what makes OFFSET pagination deterministic. Without it, the same row

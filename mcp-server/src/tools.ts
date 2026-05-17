@@ -608,8 +608,9 @@ export async function get_context(
  *   noteHighFrequency on verbose → { entries, cursor?, verboseNote? }.
  *
  * All 8 stages are implemented in this file; see the numbered Step comments
- * inline. This handler is the prototype for PRs 4–7 (search_notes,
- * query_graph, list_concepts, list_domains, get_context).
+ * inline. This handler is the prototype for the cursor-adopting tools:
+ * search_notes (landed in PR 4 — see `export async function search_notes`
+ * above), then query_graph, list_concepts, list_domains, get_context.
  *
  * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
  */
