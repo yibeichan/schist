@@ -1,0 +1,27 @@
+[Unit]
+Description=schist-rag RAG companion service
+Documentation=https://github.com/yibeichan/schist
+After=network.target
+
+[Service]
+Type=simple
+User=eleven
+Environment=SCHIST_RAG_PORT=8788
+Environment=SCHIST_RAG_HOST=127.0.0.1
+Environment=PATH=/home/eleven/.local/share/uv/default/bin:/home/eleven/.local/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=/home/eleven/Projects/GitHub/schist/rag
+ExecStart=/home/eleven/.local/share/uv/default/bin/python /home/eleven/Projects/GitHub/schist/rag/server.py
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+
+# Memory guard: restart if RSS exceeds 1.5GB
+MemoryMax=1.5G
+MemoryHigh=1.2G
+
+# Resource limits
+CPUQuota=80%
+IOWeight=100
+
+[Install]
+WantedBy=multi-user.target
