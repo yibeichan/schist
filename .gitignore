@@ -38,3 +38,5 @@ cli/hooks/rejected-pushes.log
 .specify/
 .claude/skills/speckit-*/
 .claude/skills/handoff/
+.gstack/
+.claude/
