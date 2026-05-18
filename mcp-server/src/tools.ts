@@ -703,8 +703,8 @@ export async function get_context(
  *
  * All 8 stages are implemented in this file; see the numbered Step comments
  * inline. This handler is the prototype for the cursor-adopting tools:
- * search_notes (landed in PR 4 — see `export async function search_notes`
- * above), then query_graph, list_concepts, list_domains, get_context.
+ * search_notes (landed in PR 4) and query_graph (landed in PR 5 — both
+ * defined above), then list_concepts, list_domains, get_context.
  *
  * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
  */

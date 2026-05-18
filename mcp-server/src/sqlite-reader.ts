@@ -249,6 +249,17 @@ export function queryGraph(
   // `ORDER BY date DESC` gets server-paginated results in date order.
   // No regex on caller_sql for LIMIT detection — the subquery wrap is a
   // single deterministic rewrite with no comment/CTE/UNION edge cases.
+  //
+  // Cap is best-effort, not a security boundary. A caller can construct
+  // pathological SQL (e.g. `SELECT * FROM docs) AS x --`) that closes the
+  // wrap's subquery early and comments out the trailing `LIMIT ? OFFSET ?`.
+  // In every such case better-sqlite3 surfaces a clean parse/bind error
+  // (the wrap suffix's `?` placeholders no longer have anywhere to bind), so
+  // the worst outcome is INVALID_SQL — never silently-unbounded rows. The
+  // vault DB is already fully readable via SELECT; the wrap exists to bound
+  // typical-call context burn, not to defend against adversarial callers.
+  // Regression tests live in `tests/query-graph-tool.test.ts` under
+  // "subquery wrap is structurally safe against comment-escape attempts".
   const limit = opts?.limit ?? 100;
   const offset = opts?.offset ?? 0;
   const wrappedSql = `SELECT * FROM (${trimmed}) AS user_query LIMIT ? OFFSET ?`;

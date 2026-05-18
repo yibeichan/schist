@@ -265,6 +265,80 @@ describe("query_graph tool — limit handling", () => {
   });
 });
 
+// ── adversarial SQL: comment-based wrap escape attempts ───────────────────
+
+describe("query_graph tool — subquery wrap is structurally safe against comment-escape attempts", () => {
+  // The wrap embeds caller SQL as `SELECT * FROM (${trimmed}) AS user_query LIMIT ? OFFSET ?`.
+  // A caller might try to close the subquery early with `)` and comment out the
+  // wrap suffix with `--` or `/* ... */`. None of these should silently bypass
+  // the cap — they should either return correct results (cap respected) or
+  // surface a clean INVALID_SQL envelope. They MUST NOT silently return
+  // unbounded rows.
+
+  it("trailing `--` line comment errors cleanly (wrap parens become unbalanced)", async () => {
+    vaultRoot = await makeVault(150);
+    // Caller's SQL: `SELECT id FROM docs) AS x --`
+    // After wrap:   `SELECT * FROM (SELECT id FROM docs) AS x --) AS user_query LIMIT ? OFFSET ?`
+    // The `--` comments out the wrap suffix → outer LIMIT/OFFSET are gone →
+    // 2 extra params for 0 placeholders → better-sqlite3 throws.
+    const r = await query_graph(vaultRoot, { sql: "SELECT id FROM docs) AS x --" });
+    expect(r).toMatchObject({ error: expect.any(String) });
+    // Must NOT silently return all 150 rows.
+    expect("rows" in r).toBe(false);
+  });
+
+  it("unterminated `/*` block comment errors cleanly", async () => {
+    vaultRoot = await makeVault(150);
+    const r = await query_graph(vaultRoot, { sql: "SELECT id FROM docs) AS x /*" });
+    expect(r).toMatchObject({ error: expect.any(String) });
+    expect("rows" in r).toBe(false);
+  });
+
+  it("legitimate `--` inline comment inside SQL works (must not be falsely rejected)", async () => {
+    vaultRoot = await makeVault(5);
+    // `--` inside an otherwise normal SELECT is a legitimate SQL comment and
+    // must not break the wrap or trigger any spurious error.
+    const r = await query_graph(vaultRoot, {
+      sql: "SELECT id, title -- pick id and title\nFROM docs",
+    });
+    if (!("rows" in r)) throw new Error(`expected rows, got ${JSON.stringify(r)}`);
+    expect(r.rows.length).toBe(5);
+  });
+
+  it("legitimate `/* ... */` block comment inside SQL works", async () => {
+    vaultRoot = await makeVault(5);
+    const r = await query_graph(vaultRoot, {
+      sql: "SELECT /* descriptive comment */ id, title FROM docs",
+    });
+    if (!("rows" in r)) throw new Error("expected rows");
+    expect(r.rows.length).toBe(5);
+  });
+});
+
+// ── pagination math: caller LIMIT > effectiveLimit ─────────────────────────
+
+describe("query_graph tool — caller inner LIMIT crosses page boundaries correctly", () => {
+  it("caller LIMIT 35 with server effective-limit 30 paginates to 30 + 5 = 35 total", async () => {
+    // Pins the math against the adversarial concern that a cursor issued on
+    // page 1 could point past the inner LIMIT. effectiveLimit = 30 (passed as
+    // args.limit); inner LIMIT = 35. Page 1 returns 30, cursor offset 30.
+    // Page 2 returns 5 (inner has 35, outer offset 30 reads positions 30-35).
+    vaultRoot = await makeVault(100);
+    const r1 = await query_graph(vaultRoot, { sql: "SELECT id FROM docs LIMIT 35", limit: 30 });
+    if (!("rows" in r1)) throw new Error(`expected rows on page 1: ${JSON.stringify(r1)}`);
+    expect(r1.rows.length).toBe(30);
+    expect(r1.cursor).toBeDefined();
+    const r2 = await query_graph(vaultRoot, {
+      sql: "SELECT id FROM docs LIMIT 35",
+      limit: 30,
+      cursor: r1.cursor,
+    });
+    if (!("rows" in r2)) throw new Error("expected rows on page 2");
+    expect(r2.rows.length).toBe(5);
+    expect(r2.cursor).toBeUndefined();
+  });
+});
+
 // ── parameter binding ──────────────────────────────────────────────────────
 
 describe("query_graph tool — caller params bound under the wrap", () => {
