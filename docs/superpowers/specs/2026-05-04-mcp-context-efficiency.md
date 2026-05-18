@@ -491,7 +491,8 @@ this checklist before starting each PR 2–7 plan.
     `audit-2026-05-17-mcp-response-sizes-pr4.md`.
   - PR 5 → "query_graph" rows + "query_graph cursor wrapping" subsection
     + Default limits + Compatibility breaking change. (Swapped with PR 4
-    above — same scope, different integer.)
+    above — same scope, different integer.) Audit:
+    `audit-2026-05-17-mcp-response-sizes-pr5.md`.
   - PR 6 → "list_concepts" + "list_domains" rows + Default limits.
   - PR 7 → "get_context" reason-string adopters.
   - PR 8 → "Migration steps" section.

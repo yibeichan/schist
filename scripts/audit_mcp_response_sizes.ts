@@ -31,8 +31,9 @@ export function measureResponse(response: unknown): ResponseMeasurement {
     entryCount = response.length;
   } else if (response !== null && typeof response === "object") {
     // Cursor-protocol responses wrap rows in a top-level array field:
-    //   { entries: [...] }  → search_memory
-    //   { results: [...] }  → search_notes
+    //   { entries: [...] }                     → search_memory
+    //   { results: [...] }                     → search_notes
+    //   { columns, rows, rowCount, cursor? }   → query_graph
     // Other tools return arrays directly (counted above) or single-shape
     // objects (entryCount stays 1).
     const obj = response as Record<string, unknown>;
@@ -40,6 +41,11 @@ export function measureResponse(response: unknown): ResponseMeasurement {
       entryCount = obj.entries.length;
     } else if (Array.isArray(obj.results)) {
       entryCount = obj.results.length;
+    } else if (Array.isArray(obj.rows) && typeof obj.rowCount === "number") {
+      // query_graph specifically — `rows` alone is too generic to assume;
+      // require the `rowCount` field too so this branch only fires for
+      // the query_graph shape and doesn't misfire on unrelated `{rows}` shapes.
+      entryCount = obj.rowCount;
     }
   }
   return { bytes, approxTokens, entryCount };
