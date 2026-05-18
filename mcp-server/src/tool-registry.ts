@@ -215,12 +215,14 @@ export function makeWriteTools(config: VaultConfig) {
     },
     {
       name: "query_graph",
-      description: "Execute a read-only SQL query against the knowledge graph database",
+      description: "Execute a read-only SQL query against the knowledge graph database. **Server-paginated** — your query is wrapped as `SELECT * FROM (<your_sql>) AS user_query LIMIT N OFFSET M` (default N=100, cap 1000). Your own LIMIT/ORDER BY/OFFSET inside the SQL are respected. When the page is capped, the response includes a `cursor` token — echo it back on the next call to advance. Identical queries within 300s without a cursor are refused with CURSOR_REQUIRED. Only SELECT and WITH statements are allowed; mutation keywords are rejected.",
       inputSchema: {
         type: "object" as const,
         properties: {
           sql: { type: "string" },
           params: { type: "array", items: {} },
+          limit: { type: "number", description: "Outer LIMIT applied by the server wrap. Default 100, capped at 1000. This is in addition to any LIMIT in your SQL." },
+          cursor: { type: "string", description: "Opaque pagination cursor returned by a prior call. Echo verbatim; do not modify." },
         },
         required: ["sql"],
       },

@@ -220,9 +220,15 @@ export function listConcepts(
 export function queryGraph(
   vaultRoot: string,
   sql: string,
-  params?: unknown[]
+  params?: unknown[],
+  opts?: { limit?: number; offset?: number }
 ): { columns: string[]; rows: unknown[][]; rowCount: number } {
-  const trimmed = sql.trim();
+  // Strip trailing semicolon(s) + whitespace before either guard or wrap.
+  // The subquery wrap below produces invalid SQL if the caller_sql ends in a
+  // semicolon (`SELECT * FROM (SELECT 1;) ...`); accept the trailing `;` as a
+  // common ergonomic affordance and remove it. Multi-statement input is still
+  // rejected by `better-sqlite3.prepare()`.
+  const trimmed = sql.trim().replace(/;+\s*$/, "");
   if (
     !trimmed.match(/^(SELECT|WITH)\b/i) ||
     trimmed.match(/\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE)\b/i)
@@ -236,10 +242,22 @@ export function queryGraph(
     );
   }
 
+  // Subquery-wrap pagination (spec: "query_graph cursor wrapping").
+  // Server-controlled outer LIMIT/OFFSET ride on the caller's SQL. The
+  // caller's inner LIMIT/ORDER BY/OFFSET stay verbatim — a caller passing
+  // `SELECT * FROM docs LIMIT 5` gets exactly 5 rows; a caller passing
+  // `ORDER BY date DESC` gets server-paginated results in date order.
+  // No regex on caller_sql for LIMIT detection — the subquery wrap is a
+  // single deterministic rewrite with no comment/CTE/UNION edge cases.
+  const limit = opts?.limit ?? 100;
+  const offset = opts?.offset ?? 0;
+  const wrappedSql = `SELECT * FROM (${trimmed}) AS user_query LIMIT ? OFFSET ?`;
+  const allParams = [...(params ?? []), limit, offset];
+
   const db = openDb(vaultRoot);
   try {
-    const stmt = db.prepare(sql);
-    const rows = stmt.all(...(params ?? [])) as Record<string, unknown>[];
+    const stmt = db.prepare(wrappedSql);
+    const rows = stmt.all(...allParams) as Record<string, unknown>[];
     if (rows.length === 0) {
       const columns = stmt.columns().map((c) => c.name);
       return { columns, rows: [], rowCount: 0 };

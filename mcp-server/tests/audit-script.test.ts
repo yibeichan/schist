@@ -58,6 +58,17 @@ describe("measureResponse", () => {
     expect(result.entryCount).toBe(4);
   });
 
+  it("recognises { columns, rows, rowCount } shape (query_graph post-PR5)", () => {
+    // query_graph returns { columns, rows, rowCount, cursor? }. measureResponse
+    // must report rowCount, not 1, so audit reports stay meaningful.
+    const result = measureResponse({
+      columns: ["id", "title"],
+      rows: [["a", "A"], ["b", "B"], ["c", "C"]],
+      rowCount: 3,
+    });
+    expect(result.entryCount).toBe(3);
+  });
+
   it("reports entryCount: 1 for non-array responses", () => {
     const result = measureResponse({ noteCount: 0 });
     expect(result.entryCount).toBe(1);

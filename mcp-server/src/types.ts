@@ -45,6 +45,14 @@ export interface SearchNotesResponse {
   cursor?: string;
 }
 
+export interface QueryGraphResponse {
+  columns: string[];
+  rows: unknown[][];
+  rowCount: number;
+  /** Opaque cursor token for the next page; absent when this is the last page. */
+  cursor?: string;
+}
+
 export interface VaultConfig {
   name: string;
   path: string;

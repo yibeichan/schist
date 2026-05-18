@@ -6,7 +6,7 @@ import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote } from "./git-writer.js";
 import { buildNote, buildConnectionLine } from "./markdown-parser.js";
 import { validateOwner } from "./agent-identity.js";
-import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse } from "./types.js";
+import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse } from "./types.js";
 import {
   canonicalizeQueryHash,
   decodeCursor,
@@ -547,15 +547,109 @@ export async function list_concepts(
   }
 }
 
+/**
+ * query_graph tool handler. Runs the cursor pipeline:
+ *
+ *   canonicalizeQueryHash → (cursor decode + binding OR identical-query
+ *   refusal) → SQL fetch (subquery-wrapped, limit+1) → recordIssued +
+ *   issueCursor on capped results → { columns, rows, rowCount, cursor? }.
+ *
+ * **Breaking change (spec PR 5):** the server wraps every caller query as
+ * `SELECT * FROM (<caller_sql>) AS user_query LIMIT :limit OFFSET :offset`.
+ * Default outer limit is 100, hard cap 1000. A caller passing
+ * `SELECT * FROM docs` on a 1000-doc vault used to get all 1000 rows; it
+ * now gets 100 rows + a cursor. The caller's own LIMIT/ORDER BY/OFFSET
+ * inside the SQL are respected verbatim.
+ *
+ * No verbose mode — per spec, `query_graph`'s response shape is the natural
+ * unit; "verbose mode" doesn't apply. Concurrent-ingest caveat from the
+ * spec's "Concurrent-ingest limitation" subsection applies.
+ *
+ * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
+ */
 export async function query_graph(
   vaultRoot: string,
-  args: { sql: string; params?: unknown[] }
-): Promise<unknown> {
+  args: { sql: string; params?: unknown[]; limit?: number; cursor?: string }
+): Promise<QueryGraphResponse | ToolError> {
+  const TOOL_NAME = "query_graph" as const;
+
+  // Step 1: canonicalizeQueryHash. query_graph has no `owner` arg in the
+  // tool schema; activeOwner comes from env only (same as search_memory).
+  const activeOwner = process.env.SCHIST_AGENT_ID ?? "";
+  const ch = canonicalizeQueryHash(args as Record<string, unknown>, activeOwner);
+  if (!ch.ok) return ch.error;
+  const queryHash = ch.queryHash;
+
+  // Step 2: Cursor decoding + queryHash binding check.
+  let offset = 0;
+  let consumingCursor = false;
+  if (typeof args.cursor === "string" && args.cursor.length > 0) {
+    const d = decodeCursor(args.cursor, TOOL_NAME);
+    if (!d.ok) return d.error;
+    if (d.queryHash !== queryHash) {
+      return {
+        error: "CURSOR_INVALID_SIGNATURE",
+        message: "cursor was issued for a different query — restart pagination from page 1",
+      };
+    }
+    offset = d.offset;
+    consumingCursor = true;
+  }
+
+  // Step 3: Identical-query refusal (only when no cursor was presented).
+  if (!consumingCursor) {
+    const refusal = checkRefusal({
+      tool: TOOL_NAME,
+      queryHash,
+      owner: activeOwner,
+      verboseEnabled: false,
+    });
+    if (refusal.refuse) return refusal.error;
+  }
+
+  // Step 4: SQL fetch with limit + 1 to detect hasMore. Default 100, cap 1000.
+  // limit:0 / negative / missing collapse to the default (mirrors canonicalize).
+  const requested = args.limit;
+  const effectiveLimit = (requested === undefined || requested === null || requested <= 0)
+    ? 100
+    : Math.min(requested, 1000);
+
+  let result: { columns: string[]; rows: unknown[][]; rowCount: number };
   try {
-    return sqliteReader.queryGraph(vaultRoot, args.sql, args.params);
+    result = sqliteReader.queryGraph(vaultRoot, args.sql, args.params, {
+      limit: effectiveLimit + 1,
+      offset,
+    });
   } catch (e: unknown) {
     return normalizeError(e, "INVALID_SQL");
   }
+
+  const hasMore = result.rowCount > effectiveLimit;
+  const pageRows = hasMore ? result.rows.slice(0, effectiveLimit) : result.rows;
+
+  // Step 5: Cursor issuance + recordIssued (only when this page was capped).
+  let cursor: string | undefined;
+  if (hasMore) {
+    recordIssued({
+      tool: TOOL_NAME,
+      queryHash,
+      owner: activeOwner,
+      verboseEnabled: false,
+    });
+    cursor = issueCursor({
+      tool: TOOL_NAME,
+      queryHash,
+      offset: offset + effectiveLimit,
+    });
+  }
+
+  const response: QueryGraphResponse = {
+    columns: result.columns,
+    rows: pageRows,
+    rowCount: pageRows.length,
+  };
+  if (cursor !== undefined) response.cursor = cursor;
+  return response;
 }
 
 export async function get_context(
