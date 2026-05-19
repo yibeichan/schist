@@ -85,6 +85,58 @@ describe("git-writer", () => {
     expect(result.path).toBe("notes/after-timeout.md");
   }, 30000);
 
+  test("dedup: re-writing identical content does not create a second commit (#104)", async () => {
+    const vault = await makeTempVault();
+    const content = "---\ntitle: Dedup\n---\nBody";
+
+    const first = await writeNote(vault, "notes/dup.md", content, "Dedup");
+    expect(first.committed).toBe(true);
+
+    const second = await writeNote(vault, "notes/dup.md", content, "Dedup");
+    expect(second.committed).toBe(false);
+    expect(second.commitSha).toBe(first.commitSha);
+
+    // A real follow-up edit must still commit
+    const third = await writeNote(vault, "notes/dup.md", content + "\nmore", "Dedup");
+    expect(third.committed).toBe(true);
+    expect(third.commitSha).not.toBe(first.commitSha);
+  }, 30000);
+
+  test("commit title is sanitized: newlines collapsed, length capped", async () => {
+    const vault = await makeTempVault();
+    const evilTitle = "first line\nsecond line\r\n# would-be-comment\n\n\ntrailing";
+    await writeNote(vault, "notes/evil.md", "---\ntitle: x\n---\nBody", evilTitle);
+    const { stdout: oneLine } = await execFile("git", ["log", "-1", "--pretty=%s"], { cwd: vault });
+    expect(oneLine.trim()).toBe(
+      "feat(schist): write first line second line # would-be-comment trailing — via MCP"
+    );
+    // %B (full message) must also be a single subject line — no body paragraphs.
+    const { stdout: fullMsg } = await execFile("git", ["log", "-1", "--pretty=%B"], { cwd: vault });
+    expect(fullMsg.trim().split("\n").length).toBe(1);
+
+    // Length cap (197 chars + "...")
+    const longTitle = "x".repeat(500);
+    await writeNote(vault, "notes/long.md", "---\ntitle: y\n---\nBody", longTitle);
+    const { stdout: longLine } = await execFile("git", ["log", "-1", "--pretty=%s"], { cwd: vault });
+    const subj = longLine.trim();
+    expect(subj).toMatch(/^feat\(schist\): write x{197}\.\.\. — via MCP$/);
+  }, 30000);
+
+  test("commit message uses caller-supplied title, not folded YAML ('>-') (#104)", async () => {
+    const vault = await makeTempVault();
+    const longTitle =
+      "Very long title that goes on for many words and might trigger line folding behavior";
+    // gray-matter folds this title to `title: >-\n  <body>` — the old regex
+    // captured `>-` as the title. The fix is the explicit commitTitle arg.
+    const body = `---\ntitle: >-\n  ${longTitle}\n---\nBody`;
+
+    await writeNote(vault, "notes/folded.md", body, longTitle);
+
+    const { stdout } = await execFile("git", ["log", "-1", "--pretty=%s"], { cwd: vault });
+    expect(stdout.trim()).toBe(`feat(schist): write ${longTitle} — via MCP`);
+    expect(stdout).not.toContain(">-");
+  }, 30000);
+
   test("Mutex: lock is NOT left held after withTimeout fires", async () => {
     const { Mutex, withTimeout } = await import("async-mutex");
 
