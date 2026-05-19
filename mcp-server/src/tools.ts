@@ -433,10 +433,12 @@ export async function create_note(
     };
 
     const noteContent = buildNote(metadata, args.body, args.connections);
-    const result = await writeNote(vaultRoot, relPath, noteContent);
+    const result = await writeNote(vaultRoot, relPath, noteContent, args.title);
 
-    triggerIngestion(vaultRoot);
-    triggerSpokePush(vaultRoot);
+    if (result.committed) {
+      triggerIngestion(vaultRoot);
+      triggerSpokePush(vaultRoot);
+    }
 
     return { id: relPath, path: relPath, commitSha: result.commitSha };
   } catch (e: unknown) {
@@ -475,10 +477,17 @@ export async function add_connection(
       newContent = content.trimEnd() + "\n\n## Connections\n\n" + connLine + "\n";
     }
 
-    const result = await writeNote(vaultRoot, args.source, newContent);
+    const result = await writeNote(
+      vaultRoot,
+      args.source,
+      newContent,
+      `connection ${args.type} → ${args.target} on ${args.source}`
+    );
 
-    triggerIngestion(vaultRoot);
-    triggerSpokePush(vaultRoot);
+    if (result.committed) {
+      triggerIngestion(vaultRoot);
+      triggerSpokePush(vaultRoot);
+    }
 
     return { source: args.source, target: args.target, type: args.type, commitSha: result.commitSha };
   } catch (e: unknown) {
@@ -525,10 +534,17 @@ export async function assign_domain(
     const newMetadata = { ...metadata, domain: args.domain };
     const newContent = buildNote(newMetadata, body, connections);
 
-    const result = await writeNote(vaultRoot, args.id, newContent);
+    const result = await writeNote(
+      vaultRoot,
+      args.id,
+      newContent,
+      `assign domain ${args.domain} to ${args.id}`
+    );
 
-    triggerIngestion(vaultRoot);
-    triggerSpokePush(vaultRoot);
+    if (result.committed) {
+      triggerIngestion(vaultRoot);
+      triggerSpokePush(vaultRoot);
+    }
 
     return { id: args.id, domain: args.domain, commitSha: result.commitSha };
   } catch (e: unknown) {

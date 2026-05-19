@@ -56,17 +56,29 @@ function assertPathSafe(vaultRoot: string, relPath: string): void {
   }
 }
 
+export type WriteResult = {
+  path: string;
+  commitSha: string;
+  committed: boolean;
+};
+
 /**
  * Acquires the write mutex, checks out the write branch, runs fn(absPath),
  * then stages + commits relPath. Shared by writeNote and appendToNote to
  * eliminate duplicated mutex/git boilerplate.
+ *
+ * Dedup: after staging, if the working tree shows no change against HEAD for
+ * relPath, the commit is skipped and `committed: false` is returned with the
+ * current HEAD sha. This prevents the "MCP write tool over-commits" pattern
+ * (issue #104) where re-emitting identical content produced empty-message
+ * churn in the vault history.
  */
 async function withWriteLock(
   vaultRoot: string,
   relPath: string,
   commitMessage: string,
   fn: (absPath: string) => Promise<void>
-): Promise<{ path: string; commitSha: string }> {
+): Promise<WriteResult> {
   const release = await writeMutex.acquire();
   try {
     const branch = await getWriteBranch(vaultRoot);
@@ -78,10 +90,25 @@ async function withWriteLock(
     await fn(absPath);
 
     await git(vaultRoot, ["add", relPath]);
+
+    // Dedup: skip commit if staged content matches HEAD. `git diff --cached
+    // --quiet` exits 0 when there is no staged diff, 1 when there is. execFile
+    // throws on non-zero exit, so we catch the "has diff" branch.
+    let hasChanges = false;
+    try {
+      await execFile("git", ["diff", "--cached", "--quiet", "--", relPath], { cwd: vaultRoot });
+    } catch {
+      hasChanges = true;
+    }
+    if (!hasChanges) {
+      const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
+      return { path: relPath, commitSha: sha, committed: false };
+    }
+
     // NEVER --no-verify — hard coded out
     await git(vaultRoot, ["commit", "-m", commitMessage]);
     const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
-    return { path: relPath, commitSha: sha };
+    return { path: relPath, commitSha: sha, committed: true };
   } finally {
     release();
   }
@@ -90,11 +117,15 @@ async function withWriteLock(
 export async function writeNote(
   vaultRoot: string,
   relPath: string,
-  content: string
-): Promise<{ path: string; commitSha: string }> {
+  content: string,
+  commitTitle?: string
+): Promise<WriteResult> {
   assertPathSafe(vaultRoot, relPath);
-  const titleMatch = content.match(/^title:\s*["']?(.+?)["']?\s*$/m);
-  const title = titleMatch ? titleMatch[1] : relPath;
+  // Prefer the caller-supplied title — gray-matter folds long or special-char
+  // titles to `>-` / `|-`, so regex-parsing the rendered YAML produced commit
+  // messages like "write >- — via MCP" (issue #104). Fall back to relPath
+  // when no title is provided.
+  const title = commitTitle && commitTitle.trim().length > 0 ? commitTitle : relPath;
   return withWriteLock(
     vaultRoot,
     relPath,
@@ -109,7 +140,7 @@ export async function appendToNote(
   vaultRoot: string,
   relPath: string,
   addition: string
-): Promise<{ path: string; commitSha: string }> {
+): Promise<WriteResult> {
   assertPathSafe(vaultRoot, relPath);
   return withWriteLock(
     vaultRoot,
