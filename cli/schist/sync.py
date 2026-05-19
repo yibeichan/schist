@@ -40,6 +40,7 @@ sys.exit(main())
 
 POST_COMMIT_HOOK = r"""#!/bin/sh
 # schist post-commit hook — re-ingest vault into SQLite after every commit
+# schist-hook-version: 2
 
 VAULT_ROOT=$(git rev-parse --show-toplevel)
 DB_PATH="$VAULT_ROOT/.schist/schist.db"
@@ -62,10 +63,22 @@ python3 "$INGEST" --vault "$VAULT_ROOT" --db "$DB_PATH"
 """
 
 
+# Bump HOOK_VERSION when you change PRE_COMMIT_HOOK or POST_COMMIT_HOOK so that
+# `schist doctor` can detect spokes running stale hook templates. The matching
+# `# schist-hook-version: N` line lives inside each hook script body. A user
+# who has intentionally customized their hook can replace the version line
+# with `# schist-hook-version: pinned` to silence the staleness warning.
+HOOK_VERSION = 2
+
 PRE_COMMIT_HOOK = r"""#!/bin/sh
 # schist pre-commit hook — reject staged files containing secrets
+# schist-hook-version: 2
 
-PATTERNS='sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|ghs_[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16}|-----BEGIN|password\s*=|api_key\s*='
+# Patterns intentionally require a left boundary on token prefixes so substrings
+# like "task-..." inside a filename don't trigger on "sk-...", and require a
+# quoted value for password/api_key so docs prose ("set `password = <value>`")
+# doesn't trip the guard. See issue #103 for the false-positive cases.
+PATTERNS="(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}|(^|[^A-Za-z0-9])ghp_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9])ghs_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9])AKIA[A-Z0-9]{16}|-----BEGIN [A-Z ]+PRIVATE KEY-----|password\s*=\s*[\"'][^\"' ]+[\"']|api_key\s*=\s*[\"'][^\"' ]+[\"']"
 
 STAGED_FILES=$(git diff --cached --name-only)
 if [ -z "$STAGED_FILES" ]; then
@@ -90,7 +103,8 @@ def _install_local_hooks(vault_path) -> None:
 
     Shared by standalone and spoke init so either flavor of vault gets the
     SQLite auto-rebuild and the staged-secret guard. Caller must have already
-    created `<vault>/.git/`.
+    created `<vault>/.git/`. Also called by `schist hooks reinstall` to refresh
+    spokes initialized with an older hook template (issue #103).
     """
     hooks_dir = Path(vault_path) / ".git" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
@@ -100,6 +114,22 @@ def _install_local_hooks(vault_path) -> None:
     pre = hooks_dir / "pre-commit"
     pre.write_text(PRE_COMMIT_HOOK)
     pre.chmod(0o755)
+
+
+def hooks_reinstall(args, vault_path: str, db_path: str) -> None:
+    """Re-write pre-commit and post-commit hooks from the canonical templates.
+
+    Refreshes spokes that were init'd before HOOK_VERSION was bumped (issue
+    #103). Overwrites any local modifications — users who customized their
+    hooks should keep a copy before running this.
+    """
+    target = Path(vault_path)
+    if not (target / ".git").exists():
+        print(f"Error: {vault_path} is not a git repository", file=sys.stderr)
+        sys.exit(1)
+    _install_local_hooks(str(target))
+    print(f"Reinstalled pre-commit and post-commit hooks at {target}/.git/hooks/")
+    print(f"Hook template version: {HOOK_VERSION}")
 
 
 def init_spoke(args, vault_path: str, db_path: str) -> None:

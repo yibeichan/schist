@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -177,6 +178,67 @@ def check_post_commit_hook(vault_path: Optional[str]) -> CheckResult:
         return CheckResult("PASS", "Post-commit hook", "installed")
     return CheckResult("FAIL", "Post-commit hook", "not installed",
                        f"Run `schist init {vault_path}` to install hooks.")
+
+
+_HOOK_VERSION_RE = re.compile(r"^# schist-hook-version:\s*(\S+)\s*$", re.MULTILINE)
+
+
+def _installed_hook_version(hook_path: Path) -> Optional[str]:
+    """Read the `# schist-hook-version:` marker from an installed hook.
+
+    Returns the version token as a string (`"2"`, `"pinned"`, etc.), or None if
+    the hook file is missing or has no marker (legacy unversioned hook).
+    """
+    try:
+        text = hook_path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    m = _HOOK_VERSION_RE.search(text)
+    return m.group(1) if m else None
+
+
+def check_hooks_freshness(vault_path: Optional[str]) -> CheckResult:
+    """Compare installed pre/post-commit hooks against the canonical templates.
+
+    Warns when a vault is running a stale hook template — e.g. a spoke that
+    was init'd before the pre-commit regex was tightened (issue #103). Users
+    who intentionally customized their hooks can set the version line to
+    `# schist-hook-version: pinned` to silence the warning.
+    """
+    if not vault_path:
+        return CheckResult("SKIP", "Hooks freshness", "skipped (no vault)")
+    if not (Path(vault_path) / ".git").exists():
+        return CheckResult("SKIP", "Hooks freshness", "skipped (not a git repo)")
+
+    # Local import to keep this module's import graph cheap when sync.py is not
+    # the entry point. sync.py imports many things including subprocess/shutil.
+    from . import sync as sync_mod
+
+    current = str(sync_mod.HOOK_VERSION)
+    hooks_dir = Path(vault_path) / ".git" / "hooks"
+    stale = []
+    pinned = []
+    for name in ("pre-commit", "post-commit"):
+        installed = _installed_hook_version(hooks_dir / name)
+        if installed is None:
+            stale.append(f"{name}: legacy (no version marker)")
+        elif installed == "pinned":
+            pinned.append(name)
+        elif installed != current:
+            stale.append(f"{name}: v{installed} (current: v{current})")
+
+    if stale:
+        return CheckResult(
+            "WARN", "Hooks freshness",
+            "; ".join(stale),
+            fix=f"Run `schist --vault {vault_path} hooks reinstall` to update.",
+        )
+    if pinned:
+        return CheckResult(
+            "PASS", "Hooks freshness",
+            f"current (v{current}); pinned: {', '.join(pinned)}",
+        )
+    return CheckResult("PASS", "Hooks freshness", f"current (v{current})")
 
 
 def check_hooks_path(vault_path: Optional[str]) -> CheckResult:
@@ -387,6 +449,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_schist_yaml(vault_path),
         check_sqlite(vault_path, db_path),
         check_post_commit_hook(vault_path),
+        check_hooks_freshness(vault_path),
         check_hooks_path(vault_path),
         check_ingest_available(vault_path),
         check_spoke(vault_path),

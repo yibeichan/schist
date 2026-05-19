@@ -13,6 +13,7 @@ import yaml
 from schist.doctor import (
     CheckResult,
     check_git,
+    check_hooks_freshness,
     check_hooks_path,
     check_ingest_available,
     check_mcp_config,
@@ -27,6 +28,7 @@ from schist.doctor import (
     check_vault_is_git,
     run_doctor,
 )
+from schist.sync import HOOK_VERSION, POST_COMMIT_HOOK, PRE_COMMIT_HOOK
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +216,65 @@ class TestCheckPostCommitHook:
         (tmp_path / ".git").mkdir()
         r = check_post_commit_hook(str(tmp_path))
         assert r.status == "FAIL"
+
+
+class TestCheckHooksFreshness:
+    """Issue #103 — detect spokes still running an older hook template so
+    fixes to the secret regex actually reach existing installations."""
+
+    def _install_hook(self, vault: Path, name: str, body: str) -> None:
+        hooks = vault / ".git" / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
+        (hooks / name).write_text(body)
+
+    def test_no_path(self):
+        r = check_hooks_freshness(None)
+        assert r.status == "SKIP"
+
+    def test_not_a_git_repo(self, tmp_path):
+        r = check_hooks_freshness(str(tmp_path))
+        assert r.status == "SKIP"
+
+    def test_current_versions_pass(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        self._install_hook(tmp_path, "pre-commit", PRE_COMMIT_HOOK)
+        self._install_hook(tmp_path, "post-commit", POST_COMMIT_HOOK)
+        r = check_hooks_freshness(str(tmp_path))
+        assert r.status == "PASS"
+        assert f"v{HOOK_VERSION}" in r.message
+
+    def test_legacy_unversioned_hook_warns(self, tmp_path):
+        """A spoke init'd before HOOK_VERSION was introduced has no marker —
+        must surface as stale so the user knows to reinstall."""
+        (tmp_path / ".git").mkdir()
+        self._install_hook(tmp_path, "pre-commit",
+                           "#!/bin/sh\n# legacy hook with no version marker\nexit 0\n")
+        self._install_hook(tmp_path, "post-commit", POST_COMMIT_HOOK)
+        r = check_hooks_freshness(str(tmp_path))
+        assert r.status == "WARN"
+        assert "legacy" in r.message
+        assert r.fix is not None
+        assert "hooks reinstall" in r.fix
+
+    def test_old_versioned_hook_warns(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        self._install_hook(tmp_path, "pre-commit",
+                           "#!/bin/sh\n# schist-hook-version: 1\nexit 0\n")
+        self._install_hook(tmp_path, "post-commit", POST_COMMIT_HOOK)
+        r = check_hooks_freshness(str(tmp_path))
+        assert r.status == "WARN"
+        assert "v1" in r.message
+        assert f"v{HOOK_VERSION}" in r.message
+
+    def test_pinned_marker_silences_warning(self, tmp_path):
+        """User who customized their hook can opt out with `pinned`."""
+        (tmp_path / ".git").mkdir()
+        self._install_hook(tmp_path, "pre-commit",
+                           "#!/bin/sh\n# schist-hook-version: pinned\n# my custom patterns\nexit 0\n")
+        self._install_hook(tmp_path, "post-commit", POST_COMMIT_HOOK)
+        r = check_hooks_freshness(str(tmp_path))
+        assert r.status == "PASS"
+        assert "pinned" in r.message
 
 
 class TestCheckHooksPath:

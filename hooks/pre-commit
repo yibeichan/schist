@@ -1,7 +1,12 @@
 #!/bin/sh
 # schist pre-commit hook — reject staged files containing secrets
+# schist-hook-version: 2
 
-PATTERNS='sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|ghs_[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16}|-----BEGIN|password\s*=|api_key\s*='
+# Patterns intentionally require a left boundary on token prefixes so substrings
+# like "task-..." inside a filename don't trigger on "sk-...", and require a
+# quoted value for password/api_key so docs prose ("set `password = <value>`")
+# doesn't trip the guard. See issue #103 for the false-positive cases.
+PATTERNS="(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}|(^|[^A-Za-z0-9])ghp_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9])ghs_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9])AKIA[A-Z0-9]{16}|-----BEGIN [A-Z ]+PRIVATE KEY-----|password\s*=\s*[\"'][^\"' ]+[\"']|api_key\s*=\s*[\"'][^\"' ]+[\"']"
 
 STAGED_FILES=$(git diff --cached --name-only)
 if [ -z "$STAGED_FILES" ]; then

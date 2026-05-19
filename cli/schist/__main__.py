@@ -95,6 +95,12 @@ def main():
     sync_sub.add_parser('pull', help='Pull updates from hub')
     sync_sub.add_parser('push', help='Push local changes to hub')
 
+    # hooks
+    p_hooks = sub.add_parser('hooks', help='Manage installed git hooks')
+    hooks_sub = p_hooks.add_subparsers(dest='hooks_action')
+    hooks_sub.add_parser('reinstall',
+                         help='Refresh pre-commit and post-commit hooks from canonical templates')
+
     args = parser.parse_args()
 
     if not args.command:
@@ -127,6 +133,15 @@ def main():
             sync.sync_push(args, vault_path, db_path)
         else:
             print('Usage: schist sync {pull|push}', file=sys.stderr)
+            sys.exit(1)
+        sys.exit(0)
+
+    # hooks sub-dispatch
+    if args.command == 'hooks':
+        if args.hooks_action == 'reinstall':
+            sync.hooks_reinstall(args, vault_path, db_path)
+        else:
+            print('Usage: schist hooks reinstall', file=sys.stderr)
             sys.exit(1)
         sys.exit(0)
 
