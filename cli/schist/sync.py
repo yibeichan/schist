@@ -40,6 +40,7 @@ sys.exit(main())
 
 POST_COMMIT_HOOK = r"""#!/bin/sh
 # schist post-commit hook — re-ingest vault into SQLite after every commit
+# schist-hook-version: 2
 
 VAULT_ROOT=$(git rev-parse --show-toplevel)
 DB_PATH="$VAULT_ROOT/.schist/schist.db"
@@ -62,10 +63,22 @@ python3 "$INGEST" --vault "$VAULT_ROOT" --db "$DB_PATH"
 """
 
 
+# Bump HOOK_VERSION when you change PRE_COMMIT_HOOK or POST_COMMIT_HOOK so that
+# `schist doctor` can detect spokes running stale hook templates. The matching
+# `# schist-hook-version: N` line lives inside each hook script body. A user
+# who has intentionally customized their hook can replace the version line
+# with `# schist-hook-version: pinned` to silence the staleness warning.
+HOOK_VERSION = 2
+
 PRE_COMMIT_HOOK = r"""#!/bin/sh
 # schist pre-commit hook — reject staged files containing secrets
+# schist-hook-version: 2
 
-PATTERNS='sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|ghs_[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16}|-----BEGIN|password\s*=|api_key\s*='
+# Patterns intentionally require a left boundary on token prefixes so substrings
+# like "task-..." inside a filename don't trigger on "sk-...", and require a
+# quoted value for password/api_key so docs prose ("set `password = <value>`")
+# doesn't trip the guard. See issue #103 for the false-positive cases.
+PATTERNS="(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}|(^|[^A-Za-z0-9])ghp_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9])ghs_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9])AKIA[A-Z0-9]{16}|-----BEGIN [A-Z ]+PRIVATE KEY-----|password\s*=\s*[\"'][^\"' ]+[\"']|api_key\s*=\s*[\"'][^\"' ]+[\"']"
 
 STAGED_FILES=$(git diff --cached --name-only)
 if [ -z "$STAGED_FILES" ]; then
@@ -85,21 +98,83 @@ exit 0
 """
 
 
+def _atomic_write_hook(hook_path: Path, body: str) -> None:
+    """Write `body` to `hook_path` atomically + executable.
+
+    A naive `write_text` then `chmod` leaves a window where a concurrent git
+    invocation could `exec` a half-written shell script. We write to a sibling
+    `.tmp` file (same directory ⇒ same filesystem ⇒ rename is atomic on POSIX)
+    and `os.replace` over the target.
+    """
+    tmp = hook_path.with_name(hook_path.name + ".tmp")
+    tmp.write_text(body)
+    tmp.chmod(0o755)
+    os.replace(tmp, hook_path)
+
+
 def _install_local_hooks(vault_path) -> None:
     """Write the post-commit and pre-commit hooks into a working-tree repo.
 
     Shared by standalone and spoke init so either flavor of vault gets the
     SQLite auto-rebuild and the staged-secret guard. Caller must have already
-    created `<vault>/.git/`.
+    created `<vault>/.git/`. Also called by `schist hooks reinstall` to refresh
+    spokes initialized with an older hook template (issue #103).
     """
     hooks_dir = Path(vault_path) / ".git" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
-    post = hooks_dir / "post-commit"
-    post.write_text(POST_COMMIT_HOOK)
-    post.chmod(0o755)
-    pre = hooks_dir / "pre-commit"
-    pre.write_text(PRE_COMMIT_HOOK)
-    pre.chmod(0o755)
+    _atomic_write_hook(hooks_dir / "post-commit", POST_COMMIT_HOOK)
+    _atomic_write_hook(hooks_dir / "pre-commit", PRE_COMMIT_HOOK)
+
+
+_HOOK_VERSION_LINE = re.compile(r"^# schist-hook-version:\s*(\S+)", re.MULTILINE)
+
+
+def _hook_pinned(hook_path: Path) -> bool:
+    """Return True iff the hook carries a `# schist-hook-version: pinned`
+    marker — the opt-out signal users set on intentionally-customized hooks.
+    """
+    try:
+        text = hook_path.read_text()
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        return False
+    m = _HOOK_VERSION_LINE.search(text)
+    return bool(m and m.group(1) == "pinned")
+
+
+def hooks_reinstall(args, vault_path: str, db_path: str) -> None:
+    """Re-write pre-commit and post-commit hooks from the canonical templates.
+
+    Refreshes spokes that were init'd before HOOK_VERSION was bumped (issue
+    #103). Hooks carrying `# schist-hook-version: pinned` are skipped unless
+    `--force` is passed — that marker is the documented opt-out for users who
+    intentionally customized their hook bodies.
+    """
+    target = Path(vault_path)
+    if not (target / ".git").exists():
+        print(f"Error: {vault_path} is not a git repository", file=sys.stderr)
+        sys.exit(1)
+
+    hooks_dir = target / ".git" / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    force = getattr(args, "force", False)
+    skipped = []
+    written = []
+    for name, body in (("pre-commit", PRE_COMMIT_HOOK), ("post-commit", POST_COMMIT_HOOK)):
+        path = hooks_dir / name
+        if not force and _hook_pinned(path):
+            skipped.append(name)
+            continue
+        _atomic_write_hook(path, body)
+        written.append(name)
+
+    if written:
+        print(f"Reinstalled hooks: {', '.join(written)} (template v{HOOK_VERSION})")
+    for name in skipped:
+        print(
+            f"Skipped {name}: marked `# schist-hook-version: pinned`. "
+            f"Pass --force to overwrite.",
+            file=sys.stderr,
+        )
 
 
 def init_spoke(args, vault_path: str, db_path: str) -> None:
