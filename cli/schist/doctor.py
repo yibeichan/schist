@@ -180,19 +180,33 @@ def check_post_commit_hook(vault_path: Optional[str]) -> CheckResult:
                        f"Run `schist init {vault_path}` to install hooks.")
 
 
-_HOOK_VERSION_RE = re.compile(r"^# schist-hook-version:\s*(\S+)\s*$", re.MULTILINE)
+# Match the marker line and tolerate an optional trailing `# comment` so users
+# who annotate the line ("# schist-hook-version: 2  # bumped 2026-05-19") still
+# parse as v2 rather than falling through to "legacy".
+_HOOK_VERSION_RE = re.compile(
+    r"^# schist-hook-version:\s*(\S+)\s*(?:#.*)?$", re.MULTILINE
+)
+
+
+class HookReadError(RuntimeError):
+    """Raised when a hook file exists but cannot be read (e.g. permissions)."""
 
 
 def _installed_hook_version(hook_path: Path) -> Optional[str]:
     """Read the `# schist-hook-version:` marker from an installed hook.
 
-    Returns the version token as a string (`"2"`, `"pinned"`, etc.), or None if
-    the hook file is missing or has no marker (legacy unversioned hook).
+    Returns the version token as a string (`"2"`, `"pinned"`, etc.), None if
+    the hook is missing or has no marker (legacy unversioned hook). Raises
+    HookReadError when the file exists but is unreadable — that case must NOT
+    collapse into "legacy" because the recommended fix (`hooks reinstall`)
+    would also fail.
     """
     try:
         text = hook_path.read_text()
-    except (OSError, UnicodeDecodeError):
+    except FileNotFoundError:
         return None
+    except (OSError, UnicodeDecodeError) as e:
+        raise HookReadError(f"cannot read {hook_path}: {e}") from e
     m = _HOOK_VERSION_RE.search(text)
     return m.group(1) if m else None
 
@@ -218,8 +232,13 @@ def check_hooks_freshness(vault_path: Optional[str]) -> CheckResult:
     hooks_dir = Path(vault_path) / ".git" / "hooks"
     stale = []
     pinned = []
+    unreadable = []
     for name in ("pre-commit", "post-commit"):
-        installed = _installed_hook_version(hooks_dir / name)
+        try:
+            installed = _installed_hook_version(hooks_dir / name)
+        except HookReadError as e:
+            unreadable.append(f"{name}: {e}")
+            continue
         if installed is None:
             stale.append(f"{name}: legacy (no version marker)")
         elif installed == "pinned":
@@ -227,6 +246,12 @@ def check_hooks_freshness(vault_path: Optional[str]) -> CheckResult:
         elif installed != current:
             stale.append(f"{name}: v{installed} (current: v{current})")
 
+    if unreadable:
+        return CheckResult(
+            "FAIL", "Hooks freshness",
+            "; ".join(unreadable),
+            fix="Check filesystem permissions on .git/hooks/ — schist cannot read the installed hooks.",
+        )
     if stale:
         return CheckResult(
             "WARN", "Hooks freshness",

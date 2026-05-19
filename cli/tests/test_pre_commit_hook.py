@@ -87,9 +87,17 @@ def test_real_secrets_blocked(vault: Path, content: str) -> None:
     assert "Potential secret detected" in result.stdout + result.stderr
 
 
-def test_hook_carries_version_marker() -> None:
+def test_pre_commit_hook_carries_version_marker() -> None:
     """Doctor's freshness check parses this marker — it must be present."""
     assert f"# schist-hook-version: {HOOK_VERSION}" in PRE_COMMIT_HOOK
+
+
+def test_post_commit_hook_carries_version_marker() -> None:
+    """Both hook templates carry a version marker; bumping HOOK_VERSION must
+    update both literals in lockstep. This test catches drift."""
+    from schist.sync import POST_COMMIT_HOOK
+
+    assert f"# schist-hook-version: {HOOK_VERSION}" in POST_COMMIT_HOOK
 
 
 def test_hook_version_is_an_int() -> None:
@@ -97,3 +105,110 @@ def test_hook_version_is_an_int() -> None:
     should be an int so bumps are unambiguous."""
     assert isinstance(HOOK_VERSION, int)
     assert HOOK_VERSION >= 2  # was 1 (unversioned) before issue #103
+
+
+class TestHooksReinstall:
+    """Direct tests for the `schist hooks reinstall` command path.
+
+    The end-to-end CLI is exercised via __main__, but the sync.hooks_reinstall
+    function is the unit under test — covers happy path, missing-.git error,
+    pinned-skip, --force override, and the atomic-rename invariant."""
+
+    def _vault(self, tmp_path: Path) -> Path:
+        v = tmp_path / "v"
+        v.mkdir()
+        (v / ".git").mkdir()
+        (v / ".git" / "hooks").mkdir()
+        return v
+
+    def _args(self, force: bool = False):
+        from argparse import Namespace
+        return Namespace(force=force)
+
+    def test_happy_path_writes_both_hooks(self, tmp_path: Path) -> None:
+        from schist.sync import hooks_reinstall, PRE_COMMIT_HOOK, POST_COMMIT_HOOK
+
+        v = self._vault(tmp_path)
+        hooks_reinstall(self._args(), str(v), "")
+        assert (v / ".git" / "hooks" / "pre-commit").read_text() == PRE_COMMIT_HOOK
+        assert (v / ".git" / "hooks" / "post-commit").read_text() == POST_COMMIT_HOOK
+        # Atomic-rename leaves no stray .tmp siblings.
+        leftover = list((v / ".git" / "hooks").glob("*.tmp"))
+        assert leftover == [], f"unexpected .tmp leftovers: {leftover}"
+
+    def test_not_a_git_repo_exits(self, tmp_path: Path) -> None:
+        from schist.sync import hooks_reinstall
+
+        with pytest.raises(SystemExit) as exc:
+            hooks_reinstall(self._args(), str(tmp_path), "")
+        assert exc.value.code == 1
+
+    def test_pinned_hook_is_skipped(self, tmp_path: Path, capsys) -> None:
+        from schist.sync import hooks_reinstall, PRE_COMMIT_HOOK
+
+        v = self._vault(tmp_path)
+        pinned_body = "#!/bin/sh\n# schist-hook-version: pinned\n# my custom guard\nexit 0\n"
+        (v / ".git" / "hooks" / "pre-commit").write_text(pinned_body)
+
+        hooks_reinstall(self._args(force=False), str(v), "")
+
+        # pre-commit untouched
+        assert (v / ".git" / "hooks" / "pre-commit").read_text() == pinned_body
+        # post-commit refreshed
+        from schist.sync import POST_COMMIT_HOOK
+        assert (v / ".git" / "hooks" / "post-commit").read_text() == POST_COMMIT_HOOK
+        # User sees the skip notice
+        err = capsys.readouterr().err
+        assert "Skipped pre-commit" in err
+        assert "pinned" in err
+        assert "--force" in err
+
+    def test_force_overwrites_pinned(self, tmp_path: Path) -> None:
+        from schist.sync import hooks_reinstall, PRE_COMMIT_HOOK
+
+        v = self._vault(tmp_path)
+        (v / ".git" / "hooks" / "pre-commit").write_text(
+            "#!/bin/sh\n# schist-hook-version: pinned\nexit 0\n"
+        )
+        hooks_reinstall(self._args(force=True), str(v), "")
+        assert (v / ".git" / "hooks" / "pre-commit").read_text() == PRE_COMMIT_HOOK
+
+
+def test_version_marker_with_trailing_comment_parses() -> None:
+    """Users sometimes annotate the marker — doctor's regex must tolerate
+    `# schist-hook-version: 2 # bumped 2026-05-19` rather than collapsing to
+    'legacy'."""
+    from schist.doctor import _installed_hook_version
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
+        f.write("#!/bin/sh\n# schist-hook-version: 2  # bumped 2026-05-19\nexit 0\n")
+        path = Path(f.name)
+    try:
+        assert _installed_hook_version(path) == "2"
+    finally:
+        path.unlink()
+
+
+def test_unreadable_hook_raises_distinct_error(tmp_path: Path) -> None:
+    """A permission-locked hook must NOT collapse into 'legacy' — that would
+    suggest the user run `hooks reinstall`, which would also fail with the
+    same permission error. doctor.HookReadError keeps the failure visible."""
+    from schist.doctor import _installed_hook_version, HookReadError
+
+    hook = tmp_path / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 0\n")
+    hook.chmod(0o000)  # unreadable
+
+    try:
+        with pytest.raises(HookReadError):
+            _installed_hook_version(hook)
+    finally:
+        hook.chmod(0o644)  # so pytest can clean up
+
+
+def test_missing_hook_returns_none() -> None:
+    """FileNotFoundError stays distinct from PermissionError — missing hook
+    is None (check_post_commit_hook reports it separately), not a HookReadError."""
+    from schist.doctor import _installed_hook_version
+
+    assert _installed_hook_version(Path("/nonexistent/hook")) is None

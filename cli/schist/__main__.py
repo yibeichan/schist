@@ -98,8 +98,14 @@ def main():
     # hooks
     p_hooks = sub.add_parser('hooks', help='Manage installed git hooks')
     hooks_sub = p_hooks.add_subparsers(dest='hooks_action')
-    hooks_sub.add_parser('reinstall',
-                         help='Refresh pre-commit and post-commit hooks from canonical templates')
+    p_hooks_reinstall = hooks_sub.add_parser(
+        'reinstall',
+        help='Refresh pre-commit and post-commit hooks from canonical templates',
+    )
+    p_hooks_reinstall.add_argument(
+        '--force', action='store_true',
+        help='Also overwrite hooks marked `# schist-hook-version: pinned` (opt-out marker)',
+    )
 
     args = parser.parse_args()
 

@@ -98,6 +98,20 @@ exit 0
 """
 
 
+def _atomic_write_hook(hook_path: Path, body: str) -> None:
+    """Write `body` to `hook_path` atomically + executable.
+
+    A naive `write_text` then `chmod` leaves a window where a concurrent git
+    invocation could `exec` a half-written shell script. We write to a sibling
+    `.tmp` file (same directory ⇒ same filesystem ⇒ rename is atomic on POSIX)
+    and `os.replace` over the target.
+    """
+    tmp = hook_path.with_name(hook_path.name + ".tmp")
+    tmp.write_text(body)
+    tmp.chmod(0o755)
+    os.replace(tmp, hook_path)
+
+
 def _install_local_hooks(vault_path) -> None:
     """Write the post-commit and pre-commit hooks into a working-tree repo.
 
@@ -108,28 +122,59 @@ def _install_local_hooks(vault_path) -> None:
     """
     hooks_dir = Path(vault_path) / ".git" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
-    post = hooks_dir / "post-commit"
-    post.write_text(POST_COMMIT_HOOK)
-    post.chmod(0o755)
-    pre = hooks_dir / "pre-commit"
-    pre.write_text(PRE_COMMIT_HOOK)
-    pre.chmod(0o755)
+    _atomic_write_hook(hooks_dir / "post-commit", POST_COMMIT_HOOK)
+    _atomic_write_hook(hooks_dir / "pre-commit", PRE_COMMIT_HOOK)
+
+
+_HOOK_VERSION_LINE = re.compile(r"^# schist-hook-version:\s*(\S+)", re.MULTILINE)
+
+
+def _hook_pinned(hook_path: Path) -> bool:
+    """Return True iff the hook carries a `# schist-hook-version: pinned`
+    marker — the opt-out signal users set on intentionally-customized hooks.
+    """
+    try:
+        text = hook_path.read_text()
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        return False
+    m = _HOOK_VERSION_LINE.search(text)
+    return bool(m and m.group(1) == "pinned")
 
 
 def hooks_reinstall(args, vault_path: str, db_path: str) -> None:
     """Re-write pre-commit and post-commit hooks from the canonical templates.
 
     Refreshes spokes that were init'd before HOOK_VERSION was bumped (issue
-    #103). Overwrites any local modifications — users who customized their
-    hooks should keep a copy before running this.
+    #103). Hooks carrying `# schist-hook-version: pinned` are skipped unless
+    `--force` is passed — that marker is the documented opt-out for users who
+    intentionally customized their hook bodies.
     """
     target = Path(vault_path)
     if not (target / ".git").exists():
         print(f"Error: {vault_path} is not a git repository", file=sys.stderr)
         sys.exit(1)
-    _install_local_hooks(str(target))
-    print(f"Reinstalled pre-commit and post-commit hooks at {target}/.git/hooks/")
-    print(f"Hook template version: {HOOK_VERSION}")
+
+    hooks_dir = target / ".git" / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    force = getattr(args, "force", False)
+    skipped = []
+    written = []
+    for name, body in (("pre-commit", PRE_COMMIT_HOOK), ("post-commit", POST_COMMIT_HOOK)):
+        path = hooks_dir / name
+        if not force and _hook_pinned(path):
+            skipped.append(name)
+            continue
+        _atomic_write_hook(path, body)
+        written.append(name)
+
+    if written:
+        print(f"Reinstalled hooks: {', '.join(written)} (template v{HOOK_VERSION})")
+    for name in skipped:
+        print(
+            f"Skipped {name}: marked `# schist-hook-version: pinned`. "
+            f"Pass --force to overwrite.",
+            file=sys.stderr,
+        )
 
 
 def init_spoke(args, vault_path: str, db_path: str) -> None:
