@@ -58,9 +58,30 @@ function assertPathSafe(vaultRoot: string, relPath: string): void {
 
 export type WriteResult = {
   path: string;
+  /**
+   * The HEAD sha after this call. When `committed: true`, this is the sha of
+   * the new commit. When `committed: false` (the dedup path), this is the
+   * current HEAD sha — which may match a sha returned by an earlier call that
+   * wrote identical content. Callers must not assume the sha is unique per
+   * call.
+   */
   commitSha: string;
   committed: boolean;
 };
+
+/**
+ * Normalize a caller-supplied title for use inside a git commit message.
+ *
+ * Strips CR/LF (newlines would produce multi-paragraph commits and a leading
+ * `#` line could be stripped by `commit.cleanup`), collapses whitespace, and
+ * truncates to keep `git log --oneline` readable. The title is interpolated
+ * into the message, never passed through a shell — `execFile` keeps us safe
+ * from meta-character injection independently of this normalization.
+ */
+function sanitizeCommitTitle(title: string): string {
+  const collapsed = title.replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
+  return collapsed.length > 200 ? collapsed.slice(0, 197) + "..." : collapsed;
+}
 
 /**
  * Acquires the write mutex, checks out the write branch, runs fn(absPath),
@@ -125,7 +146,8 @@ export async function writeNote(
   // titles to `>-` / `|-`, so regex-parsing the rendered YAML produced commit
   // messages like "write >- — via MCP" (issue #104). Fall back to relPath
   // when no title is provided.
-  const title = commitTitle && commitTitle.trim().length > 0 ? commitTitle : relPath;
+  const rawTitle = commitTitle && commitTitle.trim().length > 0 ? commitTitle : relPath;
+  const title = sanitizeCommitTitle(rawTitle);
   return withWriteLock(
     vaultRoot,
     relPath,
@@ -145,7 +167,7 @@ export async function appendToNote(
   return withWriteLock(
     vaultRoot,
     relPath,
-    `feat(schist): append to ${relPath} — via MCP`,
+    `feat(schist): append to ${sanitizeCommitTitle(relPath)} — via MCP`,
     async (absPath) => {
       let existing = "";
       try {

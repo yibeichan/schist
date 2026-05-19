@@ -435,10 +435,14 @@ export async function create_note(
     const noteContent = buildNote(metadata, args.body, args.connections);
     const result = await writeNote(vaultRoot, relPath, noteContent, args.title);
 
-    if (result.committed) {
-      triggerIngestion(vaultRoot);
-      triggerSpokePush(vaultRoot);
-    }
+    // Always-fire even on dedup'd writes: triggerSpokePush is the SOLE spoke→hub
+    // mechanism (no git hook handles it), so gating it on `committed` would
+    // silently strand any catch-up push for previously-failed sync attempts.
+    // triggerIngestion follows suit for symmetry; cost is negligible and the
+    // alternative (stale SQLite if an external editor mutated the vault between
+    // commits) is worse than a redundant spawn.
+    triggerIngestion(vaultRoot);
+    triggerSpokePush(vaultRoot);
 
     return { id: relPath, path: relPath, commitSha: result.commitSha };
   } catch (e: unknown) {
@@ -484,10 +488,8 @@ export async function add_connection(
       `connection ${args.type} → ${args.target} on ${args.source}`
     );
 
-    if (result.committed) {
-      triggerIngestion(vaultRoot);
-      triggerSpokePush(vaultRoot);
-    }
+    triggerIngestion(vaultRoot);
+    triggerSpokePush(vaultRoot);
 
     return { source: args.source, target: args.target, type: args.type, commitSha: result.commitSha };
   } catch (e: unknown) {
@@ -541,10 +543,8 @@ export async function assign_domain(
       `assign domain ${args.domain} to ${args.id}`
     );
 
-    if (result.committed) {
-      triggerIngestion(vaultRoot);
-      triggerSpokePush(vaultRoot);
-    }
+    triggerIngestion(vaultRoot);
+    triggerSpokePush(vaultRoot);
 
     return { id: args.id, domain: args.domain, commitSha: result.commitSha };
   } catch (e: unknown) {

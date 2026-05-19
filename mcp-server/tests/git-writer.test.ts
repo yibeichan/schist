@@ -102,6 +102,26 @@ describe("git-writer", () => {
     expect(third.commitSha).not.toBe(first.commitSha);
   }, 30000);
 
+  test("commit title is sanitized: newlines collapsed, length capped", async () => {
+    const vault = await makeTempVault();
+    const evilTitle = "first line\nsecond line\r\n# would-be-comment\n\n\ntrailing";
+    await writeNote(vault, "notes/evil.md", "---\ntitle: x\n---\nBody", evilTitle);
+    const { stdout: oneLine } = await execFile("git", ["log", "-1", "--pretty=%s"], { cwd: vault });
+    expect(oneLine.trim()).toBe(
+      "feat(schist): write first line second line # would-be-comment trailing — via MCP"
+    );
+    // %B (full message) must also be a single subject line — no body paragraphs.
+    const { stdout: fullMsg } = await execFile("git", ["log", "-1", "--pretty=%B"], { cwd: vault });
+    expect(fullMsg.trim().split("\n").length).toBe(1);
+
+    // Length cap (197 chars + "...")
+    const longTitle = "x".repeat(500);
+    await writeNote(vault, "notes/long.md", "---\ntitle: y\n---\nBody", longTitle);
+    const { stdout: longLine } = await execFile("git", ["log", "-1", "--pretty=%s"], { cwd: vault });
+    const subj = longLine.trim();
+    expect(subj).toMatch(/^feat\(schist\): write x{197}\.\.\. — via MCP$/);
+  }, 30000);
+
   test("commit message uses caller-supplied title, not folded YAML ('>-') (#104)", async () => {
     const vault = await makeTempVault();
     const longTitle =
