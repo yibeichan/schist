@@ -239,8 +239,8 @@ primary sort.
 | `search_memory` (FTS path) | `query?`, `owner?`, `entry_type?`, `date_from?`, `date_to?`, `limit`, owner | **None today** (line 429). FTS5 natural relevance order. | `ORDER BY bm25(agent_memory_fts), m.id ASC`. | Existing FTS SQL + new `ORDER BY` + `LIMIT :limit OFFSET :offset`. |
 | `search_memory` (non-FTS path) | (same as FTS path) | `ORDER BY created_at DESC` (line 439). | `ORDER BY created_at DESC, id ASC`. | Existing SQL + `, id ASC` tiebreaker + `LIMIT :limit OFFSET :offset`. |
 | `query_graph` | normalized SQL string, `params?`, owner | Whatever caller's SQL specifies. | Server wraps as subquery — see "query_graph cursor wrapping" below. | `SELECT * FROM (<caller_sql>) AS user_query LIMIT :limit OFFSET :offset`. |
-| `list_concepts` | `q?`, `domain?`, `limit`, owner | `ORDER BY edgeCount DESC` (line 186). | `ORDER BY edgeCount DESC, c.slug ASC`. | Existing SQL + `, slug ASC` tiebreaker + `LIMIT :limit OFFSET :offset`. |
-| `list_domains` | `limit`, owner | `ORDER BY parent_slug NULLS FIRST, slug` (line 525). | (Already deterministic — `slug` is unique. No change needed.) | Existing SQL + `LIMIT :limit OFFSET :offset`. |
+| `list_concepts` | `tags?`, `search?`, `limit`, owner | `ORDER BY edgeCount DESC` (line 204 in sqlite-reader.ts). | `ORDER BY edgeCount DESC, c.slug ASC`. | Existing SQL + `, slug ASC` tiebreaker + `LIMIT :limit OFFSET :offset`. |
+| `list_domains` | `limit`, owner | `ORDER BY parent_slug NULLS FIRST, slug` (line 565 in sqlite-reader.ts). | (Already deterministic — `slug` is unique. No change needed.) | Existing SQL + `LIMIT :limit OFFSET :offset`. |
 
 `get_note` does NOT use cursors — single-doc fetch by ID.
 `get_context` does NOT use cursors — fixed-shape summary, not a list.
@@ -493,7 +493,7 @@ this checklist before starting each PR 2–7 plan.
     + Default limits + Compatibility breaking change. (Swapped with PR 4
     above — same scope, different integer.) Audit:
     `audit-2026-05-17-mcp-response-sizes-pr5.md`.
-  - PR 6 → "list_concepts" + "list_domains" rows + Default limits.
+  - PR 6 → "list_concepts" + "list_domains" rows + Default limits. (spec row corrected: list_concepts inputs are tags?/search? not q?/domain?)
   - PR 7 → "get_context" reason-string adopters.
   - PR 8 → "Migration steps" section.
 - [x] Cursor token shape specified concretely (unpadded base64url, JWT-like
