@@ -82,7 +82,7 @@ traced to its landing implementation. Verified via `grep` against
 | `ListConceptsResponse` / `ListDomainsResponse` types added | `mcp-server/src/types.ts` | `export type ListConceptsResponse` + `export type ListDomainsResponse` |
 | `list_concepts` handler wraps return as `{ concepts, cursor? }` | `mcp-server/src/tools.ts` (list_concepts) | `const response: ListConceptsResponse = { concepts };` |
 | `list_domains` handler wraps return as `{ domains, cursor? }` | `mcp-server/src/tools.ts` (list_domains) | `const response: ListDomainsResponse = { domains };` |
-| Default limit 50 / cap 500 for `list_concepts` | `mcp-server/src/tools.ts` (list_concepts) | `Math.min(requested, 500)` with default `50` |
+| Default limit 50 / cap 200 for `list_concepts` | `mcp-server/src/tools.ts` (list_concepts) | `Math.min(requested, 200)` with default `50` |
 | Default limit 100 / cap 500 for `list_domains` | `mcp-server/src/tools.ts` (list_domains) | `Math.min(requested, 500)` with default `100` |
 | Tool-registry schemas gain `cursor` + `limit` inputs for both tools | `mcp-server/src/tool-registry.ts` | `cursor: { type: "string", … }` + `limit: { type: "number", … }` in both entries |
 | `{ concepts }` shape recognized by audit script | `scripts/audit_mcp_response_sizes.ts` | `else if (Array.isArray(obj.concepts))` branch |
