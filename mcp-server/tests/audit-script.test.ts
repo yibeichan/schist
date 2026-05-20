@@ -157,19 +157,22 @@ describe("runAudit (end-to-end)", () => {
     // dutifully measures the error envelope and bytes>0/entryCount>=1
     // both still pass. Probe one tool per distinct DB / executor path so
     // a broken binding can't silently fail any subset:
-    //   - list_concepts / list_domains: array return
+    //   - list_concepts:                { concepts: Concept[], cursor? } (PR 6)
+    //   - list_domains:                 array return (until PR 6 Task 6.5)
     //   - query_graph:                  { columns, rows, rowCount } object return
     //   - search_memory:                { entries: MemoryEntry[], cursor?, verboseNote? } object return
     //                                   (separate memory DB file — distinct sqlite stack from vault DB)
     const tools = await import("../../mcp-server/dist/tools.js");
     type ShapeCheck = (resp: unknown) => boolean;
     const isArrayShape: ShapeCheck = (r) => Array.isArray(r);
+    const isListConceptsShape: ShapeCheck = (r) =>
+      !!r && typeof r === "object" && Array.isArray((r as { concepts?: unknown }).concepts);
     const isQueryGraphShape: ShapeCheck = (r) =>
       !!r && typeof r === "object" && Array.isArray((r as { rows?: unknown }).rows);
     const isSearchMemoryShape: ShapeCheck = (r) =>
       !!r && typeof r === "object" && Array.isArray((r as { entries?: unknown }).entries);
     const probes: Array<[string, unknown, ShapeCheck]> = [
-      ["list_concepts", await tools.list_concepts(tmpVault, {}), isArrayShape],
+      ["list_concepts", await tools.list_concepts(tmpVault, {}), isListConceptsShape],
       ["list_domains", await tools.list_domains(tmpVault, {}), isArrayShape],
       ["query_graph", await tools.query_graph(tmpVault, { sql: "SELECT 1 AS x" }), isQueryGraphShape],
       ["search_memory", await tools.search_memory(tmpVault, { limit: 1 }), isSearchMemoryShape],

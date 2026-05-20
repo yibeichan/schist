@@ -6,7 +6,7 @@ import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote } from "./git-writer.js";
 import { buildNote, buildConnectionLine } from "./markdown-parser.js";
 import { validateOwner } from "./agent-identity.js";
-import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse } from "./types.js";
+import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, ListDomainsResponse } from "./types.js";
 import {
   canonicalizeQueryHash,
   decodeCursor,
@@ -552,15 +552,86 @@ export async function assign_domain(
   }
 }
 
+/**
+ * list_concepts tool handler. Runs the cursor pipeline:
+ *
+ *   canonicalizeQueryHash → (cursor decode + binding OR identical-query
+ *   refusal) → SQL fetch (limit+1, with slug ASC tiebreaker in sqlite-reader)
+ *   → recordIssued + issueCursor on capped results → { concepts, cursor? }.
+ *
+ * No verbose mode — per spec, list_* tools are excluded from verbose.
+ * queryHash binds to (tags?, search?, limit, owner).
+ *
+ * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
+ */
 export async function list_concepts(
   vaultRoot: string,
-  args: { tags?: string[]; search?: string; limit?: number }
-): Promise<unknown> {
+  args: { tags?: string[]; search?: string; limit?: number; cursor?: string }
+): Promise<ListConceptsResponse | ToolError> {
+  const TOOL_NAME = "list_concepts" as const;
+
+  const activeOwner =
+    process.env.SCHIST_AGENT_NAME ?? process.env.SCHIST_AGENT_ID ?? "";
+  const ch = canonicalizeQueryHash(args as Record<string, unknown>, activeOwner);
+  if (!ch.ok) return ch.error;
+  const queryHash = ch.queryHash;
+
+  let offset = 0;
+  let consumingCursor = false;
+  if (typeof args.cursor === "string" && args.cursor.length > 0) {
+    const d = decodeCursor(args.cursor, TOOL_NAME);
+    if (!d.ok) return d.error;
+    if (d.queryHash !== queryHash) {
+      return {
+        error: "CURSOR_INVALID_SIGNATURE",
+        message: "cursor was issued for a different query — restart pagination from page 1",
+      };
+    }
+    offset = d.offset;
+    consumingCursor = true;
+  }
+
+  if (!consumingCursor) {
+    const refusal = checkRefusal({
+      tool: TOOL_NAME,
+      queryHash,
+      owner: activeOwner,
+      verboseEnabled: false,
+    });
+    if (refusal.refuse) return refusal.error;
+  }
+
+  const requested = args.limit;
+  const effectiveLimit =
+    requested === undefined || requested === null || requested <= 0
+      ? 50
+      : Math.min(requested, 200);
+
+  let concepts: import("./types.js").Concept[];
   try {
-    return sqliteReader.listConcepts(vaultRoot, args);
+    concepts = sqliteReader.listConcepts(vaultRoot, {
+      ...args,
+      limit: effectiveLimit + 1,
+      offset,
+    });
   } catch (e: unknown) {
     return normalizeError(e, "INGEST_ERROR");
   }
+
+  const hasMore = concepts.length > effectiveLimit;
+  if (hasMore) concepts = concepts.slice(0, effectiveLimit);
+
+  const response: ListConceptsResponse = { concepts };
+  if (hasMore) {
+    recordIssued({ tool: TOOL_NAME, queryHash, owner: activeOwner, verboseEnabled: false });
+    response.cursor = issueCursor({
+      tool: TOOL_NAME,
+      queryHash,
+      offset: offset + effectiveLimit,
+    });
+  }
+
+  return response;
 }
 
 /**
