@@ -560,11 +560,18 @@ export function deleteAgentState(key: string, owner: string): { deleted: boolean
 
 // ── Domain + alias tools (use schist.db) ──────────────────────────────────
 
-export function listDomains(vaultRoot: string): Domain[] {
+export function listDomains(
+  vaultRoot: string,
+  opts?: { limit?: number; offset?: number }
+): Domain[] {
   let db: Database.Database | undefined;
   try {
     db = openDb(vaultRoot);
-    const rows = db.prepare("SELECT * FROM domains ORDER BY parent_slug NULLS FIRST, slug").all() as Record<string, unknown>[];
+    const limit = opts?.limit ?? 100;
+    const offset = opts?.offset ?? 0;
+    const rows = db.prepare(
+      "SELECT * FROM domains ORDER BY parent_slug NULLS FIRST, slug LIMIT ? OFFSET ?"
+    ).all(limit, offset) as Record<string, unknown>[];
     return rows.map(r => ({
       slug: r.slug as string,
       label: r.label as string,
