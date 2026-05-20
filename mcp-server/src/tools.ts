@@ -946,15 +946,86 @@ export async function get_agent_state(
   }
 }
 
+/**
+ * list_domains tool handler. Runs the cursor pipeline:
+ *
+ *   canonicalizeQueryHash → (cursor decode + binding OR identical-query
+ *   refusal) → SQL fetch (limit+1) → recordIssued + issueCursor on capped
+ *   results → { domains, cursor? }.
+ *
+ * No verbose mode. ORDER BY parent_slug NULLS FIRST, slug is already
+ * deterministic (slug unique). Default limit 100, cap 500 (per spec —
+ * unbounded was a footgun for large vaults).
+ *
+ * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
+ */
 export async function list_domains(
   vaultRoot: string,
-  _args: Record<string, never>
-): Promise<unknown> {
+  args: { limit?: number; cursor?: string }
+): Promise<ListDomainsResponse | ToolError> {
+  const TOOL_NAME = "list_domains" as const;
+
+  const activeOwner =
+    process.env.SCHIST_AGENT_NAME ?? process.env.SCHIST_AGENT_ID ?? "";
+  const ch = canonicalizeQueryHash(args as Record<string, unknown>, activeOwner);
+  if (!ch.ok) return ch.error;
+  const queryHash = ch.queryHash;
+
+  let offset = 0;
+  let consumingCursor = false;
+  if (typeof args.cursor === "string" && args.cursor.length > 0) {
+    const d = decodeCursor(args.cursor, TOOL_NAME);
+    if (!d.ok) return d.error;
+    if (d.queryHash !== queryHash) {
+      return {
+        error: "CURSOR_INVALID_SIGNATURE",
+        message: "cursor was issued for a different query — restart pagination from page 1",
+      };
+    }
+    offset = d.offset;
+    consumingCursor = true;
+  }
+
+  if (!consumingCursor) {
+    const refusal = checkRefusal({
+      tool: TOOL_NAME,
+      queryHash,
+      owner: activeOwner,
+      verboseEnabled: false,
+    });
+    if (refusal.refuse) return refusal.error;
+  }
+
+  const requested = args.limit;
+  const effectiveLimit =
+    requested === undefined || requested === null || requested <= 0
+      ? 100
+      : Math.min(requested, 500);
+
+  let domains: import("./types.js").Domain[];
   try {
-    return sqliteReader.listDomains(vaultRoot);
+    domains = sqliteReader.listDomains(vaultRoot, {
+      limit: effectiveLimit + 1,
+      offset,
+    });
   } catch (e: unknown) {
     return normalizeError(e, "INGEST_ERROR");
   }
+
+  const hasMore = domains.length > effectiveLimit;
+  if (hasMore) domains = domains.slice(0, effectiveLimit);
+
+  const response: ListDomainsResponse = { domains };
+  if (hasMore) {
+    recordIssued({ tool: TOOL_NAME, queryHash, owner: activeOwner, verboseEnabled: false });
+    response.cursor = issueCursor({
+      tool: TOOL_NAME,
+      queryHash,
+      offset: offset + effectiveLimit,
+    });
+  }
+
+  return response;
 }
 
 // WRITE memory tools (require write capability gate)
