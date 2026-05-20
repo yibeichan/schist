@@ -34,6 +34,7 @@ export function measureResponse(response: unknown): ResponseMeasurement {
     //   { entries: [...] }                     → search_memory
     //   { results: [...] }                     → search_notes
     //   { concepts: [...] }                    → list_concepts (PR 6)
+    //   { domains: [...] }                     → list_domains (PR 6)
     //   { columns, rows, rowCount, cursor? }   → query_graph
     // Other tools return arrays directly (counted above) or single-shape
     // objects (entryCount stays 1).
@@ -44,6 +45,8 @@ export function measureResponse(response: unknown): ResponseMeasurement {
       entryCount = obj.results.length;
     } else if (Array.isArray(obj.concepts)) {
       entryCount = obj.concepts.length;
+    } else if (Array.isArray(obj.domains)) {
+      entryCount = obj.domains.length;
     } else if (Array.isArray(obj.rows) && typeof obj.rowCount === "number") {
       // query_graph specifically — `rows` alone is too generic to assume;
       // require the `rowCount` field too so this branch only fires for
