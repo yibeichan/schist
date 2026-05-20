@@ -87,8 +87,7 @@ Also update the `list_domains` line reference: spec says "line 525" but actual `
 **After:**
 ```typescript
     if (where.length > 0) sql += ` WHERE ${where.join(" AND ")}`;
-    // ORDER BY: edgeCount DESC primary; c.slug ASC deterministic tiebreaker
-    // (required for stable LIMIT/OFFSET pagination — spec §"Cursor adoption table").
+    // c.slug ASC tiebreaker is required for stable LIMIT/OFFSET pagination.
     sql += ` GROUP BY c.slug ORDER BY edgeCount DESC, c.slug ASC LIMIT ? OFFSET ?`;
     params.push(limit, offset);
 ```
@@ -189,7 +188,7 @@ export async function list_concepts(
   const TOOL_NAME = "list_concepts" as const;
 
   // Step 1: canonicalizeQueryHash. No per-call owner arg on list_concepts.
-  const activeOwner = process.env.SCHIST_AGENT_ID ?? "";
+  const activeOwner = process.env.SCHIST_AGENT_NAME ?? process.env.SCHIST_AGENT_ID ?? "";
   const ch = canonicalizeQueryHash(args as Record<string, unknown>, activeOwner);
   if (!ch.ok) return ch.error;
   const queryHash = ch.queryHash;
@@ -236,7 +235,7 @@ export async function list_concepts(
       offset,
     });
   } catch (e: unknown) {
-    return normalizeError(e, "INGEST_ERROR") as ToolError;
+    return normalizeError(e, "INGEST_ERROR");
   }
 
   // Step 5: hasMore detection + cursor issuance.
@@ -296,7 +295,7 @@ export async function list_domains(
   const TOOL_NAME = "list_domains" as const;
 
   // Step 1: canonicalizeQueryHash.
-  const activeOwner = process.env.SCHIST_AGENT_ID ?? "";
+  const activeOwner = process.env.SCHIST_AGENT_NAME ?? process.env.SCHIST_AGENT_ID ?? "";
   const ch = canonicalizeQueryHash(args as Record<string, unknown>, activeOwner);
   if (!ch.ok) return ch.error;
   const queryHash = ch.queryHash;
@@ -342,7 +341,7 @@ export async function list_domains(
       offset,
     });
   } catch (e: unknown) {
-    return normalizeError(e, "INGEST_ERROR") as ToolError;
+    return normalizeError(e, "INGEST_ERROR");
   }
 
   // Step 5: hasMore detection + cursor issuance.
@@ -516,8 +515,11 @@ Mirror structure of `search-notes-tool.test.ts`. Required test cases:
 10. **empty results** — empty vault → `{ concepts: [] }`, no cursor.
 11. **tiebreaker stability** — seed 6 concepts with equal edgeCount (0); paginate at limit=3 across two pages; assert no overlap and page1+page2 covers all 6 slugs in `c.slug ASC` order.
 12. **filter params** — `tags: ["neural"]` only returns matching concepts; `search: "foo"` filters correctly.
+13. **negative limit → default** — `limit: -1` collapses to default 50 (mirrors `search-notes-tool.test.ts:246`).
+14. **normalizeError fallthrough** — mock `sqliteReader.listConcepts` to throw; assert response is `{ error: "INGEST_ERROR", message: ... }` shape.
+15. **empty owner** — unset `SCHIST_AGENT_ID` and `SCHIST_AGENT_NAME`; assert handler still returns valid response (common dev/CI scenario).
 
-Estimated: ~18 tests.
+Estimated: ~21 tests.
 
 ---
 
@@ -536,8 +538,11 @@ Mirror structure. Required test cases:
 9. **limit: 0 → default 100**.
 10. **empty results** — empty vault → `{ domains: [] }`, no cursor.
 11. **tiebreaker stability** (already deterministic) — seed 10 parent + 10 child domains; paginate at limit=5 across 4 pages; assert no overlap.
+12. **negative limit → default** — `limit: -1` collapses to default 100.
+13. **normalizeError fallthrough** — mock `sqliteReader.listDomains` to throw; assert response is `{ error: "INGEST_ERROR", ... }` shape.
+14. **empty owner** — unset `SCHIST_AGENT_ID` and `SCHIST_AGENT_NAME`; assert handler still returns valid response.
 
-Estimated: ~15 tests.
+Estimated: ~18 tests.
 
 ---
 
@@ -566,7 +571,7 @@ Per spec Default limits table (line 397):
 
 ### 3. Active owner derivation
 
-Both tools use `process.env.SCHIST_AGENT_ID ?? ""` (same as `query_graph` and `search_notes`). Neither tool accepts a per-call `owner` argument. There is no `args.owner` filter to confuse with `activeOwner`.
+Both tools use `process.env.SCHIST_AGENT_NAME ?? process.env.SCHIST_AGENT_ID ?? ""` — the same env-var chain as `search_notes` (minus its leading `args.owner ??` branch, since list_* don't accept per-call owner). This keeps identity resolution uniform across all cursor-adopting tools — same agent always hashes to the same `owner` regardless of which tool it called. Locked by eng review 2026-05-20.
 
 ### 4. ORDER BY tiebreakers
 
@@ -749,6 +754,7 @@ EOF
 **Steps:**
 
 - [ ] Update audit script to handle new wrapper shapes.
+- [ ] **REGRESSION TEST (mandatory):** update `mcp-server/tests/audit-script.test.ts` to assert `{ concepts: [...] }` and `{ domains: [...] }` wrapper shapes are recognized alongside existing `{ results }` / `{ entries }` shapes. Without this, the audit pipeline can silently break.
 - [ ] Run audit script against the test vault; capture before/after byte + token counts for both tools.
 - [ ] Write audit doc in the same format as `audit-2026-05-17-mcp-response-sizes-pr4.md`.
 - [ ] Add CHANGELOG entries:
@@ -763,12 +769,13 @@ EOF
 
 | Test file | New tests | Dependencies |
 |-----------|-----------|--------------|
-| `list-concepts-tool.test.ts` (new) | ~18 | Tasks 6.1, 6.3, 6.4 |
-| `list-domains-tool.test.ts` (new) | ~15 | Tasks 6.2, 6.3, 6.5 |
+| `list-concepts-tool.test.ts` (new) | ~21 | Tasks 6.1, 6.3, 6.4 |
+| `list-domains-tool.test.ts` (new) | ~18 | Tasks 6.2, 6.3, 6.5 |
 | `sqlite-reader.test.ts` or new `list-concepts-sql.test.ts` | ~4–6 (offset + tiebreaker) | Task 6.1 |
 | (sqlite-reader for listDomains) | ~3–4 (limit + offset) | Task 6.2 |
+| `audit-script.test.ts` (extend) | ~2 (new wrapper shapes — REGRESSION test) | Task 6.7 |
 
-**Expected final test count:** 286 (baseline) + ~40–43 new = ~326–329 tests.
+**Expected final test count:** 286 (baseline) + ~48–51 new = ~334–337 tests.
 
 Run command for all new tests:
 ```bash
@@ -785,7 +792,7 @@ cd mcp-server && LD_LIBRARY_PATH=/orcd/software/core/001/spack/pkg/gcc/12.2.0/yt
 ## Acceptance checklist
 
 - [ ] `npm run build` — clean (no TypeScript errors).
-- [ ] `npm test` — all tests green (target ~326–329 / 18 suites).
+- [ ] `npm test` — all tests green (target ~334–337 / 18 suites).
 - [ ] `list_concepts` returns `{ concepts, cursor? }` (breaking change from bare array — CHANGELOG updated).
 - [ ] `list_domains` returns `{ domains, cursor? }` (breaking change from bare array — CHANGELOG updated).
 - [ ] `list_domains` default limit = 100 (unbounded was a footgun).
