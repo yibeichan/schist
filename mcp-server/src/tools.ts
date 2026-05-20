@@ -610,7 +610,8 @@ export async function list_concepts(
   let concepts: import("./types.js").Concept[];
   try {
     concepts = sqliteReader.listConcepts(vaultRoot, {
-      ...args,
+      tags: args.tags,
+      search: args.search,
       limit: effectiveLimit + 1,
       offset,
     });
