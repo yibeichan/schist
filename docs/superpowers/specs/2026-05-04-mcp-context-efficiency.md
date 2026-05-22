@@ -495,7 +495,7 @@ this checklist before starting each PR 2–7 plan.
     `audit-2026-05-17-mcp-response-sizes-pr5.md`.
   - PR 6 → "list_concepts" + "list_domains" rows + Default limits. (spec row corrected: list_concepts inputs are tags?/search? not q?/domain?)
   - PR 7 → "get_context" reason-string adopter (soft-downgrade for missing/whitespace verbose; INVALID_ARG for type/length misuse). Audit: `audit-2026-05-22-mcp-response-sizes-pr7.md`.
-  - PR 8 → "Migration steps" section.
+  - PR 8 → "Migration steps" section — `docs/mcp-setup.md` gains a cursor-protocol overview with worked example, error-code table, query_graph callout, and reason-string verbose rules. Tool-registry descriptions were updated alongside each adopter PR (3–7), so PR 8 is docs-only.
 - [x] Cursor token shape specified concretely (unpadded base64url, JWT-like
   dot separator, per-process HMAC) for PR 2 to implement from spec alone.
 - [x] `queryHash` canonicalization addresses NaN/±Infinity/BigInt
