@@ -96,6 +96,7 @@ function stripAndCollapse(args: Record<string, unknown>, excludedKeys: Set<strin
     const v = args[key];
     if (v === undefined || v === null) continue; // collapse to missing
     if (typeof v === "string" && v === "") continue; // collapse empty string
+    if (Array.isArray(v) && v.length === 0) continue; // collapse empty array — handlers treat [] identically to omitted
     if (key === "limit" && v === 0) continue; // collapse limit:0
     out[key] = v;
   }

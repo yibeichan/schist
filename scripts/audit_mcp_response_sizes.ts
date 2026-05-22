@@ -20,6 +20,14 @@ export interface ResponseMeasurement {
   bytes: number;
   approxTokens: number;
   entryCount: number;
+  /**
+   * Present iff the response was a cursor-protocol error envelope
+   * (`{ error, message }`). Without this signal, the audit would silently
+   * report the error envelope's tiny byte count as the tool's "response
+   * size" — and a stale refusal LRU between runAudit calls would make
+   * every capped tool look ~80 bytes wide.
+   */
+  error?: string;
 }
 
 export function measureResponse(response: unknown): ResponseMeasurement {
@@ -27,12 +35,24 @@ export function measureResponse(response: unknown): ResponseMeasurement {
   const bytes = Buffer.byteLength(json, "utf-8");
   const approxTokens = encode(json).length;
   let entryCount = 1;
-  if (Array.isArray(response)) {
+  let error: string | undefined;
+
+  // Error envelope detection (must precede the success-shape branches —
+  // query_graph success returns `{columns, rows, rowCount, ...}`, no `error`).
+  if (
+    response !== null && typeof response === "object" && !Array.isArray(response) &&
+    typeof (response as { error?: unknown }).error === "string"
+  ) {
+    error = (response as { error: string }).error;
+    entryCount = 0;
+  } else if (Array.isArray(response)) {
     entryCount = response.length;
   } else if (response !== null && typeof response === "object") {
     // Cursor-protocol responses wrap rows in a top-level array field:
     //   { entries: [...] }                     → search_memory
     //   { results: [...] }                     → search_notes
+    //   { concepts: [...] }                    → list_concepts (PR 6)
+    //   { domains: [...] }                     → list_domains (PR 6)
     //   { columns, rows, rowCount, cursor? }   → query_graph
     // Other tools return arrays directly (counted above) or single-shape
     // objects (entryCount stays 1).
@@ -41,6 +61,10 @@ export function measureResponse(response: unknown): ResponseMeasurement {
       entryCount = obj.entries.length;
     } else if (Array.isArray(obj.results)) {
       entryCount = obj.results.length;
+    } else if (Array.isArray(obj.concepts)) {
+      entryCount = obj.concepts.length;
+    } else if (Array.isArray(obj.domains)) {
+      entryCount = obj.domains.length;
     } else if (Array.isArray(obj.rows) && typeof obj.rowCount === "number") {
       // query_graph specifically — `rows` alone is too generic to assume;
       // require the `rowCount` field too so this branch only fires for
@@ -48,10 +72,13 @@ export function measureResponse(response: unknown): ResponseMeasurement {
       entryCount = obj.rowCount;
     }
   }
-  return { bytes, approxTokens, entryCount };
+  return error === undefined
+    ? { bytes, approxTokens, entryCount }
+    : { bytes, approxTokens, entryCount, error };
 }
 
 import * as tools from "../mcp-server/dist/tools.js";
+import { resetCursorForTesting } from "../mcp-server/dist/protocol/index.js";
 
 export interface AuditReport {
   vault: string;
@@ -64,6 +91,12 @@ export async function runAudit(opts: {
   vault: string;
   searchQuery?: string;
 }): Promise<AuditReport> {
+  // Reset cursor refusal LRU + HMAC so repeated runAudit invocations in the
+  // same process can't poison each other. Without this, a second invocation
+  // within 300s would silently hit CURSOR_REQUIRED on every capped tool and
+  // the audit would report error-envelope byte counts as "response size".
+  resetCursorForTesting();
+
   const measurements: Record<string, ResponseMeasurement> = {};
   const searchQuery = opts.searchQuery ?? "fixture";
 
@@ -79,7 +112,7 @@ export async function runAudit(opts: {
     await tools.list_concepts(opts.vault, {})
   );
 
-  // list_domains — currently unbounded.
+  // list_domains — default limit 100, cap 500 (PR 6).
   measurements.list_domains = measureResponse(
     await tools.list_domains(opts.vault, {})
   );

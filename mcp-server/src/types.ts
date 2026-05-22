@@ -45,6 +45,18 @@ export interface SearchNotesResponse {
   cursor?: string;
 }
 
+export interface ListConceptsResponse {
+  concepts: Concept[];
+  /** Opaque cursor token for the next page; absent when this is the last page. */
+  cursor?: string;
+}
+
+export interface ListDomainsResponse {
+  domains: Domain[];
+  /** Opaque cursor token for the next page; absent when this is the last page. */
+  cursor?: string;
+}
+
 export interface QueryGraphResponse {
   columns: string[];
   rows: unknown[][];

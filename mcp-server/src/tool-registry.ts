@@ -64,8 +64,14 @@ export function makeMemoryReadTools(_config: VaultConfig) {
     },
     {
       name: "list_domains",
-      description: "List research domain taxonomy.",
-      inputSchema: { type: "object" as const, properties: {} },
+      description: "List research domain taxonomy. Paginated: when results are capped, the response includes a `cursor` token — echo it back on the next call to advance. Identical queries within 300s without a cursor are refused with CURSOR_REQUIRED.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          limit: { type: "number", description: "Default 100, capped at 500." },
+          cursor: { type: "string", description: "Opaque pagination cursor returned by a prior call. Echo verbatim; do not modify." },
+        },
+      },
     },
   ];
 }
@@ -203,13 +209,14 @@ export function makeWriteTools(config: VaultConfig) {
     },
     {
       name: "list_concepts",
-      description: "List all concepts in the knowledge graph",
+      description: "List all concepts in the knowledge graph. Paginated: when results are capped, the response includes a `cursor` token — echo it back on the next call to advance. Identical queries within 300s without a cursor are refused with CURSOR_REQUIRED.",
       inputSchema: {
         type: "object" as const,
         properties: {
           tags: { type: "array", items: { type: "string" } },
           search: { type: "string" },
-          limit: { type: "number" },
+          limit: { type: "number", description: "Default 50, capped at 200." },
+          cursor: { type: "string", description: "Opaque pagination cursor returned by a prior call. Echo verbatim; do not modify." },
         },
       },
     },

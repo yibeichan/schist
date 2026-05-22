@@ -553,4 +553,32 @@ describe("assign_domain", () => {
 
     expect(result.domain).toBe("arbitrary-domain");
   });
+
+  test("accepts domain beyond listDomains default limit (regression: #50 PR 6)", async () => {
+    // Regression: PR 6 added a default limit of 100 to sqliteReader.listDomains.
+    // assign_domain must read the COMPLETE domain set for validation — otherwise
+    // domains ranked at index >=100 by `ORDER BY parent_slug NULLS FIRST, slug`
+    // are silently rejected as INVALID_DOMAIN.
+    const manyDomains = Array.from({ length: 150 }, (_, i) =>
+      `domain-${String(i).padStart(3, "0")}`
+    );
+    const vault = await makeVaultWithDomains(manyDomains);
+
+    const noteResult = (await create_note(
+      vault,
+      { title: "Test Note", body: "Test body" },
+      await loadVaultConfig(vault)
+    )) as { id: string; path: string };
+
+    // domain-149 sorts past the default 100-row window. Without the
+    // explicit `limit: Number.MAX_SAFE_INTEGER` in assign_domain, this
+    // call would return INVALID_DOMAIN.
+    const result = (await assign_domain(vault, {
+      id: noteResult.path,
+      domain: "domain-149",
+    })) as { id: string; domain: string; commitSha: string };
+
+    expect(result.domain).toBe("domain-149");
+    expect(result.commitSha).toBeDefined();
+  });
 });

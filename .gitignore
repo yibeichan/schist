@@ -30,6 +30,9 @@ Thumbs.db
 .env
 .env.local
 
+# Local-only npm overrides (e.g. HPC python path for better-sqlite3 source build)
+.npmrc
+
 # Pre-receive hook audit log (runtime-generated)
 hooks/rejected-pushes.log
 cli/hooks/rejected-pushes.log

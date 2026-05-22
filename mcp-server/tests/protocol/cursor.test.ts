@@ -67,6 +67,16 @@ describe("canonicalizeQueryHash", () => {
     if (a.ok && b.ok) expect(a.queryHash).toBe(b.queryHash);
   });
 
+  it("collapses empty arrays to missing — handlers treat [] identically to omitted", () => {
+    // Refusal-bypass guard: list_concepts({tags: []}) and list_concepts({})
+    // produce identical SQL results, so they must hash identically. Without
+    // this collapse an agent could alternate the two forms to evade the
+    // 300s identical-query refusal entirely.
+    const a = canonicalizeQueryHash({ q: "foo", tags: [] }, "yibei");
+    const b = canonicalizeQueryHash({ q: "foo" }, "yibei");
+    if (a.ok && b.ok) expect(a.queryHash).toBe(b.queryHash);
+  });
+
   it("preserves array element order (arrays are part of query identity)", () => {
     const a = canonicalizeQueryHash({ tags: ["a", "b"] }, "yibei");
     const b = canonicalizeQueryHash({ tags: ["b", "a"] }, "yibei");
