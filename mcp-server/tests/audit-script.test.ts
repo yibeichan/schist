@@ -73,6 +73,17 @@ describe("measureResponse", () => {
     const result = measureResponse({ noteCount: 0 });
     expect(result.entryCount).toBe(1);
   });
+
+  it("flags error envelopes from cursor handlers (sets error field, entryCount=0)", () => {
+    // Without this branch a stale refusal LRU between runAudit invocations
+    // would silently report ~80-byte error envelopes as "response size".
+    const result = measureResponse({
+      error: "CURSOR_REQUIRED",
+      message: "Identical query within 300s — pass the cursor you received…",
+    });
+    expect(result.error).toBe("CURSOR_REQUIRED");
+    expect(result.entryCount).toBe(0);
+  });
 });
 
 describe("runAudit (end-to-end)", () => {

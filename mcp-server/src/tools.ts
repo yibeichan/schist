@@ -509,8 +509,10 @@ export async function assign_domain(
       return { error: "PATH_TRAVERSAL", message: "Note path is outside vault root" } satisfies ToolError;
     }
 
-    // Validate domain exists in vault.yaml domains list
-    const domains = sqliteReader.listDomains(vaultRoot);
+    // Validate domain exists in vault.yaml domains list. listDomains gained
+    // a default limit of 100 in PR 6 (#50) — pass an explicit large limit so
+    // validation reads the complete domain set even on large taxonomies.
+    const domains = sqliteReader.listDomains(vaultRoot, { limit: Number.MAX_SAFE_INTEGER });
     const validSlugs = new Set(domains.map((d: { slug: string }) => d.slug));
     // If no domains are defined, allow any domain (matches CLI behavior)
     if (validSlugs.size > 0 && !validSlugs.has(args.domain)) {

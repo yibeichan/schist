@@ -172,6 +172,23 @@ describe("list_concepts tool — identical-query refusal", () => {
     expect(r).toHaveProperty("concepts");
     expect(r).not.toHaveProperty("error");
   });
+
+  it("refuses naturally on second identical call after first issued a cursor (round-trip)", async () => {
+    // Black-box regression: the prior tests prime the LRU manually with
+    // recordIssued. If recordIssued were ever moved out of the `if (hasMore)`
+    // block in the handler, those tests would still pass but production
+    // behaviour would silently change. This test exercises the full pipeline:
+    // call A returns a cursor → recordIssued fires inside the handler → call B
+    // with identical args (no cursor) must be refused.
+    await seed(vaultRoot, 15);
+    const r1 = await list_concepts(vaultRoot, { limit: 5 });
+    if (!("concepts" in r1) || !r1.cursor) throw new Error("expected page-1 cursor");
+    const r2 = await list_concepts(vaultRoot, { limit: 5 });
+    expect(r2).toEqual({
+      error: "CURSOR_REQUIRED",
+      message: expect.stringContaining("Identical query"),
+    });
+  });
 });
 
 // ── pagination + cursor issuance ───────────────────────────────────────────
