@@ -6,11 +6,18 @@ export function makeReadTools(config: VaultConfig) {
       name: "get_context",
       description:
         "Get knowledge graph context summary. Defaults to 'minimal' (counts + last 3 notes). " +
-        "Pass depth='standard' or depth='full' for richer detail. Call this first in any session.",
+        "Pass depth='standard' for recent docs + hot concepts. " +
+        'depth=\'full\' additionally returns tagCloud and REQUIRES verbose: "<reason ≥12 chars>"; ' +
+        "without a valid reason the server downgrades to 'standard' and the response carries a " +
+        "verboseNote hint. Call this first in any session.",
       inputSchema: {
         type: "object" as const,
         properties: {
           depth: { type: "string", enum: ["minimal", "standard", "full"] },
+          verbose: {
+            type: "string",
+            description: 'Reason string (≥12 code points after trim) gating depth="full". Logged to server stderr for audit. Omit or use a non-"full" depth if not needed.',
+          },
         },
       },
     },
