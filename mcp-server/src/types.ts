@@ -65,6 +65,28 @@ export interface QueryGraphResponse {
   cursor?: string;
 }
 
+/**
+ * Response shape for the `get_context` tool. Fields are optional because the
+ * SQLite reader returns different shapes at each depth tier. `verboseNote`
+ * is set when the call was downgraded (depth="full" without a valid verbose
+ * reason) or when the rate-limit tracker fires.
+ */
+export interface GetContextResponse {
+  // depth === "minimal":
+  noteCount?: number;
+  conceptCount?: number;
+  edgeCount?: number;
+  // depth >= "standard":
+  vault?: { path: string; noteCount: number; conceptCount: number; edgeCount: number };
+  recent?: Array<Record<string, unknown>>;
+  hotConcepts?: Array<Record<string, unknown>>;
+  // depth === "full":
+  tagCloud?: Array<{ tag: string; count: number }>;
+  // Operational hints (set independently of depth):
+  syncWarning?: string;
+  verboseNote?: string;
+}
+
 export interface VaultConfig {
   name: string;
   path: string;

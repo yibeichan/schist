@@ -6,7 +6,7 @@ import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote } from "./git-writer.js";
 import { buildNote, buildConnectionLine } from "./markdown-parser.js";
 import { validateOwner } from "./agent-identity.js";
-import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, ListDomainsResponse } from "./types.js";
+import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, ListDomainsResponse, GetContextResponse } from "./types.js";
 import {
   canonicalizeQueryHash,
   decodeCursor,
@@ -742,18 +742,54 @@ export async function query_graph(
   return response;
 }
 
+/**
+ * get_context tool handler. Adopts reason-string verbose (#50 PR 7).
+ *
+ *   parseVerbose → effective-depth resolution → spoke pull → sentinel read →
+ *   SQLite read → optional logVerbose + noteHighFrequency → assemble response.
+ *
+ * Soft-downgrade semantics (spec §"Reason-string verbose"):
+ *   - depth="full" + valid verbose (≥12 cp) → run tagCloud, log audit line.
+ *   - depth="full" + missing/whitespace verbose → silently run as depth="standard"
+ *     and attach a verboseNote hinting at the upgrade path. NOT an error —
+ *     callers that lazily ask for "full" should still get a usable response.
+ *   - depth=anything + verbose: true (boolean) or <12 cp string → INVALID_ARG.
+ *     parseVerbose rejects type/length misuse identically; no per-depth bypass.
+ *   - depth!="full" + valid verbose → verbose validated for type only; ignored
+ *     semantically (no logVerbose). Matches search_memory's "validate first" pattern.
+ *
+ * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
+ */
 export async function get_context(
   vaultRoot: string,
-  // Default to "minimal" for agent session-start: only note/concept/edge counts
-  // + last 3 modified. Agents that need richer context request standard/full.
-  args: { depth?: "minimal" | "standard" | "full" }
-): Promise<unknown> {
+  args: { depth?: "minimal" | "standard" | "full"; verbose?: string }
+): Promise<GetContextResponse | ToolError> {
+  const TOOL_NAME = "get_context" as const;
+
+  // Step 1: parseVerbose. Reject INVALID_ARG (boolean / non-string / too-short)
+  // before any I/O. Whitespace-only and omitted both return { enabled: false }
+  // with no error — handled identically below as "no verbose intent."
+  const v = parseVerbose(args.verbose);
+  if ("error" in v) return v.error;
+  const verboseEnabled = v.enabled;
+  const verboseReason: string | undefined = v.enabled ? v.reason : undefined;
+
+  // Step 2: effective depth resolution. If the caller asked for "full" but
+  // didn't supply a valid verbose reason, downgrade to "standard" and prepare
+  // a soft hint. Any other (depth, verbose) combination passes through.
+  const requestedDepth = args.depth ?? "minimal";
+  let effectiveDepth: "minimal" | "standard" | "full" = requestedDepth;
+  let downgradeNote: string | undefined;
+  if (requestedDepth === "full" && !verboseEnabled) {
+    effectiveDepth = "standard";
+    downgradeNote =
+      'depth="full" requires verbose: "<reason ≥12 chars>"; downgraded to "standard"';
+  }
+
   await maybeSpokePull(vaultRoot);
 
-  // Read (and clear) any pending background-sync-failure sentinel so agents
-  // don't silently work against a stale local view. This runs independently
-  // of the SQLite read — even if the DB query fails, we surface the warning
-  // on the error result so the operator knows to check the hub connection.
+  // Step 3: Read (and clear) any pending background-sync-failure sentinel so
+  // agents don't silently work against a stale local view.
   let syncWarning: string | undefined;
   const sentinelPath = path.join(vaultRoot, SYNC_ERROR_SENTINEL);
   try {
@@ -766,17 +802,39 @@ export async function get_context(
     // No sentinel — healthy state
   }
 
+  // Step 4: SQLite read at effectiveDepth.
+  let context: Record<string, unknown>;
   try {
-    const context = sqliteReader.getContext(vaultRoot, args.depth ?? "minimal") as Record<string, unknown>;
-    if (syncWarning) context.syncWarning = syncWarning;
-    return context;
+    context = sqliteReader.getContext(vaultRoot, effectiveDepth) as Record<string, unknown>;
   } catch (e: unknown) {
     const err = normalizeError(e, "INGEST_ERROR");
-    if (syncWarning) {
-      return { ...err, syncWarning };
-    }
-    return err;
+    return syncWarning ? { ...err, syncWarning } : err;
   }
+  if (syncWarning) context.syncWarning = syncWarning;
+
+  // Step 5: verbose audit log + rate-limit hint (only on the true depth="full"
+  // path — downgraded calls already carry a verboseNote).
+  let freqNote: string | undefined;
+  const activeOwner = process.env.SCHIST_AGENT_ID ?? "";
+  if (effectiveDepth === "full" && verboseEnabled && verboseReason !== undefined) {
+    logVerbose({ tool: TOOL_NAME, owner: activeOwner, reason: verboseReason });
+    const note = noteHighFrequency({
+      tool: TOOL_NAME,
+      owner: activeOwner,
+      reason: verboseReason,
+    });
+    if (note !== null) freqNote = note;
+  }
+
+  // Step 6: assemble response. verboseNote is set if either (a) the call was
+  // downgraded, or (b) the rate-limit tracker fired. Concatenate when both.
+  const verboseNote =
+    downgradeNote !== undefined && freqNote !== undefined
+      ? `${downgradeNote}; ${freqNote}`
+      : downgradeNote ?? freqNote;
+  if (verboseNote !== undefined) context.verboseNote = verboseNote;
+
+  return context as GetContextResponse;
 }
 
 // ── Memory V2 Tools ────────────────────────────────────────────────────────
