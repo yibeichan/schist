@@ -127,7 +127,9 @@ const SYNC_ERROR_SENTINEL = ".schist/last-sync-error";
 /**
  * Write a sync-failure sentinel so agents have a visible trace when a
  * background push silently fails. `get_context` reads this and surfaces it
- * to the caller on the next read.
+ * to the caller on the next read; `readSyncWarning` (below) also surfaces it
+ * on the NEXT write tool's response so write-heavy sessions don't have to
+ * call get_context to notice.
  */
 async function writeSyncError(vaultRoot: string, message: string): Promise<void> {
   try {
@@ -140,26 +142,107 @@ async function writeSyncError(vaultRoot: string, message: string): Promise<void>
   }
 }
 
+/**
+ * Read the sync-failure sentinel WITHOUT clearing it, formatted as a warning
+ * string. Returns undefined if the file is missing, empty, or unreadable.
+ *
+ * Called from successful write-tool responses so an agent in a write-heavy
+ * session (which rarely calls get_context between writes) sees the warning
+ * on the next write rather than discovering the divergence at session end.
+ *
+ * Clearing is left to get_context — it's the explicit "I am syncing with
+ * the world" call and a natural acknowledge point. Repeating the warning
+ * across N writes until then is by design: until the agent acknowledges
+ * via get_context, each write is committing into a vault that's diverging
+ * from hub, and the agent should keep being told.
+ *
+ * Spec context: see #120 — pre-fix, agents accumulated 13+ MCP commits with
+ * silent push failures before noticing the spoke had diverged from hub.
+ */
+/**
+ * Sanitize sentinel content before embedding it in an agent-facing warning.
+ * Strips non-printable / control characters (which could include ANSI
+ * escapes or fake newlines an attacker with vault write might use to steer
+ * an agent's instruction-following), and caps length at 500 chars to bound
+ * response size. The sentinel is normally written by writeSyncError with
+ * a small ISO timestamp + message, so legitimate content is unaffected.
+ */
+function sanitizeSentinelContent(raw: string): string {
+  const cleaned = raw.replace(/[^\x20-\x7e\t\n]/g, "?").trim();
+  return cleaned.length > 500 ? cleaned.slice(0, 500) + "…" : cleaned;
+}
+
+async function readSyncWarning(vaultRoot: string): Promise<string | undefined> {
+  const sentinelPath = path.join(vaultRoot, SYNC_ERROR_SENTINEL);
+  let rawText: string;
+  try {
+    rawText = await fs.readFile(sentinelPath, "utf-8");
+  } catch (e: unknown) {
+    // ENOENT is the healthy case — no sentinel means no recent failure.
+    // Any other error (EACCES on permission flip, EISDIR if something
+    // mkdir'd over the sentinel path) is itself a sync-detection problem
+    // worth surfacing. Without the distinction we'd silently report
+    // "healthy" while sync detection is actually broken.
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return undefined;
+    return `Sync-failure sentinel exists but is unreadable (${code ?? "unknown error"}). Sync state may be diverging silently.`;
+  }
+  const errText = sanitizeSentinelContent(rawText);
+  if (!errText) return undefined;
+  // Descriptive phrasing (not imperative). Agents reading this on every
+  // write should NOT abandon their current task to "acknowledge" — the
+  // sentinel will be cleared the next time get_context runs anyway.
+  return `Recent background sync failure: ${errText}. Writes may not have reached the hub. \`get_context\` will clear this on its next call.`;
+}
+
+/**
+ * Resolves the schist CLI binary to spawn for spoke sync operations.
+ * Defaults to the `schist` console-script (what `pip install` / `uv pip` /
+ * `uv tool install` / `pipx` all produce), with an opt-out for operators
+ * who need to pin a specific installation.
+ *
+ * Why not `python3 -m schist`: under `uv tool install` and `pipx`, the
+ * CLI ships in an isolated venv so the console-script is on PATH but the
+ * `schist` module is NOT importable from the default `python3`. `python3
+ * -m schist` then fails with ModuleNotFoundError and the failure surfaces
+ * silently via the .schist/last-sync-error sentinel — see #120 for the
+ * specific incident that motivated this. The `schist-ingest` ingester
+ * binary at triggerIngestion already uses this pattern; the sync paths
+ * were the holdout.
+ */
+function schistCliBin(): string {
+  // `?.trim() || ...` (not `??`) so SCHIST_BIN="" and SCHIST_BIN="   " both
+  // fall back to the default. `??` only short-circuits on null/undefined, so
+  // an exported-but-empty env var would otherwise spawn "" and ENOENT.
+  return process.env.SCHIST_BIN?.trim() || "schist";
+}
+
 /** Fire-and-forget spoke push after a write. No-op for non-spoke vaults. */
 export function triggerSpokePush(vaultRoot: string): void {
   const spokeConfig = path.join(vaultRoot, ".schist", "spoke.yaml");
   fs.access(spokeConfig).then(() => {
     const child = spawn(
-      "python3",
-      ["-m", "schist", "--vault", vaultRoot, "sync", "push"],
+      schistCliBin(),
+      ["--vault", vaultRoot, "sync", "push"],
       { cwd: vaultRoot, stdio: "ignore", env: process.env, detached: true }
     );
     child.unref();
     child.on("error", (err) => {
-      // spawn error = python3 not on PATH, or permission denied. Silent by
-      // default is a footgun — write a sentinel so the next get_context can
+      // spawn error = schist binary not on PATH, or permission denied.
+      // Silent by default is a footgun — write a sentinel so the next
+      // get_context (or write-tool response — see readSyncWarning) can
       // surface it. Also log for operators watching stderr.
       console.error("[schist] spoke push failed:", err);
       writeSyncError(vaultRoot, `push spawn failed: ${err.message}`);
     });
-    child.on("exit", (code) => {
+    child.on("exit", (code, signal) => {
       if (code !== null && code !== 0) {
         writeSyncError(vaultRoot, `push exited with code ${code}`);
+      } else if (code === null && signal) {
+        // Signal-killed: SIGTERM / SIGKILL from OOM killer, parent shutdown
+        // sending TERM down the process group, etc. Without this branch the
+        // push died silently and the next get_context would report "healthy."
+        writeSyncError(vaultRoot, `push killed by signal ${signal}`);
       }
     });
   }).catch(() => {
@@ -180,15 +263,15 @@ export async function maybeSpokePull(vaultRoot: string, timeoutMs = 5000): Promi
   }
   await new Promise<void>((resolve) => {
     const child = spawn(
-      "python3",
-      ["-m", "schist", "--vault", vaultRoot, "sync", "pull"],
+      schistCliBin(),
+      ["--vault", vaultRoot, "sync", "pull"],
       { cwd: vaultRoot, stdio: "ignore", env: process.env, detached: true }
     );
     // `detached: true` puts the child in its own process group. On timeout we
     // must signal the whole group (negative PID) — child.kill() only signals
-    // python3, leaving git-fetch/git-rebase grandchildren alive with a live
-    // .git/index.lock. SIGTERM first, then SIGKILL after a short grace in
-    // case git ignores SIGTERM mid-rebase.
+    // the schist CLI process, leaving git-fetch/git-rebase grandchildren alive
+    // with a live .git/index.lock. SIGTERM first, then SIGKILL after a short
+    // grace in case git ignores SIGTERM mid-rebase.
     const killGroup = (sig: NodeJS.Signals): void => {
       if (child.pid === undefined) return;
       try { process.kill(-child.pid, sig); } catch { /* already dead */ }
@@ -444,7 +527,19 @@ export async function create_note(
     triggerIngestion(vaultRoot);
     triggerSpokePush(vaultRoot);
 
-    return { id: relPath, path: relPath, commitSha: result.commitSha };
+    // Surface any pending sync-failure sentinel. Typically catches PRIOR
+    // pushes (this call's push is fire-and-forget and usually still in
+    // flight), but a fast-failing spawn (e.g. ENOENT on schist binary) can
+    // synchronously enqueue child.on("error") soon enough that THIS call's
+    // failure is included too — either case is a real signal the agent
+    // should see, so we don't try to distinguish.
+    const syncWarning = await readSyncWarning(vaultRoot);
+    return {
+      id: relPath,
+      path: relPath,
+      commitSha: result.commitSha,
+      ...(syncWarning !== undefined ? { syncWarning } : {}),
+    };
   } catch (e: unknown) {
     return normalizeError(e, "GIT_ERROR");
   }
@@ -491,7 +586,16 @@ export async function add_connection(
     triggerIngestion(vaultRoot);
     triggerSpokePush(vaultRoot);
 
-    return { source: args.source, target: args.target, type: args.type, commitSha: result.commitSha };
+    // Surface pending sync-failure sentinel — see create_note for the
+    // capture-timing notes.
+    const syncWarning = await readSyncWarning(vaultRoot);
+    return {
+      source: args.source,
+      target: args.target,
+      type: args.type,
+      commitSha: result.commitSha,
+      ...(syncWarning !== undefined ? { syncWarning } : {}),
+    };
   } catch (e: unknown) {
     return normalizeError(e, "GIT_ERROR");
   }
@@ -548,7 +652,15 @@ export async function assign_domain(
     triggerIngestion(vaultRoot);
     triggerSpokePush(vaultRoot);
 
-    return { id: args.id, domain: args.domain, commitSha: result.commitSha };
+    // Surface pending sync-failure sentinel — see create_note for the
+    // capture-timing notes.
+    const syncWarning = await readSyncWarning(vaultRoot);
+    return {
+      id: args.id,
+      domain: args.domain,
+      commitSha: result.commitSha,
+      ...(syncWarning !== undefined ? { syncWarning } : {}),
+    };
   } catch (e: unknown) {
     return normalizeError(e, "GIT_ERROR");
   }
@@ -789,11 +901,13 @@ export async function get_context(
   await maybeSpokePull(vaultRoot);
 
   // Step 3: Read (and clear) any pending background-sync-failure sentinel so
-  // agents don't silently work against a stale local view.
+  // agents don't silently work against a stale local view. errText is
+  // sanitized via the same helper readSyncWarning uses, so write-path and
+  // get_context surfacing share one trust-boundary policy on sentinel content.
   let syncWarning: string | undefined;
   const sentinelPath = path.join(vaultRoot, SYNC_ERROR_SENTINEL);
   try {
-    const errText = (await fs.readFile(sentinelPath, "utf-8")).trim();
+    const errText = sanitizeSentinelContent(await fs.readFile(sentinelPath, "utf-8"));
     if (errText) {
       syncWarning = `Recent background sync failure: ${errText}. Writes may not have reached the hub.`;
       await fs.unlink(sentinelPath).catch(() => {});
