@@ -159,16 +159,40 @@ async function writeSyncError(vaultRoot: string, message: string): Promise<void>
  * Spec context: see #120 — pre-fix, agents accumulated 13+ MCP commits with
  * silent push failures before noticing the spoke had diverged from hub.
  */
+/**
+ * Sanitize sentinel content before embedding it in an agent-facing warning.
+ * Strips non-printable / control characters (which could include ANSI
+ * escapes or fake newlines an attacker with vault write might use to steer
+ * an agent's instruction-following), and caps length at 500 chars to bound
+ * response size. The sentinel is normally written by writeSyncError with
+ * a small ISO timestamp + message, so legitimate content is unaffected.
+ */
+function sanitizeSentinelContent(raw: string): string {
+  const cleaned = raw.replace(/[^\x20-\x7e\t\n]/g, "?").trim();
+  return cleaned.length > 500 ? cleaned.slice(0, 500) + "…" : cleaned;
+}
+
 async function readSyncWarning(vaultRoot: string): Promise<string | undefined> {
+  const sentinelPath = path.join(vaultRoot, SYNC_ERROR_SENTINEL);
+  let rawText: string;
   try {
-    const sentinelPath = path.join(vaultRoot, SYNC_ERROR_SENTINEL);
-    const errText = (await fs.readFile(sentinelPath, "utf-8")).trim();
-    if (!errText) return undefined;
-    return `Recent background sync failure: ${errText}. Writes may not have reached the hub. Call get_context to acknowledge and clear this warning.`;
-  } catch {
-    // No sentinel — healthy state
-    return undefined;
+    rawText = await fs.readFile(sentinelPath, "utf-8");
+  } catch (e: unknown) {
+    // ENOENT is the healthy case — no sentinel means no recent failure.
+    // Any other error (EACCES on permission flip, EISDIR if something
+    // mkdir'd over the sentinel path) is itself a sync-detection problem
+    // worth surfacing. Without the distinction we'd silently report
+    // "healthy" while sync detection is actually broken.
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return undefined;
+    return `Sync-failure sentinel exists but is unreadable (${code ?? "unknown error"}). Sync state may be diverging silently.`;
   }
+  const errText = sanitizeSentinelContent(rawText);
+  if (!errText) return undefined;
+  // Descriptive phrasing (not imperative). Agents reading this on every
+  // write should NOT abandon their current task to "acknowledge" — the
+  // sentinel will be cleared the next time get_context runs anyway.
+  return `Recent background sync failure: ${errText}. Writes may not have reached the hub. \`get_context\` will clear this on its next call.`;
 }
 
 /**
@@ -187,7 +211,10 @@ async function readSyncWarning(vaultRoot: string): Promise<string | undefined> {
  * were the holdout.
  */
 function schistCliBin(): string {
-  return process.env.SCHIST_BIN ?? "schist";
+  // `?.trim() || ...` (not `??`) so SCHIST_BIN="" and SCHIST_BIN="   " both
+  // fall back to the default. `??` only short-circuits on null/undefined, so
+  // an exported-but-empty env var would otherwise spawn "" and ENOENT.
+  return process.env.SCHIST_BIN?.trim() || "schist";
 }
 
 /** Fire-and-forget spoke push after a write. No-op for non-spoke vaults. */
@@ -203,14 +230,19 @@ export function triggerSpokePush(vaultRoot: string): void {
     child.on("error", (err) => {
       // spawn error = schist binary not on PATH, or permission denied.
       // Silent by default is a footgun — write a sentinel so the next
-      // get_context (or write-tool response — see surfaceSyncWarning) can
+      // get_context (or write-tool response — see readSyncWarning) can
       // surface it. Also log for operators watching stderr.
       console.error("[schist] spoke push failed:", err);
       writeSyncError(vaultRoot, `push spawn failed: ${err.message}`);
     });
-    child.on("exit", (code) => {
+    child.on("exit", (code, signal) => {
       if (code !== null && code !== 0) {
         writeSyncError(vaultRoot, `push exited with code ${code}`);
+      } else if (code === null && signal) {
+        // Signal-killed: SIGTERM / SIGKILL from OOM killer, parent shutdown
+        // sending TERM down the process group, etc. Without this branch the
+        // push died silently and the next get_context would report "healthy."
+        writeSyncError(vaultRoot, `push killed by signal ${signal}`);
       }
     });
   }).catch(() => {
@@ -495,9 +527,12 @@ export async function create_note(
     triggerIngestion(vaultRoot);
     triggerSpokePush(vaultRoot);
 
-    // Surface any pending sync-failure sentinel from prior writes. Doesn't
-    // capture THIS call's push (fire-and-forget), but catches accumulated
-    // failures so write-heavy sessions don't keep stranding commits.
+    // Surface any pending sync-failure sentinel. Typically catches PRIOR
+    // pushes (this call's push is fire-and-forget and usually still in
+    // flight), but a fast-failing spawn (e.g. ENOENT on schist binary) can
+    // synchronously enqueue child.on("error") soon enough that THIS call's
+    // failure is included too — either case is a real signal the agent
+    // should see, so we don't try to distinguish.
     const syncWarning = await readSyncWarning(vaultRoot);
     return {
       id: relPath,
@@ -551,6 +586,8 @@ export async function add_connection(
     triggerIngestion(vaultRoot);
     triggerSpokePush(vaultRoot);
 
+    // Surface pending sync-failure sentinel — see create_note for the
+    // capture-timing notes.
     const syncWarning = await readSyncWarning(vaultRoot);
     return {
       source: args.source,
@@ -615,6 +652,8 @@ export async function assign_domain(
     triggerIngestion(vaultRoot);
     triggerSpokePush(vaultRoot);
 
+    // Surface pending sync-failure sentinel — see create_note for the
+    // capture-timing notes.
     const syncWarning = await readSyncWarning(vaultRoot);
     return {
       id: args.id,
@@ -862,11 +901,13 @@ export async function get_context(
   await maybeSpokePull(vaultRoot);
 
   // Step 3: Read (and clear) any pending background-sync-failure sentinel so
-  // agents don't silently work against a stale local view.
+  // agents don't silently work against a stale local view. errText is
+  // sanitized via the same helper readSyncWarning uses, so write-path and
+  // get_context surfacing share one trust-boundary policy on sentinel content.
   let syncWarning: string | undefined;
   const sentinelPath = path.join(vaultRoot, SYNC_ERROR_SENTINEL);
   try {
-    const errText = (await fs.readFile(sentinelPath, "utf-8")).trim();
+    const errText = sanitizeSentinelContent(await fs.readFile(sentinelPath, "utf-8"));
     if (errText) {
       syncWarning = `Recent background sync failure: ${errText}. Writes may not have reached the hub.`;
       await fs.unlink(sentinelPath).catch(() => {});
