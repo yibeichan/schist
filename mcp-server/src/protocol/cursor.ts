@@ -4,6 +4,15 @@ import * as crypto from "crypto";
 
 export const CURSOR_TTL_SECONDS = 300;
 export const CURSOR_LRU_SIZE = 256;
+/**
+ * Hard cap on raw `args.cursor` length before any base64 decode work. A
+ * well-formed cursor is ~250 chars (payload + dot + signature, both
+ * base64url-encoded). 4096 leaves comfortable headroom for future payload
+ * additions and absurd safety margin against the legitimate shape, while
+ * preventing a malicious caller from forcing a 100 MB base64 allocation
+ * before HMAC verification rejects the input. See #109.
+ */
+export const CURSOR_MAX_LENGTH = 4096;
 
 export interface InvalidArgError {
   error: "INVALID_ARG";
@@ -158,6 +167,7 @@ export type CursorErrorCode =
   | "CURSOR_REQUIRED"
   | "CURSOR_EXPIRED"
   | "CURSOR_INVALID_SIGNATURE"
+  | "CURSOR_QUERY_MISMATCH"
   | "CURSOR_WRONG_TOOL";
 
 export interface CursorError {
@@ -206,6 +216,13 @@ export type DecodeCursorResult =
   | { ok: false; error: CursorError };
 
 export function decodeCursor(token: string, expectedTool: string): DecodeCursorResult {
+  // Pre-decode length cap (#109). A well-formed cursor is ~250 chars; cap
+  // at CURSOR_MAX_LENGTH so a malicious 100 MB cursor can't force a base64
+  // decode + JSON parse before HMAC verification rejects it.
+  if (token.length > CURSOR_MAX_LENGTH) {
+    return invalidSignature(`cursor exceeds maximum length (${CURSOR_MAX_LENGTH} chars)`);
+  }
+
   // Structural validation
   const segments = token.split(".");
   if (segments.length !== 2) {
@@ -216,10 +233,15 @@ export function decodeCursor(token: string, expectedTool: string): DecodeCursorR
     return invalidSignature("malformed cursor (empty segment)");
   }
 
-  // HMAC verification (timing-safe)
+  // HMAC verification (timing-safe). A mismatch here almost always means
+  // the per-process HMAC secret rotated (server restarted, redeployed,
+  // SIGHUP). The message disambiguates that from binding-mismatch, which
+  // is now CURSOR_QUERY_MISMATCH and surfaces from the handler — not here.
   const expectedSig = crypto.createHmac("sha256", HMAC_SECRET).update(payloadB64).digest("base64url");
   if (!timingSafeEqualStrings(sigB64, expectedSig)) {
-    return invalidSignature("cursor signature mismatch");
+    return invalidSignature(
+      "cursor HMAC signature mismatch — the server's signing secret likely rotated (e.g. process restart). Restart pagination from page 1."
+    );
   }
 
   // Decode payload
@@ -307,13 +329,22 @@ interface LruEntry {
 const refusalLru = new Map<string, LruEntry>();
 
 /**
- * Builds the LRU map key from (tool, queryHash, owner) using NUL bytes as
- * separator. Callers must ensure none of the three inputs contain `\x00`
- * (queryHash is hex from canonicalizeQueryHash, tool is a fixed registry
- * name, owner comes from vault config — all NUL-free in practice).
+ * Builds the LRU map key from (tool, queryHash, owner, vaultRoot) using
+ * NUL bytes as separator. vaultRoot is included so a single MCP-server
+ * process serving multiple vaults can't have one vault's refusal block
+ * another vault's identical query (#113). Single-vault-per-process
+ * deployments — the current default — see no behavioral change because
+ * vaultRoot is constant within a process.
+ *
+ * Callers must ensure none of the four inputs contain `\x00`:
+ *   - tool: fixed registry name (alphanumeric + underscore)
+ *   - queryHash: SHA-256 hex from canonicalizeQueryHash
+ *   - owner: vault.yaml / env-derived agent identity
+ *   - vaultRoot: absolute filesystem path — POSIX paths permit any byte
+ *     except `\x00`, and `path.resolve` would reject NUL anyway
  */
-function lruKey(tool: string, queryHash: string, owner: string): string {
-  return `${tool}\x00${queryHash}\x00${owner}`;
+function lruKey(tool: string, queryHash: string, owner: string, vaultRoot: string): string {
+  return `${tool}\x00${queryHash}\x00${owner}\x00${vaultRoot}`;
 }
 
 // ── recordIssued ──────────────────────────────────────────────────────────
@@ -322,11 +353,12 @@ export interface RecordIssuedInput {
   tool: string;
   queryHash: string;
   owner: string;
+  vaultRoot: string;
   verboseEnabled: boolean;
 }
 
 export function recordIssued(input: RecordIssuedInput): void {
-  const key = lruKey(input.tool, input.queryHash, input.owner);
+  const key = lruKey(input.tool, input.queryHash, input.owner, input.vaultRoot);
   // Delete-then-set to promote to MRU (Map iteration order = insertion order)
   if (refusalLru.has(key)) refusalLru.delete(key);
   refusalLru.set(key, {
@@ -347,6 +379,7 @@ export interface CheckRefusalInput {
   tool: string;
   queryHash: string;
   owner: string;
+  vaultRoot: string;
   verboseEnabled: boolean;
 }
 
@@ -355,7 +388,7 @@ export type RefusalResult =
   | { refuse: true; error: CursorError };
 
 export function checkRefusal(input: CheckRefusalInput): RefusalResult {
-  const key = lruKey(input.tool, input.queryHash, input.owner);
+  const key = lruKey(input.tool, input.queryHash, input.owner, input.vaultRoot);
   const entry = refusalLru.get(key);
   if (!entry) return { refuse: false };
 

@@ -111,7 +111,7 @@ describe("list_domains tool — cursor decoding", () => {
     const c = issueCursor({ tool: "list_domains", queryHash: "0".repeat(64), offset: 2 });
     const r = await list_domains(vaultRoot, { cursor: c });
     expect(r).toEqual({
-      error: "CURSOR_INVALID_SIGNATURE",
+      error: "CURSOR_QUERY_MISMATCH",
       message: expect.stringContaining("different query"),
     });
   });
@@ -144,7 +144,7 @@ describe("list_domains tool — identical-query refusal", () => {
     const args = { limit: 3 };
     const ch = canonicalizeQueryHash(args, "");
     if (!ch.ok) throw new Error("canonicalize failed in test setup");
-    recordIssued({ tool: "list_domains", queryHash: ch.queryHash, owner: "", verboseEnabled: false });
+    recordIssued({ tool: "list_domains", queryHash: ch.queryHash, owner: "", vaultRoot, verboseEnabled: false });
     const r = await list_domains(vaultRoot, args);
     expect(r).toEqual({
       error: "CURSOR_REQUIRED",
@@ -161,7 +161,7 @@ describe("list_domains tool — identical-query refusal", () => {
     const args = { limit: 3 };
     const ch = canonicalizeQueryHash(args, "yibei");
     if (!ch.ok) throw new Error("canonicalize failed in test setup");
-    recordIssued({ tool: "list_domains", queryHash: ch.queryHash, owner: "yibei", verboseEnabled: false });
+    recordIssued({ tool: "list_domains", queryHash: ch.queryHash, owner: "yibei", vaultRoot, verboseEnabled: false });
     const r = await list_domains(vaultRoot, args);
     expect(r).toHaveProperty("domains");
     expect(r).not.toHaveProperty("error");
@@ -305,24 +305,51 @@ describe("list_domains tool — empty owner", () => {
 
 // ── normalizeError fallthrough ─────────────────────────────────────────────
 
-describe("list_domains tool — normalizeError fallthrough wiring", () => {
-  it("handler body contains try/catch wrapping sqliteReader.listDomains with INGEST_ERROR fallback", async () => {
-    // sqlite-reader.listDomains currently swallows DB errors and returns [],
-    // so we cannot trigger the handler's catch via DROP TABLE / corrupt DB.
-    // ESM read-only-module rules also prevent jest.spyOn on the namespace
-    // import. Verify the defensive try/catch + normalizeError("INGEST_ERROR")
-    // wiring via source inspection — same approach as the JSDoc smoke test.
-    const src = await fs.readFile(
-      path.join(__dirname, "..", "src", "tools.ts"),
-      "utf-8",
-    );
-    const fnIdx = src.indexOf("export async function list_domains(");
-    expect(fnIdx).toBeGreaterThan(0);
-    // The handler body spans ~70 lines after the function header.
-    const body = src.slice(fnIdx, fnIdx + 3500);
-    expect(body).toMatch(/sqliteReader\.listDomains\(/);
-    expect(body).toMatch(/catch\s*\(e:\s*unknown\)/);
-    expect(body).toMatch(/normalizeError\(e,\s*["']INGEST_ERROR["']\)/);
+describe("list_domains tool — normalizeError fallthrough (#111)", () => {
+  it("handler returns INGEST_ERROR when sqlite-reader throws an unexpected error", async () => {
+    // After #111 narrowed sqlite-reader's catch, an unexpected error
+    // (anything that ISN'T SQLITE_CANTOPEN or "no such table") propagates
+    // out of listDomains so the handler's try/catch can normalize it.
+    //
+    // We trigger this by deleting the docs file mid-test wouldn't work for
+    // domains... so instead we corrupt the DB file in a way that's neither
+    // "missing table" nor "can't open": locking it via a separate writer.
+    // Easier path: drop a DIFFERENT table to leave domains intact, then
+    // ALTER it to a column the handler doesn't expect. Or: easier still,
+    // make the column the handler maps non-existent.
+    //
+    // The most robust trigger: rewrite the file to be a non-SQLite blob.
+    // better-sqlite3 throws SqliteError "file is not a database" — neither
+    // SQLITE_CANTOPEN (which means the file is missing) nor "no such table"
+    // (which means it opened but the table doesn't exist).
+    const dbPath = path.join(vaultRoot, ".schist", "schist.db");
+    await fs.writeFile(dbPath, "not a sqlite database");
+
+    const r = await list_domains(vaultRoot, {});
+    expect(r).toHaveProperty("error", "INGEST_ERROR");
+    expect(r).toHaveProperty("message");
+  });
+
+  it("missing schist.db still returns empty (pre-#111 sentinel still swallowed)", async () => {
+    // The narrowed catch still swallows SQLITE_CANTOPEN for "vault not yet
+    // initialized" — verify that contract didn't regress.
+    const dbPath = path.join(vaultRoot, ".schist", "schist.db");
+    await fs.unlink(dbPath);
+    const r = await list_domains(vaultRoot, {});
+    if (!("domains" in r)) throw new Error("expected domains []");
+    expect(r.domains).toEqual([]);
+  });
+
+  it("missing domains table still returns empty (pre-#111 sentinel still swallowed)", async () => {
+    // Same contract — older vault schemas without the domains table return
+    // []. Narrowed catch keeps this case.
+    const dbPath = path.join(vaultRoot, ".schist", "schist.db");
+    const db = new Database(dbPath);
+    db.exec("DROP TABLE domains;");
+    db.close();
+    const r = await list_domains(vaultRoot, {});
+    if (!("domains" in r)) throw new Error("expected domains []");
+    expect(r.domains).toEqual([]);
   });
 });
 

@@ -116,7 +116,7 @@ describe("search_notes tool — cursor decoding", () => {
     const c = issueCursor({ tool: "search_notes", queryHash: "0".repeat(64), offset: 2 });
     const r = await search_notes(vaultRoot, { query: "haystack", cursor: c });
     expect(r).toEqual({
-      error: "CURSOR_INVALID_SIGNATURE",
+      error: "CURSOR_QUERY_MISMATCH",
       message: expect.stringContaining("different query"),
     });
   });
@@ -144,7 +144,7 @@ describe("search_notes tool — identical-query refusal", () => {
     const args = { query: "haystack", limit: 3 };
     const ch = canonicalizeQueryHash(args, "");
     if (!ch.ok) throw new Error("canonicalize failed in test setup");
-    recordIssued({ tool: "search_notes", queryHash: ch.queryHash, owner: "", verboseEnabled: false });
+    recordIssued({ tool: "search_notes", queryHash: ch.queryHash, owner: "", vaultRoot, verboseEnabled: false });
     const r = await search_notes(vaultRoot, args);
     expect(r).toEqual({
       error: "CURSOR_REQUIRED",
@@ -159,7 +159,7 @@ describe("search_notes tool — identical-query refusal", () => {
     const argsAsRecorded = { query: "haystack", limit: 3 };
     const ch = canonicalizeQueryHash(argsAsRecorded, "yibei");
     if (!ch.ok) throw new Error("canonicalize failed in test setup");
-    recordIssued({ tool: "search_notes", queryHash: ch.queryHash, owner: "yibei", verboseEnabled: false });
+    recordIssued({ tool: "search_notes", queryHash: ch.queryHash, owner: "yibei", vaultRoot, verboseEnabled: false });
     const r = await search_notes(vaultRoot, argsAsRecorded);
     expect(r).toHaveProperty("results");
   });
@@ -173,7 +173,7 @@ describe("search_notes tool — identical-query refusal", () => {
     const args = { query: "haystack", limit: 3 };
     const ch = canonicalizeQueryHash(args, "");
     if (!ch.ok) throw new Error("canonicalize failed in test setup");
-    recordIssued({ tool: "search_notes", queryHash: ch.queryHash, owner: "", verboseEnabled: false });
+    recordIssued({ tool: "search_notes", queryHash: ch.queryHash, owner: "", vaultRoot, verboseEnabled: false });
     const r = await search_notes(vaultRoot, {
       ...args,
       verbose: "this verbose is ignored by search_notes",

@@ -15,6 +15,38 @@
  *   3. Neither set → CONFIG_ERROR. Writes always require identity to
  *      be configured.
  */
+/**
+ * Resolves the active owner identity for read-side cursor handlers.
+ *
+ * Resolution order (matches the precedence callers picked individually
+ * before #115 unified it):
+ *   1. Per-call `owner` arg (when the handler accepts one — currently only
+ *      `search_notes`, since vault.yaml participant scope-inherit lookup
+ *      keys on the agent name)
+ *   2. `SCHIST_AGENT_NAME` env var (human-readable, used by vault.yaml)
+ *   3. `SCHIST_AGENT_ID` env var (stable id, used by memory + ACL paths)
+ *   4. `""` empty string fallback
+ *
+ * Returning `""` is INTENTIONAL — anonymous reads are allowed (writes
+ * still gate via `validateOwner`). The empty owner just means: this call
+ * shares the refusal-LRU bucket with every other anonymous caller in the
+ * same process. The startup warning in index.ts surfaces this state
+ * when both env vars are missing.
+ *
+ * Before #115 the 5 cursor handlers each picked their own chain (3
+ * different shapes across 5 handlers); see issue body for the divergence
+ * matrix. Unified here so the next handler added inherits the correct
+ * chain by default.
+ */
+export function resolveActiveOwner(perCallOwner?: string): string {
+  return (
+    perCallOwner ??
+    process.env.SCHIST_AGENT_NAME ??
+    process.env.SCHIST_AGENT_ID ??
+    ""
+  );
+}
+
 export function validateOwner(owner: string): void {
   const allowedAgents = process.env.SCHIST_ALLOWED_AGENTS;
   if (allowedAgents !== undefined) {

@@ -5,7 +5,7 @@ import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote } from "./git-writer.js";
 import { buildNote, buildConnectionLine } from "./markdown-parser.js";
-import { validateOwner } from "./agent-identity.js";
+import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, ListDomainsResponse, GetContextResponse } from "./types.js";
 import {
   canonicalizeQueryHash,
@@ -210,6 +210,30 @@ async function readSyncWarning(vaultRoot: string): Promise<string | undefined> {
  * binary at triggerIngestion already uses this pattern; the sync paths
  * were the holdout.
  */
+/**
+ * Validates and normalizes a `limit` argument from a cursor-adopting tool
+ * (#108). Accepts a value the JSON-schema layer already rejected (defense
+ * in depth — the registry now declares `{ type: "integer", minimum: 1 }`
+ * so well-behaved clients never reach this fallback). Handles:
+ *
+ *   - non-numeric (string from sloppy client, boolean, null, etc) → default
+ *   - NaN / ±Infinity → default
+ *   - fractional → truncate via Math.trunc, then clamp
+ *   - zero / negative → default (matches canonicalize's `limit: 0` collapse)
+ *   - >cap → clamp to cap
+ *
+ * Pre-#108 the handlers only checked `requested <= 0`, which left
+ * stringified numbers (`"50" <= 0 === false`) flowing into Math.min and
+ * triggering implicit string concat downstream — corrupting offset math
+ * and cursor offsets. See #108 for the full failure mode.
+ */
+function validateLimit(requested: unknown, defaultVal: number, cap: number): number {
+  if (typeof requested !== "number" || !Number.isFinite(requested)) return defaultVal;
+  const n = Math.trunc(requested);
+  if (n <= 0) return defaultVal;
+  return Math.min(n, cap);
+}
+
 function schistCliBin(): string {
   // `?.trim() || ...` (not `??`) so SCHIST_BIN="" and SCHIST_BIN="   " both
   // fall back to the default. `??` only short-circuits on null/undefined, so
@@ -319,17 +343,18 @@ export async function search_notes(
 ): Promise<SearchNotesResponse | ToolError> {
   const TOOL_NAME = "search_notes" as const;
 
-  // Step 1: canonicalizeQueryHash. Active owner is per-call owner first
-  // (matches sqlite-reader's scope=inherit resolution order), then env.
-  const activeOwner =
-    args.owner ?? process.env.SCHIST_AGENT_NAME ?? process.env.SCHIST_AGENT_ID ?? "";
+  // Step 1: canonicalizeQueryHash. resolveActiveOwner threads per-call
+  // `args.owner` first (sqlite-reader's scope=inherit resolution order),
+  // then env (NAME → ID → ""). Unified across all 5 cursor handlers via #115.
+  const activeOwner = resolveActiveOwner(args.owner);
   const ch = canonicalizeQueryHash(args as Record<string, unknown>, activeOwner);
   if (!ch.ok) return ch.error;
   const queryHash = ch.queryHash;
 
   // Step 2: Cursor decoding + queryHash binding check. Spec: "Cursor binding
   // to queryHash" — current call's computed queryHash MUST equal the cursor's
-  // encoded queryHash. Mismatch → CURSOR_INVALID_SIGNATURE.
+  // encoded queryHash. Mismatch → CURSOR_QUERY_MISMATCH (distinct from
+  // CURSOR_INVALID_SIGNATURE, which is HMAC-fail = secret rotated on restart).
   let offset = 0;
   let consumingCursor = false;
   if (typeof args.cursor === "string" && args.cursor.length > 0) {
@@ -337,7 +362,7 @@ export async function search_notes(
     if (!d.ok) return d.error;
     if (d.queryHash !== queryHash) {
       return {
-        error: "CURSOR_INVALID_SIGNATURE",
+        error: "CURSOR_QUERY_MISMATCH",
         message: "cursor was issued for a different query — restart pagination from page 1",
       };
     }
@@ -347,23 +372,22 @@ export async function search_notes(
 
   // Step 3: Identical-query refusal (only when no cursor was presented).
   // verboseEnabled is always false here — search_notes has no verbose mode.
+  // vaultRoot is part of the LRU key (#113) so multi-vault deployments don't
+  // see one vault's refusal block another vault's identical query.
   if (!consumingCursor) {
     const refusal = checkRefusal({
       tool: TOOL_NAME,
       queryHash,
       owner: activeOwner,
+      vaultRoot,
       verboseEnabled: false,
     });
     if (refusal.refuse) return refusal.error;
   }
 
   // Step 4: SQL fetch with limit + 1 to detect hasMore. Default 20, cap 100.
-  // Negative / zero / missing all collapse to 20 (mirrors canonicalize's
-  // limit:0 → missing rule so the queryHash on `limit: 0` matches omitted).
-  const requested = args.limit;
-  const effectiveLimit = (requested === undefined || requested === null || requested <= 0)
-    ? 20
-    : Math.min(requested, 100);
+  // validateLimit (#108) handles non-numeric / NaN / fractional / out-of-range.
+  const effectiveLimit = validateLimit(args.limit, 20, 100);
 
   let rows: import("./types.js").SearchResult[];
   try {
@@ -382,13 +406,19 @@ export async function search_notes(
   const hasMore = rows.length > effectiveLimit;
   const pageRows = hasMore ? rows.slice(0, effectiveLimit) : rows;
 
-  // Step 5: Cursor issuance + recordIssued (only when this page was capped).
+  // Step 5: Cursor issuance + recordIssued. Carve-out (#114): only fires
+  // when this page was capped — an identical query that returned <= the
+  // requested limit has no next page to capture, so refusing the same query
+  // again would prevent legitimate re-reads with no UX benefit. Spec intent
+  // is "blind retries that would burn context are refused"; a fully-served
+  // query isn't a blind retry.
   let cursor: string | undefined;
   if (hasMore) {
     recordIssued({
       tool: TOOL_NAME,
       queryHash,
       owner: activeOwner,
+      vaultRoot,
       verboseEnabled: false,
     });
     cursor = issueCursor({
@@ -684,8 +714,7 @@ export async function list_concepts(
 ): Promise<ListConceptsResponse | ToolError> {
   const TOOL_NAME = "list_concepts" as const;
 
-  const activeOwner =
-    process.env.SCHIST_AGENT_NAME ?? process.env.SCHIST_AGENT_ID ?? "";
+  const activeOwner = resolveActiveOwner();
   const ch = canonicalizeQueryHash(args as Record<string, unknown>, activeOwner);
   if (!ch.ok) return ch.error;
   const queryHash = ch.queryHash;
@@ -697,7 +726,7 @@ export async function list_concepts(
     if (!d.ok) return d.error;
     if (d.queryHash !== queryHash) {
       return {
-        error: "CURSOR_INVALID_SIGNATURE",
+        error: "CURSOR_QUERY_MISMATCH",
         message: "cursor was issued for a different query — restart pagination from page 1",
       };
     }
@@ -710,16 +739,13 @@ export async function list_concepts(
       tool: TOOL_NAME,
       queryHash,
       owner: activeOwner,
+      vaultRoot,
       verboseEnabled: false,
     });
     if (refusal.refuse) return refusal.error;
   }
 
-  const requested = args.limit;
-  const effectiveLimit =
-    requested === undefined || requested === null || requested <= 0
-      ? 50
-      : Math.min(requested, 200);
+  const effectiveLimit = validateLimit(args.limit, 50, 200);
 
   let concepts: import("./types.js").Concept[];
   try {
@@ -738,7 +764,7 @@ export async function list_concepts(
 
   const response: ListConceptsResponse = { concepts };
   if (hasMore) {
-    recordIssued({ tool: TOOL_NAME, queryHash, owner: activeOwner, verboseEnabled: false });
+    recordIssued({ tool: TOOL_NAME, queryHash, owner: activeOwner, vaultRoot, verboseEnabled: false });
     response.cursor = issueCursor({
       tool: TOOL_NAME,
       queryHash,
@@ -775,9 +801,11 @@ export async function query_graph(
 ): Promise<QueryGraphResponse | ToolError> {
   const TOOL_NAME = "query_graph" as const;
 
-  // Step 1: canonicalizeQueryHash. query_graph has no `owner` arg in the
-  // tool schema; activeOwner comes from env only (same as search_memory).
-  const activeOwner = process.env.SCHIST_AGENT_ID ?? "";
+  // Step 1: canonicalizeQueryHash. resolveActiveOwner (#115) unifies the
+  // env chain across all 5 cursor handlers; NAME → ID → "" for consistency.
+  // query_graph has no per-call owner arg (the tool schema doesn't expose
+  // one) so resolveActiveOwner is called with no argument.
+  const activeOwner = resolveActiveOwner();
   const ch = canonicalizeQueryHash(args as Record<string, unknown>, activeOwner);
   if (!ch.ok) return ch.error;
   const queryHash = ch.queryHash;
@@ -790,7 +818,7 @@ export async function query_graph(
     if (!d.ok) return d.error;
     if (d.queryHash !== queryHash) {
       return {
-        error: "CURSOR_INVALID_SIGNATURE",
+        error: "CURSOR_QUERY_MISMATCH",
         message: "cursor was issued for a different query — restart pagination from page 1",
       };
     }
@@ -804,17 +832,14 @@ export async function query_graph(
       tool: TOOL_NAME,
       queryHash,
       owner: activeOwner,
+      vaultRoot,
       verboseEnabled: false,
     });
     if (refusal.refuse) return refusal.error;
   }
 
   // Step 4: SQL fetch with limit + 1 to detect hasMore. Default 100, cap 1000.
-  // limit:0 / negative / missing collapse to the default (mirrors canonicalize).
-  const requested = args.limit;
-  const effectiveLimit = (requested === undefined || requested === null || requested <= 0)
-    ? 100
-    : Math.min(requested, 1000);
+  const effectiveLimit = validateLimit(args.limit, 100, 1000);
 
   let result: { columns: string[]; rows: unknown[][]; rowCount: number };
   try {
@@ -829,13 +854,14 @@ export async function query_graph(
   const hasMore = result.rowCount > effectiveLimit;
   const pageRows = hasMore ? result.rows.slice(0, effectiveLimit) : result.rows;
 
-  // Step 5: Cursor issuance + recordIssued (only when this page was capped).
+  // Step 5: Cursor issuance + recordIssued (carve-out #114: only on hasMore).
   let cursor: string | undefined;
   if (hasMore) {
     recordIssued({
       tool: TOOL_NAME,
       queryHash,
       owner: activeOwner,
+      vaultRoot,
       verboseEnabled: false,
     });
     cursor = issueCursor({
@@ -929,7 +955,7 @@ export async function get_context(
   // Step 5: verbose audit log + rate-limit hint (only on the true depth="full"
   // path — downgraded calls already carry a verboseNote).
   let freqNote: string | undefined;
-  const activeOwner = process.env.SCHIST_AGENT_ID ?? "";
+  const activeOwner = resolveActiveOwner();
   if (effectiveDepth === "full" && verboseEnabled && verboseReason !== undefined) {
     logVerbose({ tool: TOOL_NAME, owner: activeOwner, reason: verboseReason });
     const note = noteHighFrequency({
@@ -971,7 +997,11 @@ export async function get_context(
  * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
  */
 export async function search_memory(
-  _vaultRoot: string,
+  // Was `_vaultRoot` (underscore-unused) — now consumed as a refusal-LRU key
+  // segment (#113) so multi-vault deployments don't see cross-vault refusal
+  // collision. The memory DB itself is still at the separate path resolved
+  // inside sqliteReader (process.env.SCHIST_MEMORY_DB or ~/.openclaw/...).
+  vaultRoot: string,
   args: {
     query?: string;
     owner?: string;
@@ -991,16 +1021,19 @@ export async function search_memory(
   const verboseEnabled = v.enabled;
   const verboseReason: string | undefined = v.enabled ? v.reason : undefined;
 
-  // Step 2: canonicalizeQueryHash. Active owner is SCHIST_AGENT_ID or "".
-  const activeOwner = process.env.SCHIST_AGENT_ID ?? "";
+  // Step 2: canonicalizeQueryHash. resolveActiveOwner (#115) unifies the
+  // env chain across all 5 cursor handlers; NAME → ID → "". search_memory
+  // has no per-call owner arg (the `args.owner` is a FILTER on entries,
+  // not the caller identity — see schema).
+  const activeOwner = resolveActiveOwner();
   const ch = canonicalizeQueryHash(args as Record<string, unknown>, activeOwner);
   if (!ch.ok) return ch.error;
   const queryHash = ch.queryHash;
 
   // Step 3: Cursor decoding + queryHash binding check.
   // Binding policy: current call's computed queryHash MUST equal the cursor's
-  // encoded queryHash. Mismatch → CURSOR_INVALID_SIGNATURE with explanatory
-  // message. Locked in Task 3.0 spec amendment ("Cursor binding to queryHash").
+  // encoded queryHash. Mismatch → CURSOR_QUERY_MISMATCH (distinct from
+  // CURSOR_INVALID_SIGNATURE which is HMAC-fail; see #112 for the disambiguation).
   let offset = 0;
   let consumingCursor = false;
   if (typeof args.cursor === "string" && args.cursor.length > 0) {
@@ -1008,7 +1041,7 @@ export async function search_memory(
     if (!d.ok) return d.error;
     if (d.queryHash !== queryHash) {
       return {
-        error: "CURSOR_INVALID_SIGNATURE",
+        error: "CURSOR_QUERY_MISMATCH",
         message: "cursor was issued for a different query — restart pagination from page 1",
       };
     }
@@ -1025,21 +1058,14 @@ export async function search_memory(
       tool: TOOL_NAME,
       queryHash,
       owner: activeOwner,
+      vaultRoot,
       verboseEnabled,
     });
     if (refusal.refuse) return refusal.error;
   }
 
-  // Step 5: SQL fetch with limit + 1 to detect hasMore. Server clamps limit
-  // (max 200, 0 → default 50 to match the canonicalize collapse rule so the
-  // queryHash on `limit: 0` equals the queryHash on omitted limit).
-  const requested = args.limit;
-  // Negative / zero / missing limit all collapse to the default 50; matches
-  // canonicalize's collapse rule for `limit: 0` and gives a sensible default
-  // for malformed inputs. Positive requests are clamped to the spec cap (200).
-  const effectiveLimit = (requested === undefined || requested === null || requested <= 0)
-    ? 50
-    : Math.min(requested, 200);
+  // Step 5: SQL fetch with limit + 1 to detect hasMore. Default 50, cap 200.
+  const effectiveLimit = validateLimit(args.limit, 50, 200);
 
   let rows: import("./types.js").MemoryEntry[];
   try {
@@ -1079,6 +1105,7 @@ export async function search_memory(
       tool: TOOL_NAME,
       queryHash,
       owner: activeOwner,
+      vaultRoot,
       verboseEnabled,
     });
     cursor = issueCursor({
@@ -1140,8 +1167,7 @@ export async function list_domains(
 ): Promise<ListDomainsResponse | ToolError> {
   const TOOL_NAME = "list_domains" as const;
 
-  const activeOwner =
-    process.env.SCHIST_AGENT_NAME ?? process.env.SCHIST_AGENT_ID ?? "";
+  const activeOwner = resolveActiveOwner();
   const ch = canonicalizeQueryHash(args as Record<string, unknown>, activeOwner);
   if (!ch.ok) return ch.error;
   const queryHash = ch.queryHash;
@@ -1153,7 +1179,7 @@ export async function list_domains(
     if (!d.ok) return d.error;
     if (d.queryHash !== queryHash) {
       return {
-        error: "CURSOR_INVALID_SIGNATURE",
+        error: "CURSOR_QUERY_MISMATCH",
         message: "cursor was issued for a different query — restart pagination from page 1",
       };
     }
@@ -1166,16 +1192,13 @@ export async function list_domains(
       tool: TOOL_NAME,
       queryHash,
       owner: activeOwner,
+      vaultRoot,
       verboseEnabled: false,
     });
     if (refusal.refuse) return refusal.error;
   }
 
-  const requested = args.limit;
-  const effectiveLimit =
-    requested === undefined || requested === null || requested <= 0
-      ? 100
-      : Math.min(requested, 500);
+  const effectiveLimit = validateLimit(args.limit, 100, 500);
 
   let domains: import("./types.js").Domain[];
   try {
@@ -1192,7 +1215,7 @@ export async function list_domains(
 
   const response: ListDomainsResponse = { domains };
   if (hasMore) {
-    recordIssued({ tool: TOOL_NAME, queryHash, owner: activeOwner, verboseEnabled: false });
+    recordIssued({ tool: TOOL_NAME, queryHash, owner: activeOwner, vaultRoot, verboseEnabled: false });
     response.cursor = issueCursor({
       tool: TOOL_NAME,
       queryHash,

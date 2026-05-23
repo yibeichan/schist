@@ -122,7 +122,7 @@ describe("query_graph tool — cursor decoding", () => {
     const c = issueCursor({ tool: "query_graph", queryHash: "0".repeat(64), offset: 2 });
     const r = await query_graph(vaultRoot, { sql: "SELECT * FROM docs", cursor: c });
     expect(r).toEqual({
-      error: "CURSOR_INVALID_SIGNATURE",
+      error: "CURSOR_QUERY_MISMATCH",
       message: expect.stringContaining("different query"),
     });
   });
@@ -137,7 +137,7 @@ describe("query_graph tool — identical-query refusal", () => {
     const args = { sql: "SELECT * FROM docs" };
     const ch = canonicalizeQueryHash(args, "");
     if (!ch.ok) throw new Error("canonicalize failed in test setup");
-    recordIssued({ tool: "query_graph", queryHash: ch.queryHash, owner: "", verboseEnabled: false });
+    recordIssued({ tool: "query_graph", queryHash: ch.queryHash, owner: "", vaultRoot, verboseEnabled: false });
     const r = await query_graph(vaultRoot, args);
     expect(r).toEqual({
       error: "CURSOR_REQUIRED",

@@ -578,9 +578,23 @@ export function listDomains(
       description: r.description == null ? undefined : (r.description as string),
       parent_slug: r.parent_slug == null ? undefined : (r.parent_slug as string),
     }));
-  } catch {
-    // DB may not exist or table may not exist in older DBs — return empty
-    return [];
+  } catch (e: unknown) {
+    // Narrow the catch (#111). The original `catch {}` was for "vault not
+    // yet initialized" — DB doesn't exist or the `domains` table doesn't
+    // exist on older schemas. After PR 6 added pagination, an offset past
+    // the end legitimately returns []; conflating that with "DB error"
+    // means the handler can't tell "no more pages" from "DB corrupt / locked
+    // / missing table". A transient SQLITE_BUSY became a silent empty page
+    // → cursor never re-issued → agent loses pagination state.
+    //
+    // Swallow only the original sentinels — let real errors propagate so
+    // the handler's `normalizeError(e, "INGEST_ERROR")` actually fires.
+    const msg = e instanceof Error ? e.message : String(e);
+    const isUninitialized =
+      (e as NodeJS.ErrnoException).code === "SQLITE_CANTOPEN" ||
+      /no such table/i.test(msg);
+    if (isUninitialized) return [];
+    throw e;
   } finally {
     db?.close();
   }
