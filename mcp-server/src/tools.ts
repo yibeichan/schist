@@ -105,14 +105,15 @@ export async function loadVaultConfig(vaultRoot: string): Promise<VaultConfig> {
   };
 }
 
-function triggerIngestion(vaultRoot: string): void {
+export function triggerIngestion(vaultRoot: string): void {
   const dbPath = path.join(vaultRoot, ".schist", "schist.db");
 
   // Spawn the `schist-ingest` console script registered by the schist
   // CLI package (cli/pyproject.toml). Works for both `pip install schist`
   // and `pip install -e ./cli` setups; ENOENTs cleanly if the CLI was
   // never installed (in which case the post-commit hook also can't run).
-  const child = spawn("schist-ingest", ["--vault", vaultRoot, "--db", dbPath], {
+  // Honours SCHIST_INGEST_BIN env (#123) for operators pinning a version.
+  const child = spawn(schistCliBin("schist-ingest"), ["--vault", vaultRoot, "--db", dbPath], {
     cwd: vaultRoot,
     stdio: "ignore",
   });
@@ -136,7 +137,16 @@ async function writeSyncError(vaultRoot: string, message: string): Promise<void>
     const sentinelPath = path.join(vaultRoot, SYNC_ERROR_SENTINEL);
     await fs.mkdir(path.dirname(sentinelPath), { recursive: true });
     const entry = `${new Date().toISOString()} ${message}\n`;
-    await fs.writeFile(sentinelPath, entry);
+    // Atomic write (#124): tmp + rename so concurrent readers never observe
+    // a zero-byte truncate-in-progress state. Uniquified by pid+timestamp
+    // so two concurrent writers don't clobber each other's tmp file (only
+    // the rename target races, and POSIX rename is atomic). After the
+    // rename both writers' content is consistent — last write wins, which
+    // matches the pre-#124 fs.writeFile semantics; the gain is just
+    // crash-safety for readers.
+    const tmpPath = `${sentinelPath}.tmp-${process.pid}-${Date.now()}`;
+    await fs.writeFile(tmpPath, entry);
+    await fs.rename(tmpPath, sentinelPath);
   } catch {
     // Can't write the sentinel either — truly nothing we can do.
   }
@@ -196,21 +206,6 @@ async function readSyncWarning(vaultRoot: string): Promise<string | undefined> {
 }
 
 /**
- * Resolves the schist CLI binary to spawn for spoke sync operations.
- * Defaults to the `schist` console-script (what `pip install` / `uv pip` /
- * `uv tool install` / `pipx` all produce), with an opt-out for operators
- * who need to pin a specific installation.
- *
- * Why not `python3 -m schist`: under `uv tool install` and `pipx`, the
- * CLI ships in an isolated venv so the console-script is on PATH but the
- * `schist` module is NOT importable from the default `python3`. `python3
- * -m schist` then fails with ModuleNotFoundError and the failure surfaces
- * silently via the .schist/last-sync-error sentinel — see #120 for the
- * specific incident that motivated this. The `schist-ingest` ingester
- * binary at triggerIngestion already uses this pattern; the sync paths
- * were the holdout.
- */
-/**
  * Validates and normalizes a `limit` argument from a cursor-adopting tool
  * (#108). Accepts a value the JSON-schema layer already rejected (defense
  * in depth — the registry now declares `{ type: "integer", minimum: 1 }`
@@ -234,24 +229,81 @@ function validateLimit(requested: unknown, defaultVal: number, cap: number): num
   return Math.min(n, cap);
 }
 
-function schistCliBin(): string {
-  // `?.trim() || ...` (not `??`) so SCHIST_BIN="" and SCHIST_BIN="   " both
-  // fall back to the default. `??` only short-circuits on null/undefined, so
-  // an exported-but-empty env var would otherwise spawn "" and ENOENT.
-  return process.env.SCHIST_BIN?.trim() || "schist";
+/**
+ * Resolves which schist CLI binary to spawn. Parameterized so operators can
+ * pin EACH of the two CLI binaries (`schist` for sync, `schist-ingest` for
+ * post-commit indexing) independently — useful on hosts that have multiple
+ * installs via `uv tool install` / `pipx`. (#123)
+ *
+ * Defaults to the binary name on PATH (what every install method produces).
+ *
+ * Why not `python3 -m schist`: under `uv tool install` and `pipx`, the
+ * CLI ships in an isolated venv so the console-script is on PATH but the
+ * `schist` module is NOT importable from the default `python3`. `python3
+ * -m schist` then fails with ModuleNotFoundError and the failure surfaces
+ * silently via the .schist/last-sync-error sentinel — see #120 for the
+ * specific incident that motivated using the console-scripts here.
+ *
+ * **Version-coherence warning:** if an operator pins one binary via env
+ * but not the other, sync and ingest may run different schist versions —
+ * commits go through one version's schema while SQLite gets rebuilt by
+ * another. CHANGELOG documents the coherence requirement; we don't
+ * enforce it here because the parallel-version testing case is legitimate.
+ *
+ * `?.trim() || ...` (not `??`) so an exported-but-empty env var (e.g.
+ * `SCHIST_BIN=""`) falls back to the default rather than spawning "" and
+ * ENOENT.
+ */
+function schistCliBin(binName: "schist" | "schist-ingest"): string {
+  const envVar = binName === "schist-ingest" ? "SCHIST_INGEST_BIN" : "SCHIST_BIN";
+  return process.env[envVar]?.trim() || binName;
 }
+
+/**
+ * Tracks vaults with an in-flight `schist sync push` child so concurrent
+ * write tools coalesce instead of spawning N competing pushes (#122). A
+ * write-heavy session (e.g. distillation runs that produce 20+ rapid
+ * `create_note` calls) used to spawn 20 detached pushes — first grabs
+ * `.git/index.lock`, rest fail with lock contention, each writes a fresh
+ * sentinel and the agent sees an oscillating warning loop.
+ *
+ * The in-flight push will naturally batch any commits that landed while
+ * it was running (`git push` sends current `HEAD`), so coalescing here
+ * doesn't lose data. After the push exits, the next write tool's call to
+ * `triggerSpokePush` spawns a fresh push for whatever's still ahead of
+ * the hub. This trades the "every write triggers its own push" property
+ * for "no spawn storms"; the timing slip is bounded by a single push's
+ * runtime.
+ */
+const inFlightSpokePushes = new Set<string>();
 
 /** Fire-and-forget spoke push after a write. No-op for non-spoke vaults. */
 export function triggerSpokePush(vaultRoot: string): void {
+  // Coalesce: if a push for this vault is already running, the next
+  // commit will be picked up by that in-flight child — skip spawn.
+  if (inFlightSpokePushes.has(vaultRoot)) return;
+
   const spokeConfig = path.join(vaultRoot, ".schist", "spoke.yaml");
   fs.access(spokeConfig).then(() => {
+    // Re-check inside the .then in case a concurrent caller raced through
+    // the synchronous check above and we beat them to fs.access. Cheap.
+    if (inFlightSpokePushes.has(vaultRoot)) return;
+    inFlightSpokePushes.add(vaultRoot);
+
     const child = spawn(
-      schistCliBin(),
+      schistCliBin("schist"),
       ["--vault", vaultRoot, "sync", "push"],
       { cwd: vaultRoot, stdio: "ignore", env: process.env, detached: true }
     );
     child.unref();
+
+    // Clean up the in-flight marker on terminal events. Wrap in helper so
+    // both error and exit can call it idempotently — handlers can fire in
+    // either order depending on the failure mode.
+    const cleanup = (): void => { inFlightSpokePushes.delete(vaultRoot); };
+
     child.on("error", (err) => {
+      cleanup();
       // spawn error = schist binary not on PATH, or permission denied.
       // Silent by default is a footgun — write a sentinel so the next
       // get_context (or write-tool response — see readSyncWarning) can
@@ -260,6 +312,7 @@ export function triggerSpokePush(vaultRoot: string): void {
       writeSyncError(vaultRoot, `push spawn failed: ${err.message}`);
     });
     child.on("exit", (code, signal) => {
+      cleanup();
       if (code !== null && code !== 0) {
         writeSyncError(vaultRoot, `push exited with code ${code}`);
       } else if (code === null && signal) {
@@ -272,6 +325,11 @@ export function triggerSpokePush(vaultRoot: string): void {
   }).catch(() => {
     // Not a spoke vault — silent no-op
   });
+}
+
+/** Test-only: clear the in-flight push tracker. */
+export function resetSpokePushTrackerForTesting(): void {
+  inFlightSpokePushes.clear();
 }
 
 /**
@@ -287,7 +345,7 @@ export async function maybeSpokePull(vaultRoot: string, timeoutMs = 5000): Promi
   }
   await new Promise<void>((resolve) => {
     const child = spawn(
-      schistCliBin(),
+      schistCliBin("schist"),
       ["--vault", vaultRoot, "sync", "pull"],
       { cwd: vaultRoot, stdio: "ignore", env: process.env, detached: true }
     );
@@ -930,16 +988,28 @@ export async function get_context(
   // agents don't silently work against a stale local view. errText is
   // sanitized via the same helper readSyncWarning uses, so write-path and
   // get_context surfacing share one trust-boundary policy on sentinel content.
+  //
+  // Atomic clear (#124): rename → read → unlink. A concurrent write-tool's
+  // readSyncWarning call against the canonical path either runs BEFORE the
+  // rename (sees the sentinel; will surface the warning — fine, the agent
+  // gets one extra warning) or AFTER (sees no file; healthy state). It
+  // never observes a partially-unlinked state, and the warning isn't
+  // surfaced for follow-up writes after this get_context call has
+  // acknowledged it.
   let syncWarning: string | undefined;
   const sentinelPath = path.join(vaultRoot, SYNC_ERROR_SENTINEL);
+  const consumedPath = `${sentinelPath}.consumed-${process.pid}-${Date.now()}`;
   try {
-    const errText = sanitizeSentinelContent(await fs.readFile(sentinelPath, "utf-8"));
+    await fs.rename(sentinelPath, consumedPath);
+    // From here on, the canonical path doesn't exist — concurrent
+    // readSyncWarning calls see ENOENT and report healthy.
+    const errText = sanitizeSentinelContent(await fs.readFile(consumedPath, "utf-8"));
     if (errText) {
       syncWarning = `Recent background sync failure: ${errText}. Writes may not have reached the hub.`;
-      await fs.unlink(sentinelPath).catch(() => {});
     }
+    await fs.unlink(consumedPath).catch(() => {});
   } catch {
-    // No sentinel — healthy state
+    // ENOENT on rename = no sentinel — healthy state.
   }
 
   // Step 4: SQLite read at effectiveDepth.

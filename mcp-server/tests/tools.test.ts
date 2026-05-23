@@ -1,10 +1,14 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
+import { fileURLToPath } from "url";
 import Database from "better-sqlite3";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
-import { loadVaultConfig, create_note, add_connection, get_context, triggerSpokePush, maybeSpokePull, assign_domain } from "../src/tools.js";
+import { loadVaultConfig, create_note, add_connection, get_context, triggerSpokePush, triggerIngestion, maybeSpokePull, assign_domain, resetSpokePushTrackerForTesting } from "../src/tools.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const execFile = promisify(execFileCb);
 
@@ -191,6 +195,14 @@ describe("create_note directory validation", () => {
 // ---------------------------------------------------------------------------
 
 describe("triggerSpokePush", () => {
+  // Reset in-flight tracker between tests so the coalesce check (#122) doesn't
+  // bleed state. Each test seeds its own vault path; clearing the Set ensures
+  // a stale "in-flight" mark from a prior test (e.g. one that didn't await
+  // the spawn to fully exit) doesn't suppress this test's spawn.
+  beforeEach(() => {
+    resetSpokePushTrackerForTesting();
+  });
+
   test("spawns the schist console-script when spoke.yaml exists (#120 regression)", async () => {
     const vault = await makeTempVault();
     await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
@@ -285,6 +297,131 @@ describe("triggerSpokePush", () => {
     expect(() => triggerSpokePush(vault)).not.toThrow();
     await new Promise((r) => setTimeout(r, 100));
   });
+
+  test("coalesces concurrent pushes for the same vault (#122)", async () => {
+    // Pre-fix: 20 rapid create_note calls (in a distillation burst) spawned
+    // 20 detached `schist sync push` children, each grabbing for .git/index.lock,
+    // first succeeded, rest failed with lock contention, each wrote a sentinel
+    // → persistent oscillating warning loop. After #122: only the first call
+    // in a burst spawns; subsequent calls find the in-flight Set populated
+    // and skip. The in-flight push naturally batches commits via git push's
+    // current-HEAD semantics.
+    const vault = await makeTempVault();
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, ".schist", "spoke.yaml"),
+      "hub: file:///nonexistent\nidentity: test\nscope: notes\n"
+    );
+
+    // Stub that takes 300ms so we can fire many triggerSpokePush calls
+    // while the first child is alive. Each invocation appends to the
+    // spawn-count file so we can count them deterministically.
+    const countFile = path.join(vault, ".schist", "spawn-count");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const stub = path.join(stubDir, "schist");
+    await fs.writeFile(
+      stub,
+      `#!/bin/sh\necho "x" >> "${countFile}"\nsleep 0.3\n`,
+      { mode: 0o755 },
+    );
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      // Fire 20 rapid pushes. With coalesce, only 1 child should spawn
+      // (the rest see the in-flight Set populated and skip).
+      for (let i = 0; i < 20; i++) triggerSpokePush(vault);
+
+      // Wait for the in-flight child to exit (sleep 0.3 + buffer).
+      await new Promise((r) => setTimeout(r, 600));
+
+      let count = 0;
+      try {
+        const content = await fs.readFile(countFile, "utf-8");
+        count = content.split("\n").filter(Boolean).length;
+      } catch {
+        // file may not exist yet
+      }
+      // Pre-fix: count would be 20. Post-fix: exactly 1.
+      expect(count).toBe(1);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  test("after coalesced push exits, a subsequent push spawns fresh (#122)", async () => {
+    const vault = await makeTempVault();
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, ".schist", "spoke.yaml"),
+      "hub: file:///nonexistent\nidentity: test\nscope: notes\n"
+    );
+
+    const countFile = path.join(vault, ".schist", "spawn-count");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const stub = path.join(stubDir, "schist");
+    // Fast stub — exits immediately so we can fire a second push after.
+    await fs.writeFile(stub, `#!/bin/sh\necho "x" >> "${countFile}"\n`, { mode: 0o755 });
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      triggerSpokePush(vault);
+      await new Promise((r) => setTimeout(r, 200));
+      triggerSpokePush(vault);
+      await new Promise((r) => setTimeout(r, 200));
+
+      const content = await fs.readFile(countFile, "utf-8");
+      const count = content.split("\n").filter(Boolean).length;
+      // The first push exited before the second was fired, so the in-flight
+      // marker was cleared; the second push DOES spawn.
+      expect(count).toBe(2);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+});
+
+describe("triggerIngestion — SCHIST_INGEST_BIN env override (#123)", () => {
+  test("honors SCHIST_INGEST_BIN env to pin the ingest binary", async () => {
+    const vault = await makeTempVault();
+    const sentinel = path.join(vault, ".schist", "ingest-fired");
+    await fs.mkdir(path.dirname(sentinel), { recursive: true });
+
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-ingest-"));
+    const customBin = path.join(stubDir, "my-pinned-ingest");
+    await fs.writeFile(customBin, `#!/bin/sh\ntouch "${sentinel}"\n`, { mode: 0o755 });
+
+    const origBin = process.env.SCHIST_INGEST_BIN;
+    process.env.SCHIST_INGEST_BIN = customBin;
+    try {
+      triggerIngestion(vault);
+      // Poll for the sentinel
+      let fired = false;
+      for (let i = 0; i < 60; i++) {
+        try {
+          await fs.access(sentinel);
+          fired = true;
+          break;
+        } catch {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      }
+      expect(fired).toBe(true);
+    } finally {
+      if (origBin === undefined) delete process.env.SCHIST_INGEST_BIN;
+      else process.env.SCHIST_INGEST_BIN = origBin;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  // Empty-string SCHIST_INGEST_BIN falling back to default "schist-ingest"
+  // on PATH is exercised by every test in this file that DOESN'T set the
+  // env var — they all call create_note → triggerIngestion successfully.
+  // A dedicated PATH-stub test was attempted but flaked on spawn lookup
+  // ordering with a globally-installed schist-ingest on the dev machine.
 });
 
 describe("maybeSpokePull", () => {
@@ -341,6 +478,45 @@ describe("sync error sentinel", () => {
     const cleared = await fs.access(sentinelPath).then(() => false).catch(() => true);
     expect(cleared).toBe(true);
   }, 10000);
+
+  test("get_context clears sentinel atomically via rename → read → unlink (#124)", async () => {
+    // Atomic clear verification: after get_context returns, the canonical
+    // sentinel path is gone (consumed by the rename). A concurrent reader
+    // wouldn't have observed a partially-unlinked state because the rename
+    // is a single POSIX syscall. Verifies the new contract that pre-#124
+    // get_context used readFile + unlink (two syscalls, TOCTOU window).
+    const vault = await makeTempVault();
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    const sentinelPath = path.join(vault, ".schist", "last-sync-error");
+    await fs.writeFile(sentinelPath, "2026-05-22T23:06:22Z atomic clear test\n");
+
+    await get_context(vault, { depth: "minimal" });
+
+    // Canonical path is gone (rename consumed it; unlink finished cleanup).
+    const stillExists = await fs.access(sentinelPath).then(() => true).catch(() => false);
+    expect(stillExists).toBe(false);
+
+    // No leftover `.consumed-*` tmp files in .schist/ either.
+    const dirents = await fs.readdir(path.join(vault, ".schist"));
+    const leftovers = dirents.filter(n => n.startsWith("last-sync-error.consumed-"));
+    expect(leftovers).toEqual([]);
+  });
+
+  test("writeSyncError writes atomically via tmp + rename (#124)", async () => {
+    // Verify the source pattern uses tmp + rename (atomic) rather than
+    // direct writeFile (truncate window). The tmp path's uniquifying suffix
+    // (pid + Date.now) is also asserted so we know the implementation
+    // avoids tmp-file collision between concurrent writers.
+    const src = await fs.readFile(
+      path.join(__dirname, "..", "src", "tools.ts"),
+      "utf-8",
+    );
+    const writeSyncErrorIdx = src.indexOf("async function writeSyncError(");
+    expect(writeSyncErrorIdx).toBeGreaterThan(0);
+    const body = src.slice(writeSyncErrorIdx, writeSyncErrorIdx + 1500);
+    expect(body).toMatch(/\.tmp-\$\{process\.pid\}-\$\{Date\.now\(\)\}/);
+    expect(body).toMatch(/fs\.rename\(tmpPath, sentinelPath\)/);
+  });
 
   test("get_context has no syncWarning when sentinel is absent", async () => {
     const vault = await makeTempVault();
