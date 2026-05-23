@@ -533,6 +533,7 @@ export async function get_note(
 export async function create_note(
   vaultRoot: string,
   args: {
+    owner: string;
     title: string;
     body: string;
     tags?: string[];
@@ -544,6 +545,9 @@ export async function create_note(
   config: VaultConfig
 ): Promise<unknown> {
   try {
+    // Identity gate (#63): validate before any path / config checks so an
+    // unauthorized caller can't enumerate vault config via error messages.
+    validateOwner(args.owner);
     const directory = args.directory ?? "notes";
     if (directory.includes("..") || path.isAbsolute(directory)) {
       return {
@@ -600,11 +604,11 @@ export async function create_note(
       tags: args.tags ?? [],
       concepts: args.concepts ?? [],
       status: args.status ?? "draft",
-      source_agent: "mcp",
+      source_agent: args.owner,
     };
 
     const noteContent = buildNote(metadata, args.body, args.connections);
-    const result = await writeNote(vaultRoot, relPath, noteContent, args.title);
+    const result = await writeNote(vaultRoot, relPath, noteContent, args.title, args.owner);
 
     // Always-fire even on dedup'd writes: triggerSpokePush is the SOLE spoke→hub
     // mechanism (no git hook handles it), so gating it on `committed` would
@@ -635,9 +639,11 @@ export async function create_note(
 
 export async function add_connection(
   vaultRoot: string,
-  args: { source: string; target: string; type: string; context?: string }
+  args: { owner: string; source: string; target: string; type: string; context?: string }
 ): Promise<unknown> {
   try {
+    // Identity gate (#63): same ordering as create_note.
+    validateOwner(args.owner);
     const filePath = path.join(vaultRoot, args.source);
     const absVaultRoot = path.resolve(vaultRoot);
     const absFilePath = path.resolve(filePath);
@@ -668,7 +674,8 @@ export async function add_connection(
       vaultRoot,
       args.source,
       newContent,
-      `connection ${args.type} → ${args.target} on ${args.source}`
+      `connection ${args.type} → ${args.target} on ${args.source}`,
+      args.owner
     );
 
     triggerIngestion(vaultRoot);
@@ -691,9 +698,11 @@ export async function add_connection(
 
 export async function assign_domain(
   vaultRoot: string,
-  args: { id: string; domain: string }
+  args: { owner: string; id: string; domain: string }
 ): Promise<unknown> {
   try {
+    // Identity gate (#63): same ordering as create_note.
+    validateOwner(args.owner);
     const filePath = path.join(vaultRoot, args.id);
     const absVaultRoot = path.resolve(vaultRoot);
     const absFilePath = path.resolve(filePath);
@@ -734,7 +743,8 @@ export async function assign_domain(
       vaultRoot,
       args.id,
       newContent,
-      `assign domain ${args.domain} to ${args.id}`
+      `assign domain ${args.domain} to ${args.id}`,
+      args.owner
     );
 
     triggerIngestion(vaultRoot);

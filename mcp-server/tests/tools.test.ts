@@ -12,6 +12,18 @@ const __dirname = path.dirname(__filename);
 
 const execFile = promisify(execFileCb);
 
+// Identity gate (#63): vault-write tools now call validateOwner, which
+// CONFIG_ERRORs unless SCHIST_AGENT_ID (or SCHIST_ALLOWED_AGENTS) is set.
+// Tests in this file exercise the happy path with a single fixed identity;
+// dedicated identity-enforcement coverage lives in vault-write-identity.test.ts.
+const TEST_AGENT = "test-agent";
+beforeAll(() => {
+  process.env.SCHIST_AGENT_ID = TEST_AGENT;
+});
+afterAll(() => {
+  delete process.env.SCHIST_AGENT_ID;
+});
+
 async function makeTempVault(extraYaml = ""): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-tools-test-"));
   await execFile("git", ["init"], { cwd: dir });
@@ -88,13 +100,13 @@ describe("create_note filename collision", () => {
 
     const result1 = await create_note(
       vault,
-      { title: "Duplicate Title", body: "first body" },
+      { owner: TEST_AGENT, title: "Duplicate Title", body: "first body" },
       config
     ) as { id: string; path: string; commitSha: string };
 
     const result2 = await create_note(
       vault,
-      { title: "Duplicate Title", body: "second body" },
+      { owner: TEST_AGENT, title: "Duplicate Title", body: "second body" },
       config
     ) as { id: string; path: string; commitSha: string };
 
@@ -142,7 +154,7 @@ describe("create_note directory validation", () => {
 
     const result = await create_note(
       vault,
-      { title: "Nested Path Note", body: "lives under projects/foo", directory: "projects/foo" },
+      { owner: TEST_AGENT, title: "Nested Path Note", body: "lives under projects/foo", directory: "projects/foo" },
       config
     ) as { id: string; path: string; commitSha: string };
 
@@ -161,7 +173,7 @@ describe("create_note directory validation", () => {
 
     const result = await create_note(
       vault,
-      { title: "Should Fail", body: "x", directory: "projects/foo" },
+      { owner: TEST_AGENT, title: "Should Fail", body: "x", directory: "projects/foo" },
       config
     ) as { error: string; message: string };
 
@@ -177,7 +189,7 @@ describe("create_note directory validation", () => {
 
     const result = await create_note(
       vault,
-      { title: "Traversal Attempt", body: "x", directory: "projects/../etc" },
+      { owner: TEST_AGENT, title: "Traversal Attempt", body: "x", directory: "projects/../etc" },
       config
     ) as { error: string; message: string };
 
@@ -648,7 +660,7 @@ describe("write-tool syncWarning surfacing (#120)", () => {
 
     const result = (await create_note(
       vault,
-      { title: "Test sync surfacing", body: "body" },
+      { owner: TEST_AGENT, title: "Test sync surfacing", body: "body" },
       await loadVaultConfig(vault),
     )) as { id: string; path: string; commitSha: string; syncWarning?: string };
 
@@ -666,7 +678,7 @@ describe("write-tool syncWarning surfacing (#120)", () => {
     const vault = await makeTempVault();
     const result = (await create_note(
       vault,
-      { title: "Test no sync warn", body: "body" },
+      { owner: TEST_AGENT, title: "Test no sync warn", body: "body" },
       await loadVaultConfig(vault),
     )) as { id: string; syncWarning?: string };
     expect(result.syncWarning).toBeUndefined();
@@ -677,7 +689,7 @@ describe("write-tool syncWarning surfacing (#120)", () => {
     // Create a source note for add_connection to attach to.
     const noteResult = (await create_note(
       vault,
-      { title: "Source", body: "body" },
+      { owner: TEST_AGENT, title: "Source", body: "body" },
       await loadVaultConfig(vault),
     )) as { path: string };
 
@@ -691,6 +703,7 @@ describe("write-tool syncWarning surfacing (#120)", () => {
     );
 
     const result = (await add_connection(vault, {
+      owner: TEST_AGENT,
       source: noteResult.path,
       target: "some-target",
       type: "related",
@@ -713,7 +726,7 @@ describe("write-tool syncWarning surfacing (#120)", () => {
 
     const result = (await create_note(
       vault,
-      { title: "Test phrasing", body: "body" },
+      { owner: TEST_AGENT, title: "Test phrasing", body: "body" },
       await loadVaultConfig(vault),
     )) as { syncWarning?: string };
 
@@ -739,7 +752,7 @@ describe("write-tool syncWarning surfacing (#120)", () => {
 
     const result = (await create_note(
       vault,
-      { title: "Test sanitize", body: "body" },
+      { owner: TEST_AGENT, title: "Test sanitize", body: "body" },
       await loadVaultConfig(vault),
     )) as { syncWarning?: string };
 
@@ -763,7 +776,7 @@ describe("write-tool syncWarning surfacing (#120)", () => {
 
     const result = (await create_note(
       vault,
-      { title: "Test truncate", body: "body" },
+      { owner: TEST_AGENT, title: "Test truncate", body: "body" },
       await loadVaultConfig(vault),
     )) as { syncWarning?: string };
 
@@ -784,7 +797,7 @@ describe("write-tool syncWarning surfacing (#120)", () => {
 
     const result = (await create_note(
       vault,
-      { title: "Test eisdir", body: "body" },
+      { owner: TEST_AGENT, title: "Test eisdir", body: "body" },
       await loadVaultConfig(vault),
     )) as { syncWarning?: string };
 
@@ -810,7 +823,7 @@ describe("write-tool syncWarning surfacing (#120)", () => {
 
     const noteResult = (await create_note(
       vault,
-      { title: "Domain test", body: "body" },
+      { owner: TEST_AGENT, title: "Domain test", body: "body" },
       await loadVaultConfig(vault),
     )) as { path: string };
 
@@ -822,6 +835,7 @@ describe("write-tool syncWarning surfacing (#120)", () => {
     );
 
     const result = (await assign_domain(vault, {
+      owner: TEST_AGENT,
       id: noteResult.path,
       domain: "ai",
     })) as { id: string; domain: string; commitSha: string; syncWarning?: string };
@@ -879,7 +893,7 @@ describe("normalizeError", () => {
     // create_note catches and normalizes — use a bad vault to force an error
     const result = await create_note(
       "/nonexistent-vault",
-      { title: "Test", body: "body" },
+      { owner: TEST_AGENT, title: "Test", body: "body" },
       {
         name: "t",
         path: "/nonexistent-vault",
@@ -933,12 +947,13 @@ describe("assign_domain", () => {
     // Create a note
     const noteResult = (await create_note(
       vault,
-      { title: "Test Note", body: "Test body" },
+      { owner: TEST_AGENT, title: "Test Note", body: "Test body" },
       await loadVaultConfig(vault)
     )) as { id: string; path: string };
 
     // Assign domain
     const result = (await assign_domain(vault, {
+      owner: TEST_AGENT,
       id: noteResult.path,
       domain: "ml",
     })) as { id: string; domain: string; commitSha: string };
@@ -958,18 +973,20 @@ describe("assign_domain", () => {
     // Create a note
     const noteResult = (await create_note(
       vault,
-      { title: "Test Note", body: "Test body" },
+      { owner: TEST_AGENT, title: "Test Note", body: "Test body" },
       await loadVaultConfig(vault)
     )) as { id: string; path: string };
 
     // Assign first domain
     await assign_domain(vault, {
+      owner: TEST_AGENT,
       id: noteResult.path,
       domain: "ai",
     });
 
     // Assign different domain
     await assign_domain(vault, {
+      owner: TEST_AGENT,
       id: noteResult.path,
       domain: "security",
     });
@@ -987,11 +1004,12 @@ describe("assign_domain", () => {
 
     const noteResult = (await create_note(
       vault,
-      { title: "Test Note", body: "Test body" },
+      { owner: TEST_AGENT, title: "Test Note", body: "Test body" },
       await loadVaultConfig(vault)
     )) as { id: string; path: string };
 
     const result = (await assign_domain(vault, {
+      owner: TEST_AGENT,
       id: noteResult.path,
       domain: "invalid-domain",
     })) as { error: string; message: string };
@@ -1005,6 +1023,7 @@ describe("assign_domain", () => {
     const vault = await makeVaultWithDomains(["ai"]);
 
     const result = (await assign_domain(vault, {
+      owner: TEST_AGENT,
       id: "../../../etc/passwd",
       domain: "ai",
     })) as { error: string; message: string };
@@ -1017,6 +1036,7 @@ describe("assign_domain", () => {
     const vault = await makeVaultWithDomains(["ai"]);
 
     const result = (await assign_domain(vault, {
+      owner: TEST_AGENT,
       id: "notes/nonexistent.md",
       domain: "ai",
     })) as { error: string; message: string };
@@ -1032,12 +1052,13 @@ describe("assign_domain", () => {
 
     const noteResult = (await create_note(
       vault,
-      { title: "Test Note", body: "Test body" },
+      { owner: TEST_AGENT, title: "Test Note", body: "Test body" },
       await loadVaultConfig(vault)
     )) as { id: string; path: string };
 
     // Should accept any domain when list is empty
     const result = (await assign_domain(vault, {
+      owner: TEST_AGENT,
       id: noteResult.path,
       domain: "arbitrary-domain",
     })) as { id: string; domain: string; commitSha: string };
@@ -1057,7 +1078,7 @@ describe("assign_domain", () => {
 
     const noteResult = (await create_note(
       vault,
-      { title: "Test Note", body: "Test body" },
+      { owner: TEST_AGENT, title: "Test Note", body: "Test body" },
       await loadVaultConfig(vault)
     )) as { id: string; path: string };
 
@@ -1065,6 +1086,7 @@ describe("assign_domain", () => {
     // explicit `limit: Number.MAX_SAFE_INTEGER` in assign_domain, this
     // call would return INVALID_DOMAIN.
     const result = (await assign_domain(vault, {
+      owner: TEST_AGENT,
       id: noteResult.path,
       domain: "domain-149",
     })) as { id: string; domain: string; commitSha: string };

@@ -165,8 +165,7 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("[schist] MCP server ready (stdio).");
-  console.error("[schist] Memory writes are authorized by validateOwner against SCHIST_AGENT_ID / SCHIST_ALLOWED_AGENTS.");
-  console.error("[schist] Vault writes (create_note, add_connection, assign_domain) do not yet enforce identity — see issue #63.");
+  console.error("[schist] All writes (memory + vault) are authorized by validateOwner against SCHIST_AGENT_ID / SCHIST_ALLOWED_AGENTS.");
 }
 
 main().catch((e) => {

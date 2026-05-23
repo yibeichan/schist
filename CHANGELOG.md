@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING:** Vault-write MCP tools (`create_note`, `add_connection`, `assign_domain`) now require an `owner` argument and validate it via `validateOwner` against `SCHIST_AGENT_ID` / `SCHIST_ALLOWED_AGENTS`, mirroring the memory-write policy from #61. The validated owner is stamped on `source_agent` frontmatter (replacing the hardcoded `"mcp"`) and the git commit message (`— by {owner}` instead of `— via MCP`). Closes #63. Callers must now pass `owner` on every vault write or receive `CONFIG_ERROR` / `VALIDATION_ERROR`; deployments must set `SCHIST_AGENT_ID` or `SCHIST_ALLOWED_AGENTS` in the MCP server's environment.
+
 ## [0.2.0] - 2026-05-23
 
 ### Added
