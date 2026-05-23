@@ -127,7 +127,9 @@ const SYNC_ERROR_SENTINEL = ".schist/last-sync-error";
 /**
  * Write a sync-failure sentinel so agents have a visible trace when a
  * background push silently fails. `get_context` reads this and surfaces it
- * to the caller on the next read.
+ * to the caller on the next read; `readSyncWarning` (below) also surfaces it
+ * on the NEXT write tool's response so write-heavy sessions don't have to
+ * call get_context to notice.
  */
 async function writeSyncError(vaultRoot: string, message: string): Promise<void> {
   try {
@@ -140,19 +142,68 @@ async function writeSyncError(vaultRoot: string, message: string): Promise<void>
   }
 }
 
+/**
+ * Read the sync-failure sentinel WITHOUT clearing it, formatted as a warning
+ * string. Returns undefined if the file is missing, empty, or unreadable.
+ *
+ * Called from successful write-tool responses so an agent in a write-heavy
+ * session (which rarely calls get_context between writes) sees the warning
+ * on the next write rather than discovering the divergence at session end.
+ *
+ * Clearing is left to get_context — it's the explicit "I am syncing with
+ * the world" call and a natural acknowledge point. Repeating the warning
+ * across N writes until then is by design: until the agent acknowledges
+ * via get_context, each write is committing into a vault that's diverging
+ * from hub, and the agent should keep being told.
+ *
+ * Spec context: see #120 — pre-fix, agents accumulated 13+ MCP commits with
+ * silent push failures before noticing the spoke had diverged from hub.
+ */
+async function readSyncWarning(vaultRoot: string): Promise<string | undefined> {
+  try {
+    const sentinelPath = path.join(vaultRoot, SYNC_ERROR_SENTINEL);
+    const errText = (await fs.readFile(sentinelPath, "utf-8")).trim();
+    if (!errText) return undefined;
+    return `Recent background sync failure: ${errText}. Writes may not have reached the hub. Call get_context to acknowledge and clear this warning.`;
+  } catch {
+    // No sentinel — healthy state
+    return undefined;
+  }
+}
+
+/**
+ * Resolves the schist CLI binary to spawn for spoke sync operations.
+ * Defaults to the `schist` console-script (what `pip install` / `uv pip` /
+ * `uv tool install` / `pipx` all produce), with an opt-out for operators
+ * who need to pin a specific installation.
+ *
+ * Why not `python3 -m schist`: under `uv tool install` and `pipx`, the
+ * CLI ships in an isolated venv so the console-script is on PATH but the
+ * `schist` module is NOT importable from the default `python3`. `python3
+ * -m schist` then fails with ModuleNotFoundError and the failure surfaces
+ * silently via the .schist/last-sync-error sentinel — see #120 for the
+ * specific incident that motivated this. The `schist-ingest` ingester
+ * binary at triggerIngestion already uses this pattern; the sync paths
+ * were the holdout.
+ */
+function schistCliBin(): string {
+  return process.env.SCHIST_BIN ?? "schist";
+}
+
 /** Fire-and-forget spoke push after a write. No-op for non-spoke vaults. */
 export function triggerSpokePush(vaultRoot: string): void {
   const spokeConfig = path.join(vaultRoot, ".schist", "spoke.yaml");
   fs.access(spokeConfig).then(() => {
     const child = spawn(
-      "python3",
-      ["-m", "schist", "--vault", vaultRoot, "sync", "push"],
+      schistCliBin(),
+      ["--vault", vaultRoot, "sync", "push"],
       { cwd: vaultRoot, stdio: "ignore", env: process.env, detached: true }
     );
     child.unref();
     child.on("error", (err) => {
-      // spawn error = python3 not on PATH, or permission denied. Silent by
-      // default is a footgun — write a sentinel so the next get_context can
+      // spawn error = schist binary not on PATH, or permission denied.
+      // Silent by default is a footgun — write a sentinel so the next
+      // get_context (or write-tool response — see surfaceSyncWarning) can
       // surface it. Also log for operators watching stderr.
       console.error("[schist] spoke push failed:", err);
       writeSyncError(vaultRoot, `push spawn failed: ${err.message}`);
@@ -180,15 +231,15 @@ export async function maybeSpokePull(vaultRoot: string, timeoutMs = 5000): Promi
   }
   await new Promise<void>((resolve) => {
     const child = spawn(
-      "python3",
-      ["-m", "schist", "--vault", vaultRoot, "sync", "pull"],
+      schistCliBin(),
+      ["--vault", vaultRoot, "sync", "pull"],
       { cwd: vaultRoot, stdio: "ignore", env: process.env, detached: true }
     );
     // `detached: true` puts the child in its own process group. On timeout we
     // must signal the whole group (negative PID) — child.kill() only signals
-    // python3, leaving git-fetch/git-rebase grandchildren alive with a live
-    // .git/index.lock. SIGTERM first, then SIGKILL after a short grace in
-    // case git ignores SIGTERM mid-rebase.
+    // the schist CLI process, leaving git-fetch/git-rebase grandchildren alive
+    // with a live .git/index.lock. SIGTERM first, then SIGKILL after a short
+    // grace in case git ignores SIGTERM mid-rebase.
     const killGroup = (sig: NodeJS.Signals): void => {
       if (child.pid === undefined) return;
       try { process.kill(-child.pid, sig); } catch { /* already dead */ }
@@ -444,7 +495,16 @@ export async function create_note(
     triggerIngestion(vaultRoot);
     triggerSpokePush(vaultRoot);
 
-    return { id: relPath, path: relPath, commitSha: result.commitSha };
+    // Surface any pending sync-failure sentinel from prior writes. Doesn't
+    // capture THIS call's push (fire-and-forget), but catches accumulated
+    // failures so write-heavy sessions don't keep stranding commits.
+    const syncWarning = await readSyncWarning(vaultRoot);
+    return {
+      id: relPath,
+      path: relPath,
+      commitSha: result.commitSha,
+      ...(syncWarning !== undefined ? { syncWarning } : {}),
+    };
   } catch (e: unknown) {
     return normalizeError(e, "GIT_ERROR");
   }
@@ -491,7 +551,14 @@ export async function add_connection(
     triggerIngestion(vaultRoot);
     triggerSpokePush(vaultRoot);
 
-    return { source: args.source, target: args.target, type: args.type, commitSha: result.commitSha };
+    const syncWarning = await readSyncWarning(vaultRoot);
+    return {
+      source: args.source,
+      target: args.target,
+      type: args.type,
+      commitSha: result.commitSha,
+      ...(syncWarning !== undefined ? { syncWarning } : {}),
+    };
   } catch (e: unknown) {
     return normalizeError(e, "GIT_ERROR");
   }
@@ -548,7 +615,13 @@ export async function assign_domain(
     triggerIngestion(vaultRoot);
     triggerSpokePush(vaultRoot);
 
-    return { id: args.id, domain: args.domain, commitSha: result.commitSha };
+    const syncWarning = await readSyncWarning(vaultRoot);
+    return {
+      id: args.id,
+      domain: args.domain,
+      commitSha: result.commitSha,
+      ...(syncWarning !== undefined ? { syncWarning } : {}),
+    };
   } catch (e: unknown) {
     return normalizeError(e, "GIT_ERROR");
   }

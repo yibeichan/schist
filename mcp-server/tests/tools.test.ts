@@ -4,7 +4,7 @@ import * as os from "os";
 import Database from "better-sqlite3";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
-import { loadVaultConfig, create_note, get_context, triggerSpokePush, maybeSpokePull, assign_domain } from "../src/tools.js";
+import { loadVaultConfig, create_note, add_connection, get_context, triggerSpokePush, maybeSpokePull, assign_domain } from "../src/tools.js";
 
 const execFile = promisify(execFileCb);
 
@@ -191,7 +191,7 @@ describe("create_note directory validation", () => {
 // ---------------------------------------------------------------------------
 
 describe("triggerSpokePush", () => {
-  test("spawns python push when spoke.yaml exists", async () => {
+  test("spawns the schist console-script when spoke.yaml exists (#120 regression)", async () => {
     const vault = await makeTempVault();
     await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
     await fs.writeFile(
@@ -199,15 +199,17 @@ describe("triggerSpokePush", () => {
       "hub: file:///nonexistent\nidentity: test\nscope: notes\n"
     );
 
-    // Stub python3 that touches a sentinel file so we can observe invocation.
-    // The fs.access → spawn chain inside triggerSpokePush is microtask-delayed,
-    // so we poll a few times before giving up.
+    // Stub `schist` console-script that captures argv to a sentinel file.
+    // Pre-#120 this stub was named `python3` because the impl spawned
+    // `python3 -m schist`; the rename to `schist` is the actual fix —
+    // `uv tool install` / `pipx` produce the `schist` binary but NOT an
+    // importable `schist` module on the default python3.
     const sentinel = path.join(vault, ".schist", "push-fired");
-    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-py-"));
-    const stub = path.join(stubDir, "python3");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const stub = path.join(stubDir, "schist");
     await fs.writeFile(
       stub,
-      `#!/bin/sh\ntouch "${sentinel}"\n`,
+      `#!/bin/sh\necho "$@" > "${sentinel}"\n`,
       { mode: 0o755 }
     );
 
@@ -216,6 +218,50 @@ describe("triggerSpokePush", () => {
     try {
       triggerSpokePush(vault);
       // spawn is fire-and-forget; poll briefly for the sentinel
+      let fired = false;
+      let argv = "";
+      for (let i = 0; i < 60; i++) {
+        try {
+          argv = await fs.readFile(sentinel, "utf-8");
+          fired = true;
+          break;
+        } catch {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      }
+      expect(fired).toBe(true);
+      // Assert the new argv shape: no `-m schist` prefix; `--vault <path>
+      // sync push` only.
+      expect(argv).toContain("--vault");
+      expect(argv).toContain("sync push");
+      expect(argv).not.toContain("-m schist");
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  test("respects SCHIST_BIN env override", async () => {
+    const vault = await makeTempVault();
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, ".schist", "spoke.yaml"),
+      "hub: file:///nonexistent\nidentity: test\nscope: notes\n"
+    );
+
+    const sentinel = path.join(vault, ".schist", "custom-bin-fired");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-customsch-"));
+    const customStub = path.join(stubDir, "my-pinned-schist");
+    await fs.writeFile(
+      customStub,
+      `#!/bin/sh\ntouch "${sentinel}"\n`,
+      { mode: 0o755 }
+    );
+
+    const origBin = process.env.SCHIST_BIN;
+    process.env.SCHIST_BIN = customStub;
+    try {
+      triggerSpokePush(vault);
       let fired = false;
       for (let i = 0; i < 60; i++) {
         try {
@@ -228,7 +274,8 @@ describe("triggerSpokePush", () => {
       }
       expect(fired).toBe(true);
     } finally {
-      process.env.PATH = origPath;
+      if (origBin === undefined) delete process.env.SCHIST_BIN;
+      else process.env.SCHIST_BIN = origBin;
       await fs.rm(stubDir, { recursive: true, force: true });
     }
   }, 10000);
@@ -257,8 +304,9 @@ describe("maybeSpokePull", () => {
       "hub: file:///nonexistent\nidentity: test\nscope: notes\n"
     );
 
-    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-py-"));
-    const stub = path.join(stubDir, "python3");
+    // Stub schist console-script that hangs — same rename as the push test.
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const stub = path.join(stubDir, "schist");
     await fs.writeFile(stub, "#!/bin/sh\nsleep 10\n", { mode: 0o755 });
 
     const origPath = process.env.PATH;
@@ -309,9 +357,11 @@ describe("sync error sentinel", () => {
       "hub: file:///nonexistent\nidentity: test\nscope: notes\n"
     );
 
-    // Stub python3 that exits nonzero — triggers the 'exit' handler path
-    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-py-"));
-    const stub = path.join(stubDir, "python3");
+    // Stub schist console-script that exits nonzero — triggers the 'exit'
+    // handler path. Pre-#120 this stub was named `python3`; rename matches
+    // the actual binary triggerSpokePush now spawns.
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const stub = path.join(stubDir, "schist");
     await fs.writeFile(stub, "#!/bin/sh\nexit 7\n", { mode: 0o755 });
 
     const origPath = process.env.PATH;
@@ -341,6 +391,118 @@ describe("sync error sentinel", () => {
   }, 10000);
 });
 
+// ---------------------------------------------------------------------------
+// Write-tool sync-warning surfacing (#120)
+//
+// Write tools now read the .schist/last-sync-error sentinel and surface its
+// content as a `syncWarning` field on successful responses. Doesn't clear
+// the sentinel — get_context still owns clearing. The intent: write-heavy
+// sessions (e.g. distillation runs) that rarely call get_context will see
+// the warning on every write, instead of discovering the divergence at
+// session end.
+// ---------------------------------------------------------------------------
+
+describe("write-tool syncWarning surfacing (#120)", () => {
+  test("create_note response includes syncWarning when sentinel exists", async () => {
+    const vault = await makeTempVault();
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, ".schist", "last-sync-error"),
+      "2026-05-22T23:06:22.980Z push exited with code 1\n",
+    );
+
+    const result = (await create_note(
+      vault,
+      { title: "Test sync surfacing", body: "body" },
+      await loadVaultConfig(vault),
+    )) as { id: string; path: string; commitSha: string; syncWarning?: string };
+
+    expect(result.syncWarning).toBeDefined();
+    expect(result.syncWarning).toContain("push exited with code 1");
+    expect(result.syncWarning).toContain("Recent background sync failure");
+
+    // Sentinel is NOT cleared by write tools — get_context still owns that.
+    const sentinelPath = path.join(vault, ".schist", "last-sync-error");
+    const stillExists = await fs.access(sentinelPath).then(() => true).catch(() => false);
+    expect(stillExists).toBe(true);
+  });
+
+  test("create_note response omits syncWarning when sentinel is absent", async () => {
+    const vault = await makeTempVault();
+    const result = (await create_note(
+      vault,
+      { title: "Test no sync warn", body: "body" },
+      await loadVaultConfig(vault),
+    )) as { id: string; syncWarning?: string };
+    expect(result.syncWarning).toBeUndefined();
+  });
+
+  test("add_connection response includes syncWarning when sentinel exists", async () => {
+    const vault = await makeTempVault();
+    // Create a source note for add_connection to attach to.
+    const noteResult = (await create_note(
+      vault,
+      { title: "Source", body: "body" },
+      await loadVaultConfig(vault),
+    )) as { path: string };
+
+    // Plant the sentinel after the create_note above. Ensure .schist exists
+    // since the vault setup may not have created it (only the post-commit
+    // ingest hook does, asynchronously).
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, ".schist", "last-sync-error"),
+      "2026-05-22T23:07:00Z push spawn failed: spawn schist ENOENT\n",
+    );
+
+    const result = (await add_connection(vault, {
+      source: noteResult.path,
+      target: "some-target",
+      type: "related",
+    })) as { source: string; target: string; type: string; commitSha: string; syncWarning?: string };
+
+    expect(result.syncWarning).toBeDefined();
+    expect(result.syncWarning).toContain("push spawn failed");
+  });
+
+  test("assign_domain response includes syncWarning when sentinel exists", async () => {
+    // Seed a vault with a domains table + one note + a fresh sentinel, then
+    // call assign_domain. Mirrors the assign_domain test pattern further down
+    // in this file.
+    const vault = await makeTempVault("\ndomains:\n  - ai\n");
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    const dbPath = path.join(vault, ".schist", "schist.db");
+    await fs.mkdir(path.dirname(dbPath), { recursive: true });
+    const db = new Database(dbPath);
+    db.exec(
+      "CREATE TABLE domains (slug TEXT PRIMARY KEY, label TEXT NOT NULL, description TEXT, parent_slug TEXT REFERENCES domains(slug))",
+    );
+    db.prepare("INSERT INTO domains (slug, label) VALUES (?, ?)").run("ai", "ai");
+    db.close();
+
+    const noteResult = (await create_note(
+      vault,
+      { title: "Domain test", body: "body" },
+      await loadVaultConfig(vault),
+    )) as { path: string };
+
+    // Plant sentinel AFTER the create_note (whose own response we don't care
+    // about here) so the assign_domain response is the one being checked.
+    await fs.writeFile(
+      path.join(vault, ".schist", "last-sync-error"),
+      "2026-05-22T23:08:00Z push exited with code 1\n",
+    );
+
+    const result = (await assign_domain(vault, {
+      id: noteResult.path,
+      domain: "ai",
+    })) as { id: string; domain: string; commitSha: string; syncWarning?: string };
+
+    expect(result.syncWarning).toBeDefined();
+    expect(result.syncWarning).toContain("push exited with code 1");
+  });
+});
+
 describe("get_context wiring", () => {
   test("get_context awaits maybeSpokePull when spoke.yaml present", async () => {
     const vault = await makeTempVault();
@@ -350,13 +512,14 @@ describe("get_context wiring", () => {
       "hub: file:///nonexistent\nidentity: test\nscope: notes\n"
     );
 
-    // Stub python3 that sleeps 500ms then writes a sentinel — if get_context
-    // awaits maybeSpokePull, the pull runs before the SQLite read (which will
-    // fail because there's no DB, but that's caught and doesn't affect the
-    // ordering check).
+    // Stub schist console-script that sleeps 200ms then writes a sentinel —
+    // if get_context awaits maybeSpokePull, the pull runs before the SQLite
+    // read (which will fail because there's no DB, but that's caught and
+    // doesn't affect the ordering check). Pre-#120 the stub was python3;
+    // rename matches the actual binary maybeSpokePull spawns.
     const sentinel = path.join(vault, ".schist", "get-context-pull-fired");
-    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-py-"));
-    const stub = path.join(stubDir, "python3");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const stub = path.join(stubDir, "schist");
     await fs.writeFile(
       stub,
       `#!/bin/sh\nsleep 0.2\ntouch "${sentinel}"\n`,

@@ -49,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP server now lists all tools at `ListTools` time; write access gated at call-time (PR #30)
 
 ### Fixed
+- **`triggerSpokePush` / `maybeSpokePull` now spawn the `schist` console-script** instead of `python3 -m schist` (#120). The `python3 -m schist` form fails silently on hosts where schist is installed via `uv tool install` or `pipx` — both produce the `schist` binary on PATH but install into an isolated venv, so `python3` has no importable `schist` module. Pre-fix this manifested as silent `ModuleNotFoundError` exits during write-heavy sessions: the sentinel `.schist/last-sync-error` recorded each failure but agents never saw the divergence until session end. The console-script approach matches the existing `schist-ingest` pattern at `triggerIngestion`. New `SCHIST_BIN` env var lets operators pin a specific binary path if needed.
+- **Write-tool responses now surface `syncWarning`** when `.schist/last-sync-error` is present (#120). `create_note`, `add_connection`, and `assign_domain` read the sentinel on each successful response and include the failure message — without clearing. `get_context` still owns clearing (its existing behavior). This means a write-heavy session that diverges from hub sees the warning on every write rather than discovering the divergence at session end. The warning text points at `get_context` as the acknowledge path.
 - setuptools 82+ flat-layout collision with local `cli/hooks/` directory (PR #28)
 - Viewer `normalize_endpoint` stripping `.md` from note paths (PR #27)
 - MCP `triggerIngestion` path after ingestion move (PR #31, second commit)
