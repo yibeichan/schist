@@ -156,6 +156,61 @@ describe("#63 vault-write identity enforcement", () => {
       })) as { error: string; message: string };
       expect(result.error).toBe("VALIDATION_ERROR");
     });
+
+    test("empty-string owner is rejected (single-agent mode)", async () => {
+      process.env.SCHIST_AGENT_ID = "octopus";
+      const vault = await makeTempVault();
+      const config = await loadVaultConfig(vault);
+      const result = (await create_note(
+        vault,
+        { owner: "", title: "X", body: "y" },
+        config,
+      )) as { error: string };
+      expect(result.error).toBe("VALIDATION_ERROR");
+    });
+
+    test("whitespace-only owner is rejected (allowlist mode)", async () => {
+      // allowedAgents.split(",").map(trim).filter(Boolean) drops empty entries,
+      // so a whitespace-only owner is never in the allowlist.
+      process.env.SCHIST_ALLOWED_AGENTS = "octopus,atwood";
+      const vault = await makeTempVault();
+      const config = await loadVaultConfig(vault);
+      const result = (await create_note(
+        vault,
+        { owner: "   ", title: "X", body: "y" },
+        config,
+      )) as { error: string };
+      expect(result.error).toBe("VALIDATION_ERROR");
+    });
+
+    test("padded owner is accepted; canonical form stamped on both frontmatter and commit", async () => {
+      // End-to-end of the #131 review-time trim-symmetry fix: caller sends
+      // "atwood " (trailing space), validateOwner canonicalizes to "atwood",
+      // and both source_agent and the commit subject store "atwood" (NOT
+      // "atwood "). Without canonicalization the agent's writes would
+      // silently split across two distinct owner keys in the side tables.
+      process.env.SCHIST_ALLOWED_AGENTS = "octopus,atwood";
+      const vault = await makeTempVault();
+      const config = await loadVaultConfig(vault);
+      const result = (await create_note(
+        vault,
+        { owner: "atwood ", title: "Padded owner", body: "body" },
+        config,
+      )) as { path: string; commitSha: string };
+      expect(result.commitSha).toBeDefined();
+
+      const content = await fs.readFile(path.join(vault, result.path), "utf-8");
+      // The YAML line must be exactly `source_agent: atwood` with no inner
+      // whitespace bracketed by the trailing space the caller sent. The
+      // `$` in multiline mode matches end-of-line, so trailing-space-then-
+      // newline would fail the assertion.
+      expect(content).toMatch(/^source_agent: atwood$/m);
+
+      const { stdout } = await execFile("git", ["log", "-1", "--format=%s"], { cwd: vault });
+      // git's `--format=%s` strips trailing newline but not interior ones;
+      // an end-anchored `— by atwood` proves no padding leaked through.
+      expect(stdout.trim()).toMatch(/— by atwood$/);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -180,6 +235,35 @@ describe("#63 vault-write identity enforcement", () => {
       // Commit message includes the agent — git log subject of HEAD.
       const { stdout } = await execFile("git", ["log", "-1", "--format=%s"], { cwd: vault });
       expect(stdout.trim()).toMatch(/^feat\(schist\): write Note by atwood — by atwood$/);
+    });
+
+    test("source_agent frontmatter matches the agent in the commit subject", async () => {
+      // Defense-in-depth: validateOwner currently demands exact env match,
+      // so the value stamped on `source_agent: <owner>` and the value
+      // following "— by " in the commit subject MUST be identical. If a
+      // future refactor weakens validateOwner (e.g. case-insensitive match,
+      // trim-on-accept), this test fires before silent attribution drift
+      // makes it into a release.
+      process.env.SCHIST_ALLOWED_AGENTS = "octopus,atwood";
+      const vault = await makeTempVault();
+      const config = await loadVaultConfig(vault);
+      const result = (await create_note(
+        vault,
+        { owner: "atwood", title: "Sync check", body: "body" },
+        config,
+      )) as { path: string };
+
+      const content = await fs.readFile(path.join(vault, result.path), "utf-8");
+      const sourceAgentMatch = content.match(/^source_agent:\s*(.+)$/m);
+      expect(sourceAgentMatch).not.toBeNull();
+      const sourceAgent = sourceAgentMatch![1].trim();
+
+      const { stdout } = await execFile("git", ["log", "-1", "--format=%s"], { cwd: vault });
+      const commitMatch = stdout.trim().match(/— by (.+)$/);
+      expect(commitMatch).not.toBeNull();
+      const commitOwner = commitMatch![1].trim();
+
+      expect(sourceAgent).toBe(commitOwner);
     });
 
     test("create_note rejects an owner outside the allowlist", async () => {

@@ -119,4 +119,45 @@ describe("validateOwner", () => {
       );
     });
   });
+
+  describe("returns canonical (trimmed) owner — #131 trim symmetry", () => {
+    // Pre-#131 the allowlist parser trimmed entries but the includes-check
+    // ran against the raw owner. So `SCHIST_ALLOWED_AGENTS="atwood,octopus"`
+    // with caller-sent `owner="atwood "` would reject with VALIDATION_ERROR
+    // even though the operator intended atwood==atwood. Both halves are
+    // now canonicalized.
+
+    it("accepts owner with leading/trailing whitespace in allowlist mode", () => {
+      process.env.SCHIST_ALLOWED_AGENTS = "octopus,atwood";
+      expect(() => validateOwner("atwood ")).not.toThrow();
+      expect(() => validateOwner(" atwood")).not.toThrow();
+      expect(() => validateOwner("\tatwood\n")).not.toThrow();
+    });
+
+    it("accepts owner with leading/trailing whitespace in legacy mode", () => {
+      process.env.SCHIST_AGENT_ID = "sansan";
+      expect(() => validateOwner(" sansan")).not.toThrow();
+      expect(() => validateOwner("sansan\n")).not.toThrow();
+    });
+
+    it("returns the canonical trimmed string", () => {
+      process.env.SCHIST_ALLOWED_AGENTS = "octopus,atwood";
+      expect(validateOwner("atwood ")).toBe("atwood");
+      expect(validateOwner(" octopus\t")).toBe("octopus");
+    });
+
+    it("returns the same string when no whitespace is present", () => {
+      process.env.SCHIST_AGENT_ID = "sansan";
+      expect(validateOwner("sansan")).toBe("sansan");
+    });
+
+    it("still rejects whitespace-only owner (canonical form is empty)", () => {
+      process.env.SCHIST_ALLOWED_AGENTS = "octopus,atwood";
+      expectThrow(
+        () => validateOwner("   "),
+        "VALIDATION_ERROR",
+        /not in SCHIST_ALLOWED_AGENTS/
+      );
+    });
+  });
 });

@@ -62,4 +62,20 @@ describe("listAllTools — unconditional tool exposure", () => {
     const names = listAllTools(testConfig()).map((t) => t.name);
     expect(names).not.toContain("request_capabilities");
   });
+
+  test("vault-write tools mark `owner` as required in inputSchema (#63)", () => {
+    // Regression guard: validateOwner enforces identity at the data layer,
+    // but agents discover required fields from the inputSchema. If `owner`
+    // silently drops out of `required[]` in a future refactor, agents
+    // would stop passing it and every call would fail at runtime with
+    // CONFIG_ERROR / VALIDATION_ERROR — wasting tokens on an avoidable
+    // round-trip. This test catches that drift at build time.
+    const tools = listAllTools(testConfig());
+    for (const name of ["create_note", "add_connection", "assign_domain"]) {
+      const tool = tools.find((t) => t.name === name);
+      expect(tool).toBeDefined();
+      const required = (tool!.inputSchema as { required?: string[] }).required ?? [];
+      expect(required).toContain("owner");
+    }
+  });
 });

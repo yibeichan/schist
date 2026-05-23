@@ -47,7 +47,22 @@ export function resolveActiveOwner(perCallOwner?: string): string {
   );
 }
 
-export function validateOwner(owner: string): void {
+/**
+ * Returns the canonical (whitespace-trimmed) owner string when validation
+ * passes. Callers should assign the return value back so the canonical form
+ * flows to downstream stamps (frontmatter `source_agent`, git commit subject,
+ * `agent_memory.owner` column) — otherwise a caller passing `"atwood "`
+ * would be accepted (the allowlist is trimmed at parse time) but store
+ * `"atwood "` in those side tables, splitting per-agent state across two
+ * keys that differ only by trailing whitespace. Pre-#131 the asymmetry
+ * went the other way: allowlist trimmed, owner not, so `"atwood "` was
+ * rejected. Both halves of that footgun are closed by canonicalizing here.
+ */
+export function validateOwner(owner: string): string {
+  // Coerce non-string inputs ('' if undefined / null) so the comparisons
+  // below behave predictably. The error messages still reflect the
+  // raw value the caller sent for diagnostic clarity.
+  const canonical = (typeof owner === "string" ? owner : "").trim();
   const allowedAgents = process.env.SCHIST_ALLOWED_AGENTS;
   if (allowedAgents !== undefined) {
     const allowed = allowedAgents
@@ -62,7 +77,7 @@ export function validateOwner(owner: string): void {
         { error: "CONFIG_ERROR" }
       );
     }
-    if (!allowed.includes(owner)) {
+    if (!allowed.includes(canonical)) {
       throw Object.assign(
         new Error(
           `Owner '${owner}' not in SCHIST_ALLOWED_AGENTS '${allowedAgents}'`
@@ -70,7 +85,7 @@ export function validateOwner(owner: string): void {
         { error: "VALIDATION_ERROR" }
       );
     }
-    return;
+    return canonical;
   }
   const agentId = process.env.SCHIST_AGENT_ID;
   if (!agentId) {
@@ -81,10 +96,11 @@ export function validateOwner(owner: string): void {
       { error: "CONFIG_ERROR" }
     );
   }
-  if (agentId !== owner) {
+  if (agentId !== canonical) {
     throw Object.assign(
       new Error(`Owner '${owner}' does not match SCHIST_AGENT_ID '${agentId}'`),
       { error: "VALIDATION_ERROR" }
     );
   }
+  return canonical;
 }
