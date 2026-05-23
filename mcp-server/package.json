@@ -1,6 +1,6 @@
 {
   "name": "@schist/mcp-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server for schist: agent-first knowledge graph with git + SQLite",
   "author": "schist contributors",
   "license": "MIT",
