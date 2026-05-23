@@ -97,7 +97,7 @@ describe("search_memory tool — cursor decoding", () => {
     // different queryHash, so binding must reject.
     const r = await search_memory(VAULT_ROOT, { cursor: c } as never);
     expect(r).toEqual({
-      error: "CURSOR_INVALID_SIGNATURE",
+      error: "CURSOR_QUERY_MISMATCH",
       message: expect.stringContaining("different query"),
     });
   });
@@ -132,7 +132,7 @@ describe("search_memory tool — identical-query refusal", () => {
     const args = { owner: "sansan", limit: 3 };
     const ch = canonicalizeQueryHash(args, "");
     if (!ch.ok) throw new Error("canonicalize failed in test setup");
-    recordIssued({ tool: "search_memory", queryHash: ch.queryHash, owner: "", verboseEnabled: false });
+    recordIssued({ tool: "search_memory", queryHash: ch.queryHash, owner: "", vaultRoot: VAULT_ROOT, verboseEnabled: false });
     // Second identical call (no cursor) must be refused
     const r = await search_memory(VAULT_ROOT, args as never);
     expect(r).toEqual({
@@ -148,7 +148,7 @@ describe("search_memory tool — identical-query refusal", () => {
     // Record under owner "yibei"
     const ch = canonicalizeQueryHash(args, "yibei");
     if (!ch.ok) throw new Error("canonicalize failed in test setup");
-    recordIssued({ tool: "search_memory", queryHash: ch.queryHash, owner: "yibei", verboseEnabled: false });
+    recordIssued({ tool: "search_memory", queryHash: ch.queryHash, owner: "yibei", vaultRoot: VAULT_ROOT, verboseEnabled: false });
     // Current call's activeOwner is "" (SCHIST_AGENT_ID not set) — different
     // namespace, no refusal expected. Both queryHash AND owner differ in the
     // LRU key, so checkRefusal returns refuse:false.
@@ -163,7 +163,7 @@ describe("search_memory tool — identical-query refusal", () => {
     const args = { owner: "sansan", limit: 3 };
     const ch = canonicalizeQueryHash(args, "");
     if (!ch.ok) throw new Error("canonicalize failed in test setup");
-    recordIssued({ tool: "search_memory", queryHash: ch.queryHash, owner: "", verboseEnabled: false });
+    recordIssued({ tool: "search_memory", queryHash: ch.queryHash, owner: "", vaultRoot: VAULT_ROOT, verboseEnabled: false });
     // Now retry the identical query with verbose newly set
     const r = await search_memory(VAULT_ROOT, {
       ...args,
@@ -180,7 +180,7 @@ describe("search_memory tool — identical-query refusal", () => {
     const ch = canonicalizeQueryHash(args, "");
     if (!ch.ok) throw new Error("canonicalize failed in test setup");
     // Record with verboseEnabled=true (prior verbose call)
-    recordIssued({ tool: "search_memory", queryHash: ch.queryHash, owner: "", verboseEnabled: true });
+    recordIssued({ tool: "search_memory", queryHash: ch.queryHash, owner: "", vaultRoot: VAULT_ROOT, verboseEnabled: true });
     const r = await search_memory(VAULT_ROOT, {
       ...args,
       verbose: "user requested full content for review",
@@ -197,7 +197,7 @@ describe("search_memory tool — identical-query refusal", () => {
     const args = { owner: "sansan", limit: 3 };
     const ch = canonicalizeQueryHash(args, "");
     if (!ch.ok) throw new Error("canonicalize failed in test setup");
-    recordIssued({ tool: "search_memory", queryHash: ch.queryHash, owner: "", verboseEnabled: true });
+    recordIssued({ tool: "search_memory", queryHash: ch.queryHash, owner: "", vaultRoot: VAULT_ROOT, verboseEnabled: true });
     // Current call has NO verbose — downgrade should still refuse
     const r = await search_memory(VAULT_ROOT, args as never);
     expect(r).toEqual({

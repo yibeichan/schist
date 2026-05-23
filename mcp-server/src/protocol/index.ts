@@ -4,6 +4,7 @@
 export {
   CURSOR_TTL_SECONDS,
   CURSOR_LRU_SIZE,
+  CURSOR_MAX_LENGTH,
   canonicalizeQueryHash,
   issueCursor,
   decodeCursor,

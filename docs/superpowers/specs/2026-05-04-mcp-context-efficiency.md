@@ -136,7 +136,23 @@ their order — array element ordering is part of the query identity).
 ### Server-side identical-query refusal
 
 When a tool returns a cursor (results were capped), the server stores
-`(tool, queryHash, owner, issuedAt)` in an in-memory LRU (size 256).
+`(tool, queryHash, owner, vaultRoot, issuedAt)` in an in-memory LRU (size 256).
+
+**Carve-out — `recordIssued` only fires on `hasMore` (#114):** an identical
+query whose results fit within the requested `limit` (no cursor returned)
+does NOT populate the LRU, so a subsequent identical call is *not* refused.
+Rationale: refusal exists to prevent blind-retry context burn on capped
+results; a fully-served query has no next page worth pointing the agent at,
+and refusing identical follow-up reads would prevent legitimate "let me check
+again" patterns with no UX benefit. This is intentional and applies uniformly
+across all 5 cursor-adopting handlers (search_notes, search_memory,
+query_graph, list_concepts, list_domains).
+
+**Key includes `vaultRoot` (#113):** so an MCP-server process serving
+multiple vaults (or a future per-call vault override) doesn't see one
+vault's refusal block another vault's identical query. Single-vault-per-process
+deployments see no behavioral change.
+
 On a subsequent call:
 
 | Condition | Behavior |

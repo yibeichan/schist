@@ -66,6 +66,20 @@ async function main() {
   console.error(`[schist] Vault: ${vaultRoot}`);
   console.error(`[schist] Config: ${config.name}`);
 
+  // #110: warn once at startup when neither SCHIST_AGENT_NAME nor
+  // SCHIST_AGENT_ID is set. The cursor-protocol refusal LRU keys on
+  // `(tool, queryHash, owner, vaultRoot)`; with no agent identity the
+  // owner segment collapses to "" and every anonymous caller in this
+  // process shares one refusal bucket — fine for single-user dev, but
+  // a footgun in multi-tenant (e.g. OpenClaw) shared-MCP deployments.
+  if (!process.env.SCHIST_AGENT_NAME && !process.env.SCHIST_AGENT_ID) {
+    console.error(
+      "[schist] WARN: neither SCHIST_AGENT_NAME nor SCHIST_AGENT_ID is set. " +
+      "Cursor-refusal isolation will collapse to a shared anonymous bucket. " +
+      "Set one (NAME for human-readable; ID for stable identity in multi-agent setups)."
+    );
+  }
+
   const server = new Server(
     { name: "schist", version: "0.1.0" },
     { capabilities: { tools: {} } }

@@ -117,7 +117,7 @@ describe("list_concepts tool — cursor decoding", () => {
     const c = issueCursor({ tool: "list_concepts", queryHash: "0".repeat(64), offset: 2 });
     const r = await list_concepts(vaultRoot, { cursor: c });
     expect(r).toEqual({
-      error: "CURSOR_INVALID_SIGNATURE",
+      error: "CURSOR_QUERY_MISMATCH",
       message: expect.stringContaining("different query"),
     });
   });
@@ -150,7 +150,7 @@ describe("list_concepts tool — identical-query refusal", () => {
     const args = { limit: 3 };
     const ch = canonicalizeQueryHash(args, "");
     if (!ch.ok) throw new Error("canonicalize failed in test setup");
-    recordIssued({ tool: "list_concepts", queryHash: ch.queryHash, owner: "", verboseEnabled: false });
+    recordIssued({ tool: "list_concepts", queryHash: ch.queryHash, owner: "", vaultRoot, verboseEnabled: false });
     const r = await list_concepts(vaultRoot, args);
     expect(r).toEqual({
       error: "CURSOR_REQUIRED",
@@ -167,7 +167,7 @@ describe("list_concepts tool — identical-query refusal", () => {
     const args = { limit: 3 };
     const ch = canonicalizeQueryHash(args, "yibei");
     if (!ch.ok) throw new Error("canonicalize failed in test setup");
-    recordIssued({ tool: "list_concepts", queryHash: ch.queryHash, owner: "yibei", verboseEnabled: false });
+    recordIssued({ tool: "list_concepts", queryHash: ch.queryHash, owner: "yibei", vaultRoot, verboseEnabled: false });
     const r = await list_concepts(vaultRoot, args);
     expect(r).toHaveProperty("concepts");
     expect(r).not.toHaveProperty("error");
@@ -255,6 +255,34 @@ describe("list_concepts tool — pagination + cursor issuance", () => {
     if (!("concepts" in r)) throw new Error("expected concepts");
     expect(r.concepts.length).toBe(50);
     expect(r.cursor).toBeDefined();
+  });
+
+  it("rejects non-numeric limit (string) — validateLimit defense (#108)", async () => {
+    await seed(vaultRoot, 60);
+    // Caller bypassed the JSON-schema layer and passed a string. Pre-#108
+    // this flowed into Math.min with implicit coercion and corrupted the
+    // offset math; post-#108 validateLimit treats non-number as not-a-number
+    // and falls back to default 50.
+    const r = await list_concepts(vaultRoot, { limit: "50" as unknown as number });
+    if (!("concepts" in r)) throw new Error(`unexpected error: ${JSON.stringify(r)}`);
+    expect(r.concepts.length).toBe(50);
+  });
+
+  it("truncates fractional limit (Math.trunc) — validateLimit (#108)", async () => {
+    await seed(vaultRoot, 60);
+    const r = await list_concepts(vaultRoot, { limit: 12.7 });
+    if (!("concepts" in r)) throw new Error("expected concepts");
+    // 12.7 → truncated to 12 (NOT rounded to 13)
+    expect(r.concepts.length).toBe(12);
+  });
+
+  it("rejects NaN at canonicalize (before validateLimit) — INVALID_ARG (#108)", async () => {
+    await seed(vaultRoot, 60);
+    // NaN is caught by canonicalizeQueryHash BEFORE reaching validateLimit;
+    // the handler returns INVALID_ARG, not a fallback default. validateLimit
+    // is defense-in-depth — the canonicalize gate is the first line.
+    const r = await list_concepts(vaultRoot, { limit: NaN });
+    expect(r).toEqual({ error: "INVALID_ARG", message: expect.stringContaining("non-finite") });
   });
 
   it("returns empty concepts + no cursor when no rows match", async () => {

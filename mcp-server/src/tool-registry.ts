@@ -28,7 +28,7 @@ export function makeReadTools(config: VaultConfig) {
         type: "object" as const,
         properties: {
           query: { type: "string" },
-          limit: { type: "number", description: "Default 20, capped at 100." },
+          limit: { type: "integer", minimum: 1, maximum: 100, description: "Default 20, capped at 100." },
           status: { type: "string", enum: config.statuses },
           tags: { type: "array", items: { type: "string" } },
           scope: { type: "string", description: 'Filter by scope. Use "inherit" to search agent default scope + global.' },
@@ -54,7 +54,7 @@ export function makeMemoryReadTools(_config: VaultConfig) {
           entry_type: { type: "string", enum: ["decision", "lesson", "blocker", "completion", "observation"] },
           date_from: { type: "string" },
           date_to: { type: "string" },
-          limit: { type: "number", description: "Default 50, capped at 200." },
+          limit: { type: "integer", minimum: 1, maximum: 200, description: "Default 50, capped at 200." },
           cursor: { type: "string", description: "Opaque pagination cursor returned by a prior call. Echo verbatim; do not modify." },
           verbose: { type: "string", description: "Reason (≥12 Unicode code points after trim) gating full-content return. Logged to server stderr for audit." },
         },
@@ -75,7 +75,7 @@ export function makeMemoryReadTools(_config: VaultConfig) {
       inputSchema: {
         type: "object" as const,
         properties: {
-          limit: { type: "number", description: "Default 100, capped at 500." },
+          limit: { type: "integer", minimum: 1, maximum: 500, description: "Default 100, capped at 500." },
           cursor: { type: "string", description: "Opaque pagination cursor returned by a prior call. Echo verbatim; do not modify." },
         },
       },
@@ -222,7 +222,7 @@ export function makeWriteTools(config: VaultConfig) {
         properties: {
           tags: { type: "array", items: { type: "string" } },
           search: { type: "string" },
-          limit: { type: "number", description: "Default 50, capped at 200." },
+          limit: { type: "integer", minimum: 1, maximum: 200, description: "Default 50, capped at 200." },
           cursor: { type: "string", description: "Opaque pagination cursor returned by a prior call. Echo verbatim; do not modify." },
         },
       },
@@ -235,7 +235,7 @@ export function makeWriteTools(config: VaultConfig) {
         properties: {
           sql: { type: "string" },
           params: { type: "array", items: {} },
-          limit: { type: "number", description: "Outer LIMIT applied by the server wrap. Default 100, capped at 1000. This is in addition to any LIMIT in your SQL." },
+          limit: { type: "integer", minimum: 1, maximum: 1000, description: "Outer LIMIT applied by the server wrap. Default 100, capped at 1000. This is in addition to any LIMIT in your SQL." },
           cursor: { type: "string", description: "Opaque pagination cursor returned by a prior call. Echo verbatim; do not modify." },
         },
         required: ["sql"],
