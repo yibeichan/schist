@@ -165,8 +165,14 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("[schist] MCP server ready (stdio).");
-  console.error("[schist] Memory writes are authorized by validateOwner against SCHIST_AGENT_ID / SCHIST_ALLOWED_AGENTS.");
-  console.error("[schist] Vault writes (create_note, add_connection, assign_domain) do not yet enforce identity — see issue #63.");
+  console.error("[schist] All writes (memory + vault) are authorized by validateOwner against SCHIST_AGENT_ID / SCHIST_ALLOWED_AGENTS.");
+  // Loud startup signal when no identity env is set: every write tool will
+  // return CONFIG_ERROR on the first call, but operators upgrading from a
+  // version that didn't gate vault writes would otherwise only discover the
+  // breakage from a downstream tool failure. See PR #131 / #63.
+  if (process.env.SCHIST_AGENT_ID === undefined && process.env.SCHIST_ALLOWED_AGENTS === undefined) {
+    console.error("[schist] WARNING: neither SCHIST_AGENT_ID nor SCHIST_ALLOWED_AGENTS is set — all write tools will return CONFIG_ERROR. Set one of these env vars in your MCP server config.");
+  }
 }
 
 main().catch((e) => {

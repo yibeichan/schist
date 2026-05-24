@@ -163,6 +163,7 @@ export function makeWriteTools(config: VaultConfig) {
       inputSchema: {
         type: "object" as const,
         properties: {
+          owner: { type: "string", description: "Agent identity. Required; validated against SCHIST_ALLOWED_AGENTS or SCHIST_AGENT_ID. Stamped on the note's source_agent frontmatter and the git commit message." },
           title: { type: "string" },
           body: { type: "string" },
           tags: { type: "array", items: { type: "string" } },
@@ -185,7 +186,7 @@ export function makeWriteTools(config: VaultConfig) {
             enum: config.directories,
           },
         },
-        required: ["title", "body"],
+        required: ["owner", "title", "body"],
       },
     },
     {
@@ -194,12 +195,13 @@ export function makeWriteTools(config: VaultConfig) {
       inputSchema: {
         type: "object" as const,
         properties: {
+          owner: { type: "string", description: "Agent identity. Required; validated against SCHIST_ALLOWED_AGENTS or SCHIST_AGENT_ID. Stamped on the git commit message." },
           source: { type: "string" },
           target: { type: "string" },
           type: { type: "string", enum: config.connectionTypes },
           context: { type: "string" },
         },
-        required: ["source", "target", "type"],
+        required: ["owner", "source", "target", "type"],
       },
     },
     {
@@ -208,10 +210,11 @@ export function makeWriteTools(config: VaultConfig) {
       inputSchema: {
         type: "object" as const,
         properties: {
+          owner: { type: "string", description: "Agent identity. Required; validated against SCHIST_ALLOWED_AGENTS or SCHIST_AGENT_ID. Stamped on the git commit message." },
           id: { type: "string", description: "Note ID (relative path)" },
           domain: { type: "string", description: "Domain slug from vault.yaml domains list" },
         },
-        required: ["id", "domain"],
+        required: ["owner", "id", "domain"],
       },
     },
     {
@@ -253,9 +256,10 @@ export function makeWriteTools(config: VaultConfig) {
  *   - Memory writes (add_memory, set_agent_state, delete_agent_state,
  *     add_concept_alias) call `validateOwner` (see `agent-identity.ts`)
  *     against the configured SCHIST_AGENT_ID / SCHIST_ALLOWED_AGENTS.
- *   - Vault writes (create_note, add_connection, assign_domain) do not
- *     yet enforce identity — every commit attributes to source_agent: "mcp"
- *     regardless of caller. Tracked as issue #63.
+ *   - Vault writes (create_note, add_connection, assign_domain) call the
+ *     same `validateOwner` (closed by #63): each accepts a required
+ *     `owner` arg, stamped onto note frontmatter (`source_agent`) and the
+ *     git commit message.
  */
 export function listAllTools(config: VaultConfig) {
   return [

@@ -135,11 +135,27 @@ async function withWriteLock(
   }
 }
 
+/**
+ * Commit-message attribution: `— by {owner}` when `owner` is provided (the
+ * normal MCP path, since tools.ts requires identity per #63), otherwise
+ * `— via MCP` for callers that haven't been wired through the identity
+ * gate yet. Newlines and excessive whitespace in the owner are stripped
+ * for the same reason as commit titles — the value flows into a single
+ * git `-m` line via execFile, so meta-character injection isn't possible,
+ * but linebreaks would still produce multi-paragraph commits.
+ */
+function attribution(owner: string | undefined): string {
+  if (!owner) return "via MCP";
+  const cleaned = owner.replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
+  return cleaned.length > 0 ? `by ${cleaned}` : "via MCP";
+}
+
 export async function writeNote(
   vaultRoot: string,
   relPath: string,
   content: string,
-  commitTitle?: string
+  commitTitle?: string,
+  owner?: string
 ): Promise<WriteResult> {
   assertPathSafe(vaultRoot, relPath);
   // Prefer the caller-supplied title — gray-matter folds long or special-char
@@ -151,7 +167,7 @@ export async function writeNote(
   return withWriteLock(
     vaultRoot,
     relPath,
-    `feat(schist): write ${title} — via MCP`,
+    `feat(schist): write ${title} — ${attribution(owner)}`,
     async (absPath) => {
       await fs.writeFile(absPath, content, "utf-8");
     }
@@ -161,13 +177,14 @@ export async function writeNote(
 export async function appendToNote(
   vaultRoot: string,
   relPath: string,
-  addition: string
+  addition: string,
+  owner?: string
 ): Promise<WriteResult> {
   assertPathSafe(vaultRoot, relPath);
   return withWriteLock(
     vaultRoot,
     relPath,
-    `feat(schist): append to ${sanitizeCommitTitle(relPath)} — via MCP`,
+    `feat(schist): append to ${sanitizeCommitTitle(relPath)} — ${attribution(owner)}`,
     async (absPath) => {
       let existing = "";
       try {

@@ -533,6 +533,7 @@ export async function get_note(
 export async function create_note(
   vaultRoot: string,
   args: {
+    owner: string;
     title: string;
     body: string;
     tags?: string[];
@@ -544,6 +545,12 @@ export async function create_note(
   config: VaultConfig
 ): Promise<unknown> {
   try {
+    // Identity gate (#63): validate before any path / config checks so an
+    // unauthorized caller can't enumerate vault config via error messages.
+    // Reassign to the canonicalized owner so the trimmed form flows to
+    // both source_agent and the commit subject (avoids divergence when
+    // the caller sends e.g. "atwood ").
+    const owner = validateOwner(args.owner);
     const directory = args.directory ?? "notes";
     if (directory.includes("..") || path.isAbsolute(directory)) {
       return {
@@ -600,11 +607,11 @@ export async function create_note(
       tags: args.tags ?? [],
       concepts: args.concepts ?? [],
       status: args.status ?? "draft",
-      source_agent: "mcp",
+      source_agent: owner,
     };
 
     const noteContent = buildNote(metadata, args.body, args.connections);
-    const result = await writeNote(vaultRoot, relPath, noteContent, args.title);
+    const result = await writeNote(vaultRoot, relPath, noteContent, args.title, owner);
 
     // Always-fire even on dedup'd writes: triggerSpokePush is the SOLE spoke→hub
     // mechanism (no git hook handles it), so gating it on `committed` would
@@ -635,9 +642,12 @@ export async function create_note(
 
 export async function add_connection(
   vaultRoot: string,
-  args: { source: string; target: string; type: string; context?: string }
+  args: { owner: string; source: string; target: string; type: string; context?: string }
 ): Promise<unknown> {
   try {
+    // Identity gate (#63): same ordering as create_note. Reassign to the
+    // canonicalized owner for downstream stamps.
+    const owner = validateOwner(args.owner);
     const filePath = path.join(vaultRoot, args.source);
     const absVaultRoot = path.resolve(vaultRoot);
     const absFilePath = path.resolve(filePath);
@@ -668,7 +678,8 @@ export async function add_connection(
       vaultRoot,
       args.source,
       newContent,
-      `connection ${args.type} → ${args.target} on ${args.source}`
+      `connection ${args.type} → ${args.target} on ${args.source}`,
+      owner
     );
 
     triggerIngestion(vaultRoot);
@@ -691,9 +702,12 @@ export async function add_connection(
 
 export async function assign_domain(
   vaultRoot: string,
-  args: { id: string; domain: string }
+  args: { owner: string; id: string; domain: string }
 ): Promise<unknown> {
   try {
+    // Identity gate (#63): same ordering as create_note. Reassign to the
+    // canonicalized owner for downstream stamps.
+    const owner = validateOwner(args.owner);
     const filePath = path.join(vaultRoot, args.id);
     const absVaultRoot = path.resolve(vaultRoot);
     const absFilePath = path.resolve(filePath);
@@ -734,7 +748,8 @@ export async function assign_domain(
       vaultRoot,
       args.id,
       newContent,
-      `assign domain ${args.domain} to ${args.id}`
+      `assign domain ${args.domain} to ${args.id}`,
+      owner
     );
 
     triggerIngestion(vaultRoot);
@@ -1312,8 +1327,12 @@ export async function add_memory(
   }
 ): Promise<unknown> {
   try {
-    validateOwner(args.owner);
-    return sqliteReader.addMemory(args);
+    // Canonicalize so `agent_memory.owner` stores the trimmed form — pre-#131
+    // a caller passing "atwood " would have been silently accepted (allowlist
+    // already trimmed at parse time) and stored under a key that diverges
+    // from every "atwood" write by the same agent.
+    const owner = validateOwner(args.owner);
+    return sqliteReader.addMemory({ ...args, owner });
   } catch (e: unknown) {
     return normalizeError(e, "VALIDATION_ERROR");
   }
@@ -1324,8 +1343,8 @@ export async function set_agent_state(
   args: { key: string; value: unknown; owner: string; ttl_hours?: number }
 ): Promise<unknown> {
   try {
-    validateOwner(args.owner);
-    return sqliteReader.setAgentState(args.key, args.value, args.owner, args.ttl_hours);
+    const owner = validateOwner(args.owner);
+    return sqliteReader.setAgentState(args.key, args.value, owner, args.ttl_hours);
   } catch (e: unknown) {
     return normalizeError(e, "VALIDATION_ERROR");
   }
@@ -1336,8 +1355,8 @@ export async function delete_agent_state(
   args: { key: string; owner: string }
 ): Promise<unknown> {
   try {
-    validateOwner(args.owner);
-    return sqliteReader.deleteAgentState(args.key, args.owner);
+    const owner = validateOwner(args.owner);
+    return sqliteReader.deleteAgentState(args.key, owner);
   } catch (e: unknown) {
     return normalizeError(e, "VALIDATION_ERROR");
   }
@@ -1348,8 +1367,8 @@ export async function add_concept_alias(
   args: { duplicate_slug: string; canonical_slug: string; reason?: string; created_by: string }
 ): Promise<unknown> {
   try {
-    validateOwner(args.created_by);
-    return sqliteReader.addConceptAlias(vaultRoot, args.duplicate_slug, args.canonical_slug, args.reason, args.created_by);
+    const createdBy = validateOwner(args.created_by);
+    return sqliteReader.addConceptAlias(vaultRoot, args.duplicate_slug, args.canonical_slug, args.reason, createdBy);
   } catch (e: unknown) {
     return normalizeError(e, "VALIDATION_ERROR");
   }

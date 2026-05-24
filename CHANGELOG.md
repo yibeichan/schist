@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING:** Vault-write MCP tools (`create_note`, `add_connection`, `assign_domain`) now require an `owner` argument and validate it via `validateOwner` against `SCHIST_AGENT_ID` / `SCHIST_ALLOWED_AGENTS`, mirroring the memory-write policy from #61. The validated owner is stamped on `source_agent` frontmatter (replacing the hardcoded `"mcp"`) and the git commit message (`— by {owner}` instead of `— via MCP`). Closes #63. Callers must now pass `owner` on every vault write or receive `CONFIG_ERROR` / `VALIDATION_ERROR`; deployments must set `SCHIST_AGENT_ID` or `SCHIST_ALLOWED_AGENTS` in the MCP server's environment.
+- **Bug fix:** `validateOwner` now canonicalizes the incoming owner by trimming whitespace before comparing against `SCHIST_ALLOWED_AGENTS` (which is itself trimmed at parse time). Pre-fix the trim was asymmetric — a caller sending `owner="atwood "` was rejected even when `"atwood"` was in the allowlist. The function now returns the canonical (trimmed) owner string; vault-write and memory-write tools assign it back so `source_agent` frontmatter, git commit subjects, and `agent_memory.owner` rows all store the canonical form (no silent key-splitting from trailing whitespace). Surfaced by adversarial review of #131.
+
+### Added
+- Startup warning when neither `SCHIST_AGENT_ID` nor `SCHIST_ALLOWED_AGENTS` is set — every write tool will return `CONFIG_ERROR` until one is configured. Replaces silent first-write failure with a loud signal at MCP server startup.
+
 ## [0.2.0] - 2026-05-23
 
 ### Added
