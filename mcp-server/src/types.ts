@@ -18,6 +18,7 @@ export interface Note {
   connections: Connection[];
   scope?: string;      // e.g., "global", "decisions", "research/ai"
   source?: "human" | "agent"; // allowed values; omitted means undefined
+  confidence?: "low" | "medium" | "high"; // omitted means agent did not declare
 }
 
 export interface Concept {
@@ -37,6 +38,7 @@ export interface SearchResult {
   domain?: string;
   snippet: string;
   scope?: string;
+  confidence?: "low" | "medium" | "high"; // omitted means not declared on the note
 }
 
 export interface SearchNotesResponse {

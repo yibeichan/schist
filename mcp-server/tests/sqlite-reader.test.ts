@@ -20,6 +20,7 @@ async function makeTempDb(): Promise<string> {
       tags TEXT,
       concepts TEXT,
       body TEXT NOT NULL DEFAULT '',
+      confidence TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
     );
@@ -92,6 +93,7 @@ async function makeScopedVault(): Promise<string> {
       body TEXT NOT NULL DEFAULT '',
       scope TEXT DEFAULT 'global',
       source TEXT,
+      confidence TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
     );

@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
+import { spawnSync } from "child_process";
 import { load as yamlLoad } from "js-yaml";
 import type { SearchResult, Note, Concept, Connection, MemoryEntry, AgentStateEntry, Domain, ConceptAlias } from "./types.js";
 import { CONNECTION_RE, parseConnections as parseConnectionsSync } from "./markdown-parser.js";
@@ -59,7 +60,115 @@ function sanitizeFtsQuery(raw: string): string {
     .join(" ");
 }
 
+// ── Schema-drift detection (#69) ─────────────────────────────────────────
+//
+// Pre-#69 vaults built their SQLite from an older schema.sql that lacked
+// columns the current readers SELECT. The Python `get_db` (cli/schist/
+// sqlite_query.py) only re-ingests on missing-file or missing-`docs`-table
+// — it doesn't detect column drift. So on upgrade day, the first read
+// against a pre-existing DB would throw `no such column` until something
+// else triggered a rebuild (post-commit hook, spoke pull, manual ingest).
+//
+// Fix: before every `openDb`, verify the `docs` table has the columns this
+// reader needs. If any are missing, synchronously spawn `schist-ingest` to
+// rebuild from markdown, then continue. The check is cached per-vault per-
+// process so it runs once per server start. Generalizes to all future
+// schema additions: bump REQUIRED_DOCS_COLUMNS alongside schema.sql edits
+// and existing deployments self-heal on next read.
+const REQUIRED_DOCS_COLUMNS: ReadonlySet<string> = new Set([
+  "id", "title", "date", "status", "tags", "concepts",
+  "domain", "body", "scope", "source", "confidence",
+]);
+
+const verifiedVaults = new Set<string>();
+
+/** Test-only — clears the per-process verified-vaults cache so drift detection re-fires. */
+export function resetSchemaCacheForTesting(): void {
+  verifiedVaults.clear();
+}
+
+function ensureSchemaCurrent(vaultRoot: string): void {
+  if (verifiedVaults.has(vaultRoot)) return;
+
+  // Skip drift detection on inline-DB test fixtures (no schist.yaml present).
+  // Production vaults always carry a schist.yaml config — its presence is
+  // what distinguishes "real vault that should auto-heal" from "test
+  // fixture with a hand-crafted DB that should be left alone".
+  if (!fs.existsSync(path.join(vaultRoot, "schist.yaml"))) {
+    verifiedVaults.add(vaultRoot);
+    return;
+  }
+
+  const dbPath = path.join(vaultRoot, ".schist", "schist.db");
+  // Narrowed scope: only flag drift when the `docs` table EXISTS but lacks
+  // required columns. Missing-table / missing-file cases are already
+  // handled upstream by the Python `get_db` (cli/schist/sqlite_query.py),
+  // and triggering an ingest here on a test fixture that hand-crafts a
+  // minimal DB without docs would wipe its seed data. The upgrade hazard
+  // this guards against is "docs table exists from an older schema and
+  // lacks a column the current reader SELECTs" — that's the only case we
+  // need to repair from the TS side.
+  const checkMissing = (): string[] => {
+    try {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        const cols = db.pragma("table_info(docs)") as Array<{ name: string }>;
+        if (cols.length === 0) return []; // no docs table — out of scope
+        const present = new Set(cols.map((c) => c.name));
+        return [...REQUIRED_DOCS_COLUMNS].filter((c) => !present.has(c));
+      } finally {
+        db.close();
+      }
+    } catch {
+      return []; // DB file missing or corrupt — out of scope
+    }
+  };
+
+  if (checkMissing().length === 0) {
+    verifiedVaults.add(vaultRoot);
+    return;
+  }
+
+  runIngestSync(vaultRoot);
+
+  // Verify ingest actually fixed the drift. Catches the "installed
+  // schist-ingest is older than this MCP server" case — the rebuild
+  // succeeds but produces the same out-of-date schema. Without this
+  // recheck the next query would throw `no such column` with no hint
+  // that the underlying problem is a version mismatch.
+  const stillMissing = checkMissing();
+  if (stillMissing.length > 0) {
+    throw new Error(
+      `Schema drift persists after schist-ingest rebuild — docs table missing columns: ${stillMissing.join(", ")}. ` +
+      `The installed schist-ingest is likely older than this MCP server. ` +
+      `Upgrade it: \`uv tool install --reinstall --force <path-to-schist/cli>\`.`,
+    );
+  }
+  verifiedVaults.add(vaultRoot);
+}
+
+function runIngestSync(vaultRoot: string): void {
+  // Mirrors SCHIST_INGEST_BIN handling in tools.ts:schistCliBin. Duplicated
+  // here (1 line) rather than imported to avoid a tools→reader→tools cycle.
+  const ingestBin = process.env.SCHIST_INGEST_BIN?.trim() || "schist-ingest";
+  const dbPath = path.join(vaultRoot, ".schist", "schist.db");
+  const res = spawnSync(ingestBin, ["--vault", vaultRoot, "--db", dbPath], {
+    cwd: vaultRoot,
+    stdio: ["ignore", "ignore", "pipe"],
+    encoding: "utf-8",
+  });
+  if (res.error || res.status !== 0) {
+    const stderr = (res.stderr ?? "").toString().trim();
+    throw new Error(
+      `schist-ingest failed during schema-drift rebuild: ${
+        res.error?.message ?? stderr ?? `exit ${res.status}`
+      }`,
+    );
+  }
+}
+
 function openDb(vaultRoot: string, opts?: { readonly?: boolean }): Database.Database {
+  ensureSchemaCurrent(vaultRoot);
   const dbPath = path.join(vaultRoot, ".schist", "schist.db");
   return new Database(dbPath, { readonly: opts?.readonly ?? true });
 }
@@ -67,14 +176,14 @@ function openDb(vaultRoot: string, opts?: { readonly?: boolean }): Database.Data
 export function searchNotes(
   vaultRoot: string,
   query: string,
-  opts?: { limit?: number; status?: string; tags?: string[]; scope?: string; owner?: string; offset?: number }
+  opts?: { limit?: number; status?: string; tags?: string[]; scope?: string; owner?: string; offset?: number; confidence?: "low" | "medium" | "high" }
 ): SearchResult[] {
   const db = openDb(vaultRoot);
   try {
     const limit = opts?.limit ?? 20;
     const offset = opts?.offset ?? 0;
     let sql = `
-      SELECT docs.id, docs.title, docs.date, docs.status, docs.tags, docs.domain, docs.scope,
+      SELECT docs.id, docs.title, docs.date, docs.status, docs.tags, docs.domain, docs.scope, docs.confidence,
              snippet(docs_fts, 1, '<b>', '</b>', '...', 20) as snippet
       FROM docs_fts
       JOIN docs ON docs.rowid = docs_fts.rowid
@@ -92,6 +201,11 @@ export function searchNotes(
         sql += ` AND docs.tags LIKE ?`;
         params.push(`%"${tag}"%`);
       }
+    }
+
+    if (opts?.confidence) {
+      sql += ` AND docs.confidence = ?`;
+      params.push(opts.confidence);
     }
 
     // ORDER BY is assembled in three layers so OFFSET pagination is stable:
@@ -130,16 +244,20 @@ export function searchNotes(
     params.push(limit, offset);
 
     const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
-    return rows.map((row) => ({
-      id: row.id as string,
-      title: row.title as string,
-      date: (row.date as string) ?? "",
-      status: (row.status as string) ?? "draft",
-      tags: row.tags ? JSON.parse(row.tags as string) : [],
-      domain: (row.domain as string) ?? undefined,
-      snippet: (row.snippet as string) ?? "",
-      scope: (row.scope as string) ?? undefined,
-    }));
+    return rows.map((row) => {
+      const conf = row.confidence;
+      return {
+        id: row.id as string,
+        title: row.title as string,
+        date: (row.date as string) ?? "",
+        status: (row.status as string) ?? "draft",
+        tags: row.tags ? JSON.parse(row.tags as string) : [],
+        domain: (row.domain as string) ?? undefined,
+        snippet: (row.snippet as string) ?? "",
+        scope: (row.scope as string) ?? undefined,
+        confidence: (conf === "low" || conf === "medium" || conf === "high") ? conf : undefined,
+      };
+    });
   } finally {
     db.close();
   }
@@ -154,6 +272,7 @@ export function getNote(vaultRoot: string, id: string): Note | null {
     const body = (row.body as string) ?? "";
     const connections = parseConnectionsSync(body);
 
+    const conf = row.confidence;
     return {
       id: row.id as string,
       title: row.title as string,
@@ -166,6 +285,7 @@ export function getNote(vaultRoot: string, id: string): Note | null {
       connections,
       scope: (row.scope as string) ?? undefined,
       source: (row.source === "human" || row.source === "agent") ? row.source as "human" | "agent" : undefined,
+      confidence: (conf === "low" || conf === "medium" || conf === "high") ? conf : undefined,
     };
   } finally {
     db.close();

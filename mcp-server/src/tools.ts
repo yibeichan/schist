@@ -396,10 +396,18 @@ export async function search_notes(
     tags?: string[];
     scope?: string;
     owner?: string;
+    confidence?: "low" | "medium" | "high";
     cursor?: string;
   }
 ): Promise<SearchNotesResponse | ToolError> {
   const TOOL_NAME = "search_notes" as const;
+
+  if (args.confidence !== undefined && !["low", "medium", "high"].includes(args.confidence)) {
+    return {
+      error: "VALIDATION_ERROR",
+      message: `confidence must be one of: low, medium, high (got "${args.confidence}")`,
+    };
+  }
 
   // Step 1: canonicalizeQueryHash. resolveActiveOwner threads per-call
   // `args.owner` first (sqlite-reader's scope=inherit resolution order),
@@ -455,6 +463,7 @@ export async function search_notes(
       tags: args.tags,
       scope: args.scope,
       owner: args.owner,
+      confidence: args.confidence,
       offset,
     });
   } catch (e: unknown) {
@@ -514,6 +523,7 @@ export async function get_note(
     const { metadata, body, connections } = parseNote(content);
     const meta = metadata as Record<string, unknown>;
 
+    const confidence = meta.confidence;
     return {
       id: args.id,
       title: (meta.title as string) ?? "",
@@ -524,6 +534,9 @@ export async function get_note(
       domain: (meta.domain as string) ?? undefined,
       body,
       connections,
+      ...(confidence === "low" || confidence === "medium" || confidence === "high"
+        ? { confidence }
+        : {}),
     };
   } catch (e: unknown) {
     return normalizeError(e, "INGEST_ERROR");
@@ -541,6 +554,7 @@ export async function create_note(
     status?: string;
     connections?: Array<{ target: string; type: string; context?: string }>;
     directory?: string;
+    confidence?: "low" | "medium" | "high";
   },
   config: VaultConfig
 ): Promise<unknown> {
@@ -551,6 +565,12 @@ export async function create_note(
     // both source_agent and the commit subject (avoids divergence when
     // the caller sends e.g. "atwood ").
     const owner = validateOwner(args.owner);
+    if (args.confidence !== undefined && !["low", "medium", "high"].includes(args.confidence)) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: `confidence must be one of: low, medium, high (got "${args.confidence}")`,
+      } satisfies ToolError;
+    }
     const directory = args.directory ?? "notes";
     if (directory.includes("..") || path.isAbsolute(directory)) {
       return {
@@ -609,6 +629,9 @@ export async function create_note(
       status: args.status ?? "draft",
       source_agent: owner,
     };
+    if (args.confidence !== undefined) {
+      metadata.confidence = args.confidence;
+    }
 
     const noteContent = buildNote(metadata, args.body, args.connections);
     const result = await writeNote(vaultRoot, relPath, noteContent, args.title, owner);

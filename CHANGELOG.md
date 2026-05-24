@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `confidence` field on docs schema and `create_note` MCP tool. Optional enum (`low | medium | high`); omitted from frontmatter when not declared. Ingestion populates `docs.confidence` (NULL when undeclared — deliberately distinct from "agent said medium"). `search_notes` accepts an optional `confidence` filter that selects matching docs and excludes NULL-confidence rows. `get_note` returns the field when set, omits it when NULL. Closes #69.
+
 ### Changed
 - **BREAKING:** Vault-write MCP tools (`create_note`, `add_connection`, `assign_domain`) now require an `owner` argument and validate it via `validateOwner` against `SCHIST_AGENT_ID` / `SCHIST_ALLOWED_AGENTS`, mirroring the memory-write policy from #61. The validated owner is stamped on `source_agent` frontmatter (replacing the hardcoded `"mcp"`) and the git commit message (`— by {owner}` instead of `— via MCP`). Closes #63. Callers must now pass `owner` on every vault write or receive `CONFIG_ERROR` / `VALIDATION_ERROR`; deployments must set `SCHIST_AGENT_ID` or `SCHIST_ALLOWED_AGENTS` in the MCP server's environment.
 - **Bug fix:** `validateOwner` now canonicalizes the incoming owner by trimming whitespace before comparing against `SCHIST_ALLOWED_AGENTS` (which is itself trimmed at parse time). Pre-fix the trim was asymmetric — a caller sending `owner="atwood "` was rejected even when `"atwood"` was in the allowlist. The function now returns the canonical (trimmed) owner string; vault-write and memory-write tools assign it back so `source_agent` frontmatter, git commit subjects, and `agent_memory.owner` rows all store the canonical form (no silent key-splitting from trailing whitespace). Surfaced by adversarial review of #131.

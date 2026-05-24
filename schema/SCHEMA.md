@@ -22,6 +22,7 @@ All knowledge in a schist vault is stored as markdown files with YAML frontmatte
 | `concepts` | string[]   | no       | `[]`      | Concept slugs this note relates to |
 | `domain`   | string     | no       | `null`    | Research domain from vault.yaml `domains` list |
 | `related`  | string[]   | no       | `[]`      | Relative paths to related notes |
+| `confidence` | string   | no       | `null`    | Agent-declared confidence: `low`, `medium`, or `high`. NULL = not declared (load-bearing distinction from `'medium'`) |
 
 ### Example
 
