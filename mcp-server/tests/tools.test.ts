@@ -2,7 +2,6 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
 import { fileURLToPath } from "url";
-import Database from "better-sqlite3";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { loadVaultConfig, create_note, add_connection, get_context, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting } from "../src/tools.js";

@@ -5,6 +5,10 @@ DROP TABLE IF EXISTS docs_fts;
 DROP TABLE IF EXISTS edges;
 DROP TABLE IF EXISTS concepts;
 DROP TABLE IF EXISTS docs;
+-- Drop the retired `domains` table on upgrade-day ingest. Idempotent on
+-- fresh installs (table never existed); cleans up the orphan on pre-#146
+-- deployments where the table was created by the older schema.sql.
+DROP TABLE IF EXISTS domains;
 
 CREATE TABLE docs (
     id          TEXT PRIMARY KEY,       -- relative path: "notes/2026-03-26-attention.md"

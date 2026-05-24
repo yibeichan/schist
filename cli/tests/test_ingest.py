@@ -226,12 +226,14 @@ def test_wheel_install_ships_schema_and_console_script(tmp_path: Path) -> None:
 
 
 def test_run_ingest_deletes_partial_db_on_failure(tmp_path: Path) -> None:
-    """Unit: `_run_ingest` removes the schema-only DB if ingest raises.
+    """Unit: `_run_ingest` removes the partial DB if ingest raises.
 
-    Without this cleanup, a failure mid-ingest after the schema
-    `executescript` (which commits implicitly) would leave a docs table
-    on disk. The next `get_db()` call would see the table exists, set
-    needs_ingest=False, and silently return an empty DB to the caller.
+    Without this cleanup, a failure during ingest would leave a docs
+    table on disk. The next `get_db()` call would see the table exists,
+    set needs_ingest=False, and silently return that stale DB to the
+    caller. This test verifies that ANY exception from `ingest()`
+    triggers DB removal — exact failure timing within `_ingest_into`
+    isn't load-bearing, just that the cleanup is unconditional.
     """
     from schist.sqlite_query import _run_ingest
 
