@@ -4,7 +4,7 @@ import * as os from "os";
 import * as fs from "fs";
 import { spawnSync } from "child_process";
 import { load as yamlLoad } from "js-yaml";
-import type { SearchResult, Note, Concept, Connection, MemoryEntry, AgentStateEntry, Domain, ConceptAlias } from "./types.js";
+import type { SearchResult, Note, Concept, Connection, MemoryEntry, AgentStateEntry, ConceptAlias } from "./types.js";
 import { CONNECTION_RE, parseConnections as parseConnectionsSync } from "./markdown-parser.js";
 import { validateOwner } from "./agent-identity.js";
 
@@ -77,7 +77,7 @@ function sanitizeFtsQuery(raw: string): string {
 // and existing deployments self-heal on next read.
 const REQUIRED_DOCS_COLUMNS: ReadonlySet<string> = new Set([
   "id", "title", "date", "status", "tags", "concepts",
-  "domain", "body", "scope", "source", "confidence",
+  "body", "scope", "source", "confidence",
 ]);
 
 const verifiedVaults = new Set<string>();
@@ -183,7 +183,7 @@ export function searchNotes(
     const limit = opts?.limit ?? 20;
     const offset = opts?.offset ?? 0;
     let sql = `
-      SELECT docs.id, docs.title, docs.date, docs.status, docs.tags, docs.domain, docs.scope, docs.confidence,
+      SELECT docs.id, docs.title, docs.date, docs.status, docs.tags, docs.scope, docs.confidence,
              snippet(docs_fts, 1, '<b>', '</b>', '...', 20) as snippet
       FROM docs_fts
       JOIN docs ON docs.rowid = docs_fts.rowid
@@ -252,7 +252,6 @@ export function searchNotes(
         date: (row.date as string) ?? "",
         status: (row.status as string) ?? "draft",
         tags: row.tags ? JSON.parse(row.tags as string) : [],
-        domain: (row.domain as string) ?? undefined,
         snippet: (row.snippet as string) ?? "",
         scope: (row.scope as string) ?? undefined,
         confidence: (conf === "low" || conf === "medium" || conf === "high") ? conf : undefined,
@@ -280,7 +279,6 @@ export function getNote(vaultRoot: string, id: string): Note | null {
       status: (row.status as string) ?? "draft",
       tags: row.tags ? JSON.parse(row.tags as string) : [],
       concepts: row.concepts ? JSON.parse(row.concepts as string) : [],
-      domain: (row.domain as string) ?? undefined,
       body,
       connections,
       scope: (row.scope as string) ?? undefined,
@@ -678,47 +676,7 @@ export function deleteAgentState(key: string, owner: string): { deleted: boolean
   }
 }
 
-// ── Domain + alias tools (use schist.db) ──────────────────────────────────
-
-export function listDomains(
-  vaultRoot: string,
-  opts?: { limit?: number; offset?: number }
-): Domain[] {
-  let db: Database.Database | undefined;
-  try {
-    db = openDb(vaultRoot);
-    const limit = opts?.limit ?? 100;
-    const offset = opts?.offset ?? 0;
-    const rows = db.prepare(
-      "SELECT * FROM domains ORDER BY parent_slug NULLS FIRST, slug LIMIT ? OFFSET ?"
-    ).all(limit, offset) as Record<string, unknown>[];
-    return rows.map(r => ({
-      slug: r.slug as string,
-      label: r.label as string,
-      description: r.description == null ? undefined : (r.description as string),
-      parent_slug: r.parent_slug == null ? undefined : (r.parent_slug as string),
-    }));
-  } catch (e: unknown) {
-    // Narrow the catch (#111). The original `catch {}` was for "vault not
-    // yet initialized" — DB doesn't exist or the `domains` table doesn't
-    // exist on older schemas. After PR 6 added pagination, an offset past
-    // the end legitimately returns []; conflating that with "DB error"
-    // means the handler can't tell "no more pages" from "DB corrupt / locked
-    // / missing table". A transient SQLITE_BUSY became a silent empty page
-    // → cursor never re-issued → agent loses pagination state.
-    //
-    // Swallow only the original sentinels — let real errors propagate so
-    // the handler's `normalizeError(e, "INGEST_ERROR")` actually fires.
-    const msg = e instanceof Error ? e.message : String(e);
-    const isUninitialized =
-      (e as NodeJS.ErrnoException).code === "SQLITE_CANTOPEN" ||
-      /no such table/i.test(msg);
-    if (isUninitialized) return [];
-    throw e;
-  } finally {
-    db?.close();
-  }
-}
+// ── Concept-alias tools (use schist.db) ───────────────────────────────────
 
 export function addConceptAlias(
   vaultRoot: string,

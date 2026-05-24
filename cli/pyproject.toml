@@ -44,9 +44,9 @@ schist-ingest = "schist.ingest:main"
 [tool.setuptools]
 packages = ["schist"]
 
-# Ship .sql files (schema.sql, seed-domains.sql) inside the wheel so
-# `schist-ingest` works after `pip install schist` — ingest.py reads
-# schema.sql via Path(__file__).parent / 'schema.sql'.
+# Ship schema.sql inside the wheel so `schist-ingest` works after
+# `pip install schist` — ingest.py reads schema.sql via
+# Path(__file__).parent / 'schema.sql'.
 [tool.setuptools.package-data]
 schist = ["*.sql"]
 

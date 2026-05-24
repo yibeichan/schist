@@ -462,6 +462,150 @@ def check_mcp_config(vault_path: Optional[str]) -> CheckResult:
     )
 
 
+# Match `REQUIRED_DOCS_COLUMNS = new Set([ "id", "title", ... ])` in the
+# compiled JS. Tolerant of newlines and trailing commas. The inner-string
+# match is non-greedy so a later `Set(...)` literal in the file doesn't
+# extend the capture.
+_REQUIRED_DOCS_RE = re.compile(
+    r"REQUIRED_DOCS_COLUMNS\s*=\s*new\s+Set\(\s*\[(.*?)\]\s*\)",
+    re.DOTALL,
+)
+_DOC_COL_STRING_RE = re.compile(r"""['"]([a-zA-Z_][a-zA-Z0-9_]*)['"]""")
+
+
+def _mcp_dist_dir_from_config(vault_path: Optional[str]) -> Optional[Path]:
+    """Return the dist/ directory of the configured MCP entry, or None.
+
+    Mirrors `check_mcp_config`'s lookup order so doctor reports against the
+    actual deployed dist (not just the source checkout's local build).
+    """
+    candidates = [
+        Path.home() / ".claude.json",
+        Path.home() / ".claude" / "settings.json",
+        Path.home() / ".claude" / "settings.local.json",
+    ]
+    if vault_path:
+        candidates.append(Path(vault_path) / ".claude" / "settings.json")
+        candidates.append(Path(vault_path) / ".claude" / "settings.local.json")
+    candidates.append(Path.home() / ".cursor" / "mcp.json")
+
+    for c in candidates:
+        if not c.exists():
+            continue
+        try:
+            data = json.loads(c.read_text())
+        except Exception:
+            continue
+        servers = data.get("mcpServers", {})
+        entry = servers.get("schist")
+        if not entry:
+            for cfg in servers.values():
+                args = cfg.get("args", [])
+                if any("schist" in str(a) or "dist/index.js" in str(a) for a in args):
+                    entry = cfg
+                    break
+        if not entry:
+            continue
+        args = entry.get("args", [])
+        if not args:
+            continue
+        args0 = Path(str(args[0]))
+        if args0.is_file():
+            return args0.parent
+    return None
+
+
+def _extract_mcp_required_columns(dist_dir: Path) -> Optional[set[str]]:
+    """Read REQUIRED_DOCS_COLUMNS from the MCP server's compiled
+    sqlite-reader.js. Returns None when the constant can't be found —
+    older MCP builds (pre-#145) don't declare it.
+    """
+    reader = dist_dir / "sqlite-reader.js"
+    try:
+        text = reader.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    m = _REQUIRED_DOCS_RE.search(text)
+    if not m:
+        return None
+    return set(_DOC_COL_STRING_RE.findall(m.group(1)))
+
+
+def _canonical_docs_columns() -> Optional[set[str]]:
+    """Return the `docs` table column set defined by the bundled schema.sql.
+
+    Materializes the schema in an in-memory SQLite and reads PRAGMA
+    table_info — same source of truth ingest.py uses. Returns None on
+    failure (missing schema.sql, malformed SQL — both are 'someone broke
+    the install', distinct from skew).
+    """
+    schema_path = Path(__file__).parent / "schema.sql"
+    if not schema_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.executescript(schema_path.read_text())
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(docs)").fetchall()}
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return cols or None
+
+
+def check_mcp_schema_alignment(vault_path: Optional[str]) -> CheckResult:
+    """Detect MCP-server-vs-ingest schema skew before it surfaces as the
+    misleading 'schist-ingest is older than this MCP server' error from
+    ensureSchemaCurrent.
+
+    Specifically catches the case where MCP's REQUIRED_DOCS_COLUMNS lists
+    columns the current `schema.sql` does not define — i.e. the MCP dist
+    was compiled against an older schema that has since dropped columns.
+    The reverse case (canonical schema has columns MCP doesn't list) is
+    intentional — MCP only declares the columns it reads, not the full
+    table — so we don't flag it.
+
+    SKIPs when no MCP entry is configured or the MCP dist predates the
+    drift-detection feature (pre-#145).
+    """
+    dist_dir = _mcp_dist_dir_from_config(vault_path)
+    if dist_dir is None:
+        return CheckResult("SKIP", "MCP schema alignment", "skipped (no MCP config)")
+
+    mcp_required = _extract_mcp_required_columns(dist_dir)
+    if mcp_required is None:
+        return CheckResult(
+            "SKIP", "MCP schema alignment",
+            f"skipped (REQUIRED_DOCS_COLUMNS not declared in {dist_dir / 'sqlite-reader.js'})",
+        )
+
+    canonical = _canonical_docs_columns()
+    if canonical is None:
+        return CheckResult(
+            "FAIL", "MCP schema alignment",
+            "could not read canonical schema.sql",
+            "Reinstall schist: `uv tool install --reinstall --force <path-to-schist/cli>`.",
+        )
+
+    retired = mcp_required - canonical
+    if not retired:
+        return CheckResult("PASS", "MCP schema alignment",
+                           f"in sync ({len(mcp_required)} required docs columns)")
+
+    return CheckResult(
+        "WARN", "MCP schema alignment",
+        f"MCP expects retired columns: {', '.join(sorted(retired))}",
+        fix=(
+            "Rebuild the MCP server dist to align with the installed schist-ingest: "
+            f"`cd <schist>/mcp-server && npm run build`, then restart Claude Code / "
+            "Claude Desktop so they reload the new dist. "
+            "(The skew direction makes the runtime error from `ensureSchemaCurrent` "
+            "misleading — it always blames `schist-ingest`.)"
+        ),
+    )
+
+
 def run_doctor(vault_path: Optional[str], db_path: Optional[str],
                as_json: bool = False) -> list[CheckResult]:
     checks = [
@@ -479,6 +623,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_ingest_available(vault_path),
         check_spoke(vault_path),
         check_mcp_config(vault_path),
+        check_mcp_schema_alignment(vault_path),
     ]
 
     if as_json:

@@ -5,6 +5,9 @@ DROP TABLE IF EXISTS docs_fts;
 DROP TABLE IF EXISTS edges;
 DROP TABLE IF EXISTS concepts;
 DROP TABLE IF EXISTS docs;
+-- Drop the retired `domains` table on upgrade-day ingest. Idempotent on
+-- fresh installs (table never existed); cleans up the orphan on pre-#146
+-- deployments where the table was created by the older schema.sql.
 DROP TABLE IF EXISTS domains;
 
 CREATE TABLE docs (
@@ -14,7 +17,6 @@ CREATE TABLE docs (
     status      TEXT DEFAULT 'draft',   -- draft | review | final | archived
     tags        TEXT,                   -- JSON array: '["attention", "transformer"]'
     concepts    TEXT,                   -- JSON array of concept slugs
-    domain      TEXT,                   -- research domain from vault.yaml domains list
     body        TEXT NOT NULL,          -- full markdown body (sans frontmatter)
     scope       TEXT DEFAULT 'global', -- derived from directory or frontmatter
     source      TEXT,                  -- "human" | "agent" | null
@@ -47,20 +49,19 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(
     body,
     tags,
     scope UNINDEXED,
-    domain UNINDEXED,
     content='docs',
     content_rowid='rowid'
 );
 
 -- Triggers to keep FTS in sync during ingestion
 CREATE TRIGGER docs_ai AFTER INSERT ON docs BEGIN
-    INSERT INTO docs_fts(rowid, title, body, tags, scope, domain)
-    VALUES (new.rowid, new.title, new.body, new.tags, new.scope, new.domain);
+    INSERT INTO docs_fts(rowid, title, body, tags, scope)
+    VALUES (new.rowid, new.title, new.body, new.tags, new.scope);
 END;
 
 CREATE TRIGGER docs_ad AFTER DELETE ON docs BEGIN
-    INSERT INTO docs_fts(docs_fts, rowid, title, body, tags, scope, domain)
-    VALUES ('delete', old.rowid, old.title, old.body, old.tags, old.scope, old.domain);
+    INSERT INTO docs_fts(docs_fts, rowid, title, body, tags, scope)
+    VALUES ('delete', old.rowid, old.title, old.body, old.tags, old.scope);
 END;
 
 -- Indexes
@@ -69,19 +70,6 @@ CREATE INDEX idx_edges_target ON edges(target);
 CREATE INDEX idx_edges_type ON edges(type);
 CREATE INDEX idx_docs_status ON docs(status);
 CREATE INDEX idx_docs_date ON docs(date);
-
--- ── Derived from vault.yaml, rebuilt every ingest ─────────────────────────
--- `domains` mirrors the top-level `domains:` list in vault.yaml (the
--- source of truth per schema/vault-yaml.md). It's in the DROP list above
--- and is rebuilt by `_populate_domains()` in ingest.py on every ingest,
--- so entries added to or removed from vault.yaml propagate automatically.
-
-CREATE TABLE domains (
-  slug        TEXT PRIMARY KEY,
-  label       TEXT NOT NULL,
-  description TEXT,
-  parent_slug TEXT REFERENCES domains(slug)
-);
 
 -- ── MCP-written side table (survives commit-path rebuilds) ────────────────
 -- `concept_aliases` is written by the MCP `add_concept_alias` tool. It uses

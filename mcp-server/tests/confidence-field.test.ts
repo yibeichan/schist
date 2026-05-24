@@ -140,19 +140,18 @@ describe("search_notes confidence filter", () => {
         status TEXT DEFAULT 'draft',
         tags TEXT,
         concepts TEXT,
-        domain TEXT,
         body TEXT NOT NULL DEFAULT '',
         scope TEXT DEFAULT 'global',
         source TEXT,
         confidence TEXT
       );
       CREATE VIRTUAL TABLE docs_fts USING fts5(
-        title, body, tags, scope UNINDEXED, domain UNINDEXED,
+        title, body, tags, scope UNINDEXED,
         content='docs', content_rowid='rowid'
       );
       CREATE TRIGGER docs_ai AFTER INSERT ON docs BEGIN
-        INSERT INTO docs_fts(rowid, title, body, tags, scope, domain)
-        VALUES (new.rowid, new.title, new.body, new.tags, new.scope, new.domain);
+        INSERT INTO docs_fts(rowid, title, body, tags, scope)
+        VALUES (new.rowid, new.title, new.body, new.tags, new.scope);
       END;
     `);
     const insert = db.prepare(
@@ -263,19 +262,18 @@ describe("schema-drift auto-rebuild", () => {
         status TEXT DEFAULT 'draft',
         tags TEXT,
         concepts TEXT,
-        domain TEXT,
         body TEXT NOT NULL DEFAULT '',
         scope TEXT DEFAULT 'global',
         source TEXT
         -- NO confidence column — pre-#69 schema
       );
       CREATE VIRTUAL TABLE docs_fts USING fts5(
-        title, body, tags, scope UNINDEXED, domain UNINDEXED,
+        title, body, tags, scope UNINDEXED,
         content='docs', content_rowid='rowid'
       );
       CREATE TRIGGER docs_ai AFTER INSERT ON docs BEGIN
-        INSERT INTO docs_fts(rowid, title, body, tags, scope, domain)
-        VALUES (new.rowid, new.title, new.body, new.tags, new.scope, new.domain);
+        INSERT INTO docs_fts(rowid, title, body, tags, scope)
+        VALUES (new.rowid, new.title, new.body, new.tags, new.scope);
       END;
     `);
     db.prepare(

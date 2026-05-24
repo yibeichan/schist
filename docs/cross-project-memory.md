@@ -74,8 +74,6 @@ The memory subsystem exposes six MCP tools. All tools are listed by
   `date_from`, `date_to`, `limit` filters. FTS5 indexes the `content` and
   `tags` columns, so tag-scoped queries work via the `query` field.
 - `get_agent_state` — fetch a keyed state value (`{key}`).
-- `list_domains` — list the research domain taxonomy (separate from memory,
-  included here because it shares the read surface).
 
 **Write:**
 

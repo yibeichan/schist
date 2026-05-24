@@ -8,7 +8,6 @@ Located at the root of a schist vault. Optional — schist works without it.
 |-------|------|----------|-------------|
 | vault_version | integer | yes (v1+) | Schema version. Currently `1`. Omitting triggers a v0 deprecation warning. |
 | name | string | yes | Human-readable vault name |
-| domains | [string] | no | Valid domain taxonomy values |
 | participants | [string \| object] | yes | Agent identity names. Can be simple strings or objects (see below) |
 | scope_convention | string | yes (v1) | How scope maps to filesystem: `subdirectory` (default), `flat`, `multi-vault` |
 | access | {identity: {read, write}} | yes | Per-participant read/write scope grants |
@@ -81,7 +80,6 @@ rate_limits:
 ```yaml
 vault_version: 1
 name: my-team
-domains: [ai, security, ops]
 scope_convention: subdirectory
 participants:
   - name: agent-a
@@ -108,6 +106,5 @@ rate_limits:
 ## Notes
 
 - `participants` uses agent names only. Human contributions use `source: human` on individual notes.
-- `domains` defines the valid set for the `domain` field on notes. Tools may validate against this list.
 - `scope_convention` tells tools how to derive scope from directory structure.
 - `vault_version` is required for v1 vaults. Omitting it triggers a deprecation warning and defaults to v0 behavior.

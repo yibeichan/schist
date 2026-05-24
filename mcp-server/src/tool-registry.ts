@@ -70,17 +70,6 @@ export function makeMemoryReadTools(_config: VaultConfig) {
         required: ["key"],
       },
     },
-    {
-      name: "list_domains",
-      description: "List research domain taxonomy. Paginated: when results are capped, the response includes a `cursor` token — echo it back on the next call to advance. Identical queries within 300s without a cursor are refused with CURSOR_REQUIRED.",
-      inputSchema: {
-        type: "object" as const,
-        properties: {
-          limit: { type: "integer", minimum: 1, maximum: 500, description: "Default 100, capped at 500." },
-          cursor: { type: "string", description: "Opaque pagination cursor returned by a prior call. Echo verbatim; do not modify." },
-        },
-      },
-    },
   ];
 }
 
@@ -211,19 +200,6 @@ export function makeWriteTools(config: VaultConfig) {
       },
     },
     {
-      name: "assign_domain",
-      description: "Assign a research domain to a note. Domain must exist in vault.yaml domains list.",
-      inputSchema: {
-        type: "object" as const,
-        properties: {
-          owner: { type: "string", description: "Agent identity. Required; validated against SCHIST_ALLOWED_AGENTS or SCHIST_AGENT_ID. Stamped on the git commit message." },
-          id: { type: "string", description: "Note ID (relative path)" },
-          domain: { type: "string", description: "Domain slug from vault.yaml domains list" },
-        },
-        required: ["owner", "id", "domain"],
-      },
-    },
-    {
       name: "list_concepts",
       description: "List all concepts in the knowledge graph. Paginated: when results are capped, the response includes a `cursor` token — echo it back on the next call to advance. Identical queries within 300s without a cursor are refused with CURSOR_REQUIRED.",
       inputSchema: {
@@ -262,10 +238,10 @@ export function makeWriteTools(config: VaultConfig) {
  *   - Memory writes (add_memory, set_agent_state, delete_agent_state,
  *     add_concept_alias) call `validateOwner` (see `agent-identity.ts`)
  *     against the configured SCHIST_AGENT_ID / SCHIST_ALLOWED_AGENTS.
- *   - Vault writes (create_note, add_connection, assign_domain) call the
- *     same `validateOwner` (closed by #63): each accepts a required
- *     `owner` arg, stamped onto note frontmatter (`source_agent`) and the
- *     git commit message.
+ *   - Vault writes (create_note, add_connection) call the same
+ *     `validateOwner` (closed by #63): each accepts a required `owner`
+ *     arg, stamped onto note frontmatter (`source_agent`) and the git
+ *     commit message.
  */
 export function listAllTools(config: VaultConfig) {
   return [

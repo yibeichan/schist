@@ -529,7 +529,7 @@ def _init_vault_with_schema(
     the current schema.sql applied. Returns (vault_path, db_path).
 
     If `vault_yaml_body` is provided, it's written to vault.yaml before the
-    first rebuild — useful for exercising domain-taxonomy ingest.
+    first rebuild.
     """
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -589,165 +589,6 @@ class TestRebuildIndexSideTablePreservation:
 
         assert rows == [("backprop", "backpropagation", "short form", "tester")]
 
-    def test_domains_populated_from_vault_yaml(self, tmp_path):
-        """Domains come from vault.yaml's top-level `domains:` list (the
-        source of truth per schema/vault-yaml.md)."""
-        import sqlite3
-
-        vault_yaml = (
-            "vault_version: 1\n"
-            "name: test-vault\n"
-            "scope_convention: subdirectory\n"
-            "domains: [ai, security, ops]\n"
-            "participants:\n"
-            "  - name: tester\n"
-            "    type: agent\n"
-            "    default_scope: global\n"
-            "access:\n"
-            "  tester:\n"
-            "    read: ['*']\n"
-            "    write: ['*']\n"
-        )
-        _, db_path = _init_vault_with_schema(tmp_path, vault_yaml_body=vault_yaml)
-
-        conn = sqlite3.connect(db_path)
-        try:
-            rows = conn.execute(
-                "SELECT slug, label, description, parent_slug FROM domains ORDER BY slug"
-            ).fetchall()
-        finally:
-            conn.close()
-
-        assert rows == [
-            ("ai", "ai", None, None),
-            ("ops", "ops", None, None),
-            ("security", "security", None, None),
-        ]
-
-    def test_domains_reflect_vault_yaml_changes_across_rebuild(self, tmp_path):
-        """Removing a domain from vault.yaml must remove it from SQLite on
-        the next rebuild — the derived table follows the source of truth."""
-        import sqlite3
-        from schist.sync import _rebuild_index
-
-        vault_yaml_v1 = (
-            "vault_version: 1\n"
-            "name: test\n"
-            "scope_convention: subdirectory\n"
-            "domains: [ai, ml, ops]\n"
-            "participants: [{name: t, type: agent, default_scope: global}]\n"
-            "access: {t: {read: ['*'], write: ['*']}}\n"
-        )
-        vault_path, db_path = _init_vault_with_schema(
-            tmp_path, vault_yaml_body=vault_yaml_v1
-        )
-
-        # Remove `ml`, add `security`
-        vault_yaml_v2 = vault_yaml_v1.replace(
-            "domains: [ai, ml, ops]", "domains: [ai, ops, security]"
-        )
-        (Path(vault_path) / "vault.yaml").write_text(vault_yaml_v2)
-
-        _rebuild_index(vault_path, db_path)
-
-        conn = sqlite3.connect(db_path)
-        try:
-            slugs = [
-                r[0] for r in conn.execute(
-                    "SELECT slug FROM domains ORDER BY slug"
-                ).fetchall()
-            ]
-        finally:
-            conn.close()
-
-        assert slugs == ["ai", "ops", "security"]
-
-    def test_domains_empty_when_vault_yaml_missing(self, tmp_path):
-        """Missing vault.yaml → domains table exists and is empty. No crash."""
-        import sqlite3
-
-        # _init_vault_with_schema with vault_yaml_body=None → no vault.yaml
-        _, db_path = _init_vault_with_schema(tmp_path)
-
-        conn = sqlite3.connect(db_path)
-        try:
-            count = conn.execute("SELECT COUNT(*) FROM domains").fetchone()[0]
-        finally:
-            conn.close()
-        assert count == 0
-
-    def test_domains_empty_when_vault_yaml_lacks_domains_field(self, tmp_path):
-        """vault.yaml without a top-level `domains:` field → empty table."""
-        import sqlite3
-
-        vault_yaml = (
-            "vault_version: 1\n"
-            "name: test\n"
-            "scope_convention: subdirectory\n"
-            "participants: [{name: t, type: agent, default_scope: global}]\n"
-            "access: {t: {read: ['*'], write: ['*']}}\n"
-        )
-        _, db_path = _init_vault_with_schema(tmp_path, vault_yaml_body=vault_yaml)
-
-        conn = sqlite3.connect(db_path)
-        try:
-            count = conn.execute("SELECT COUNT(*) FROM domains").fetchone()[0]
-        finally:
-            conn.close()
-        assert count == 0
-
-    def test_domains_accept_dict_form(self, tmp_path):
-        """Rich dict form for domains is accepted (future-proofing): each
-        entry may be `{slug, label, description, parent_slug}`."""
-        import sqlite3
-
-        vault_yaml = (
-            "vault_version: 1\n"
-            "name: test\n"
-            "scope_convention: subdirectory\n"
-            "domains:\n"
-            "  - slug: ai\n"
-            "    label: Artificial Intelligence\n"
-            "    description: AI research\n"
-            "  - slug: ml\n"
-            "    label: Machine Learning\n"
-            "    parent_slug: ai\n"
-            "participants: [{name: t, type: agent, default_scope: global}]\n"
-            "access: {t: {read: ['*'], write: ['*']}}\n"
-        )
-        _, db_path = _init_vault_with_schema(tmp_path, vault_yaml_body=vault_yaml)
-
-        conn = sqlite3.connect(db_path)
-        try:
-            rows = conn.execute(
-                "SELECT slug, label, description, parent_slug FROM domains ORDER BY slug"
-            ).fetchall()
-        finally:
-            conn.close()
-
-        assert rows == [
-            ("ai", "Artificial Intelligence", "AI research", None),
-            ("ml", "Machine Learning", None, "ai"),
-        ]
-
-    def test_domains_malformed_vault_yaml_does_not_crash(self, tmp_path):
-        """Malformed YAML in vault.yaml → domains population skipped, ingest
-        still succeeds (must not crash the post-commit hook)."""
-        import sqlite3
-
-        # Broken YAML — unclosed bracket
-        _, db_path = _init_vault_with_schema(
-            tmp_path, vault_yaml_body="domains: [ai, security\n"
-        )
-
-        # DB should exist and have an empty domains table
-        conn = sqlite3.connect(db_path)
-        try:
-            count = conn.execute("SELECT COUNT(*) FROM domains").fetchone()[0]
-        finally:
-            conn.close()
-        assert count == 0
-
     def test_rebuild_ok_with_no_prior_db(self, tmp_path):
         """First rebuild (no backup) should succeed with no side-table data."""
         import sqlite3
@@ -769,15 +610,14 @@ class TestRebuildIndexSideTablePreservation:
 
         conn = sqlite3.connect(db_path)
         try:
-            # Both side tables should exist, both empty
-            assert conn.execute("SELECT COUNT(*) FROM domains").fetchone()[0] == 0
+            # Side table should exist and be empty
             assert conn.execute("SELECT COUNT(*) FROM concept_aliases").fetchone()[0] == 0
         finally:
             conn.close()
 
     def test_rebuild_handles_missing_side_table_in_backup(self, tmp_path):
-        """Older DB format without `domains` or `concept_aliases` should not
-        crash the rebuild — the missing tables should be skipped silently."""
+        """Older DB format without `concept_aliases` should not crash the
+        rebuild — the missing table should be skipped silently."""
         import sqlite3
         from schist.sync import _rebuild_index
 
@@ -803,10 +643,10 @@ class TestRebuildIndexSideTablePreservation:
             conn.close()
 
     def test_side_table_columns_list_is_complete(self, tmp_path):
-        """Guard test: if schema.sql adds a column to domains or
-        concept_aliases, the hardcoded column list in sync.py must be
-        updated too. This test reads the actual schema from a fresh DB and
-        compares against the hardcoded list.
+        """Guard test: if schema.sql adds a column to concept_aliases, the
+        hardcoded column list in sync.py must be updated too. This test
+        reads the actual schema from a fresh DB and compares against the
+        hardcoded list.
         """
         import sqlite3
         from schist.sync import _SIDE_TABLE_COLUMNS

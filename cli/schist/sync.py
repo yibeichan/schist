@@ -955,10 +955,6 @@ def _rebuild_index(vault_path: str, db_path: str) -> None:
     rebuild it survives naturally (ingest.py runs against the existing DB).
     Here we rename the whole file, so the copy is the only thing keeping
     its rows alive.
-
-    The `domains` table is NOT preserved here. Its source of truth is
-    `vault.yaml`, and ingest.py rebuilds it from that file on every ingest
-    (see `_populate_domains` in `schist/ingest.py`).
     """
     db = Path(db_path)
     backup = None
@@ -985,10 +981,6 @@ def _rebuild_index(vault_path: str, db_path: str) -> None:
 # in `cli/schist/schema.sql` cannot silently misalign columns during the copy.
 # If you add a column to any listed table, update this map too — `test_sync.py`
 # has a guard test that asserts every table column is listed here.
-#
-# `domains` is intentionally NOT here — it's rebuilt by ingest.py from
-# vault.yaml on every rebuild, so preserving rows from the backup would
-# resurrect entries the user just removed from vault.yaml.
 _SIDE_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "concept_aliases": (
         "duplicate_slug", "canonical_slug", "reason", "created_by", "created_at",

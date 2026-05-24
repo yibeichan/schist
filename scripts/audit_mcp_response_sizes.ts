@@ -52,7 +52,6 @@ export function measureResponse(response: unknown): ResponseMeasurement {
     //   { entries: [...] }                     → search_memory
     //   { results: [...] }                     → search_notes
     //   { concepts: [...] }                    → list_concepts (PR 6)
-    //   { domains: [...] }                     → list_domains (PR 6)
     //   { columns, rows, rowCount, cursor? }   → query_graph
     // Other tools return arrays directly (counted above) or single-shape
     // objects (entryCount stays 1).
@@ -63,8 +62,6 @@ export function measureResponse(response: unknown): ResponseMeasurement {
       entryCount = obj.results.length;
     } else if (Array.isArray(obj.concepts)) {
       entryCount = obj.concepts.length;
-    } else if (Array.isArray(obj.domains)) {
-      entryCount = obj.domains.length;
     } else if (Array.isArray(obj.rows) && typeof obj.rowCount === "number") {
       // query_graph specifically — `rows` alone is too generic to assume;
       // require the `rowCount` field too so this branch only fires for
@@ -110,11 +107,6 @@ export async function runAudit(opts: {
   // list_concepts — default limit 50 in current code.
   measurements.list_concepts = measureResponse(
     await tools.list_concepts(opts.vault, {})
-  );
-
-  // list_domains — default limit 100, cap 500 (PR 6).
-  measurements.list_domains = measureResponse(
-    await tools.list_domains(opts.vault, {})
   );
 
   // query_graph — SELECT * FROM docs is the worst-case from #50.

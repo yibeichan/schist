@@ -69,8 +69,8 @@ schist/
 │   │   └── types.ts              # Shared TypeScript types
 │   ├── package.json
 │   └── tsconfig.json
-│   # Ingestion ships inside the schist package — see cli/schist/ingest.py,
-│   # cli/schist/schema.sql, cli/schist/seed-domains.sql.
+│   # Ingestion ships inside the schist package — see cli/schist/ingest.py
+│   # and cli/schist/schema.sql.
 ├── viewer/
 │   ├── src/
 │   │   ├── graph.js              # D3.js force-directed graph

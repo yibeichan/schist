@@ -15,7 +15,6 @@ from schist.acl import ACLError, VaultACL, parse_vault_data, parse_vault_yaml
 VALID_V1 = {
     "name": "test-vault",
     "vault_version": 1,
-    "domains": ["ai", "security"],
     "scope_convention": "subdirectory",
     "participants": [
         {"name": "alice", "type": "agent", "default_scope": "global"},
@@ -35,7 +34,6 @@ VALID_V1 = {
 
 V0_MINIMAL = {
     "name": "old-vault",
-    "domains": ["ai"],
     "scope_convention": "subdirectory",
     "participants": [
         {"name": "eleven", "default_scope": "global"},
@@ -85,10 +83,6 @@ class TestValidV1:
         assert acl.access["alice"].read == ["*"]
         assert acl.access["alice"].write == ["*"]
         assert acl.access["cluster-bob"].write == ["research/bob"]
-
-    def test_domains_parsed(self):
-        acl = parse_vault_data(VALID_V1)
-        assert acl.domains == ["ai", "security"]
 
     def test_rate_limits_defaults(self):
         acl = parse_vault_data(VALID_V1)
@@ -394,17 +388,6 @@ class TestBackwardCompat:
 
 
 class TestEdgeCases:
-    def test_empty_domains_list(self):
-        data = _v1(domains=[])
-        acl = parse_vault_data(data)
-        assert acl.domains == []
-
-    def test_no_domains_key(self):
-        data = _v1()
-        del data["domains"]
-        acl = parse_vault_data(data)
-        assert acl.domains == []
-
     def test_scope_with_multiple_segments(self):
         data = _v1()
         data["access"]["alice"]["write"] = ["a/b/c"]
@@ -511,13 +494,6 @@ class TestRateLimitValidation:
             "nobody": {"git_syncs_per_hour": 5},
         })
         with pytest.raises(ACLError, match="no corresponding participant"):
-            parse_vault_data(data)
-
-
-class TestDomainValidation:
-    def test_reject_non_string_domain(self):
-        data = _v1(domains=["ai", 42])
-        with pytest.raises(ACLError, match="domains.*must be a string"):
             parse_vault_data(data)
 
 

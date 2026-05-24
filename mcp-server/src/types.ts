@@ -13,7 +13,6 @@ export interface Note {
   status: string;
   tags: string[];
   concepts: string[];
-  domain?: string;     // research domain from vault.yaml domains list
   body: string;
   connections: Connection[];
   scope?: string;      // e.g., "global", "decisions", "research/ai"
@@ -35,7 +34,6 @@ export interface SearchResult {
   date: string;
   status: string;
   tags: string[];
-  domain?: string;
   snippet: string;
   scope?: string;
   confidence?: "low" | "medium" | "high"; // omitted means not declared on the note
@@ -49,12 +47,6 @@ export interface SearchNotesResponse {
 
 export interface ListConceptsResponse {
   concepts: Concept[];
-  /** Opaque cursor token for the next page; absent when this is the last page. */
-  cursor?: string;
-}
-
-export interface ListDomainsResponse {
-  domains: Domain[];
   /** Opaque cursor token for the next page; absent when this is the last page. */
   cursor?: string;
 }
@@ -138,13 +130,6 @@ export interface AgentStateEntry {
   owner: string;
   updated_at: string;
   ttl_hours?: number | null;
-}
-
-export interface Domain {
-  slug: string;
-  label: string;
-  description?: string;
-  parent_slug?: string;
 }
 
 export interface ConceptAlias {
