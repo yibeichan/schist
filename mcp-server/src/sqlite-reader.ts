@@ -67,14 +67,14 @@ function openDb(vaultRoot: string, opts?: { readonly?: boolean }): Database.Data
 export function searchNotes(
   vaultRoot: string,
   query: string,
-  opts?: { limit?: number; status?: string; tags?: string[]; scope?: string; owner?: string; offset?: number }
+  opts?: { limit?: number; status?: string; tags?: string[]; scope?: string; owner?: string; offset?: number; confidence?: "low" | "medium" | "high" }
 ): SearchResult[] {
   const db = openDb(vaultRoot);
   try {
     const limit = opts?.limit ?? 20;
     const offset = opts?.offset ?? 0;
     let sql = `
-      SELECT docs.id, docs.title, docs.date, docs.status, docs.tags, docs.domain, docs.scope,
+      SELECT docs.id, docs.title, docs.date, docs.status, docs.tags, docs.domain, docs.scope, docs.confidence,
              snippet(docs_fts, 1, '<b>', '</b>', '...', 20) as snippet
       FROM docs_fts
       JOIN docs ON docs.rowid = docs_fts.rowid
@@ -92,6 +92,11 @@ export function searchNotes(
         sql += ` AND docs.tags LIKE ?`;
         params.push(`%"${tag}"%`);
       }
+    }
+
+    if (opts?.confidence) {
+      sql += ` AND docs.confidence = ?`;
+      params.push(opts.confidence);
     }
 
     // ORDER BY is assembled in three layers so OFFSET pagination is stable:
@@ -130,16 +135,20 @@ export function searchNotes(
     params.push(limit, offset);
 
     const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
-    return rows.map((row) => ({
-      id: row.id as string,
-      title: row.title as string,
-      date: (row.date as string) ?? "",
-      status: (row.status as string) ?? "draft",
-      tags: row.tags ? JSON.parse(row.tags as string) : [],
-      domain: (row.domain as string) ?? undefined,
-      snippet: (row.snippet as string) ?? "",
-      scope: (row.scope as string) ?? undefined,
-    }));
+    return rows.map((row) => {
+      const conf = row.confidence;
+      return {
+        id: row.id as string,
+        title: row.title as string,
+        date: (row.date as string) ?? "",
+        status: (row.status as string) ?? "draft",
+        tags: row.tags ? JSON.parse(row.tags as string) : [],
+        domain: (row.domain as string) ?? undefined,
+        snippet: (row.snippet as string) ?? "",
+        scope: (row.scope as string) ?? undefined,
+        confidence: (conf === "low" || conf === "medium" || conf === "high") ? conf : undefined,
+      };
+    });
   } finally {
     db.close();
   }
@@ -154,6 +163,7 @@ export function getNote(vaultRoot: string, id: string): Note | null {
     const body = (row.body as string) ?? "";
     const connections = parseConnectionsSync(body);
 
+    const conf = row.confidence;
     return {
       id: row.id as string,
       title: row.title as string,
@@ -166,6 +176,7 @@ export function getNote(vaultRoot: string, id: string): Note | null {
       connections,
       scope: (row.scope as string) ?? undefined,
       source: (row.source === "human" || row.source === "agent") ? row.source as "human" | "agent" : undefined,
+      confidence: (conf === "low" || conf === "medium" || conf === "high") ? conf : undefined,
     };
   } finally {
     db.close();

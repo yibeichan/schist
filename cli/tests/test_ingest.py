@@ -265,3 +265,84 @@ def test_run_ingest_deletes_partial_db_on_failure(tmp_path: Path) -> None:
         f"_run_ingest must delete the partial DB on failure but {db} still exists; "
         "next get_db() would trust an empty schema-only DB and serve no rows."
     )
+
+
+# ---- #69: confidence field round-trip via frontmatter --------------------
+
+
+def _write_note(vault: Path, name: str, body_block: str) -> None:
+    (vault / "notes").mkdir(parents=True, exist_ok=True)
+    (vault / "notes" / name).write_text(body_block, encoding="utf-8")
+
+
+def test_ingest_reads_confidence_from_frontmatter(tmp_path: Path) -> None:
+    """#69: `confidence` frontmatter populates `docs.confidence` for valid enum values.
+
+    The schema's CHECK constraint AND ingest.py both gate on
+    {'low','medium','high'} — this test exercises the happy path for all
+    three and asserts NULL is preserved (no silent default to 'medium').
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for level in ("low", "medium", "high"):
+        _write_note(
+            vault,
+            f"2026-05-24-{level}.md",
+            f"---\ntitle: {level.title()}\ndate: 2026-05-24\nconfidence: {level}\n---\n\nBody.\n",
+        )
+    # A note that does NOT declare confidence — should land as NULL, not 'medium'.
+    _write_note(
+        vault,
+        "2026-05-24-undeclared.md",
+        "---\ntitle: Undeclared\ndate: 2026-05-24\n---\n\nBody.\n",
+    )
+
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = dict(conn.execute("SELECT title, confidence FROM docs"))
+    finally:
+        conn.close()
+
+    assert rows == {
+        "Low": "low",
+        "Medium": "medium",
+        "High": "high",
+        "Undeclared": None,  # NOT 'medium' — the NULL state is load-bearing.
+    }
+
+
+def test_ingest_skips_invalid_confidence(tmp_path: Path) -> None:
+    """#69: garbage confidence value falls back to NULL, not a crash.
+
+    ingest.py validates against the enum before INSERTing. An off-enum
+    string (e.g. an LLM hallucinating 'very-high') ingests as NULL —
+    safer than CHECK-constraint-rejecting the whole row, which would
+    silently drop the doc from the index.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-05-24-garbage.md",
+        "---\ntitle: Garbage\ndate: 2026-05-24\nconfidence: very-high\n---\n\nBody.\n",
+    )
+
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute("SELECT title, confidence FROM docs").fetchone()
+    finally:
+        conn.close()
+
+    assert row == ("Garbage", None)

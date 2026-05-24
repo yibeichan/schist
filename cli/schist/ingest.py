@@ -147,6 +147,12 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         raw_domain = meta.get('domain')
         domain = raw_domain if isinstance(raw_domain, str) and raw_domain else None
 
+        # Confidence: from frontmatter, validated against enum.
+        # NULL when not declared — distinguishes "agent didn't say" from
+        # "agent said medium" (don't default to medium here, see issue #69).
+        raw_confidence = meta.get('confidence')
+        confidence = raw_confidence if raw_confidence in {"low", "medium", "high"} else None
+
         doc_id = str(rel)
 
         # Determine if this is a concept file (in concepts/ dir or has 'concept' key)
@@ -160,8 +166,8 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         if date_val is not None:
             date_val = str(date_val)
         conn.execute(
-            'INSERT INTO docs (id, title, date, status, tags, concepts, domain, body, scope, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (doc_id, title, date_val, meta.get('status', 'draft'), tags_json, concepts_json, domain, body, scope, source),
+            'INSERT INTO docs (id, title, date, status, tags, concepts, domain, body, scope, source, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (doc_id, title, date_val, meta.get('status', 'draft'), tags_json, concepts_json, domain, body, scope, source, confidence),
         )
         doc_count += 1
 

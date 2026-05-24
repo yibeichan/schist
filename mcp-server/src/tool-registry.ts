@@ -33,6 +33,7 @@ export function makeReadTools(config: VaultConfig) {
           tags: { type: "array", items: { type: "string" } },
           scope: { type: "string", description: 'Filter by scope. Use "inherit" to search agent default scope + global.' },
           owner: { type: "string", description: "Calling agent's id. Required for scope='inherit' under SCHIST_ALLOWED_AGENTS-only deployments where the env has no per-process identity; otherwise optional (falls back to SCHIST_AGENT_NAME / SCHIST_AGENT_ID)." },
+          confidence: { type: "string", enum: ["low", "medium", "high"], description: "Filter results by agent-declared confidence. Notes without a declared confidence (NULL) are excluded when this filter is set." },
           cursor: { type: "string", description: "Opaque pagination cursor returned by a prior call. Echo verbatim; do not modify." },
         },
         required: ["query"],
@@ -184,6 +185,11 @@ export function makeWriteTools(config: VaultConfig) {
           directory: {
             type: "string",
             enum: config.directories,
+          },
+          confidence: {
+            type: "string",
+            enum: ["low", "medium", "high"],
+            description: "Optional. Agent's stated confidence in the note's content. Omit if not declared; do not default to 'medium' to preserve 'agent did not declare' vs 'agent said medium' as distinct states.",
           },
         },
         required: ["owner", "title", "body"],

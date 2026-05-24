@@ -18,6 +18,7 @@ CREATE TABLE docs (
     body        TEXT NOT NULL,          -- full markdown body (sans frontmatter)
     scope       TEXT DEFAULT 'global', -- derived from directory or frontmatter
     source      TEXT,                  -- "human" | "agent" | null
+    confidence  TEXT CHECK(confidence IS NULL OR confidence IN ('low','medium','high')),  -- NULL = agent did not declare
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now'))
 );

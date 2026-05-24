@@ -30,6 +30,7 @@ async function makeVault(): Promise<string> {
       body TEXT NOT NULL DEFAULT '',
       scope TEXT DEFAULT 'global',
       source TEXT,
+      confidence TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
     );
@@ -289,6 +290,7 @@ describe("search_notes tool — scope=inherit + cursor", () => {
         body TEXT NOT NULL DEFAULT '',
         scope TEXT DEFAULT 'global',
         source TEXT,
+        confidence TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now'))
       );
