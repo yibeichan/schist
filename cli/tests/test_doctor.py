@@ -17,6 +17,7 @@ from schist.doctor import (
     check_hooks_path,
     check_ingest_available,
     check_mcp_config,
+    check_mcp_schema_alignment,
     check_node,
     check_post_commit_hook,
     check_python,
@@ -494,6 +495,106 @@ class TestCheckMcpConfig:
             r = check_mcp_config(None)
             assert r.status == "WARN"
             assert "auto-detected" in r.message or "differs" in r.message
+
+
+class TestCheckMcpSchemaAlignment:
+    """Guard against the OLD-MCP / NEW-ingest skew that surfaces as the
+    misleading 'schist-ingest is older' error from ensureSchemaCurrent
+    (mcp-server/src/sqlite-reader.ts:140-146).
+    """
+
+    def _write_dist_with_columns(self, dist_dir: Path, cols: list[str]) -> None:
+        """Stub a `sqlite-reader.js` containing a REQUIRED_DOCS_COLUMNS
+        Set literal matching the regex in doctor.py."""
+        dist_dir.mkdir(parents=True, exist_ok=True)
+        (dist_dir / "index.js").write_text("// stub\n")
+        col_strs = ", ".join(f'"{c}"' for c in cols)
+        (dist_dir / "sqlite-reader.js").write_text(
+            f"const REQUIRED_DOCS_COLUMNS = new Set([\n  {col_strs},\n]);\n"
+        )
+
+    def _write_claude_json(self, tmp_path: Path, dist_dir: Path) -> None:
+        (tmp_path / ".claude.json").write_text(json.dumps({
+            "mcpServers": {"schist": {
+                "command": "node", "args": [str(dist_dir / "index.js")],
+            }}
+        }))
+
+    def test_pass_when_sets_match(self, tmp_path, monkeypatch):
+        """In-sync MCP dist + schema.sql → PASS."""
+        # Canonical columns are derived from the bundled schema.sql; use
+        # _canonical_docs_columns to pin the test to whatever schist ships.
+        from schist.doctor import _canonical_docs_columns
+        canonical = _canonical_docs_columns()
+        assert canonical is not None, "test prerequisite: schema.sql must load"
+        dist_dir = tmp_path / "mcp" / "dist"
+        self._write_dist_with_columns(dist_dir, sorted(canonical))
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_schema_alignment(None)
+        assert r.status == "PASS", r.message
+        assert "in sync" in r.message
+
+    def test_warn_when_mcp_expects_retired_column(self, tmp_path, monkeypatch):
+        """The #146 scenario: MCP dist still lists `domain` after the
+        ingest schema dropped it. doctor must WARN with a 'rebuild MCP'
+        fix — NOT 'reinstall schist-ingest' (the misleading runtime error)."""
+        from schist.doctor import _canonical_docs_columns
+        canonical = _canonical_docs_columns()
+        assert canonical is not None
+        stale_cols = sorted(canonical | {"domain"})
+        dist_dir = tmp_path / "mcp" / "dist"
+        self._write_dist_with_columns(dist_dir, stale_cols)
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_schema_alignment(None)
+        assert r.status == "WARN"
+        assert "retired columns: domain" in r.message
+        assert r.fix is not None and "npm run build" in r.fix
+
+    def test_pass_when_mcp_required_is_proper_subset(self, tmp_path, monkeypatch):
+        """Canonical-only columns (e.g. `created_at`, `updated_at`) that MCP
+        doesn't read aren't a skew. The check must NOT warn on the reverse
+        direction — MCP only declares the columns it SELECTs, by design."""
+        from schist.doctor import _canonical_docs_columns
+        canonical = _canonical_docs_columns()
+        assert canonical is not None
+        # Drop a column MCP doesn't need to read — pick a timestamp that
+        # really is in the canonical set but absent from REQUIRED_DOCS_COLUMNS.
+        assert {"created_at", "updated_at"} <= canonical, (
+            "test prerequisite: timestamp columns must be in canonical schema"
+        )
+        cols_mcp_reads = sorted(canonical - {"created_at", "updated_at"})
+        dist_dir = tmp_path / "mcp" / "dist"
+        self._write_dist_with_columns(dist_dir, cols_mcp_reads)
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_schema_alignment(None)
+        assert r.status == "PASS", r.message
+        assert "in sync" in r.message
+
+    def test_skip_when_no_mcp_config(self, tmp_path, monkeypatch):
+        """No MCP entry configured → SKIP, not FAIL (check_mcp_config
+        already surfaces the missing-entry case)."""
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_schema_alignment(None)
+        assert r.status == "SKIP"
+        assert "no MCP config" in r.message
+
+    def test_skip_when_dist_predates_drift_detection(self, tmp_path, monkeypatch):
+        """Pre-#145 MCP dist doesn't declare REQUIRED_DOCS_COLUMNS — SKIP
+        instead of misreporting the unparseable file as a skew."""
+        dist_dir = tmp_path / "mcp" / "dist"
+        dist_dir.mkdir(parents=True)
+        (dist_dir / "index.js").write_text("// stub\n")
+        (dist_dir / "sqlite-reader.js").write_text(
+            "// older MCP server — no REQUIRED_DOCS_COLUMNS yet\n"
+        )
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_schema_alignment(None)
+        assert r.status == "SKIP"
+        assert "REQUIRED_DOCS_COLUMNS not declared" in r.message
 
 
 # ---------------------------------------------------------------------------
