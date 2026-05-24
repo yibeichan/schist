@@ -33,7 +33,6 @@ async function makeVault(opts?: { docTagsRow?: string }): Promise<string> {
       status      TEXT DEFAULT 'draft',
       tags        TEXT,
       concepts    TEXT,
-      domain      TEXT,
       body        TEXT NOT NULL,
       scope       TEXT DEFAULT 'global',
       source      TEXT,

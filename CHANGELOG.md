@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **BREAKING:** Retired the `domain` concept. Closes #146. Dropped from every layer: vault.yaml top-level `domains:` field; note frontmatter `domain:`; SQLite `docs.domain` column and standalone `domains` table; `cli/schist/seed-domains.sql`; CLI `schist assign-domain` subcommand; MCP `list_domains` and `assign_domain` tools; `Domain` and `ListDomainsResponse` TypeScript interfaces. Field was 1.5% adopted (6/384 vault notes) with no registry in vault.yaml; never queried in any read path. Tags + concepts cover the same need. Migration: callers of removed tools/commands receive `unknown tool`/`unrecognized subcommand`; existing `domain:` keys in note frontmatter are now ignored by ingest (no rewrite needed); the SQLite `docs.domain` column is dropped on the first post-upgrade ingest since `docs` is DROP+CREATE'd every commit; the `domains` table is dropped likewise.
+
 ### Added
 - `confidence` field on docs schema and `create_note` MCP tool. Optional enum (`low | medium | high`); omitted from frontmatter when not declared. Ingestion populates `docs.confidence` (NULL when undeclared — deliberately distinct from "agent said medium"). `search_notes` accepts an optional `confidence` filter that selects matching docs and excludes NULL-confidence rows. `get_note` returns the field when set, omits it when NULL. Closes #69.
 

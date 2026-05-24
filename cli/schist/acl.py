@@ -53,7 +53,6 @@ class RateLimits:
 class VaultACL:
     name: str
     vault_version: int
-    domains: list[str]
     participants: list[Participant]
     scope_convention: str
     access: dict[str, AccessEntry]
@@ -304,16 +303,6 @@ def parse_vault_data(data: dict[str, Any]) -> VaultACL:
             write=[str(s) for s in write],
         )
 
-    # --- domains ---
-    domains = data.get("domains") or []
-    if not isinstance(domains, list):
-        errors.append("'domains' must be a list")
-        domains = []
-    else:
-        for i, d in enumerate(domains):
-            if not isinstance(d, str):
-                errors.append(f"domains[{i}]: must be a string, got {type(d).__name__}")
-
     # --- rate_limits ---
     raw_limits = data.get("rate_limits") or {}
     rate_limits: dict[str, RateLimits] = {}
@@ -344,7 +333,6 @@ def parse_vault_data(data: dict[str, Any]) -> VaultACL:
     return VaultACL(
         name=name or "",
         vault_version=version,
-        domains=domains,
         participants=participants,
         scope_convention=scope_convention,
         access=access,

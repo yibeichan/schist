@@ -241,25 +241,27 @@ def test_run_ingest_deletes_partial_db_on_failure(tmp_path: Path) -> None:
     db.parent.mkdir(parents=True, exist_ok=True)
 
     # Force ingest to raise after `executescript` has already committed
-    # the schema. Patch `_populate_domains` (called near the end of the
-    # ingest body) — it isn't wrapped in a try/except, so the raise
-    # propagates out of `ingest()` and into `_run_ingest`.
+    # the schema. Wrap `_ingest_into` so the original body runs (schema
+    # written, docs/concepts/edges INSERTed) and we raise just before the
+    # function returns — the exception propagates out of `ingest()` into
+    # `_run_ingest`, which must then delete the partial DB.
     import schist.ingest as ingest_mod
 
-    original = ingest_mod._populate_domains
+    original = ingest_mod._ingest_into
 
     class _Boom(Exception):
         pass
 
-    def _explode(*_args, **_kwargs):
+    def _explode(*args, **kwargs):
+        original(*args, **kwargs)
         raise _Boom("synthetic ingest failure")
 
-    ingest_mod._populate_domains = _explode
+    ingest_mod._ingest_into = _explode
     try:
         with pytest.raises(_Boom):
             _run_ingest(str(vault), str(db))
     finally:
-        ingest_mod._populate_domains = original
+        ingest_mod._ingest_into = original
 
     assert not db.exists(), (
         f"_run_ingest must delete the partial DB on failure but {db} still exists; "

@@ -112,11 +112,6 @@ export async function runAudit(opts: {
     await tools.list_concepts(opts.vault, {})
   );
 
-  // list_domains — default limit 100, cap 500 (PR 6).
-  measurements.list_domains = measureResponse(
-    await tools.list_domains(opts.vault, {})
-  );
-
   // query_graph — SELECT * FROM docs is the worst-case from #50.
   measurements.query_graph = measureResponse(
     await tools.query_graph(opts.vault, { sql: "SELECT * FROM docs" })

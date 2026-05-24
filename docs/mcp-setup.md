@@ -34,11 +34,11 @@ any of them unconditionally. There is no opt-in meta-tool.
 Read tools:
 
 - `get_context`, `search_notes`, `get_note`, `list_concepts`, `query_graph` — vault read
-- `search_memory`, `get_agent_state`, `list_domains` — memory read
+- `search_memory`, `get_agent_state` — memory read
 
 Write tools:
 
-- `create_note`, `add_connection`, `assign_domain` — vault write
+- `create_note`, `add_connection` — vault write
 - `add_memory`, `set_agent_state`, `delete_agent_state`, `add_concept_alias` — memory write
 
 **Where authorization lives.** Writes are authorized at the data layer by
@@ -68,7 +68,6 @@ size and protect the agent's context window. Tools that adopted the protocol
 | `search_memory` | 50 | 200 | yes | yes — `verbose: "<reason ≥12 chars>"` returns full `content` (default is a 200-cp snippet) |
 | `query_graph` | 100 | 1000 | yes | no |
 | `list_concepts` | 50 | 200 | yes | no |
-| `list_domains` | 100 | 500 | yes | no |
 | `get_context` | n/a (tiered: `minimal` / `standard` / `full`) | n/a | no | yes — `depth: "full"` requires `verbose: "<reason ≥12 chars>"`; without it the server downgrades to `standard` + emits a `verboseNote` hint |
 
 `get_note` and `get_agent_state` are single-fetch by ID and don't paginate.

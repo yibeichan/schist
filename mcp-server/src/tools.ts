@@ -6,7 +6,7 @@ import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote } from "./git-writer.js";
 import { buildNote, buildConnectionLine } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
-import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, ListDomainsResponse, GetContextResponse } from "./types.js";
+import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse } from "./types.js";
 import {
   canonicalizeQueryHash,
   decodeCursor,
@@ -531,7 +531,6 @@ export async function get_note(
       status: (meta.status as string) ?? "draft",
       tags: Array.isArray(meta.tags) ? meta.tags : [],
       concepts: Array.isArray(meta.concepts) ? meta.concepts : [],
-      domain: (meta.domain as string) ?? undefined,
       body,
       connections,
       ...(confidence === "low" || confidence === "medium" || confidence === "high"
@@ -715,75 +714,6 @@ export async function add_connection(
       source: args.source,
       target: args.target,
       type: args.type,
-      commitSha: result.commitSha,
-      ...(syncWarning !== undefined ? { syncWarning } : {}),
-    };
-  } catch (e: unknown) {
-    return normalizeError(e, "GIT_ERROR");
-  }
-}
-
-export async function assign_domain(
-  vaultRoot: string,
-  args: { owner: string; id: string; domain: string }
-): Promise<unknown> {
-  try {
-    // Identity gate (#63): same ordering as create_note. Reassign to the
-    // canonicalized owner for downstream stamps.
-    const owner = validateOwner(args.owner);
-    const filePath = path.join(vaultRoot, args.id);
-    const absVaultRoot = path.resolve(vaultRoot);
-    const absFilePath = path.resolve(filePath);
-    if (!absFilePath.startsWith(absVaultRoot + path.sep)) {
-      return { error: "PATH_TRAVERSAL", message: "Note path is outside vault root" } satisfies ToolError;
-    }
-
-    // Validate domain exists in vault.yaml domains list. listDomains gained
-    // a default limit of 100 in PR 6 (#50) — pass an explicit large limit so
-    // validation reads the complete domain set even on large taxonomies.
-    const domains = sqliteReader.listDomains(vaultRoot, { limit: Number.MAX_SAFE_INTEGER });
-    const validSlugs = new Set(domains.map((d: { slug: string }) => d.slug));
-    // If no domains are defined, allow any domain (matches CLI behavior)
-    if (validSlugs.size > 0 && !validSlugs.has(args.domain)) {
-      return {
-        error: "INVALID_DOMAIN",
-        message: `Domain "${args.domain}" not found in vault.yaml. Valid domains: ${[...validSlugs].join(", ")}`,
-      } satisfies ToolError;
-    }
-
-    let content: string;
-    try {
-      content = await fs.readFile(filePath, "utf-8");
-    } catch {
-      return { error: "NOT_FOUND", message: `Note not found: ${args.id}` } satisfies ToolError;
-    }
-
-    // Use gray-matter to modify frontmatter
-    const matter = (await import("./markdown-parser.js")).parseNote;
-    const { metadata, body, connections } = matter(content);
-    const { buildNote } = await import("./markdown-parser.js");
-
-    // Update domain in metadata
-    const newMetadata = { ...metadata, domain: args.domain };
-    const newContent = buildNote(newMetadata, body, connections);
-
-    const result = await writeNote(
-      vaultRoot,
-      args.id,
-      newContent,
-      `assign domain ${args.domain} to ${args.id}`,
-      owner
-    );
-
-    triggerIngestion(vaultRoot);
-    triggerSpokePush(vaultRoot);
-
-    // Surface pending sync-failure sentinel — see create_note for the
-    // capture-timing notes.
-    const syncWarning = await readSyncWarning(vaultRoot);
-    return {
-      id: args.id,
-      domain: args.domain,
       commitSha: result.commitSha,
       ...(syncWarning !== undefined ? { syncWarning } : {}),
     };
@@ -1100,7 +1030,7 @@ export async function get_context(
  * All 8 stages are implemented in this file; see the numbered Step comments
  * inline. This handler is the prototype for the cursor-adopting tools:
  * search_notes (landed in PR 4) and query_graph (landed in PR 5 — both
- * defined above), then list_concepts, list_domains, get_context.
+ * defined above), then list_concepts, get_context.
  *
  * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
  */
@@ -1254,84 +1184,6 @@ export async function get_agent_state(
   } catch (e: unknown) {
     return normalizeError(e, "INVALID_SQL");
   }
-}
-
-/**
- * list_domains tool handler. Runs the cursor pipeline:
- *
- *   canonicalizeQueryHash → (cursor decode + binding OR identical-query
- *   refusal) → SQL fetch (limit+1) → recordIssued + issueCursor on capped
- *   results → { domains, cursor? }.
- *
- * No verbose mode. ORDER BY parent_slug NULLS FIRST, slug is already
- * deterministic (slug unique). Default limit 100, cap 500 (per spec —
- * unbounded was a footgun for large vaults).
- *
- * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
- */
-export async function list_domains(
-  vaultRoot: string,
-  args: { limit?: number; cursor?: string }
-): Promise<ListDomainsResponse | ToolError> {
-  const TOOL_NAME = "list_domains" as const;
-
-  const activeOwner = resolveActiveOwner();
-  const ch = canonicalizeQueryHash(args as Record<string, unknown>, activeOwner);
-  if (!ch.ok) return ch.error;
-  const queryHash = ch.queryHash;
-
-  let offset = 0;
-  let consumingCursor = false;
-  if (typeof args.cursor === "string" && args.cursor.length > 0) {
-    const d = decodeCursor(args.cursor, TOOL_NAME);
-    if (!d.ok) return d.error;
-    if (d.queryHash !== queryHash) {
-      return {
-        error: "CURSOR_QUERY_MISMATCH",
-        message: "cursor was issued for a different query — restart pagination from page 1",
-      };
-    }
-    offset = d.offset;
-    consumingCursor = true;
-  }
-
-  if (!consumingCursor) {
-    const refusal = checkRefusal({
-      tool: TOOL_NAME,
-      queryHash,
-      owner: activeOwner,
-      vaultRoot,
-      verboseEnabled: false,
-    });
-    if (refusal.refuse) return refusal.error;
-  }
-
-  const effectiveLimit = validateLimit(args.limit, 100, 500);
-
-  let domains: import("./types.js").Domain[];
-  try {
-    domains = sqliteReader.listDomains(vaultRoot, {
-      limit: effectiveLimit + 1,
-      offset,
-    });
-  } catch (e: unknown) {
-    return normalizeError(e, "INGEST_ERROR");
-  }
-
-  const hasMore = domains.length > effectiveLimit;
-  if (hasMore) domains = domains.slice(0, effectiveLimit);
-
-  const response: ListDomainsResponse = { domains };
-  if (hasMore) {
-    recordIssued({ tool: TOOL_NAME, queryHash, owner: activeOwner, vaultRoot, verboseEnabled: false });
-    response.cursor = issueCursor({
-      tool: TOOL_NAME,
-      queryHash,
-      offset: offset + effectiveLimit,
-    });
-  }
-
-  return response;
 }
 
 // WRITE memory tools (require write capability gate)

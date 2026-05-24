@@ -11,7 +11,6 @@ import {
   get_note,
   create_note,
   add_connection,
-  assign_domain,
   list_concepts,
   query_graph,
   get_context,
@@ -23,7 +22,6 @@ import {
   set_agent_state,
   delete_agent_state,
   add_concept_alias,
-  list_domains,
 } from "./tools.js";
 import type { VaultConfig } from "./types.js";
 import { listAllTools } from "./tool-registry.js";
@@ -109,9 +107,6 @@ async function main() {
         case "add_connection":
           result = await add_connection(vaultRoot, toolArgs as Parameters<typeof add_connection>[1]);
           break;
-        case "assign_domain":
-          result = await assign_domain(vaultRoot, toolArgs as Parameters<typeof assign_domain>[1]);
-          break;
         case "list_concepts":
           result = await list_concepts(vaultRoot, toolArgs as Parameters<typeof list_concepts>[1]);
           break;
@@ -126,9 +121,6 @@ async function main() {
           break;
         case "get_agent_state":
           result = await get_agent_state(vaultRoot, toolArgs as Parameters<typeof get_agent_state>[1]);
-          break;
-        case "list_domains":
-          result = await list_domains(vaultRoot, toolArgs as Parameters<typeof list_domains>[1]);
           break;
         case "add_memory":
           result = await add_memory(vaultRoot, toolArgs as Parameters<typeof add_memory>[1]);
