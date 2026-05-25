@@ -17,7 +17,7 @@ Beyond the original "flatten" scope, exploration surfaced **four separate "what 
 |---|---|---|
 | `schema/default.yaml` | `{notes, concepts}` | `cli/schist/commands.py:198` |
 | `cli/schist/rate_limit.py:38` | `("notes/", "papers/", "concepts/")` | rate-limit note counting |
-| `mcp-server/src/tools.ts:98` fallback | `["notes", "papers", "concepts"]` | `create_note` `dir` validation |
+| `mcp-server/src/tools.ts:98` fallback | `["notes", "papers", "concepts"]` | `create_note` `dir` validation (reads `<vault>/schist.yaml`, distinct from `vault.yaml`) |
 | Actual vault layout | notes, papers, concepts, research, decisions, ops, projects, shared, logs | reality |
 
 This refactor adopts the **C** scope: not just flip defaults, but make `schema/default.yaml` the single source of truth and have both consumers derive from it, with drift tests to keep it that way.
@@ -54,7 +54,7 @@ write_branch: drafts
 **Consumers:**
 
 - `cli/schist/rate_limit.py` — replaces the hardcoded `NOTE_DIRS` constant with `_DEFAULT_NOTE_DIRS` loaded once at module import via `Path(__file__).resolve().parent.parent.parent / "schema" / "default.yaml"`. Fails closed at import (RuntimeError) if file is missing or malformed — a broken install must not silently under-count.
-- `mcp-server/src/tools.ts` — in `loadVaultConfig`, loads `path.resolve(__dirname, "../../schema/default.yaml")` and uses its `directories` mapping as the fallback when vault.yaml doesn't declare its own. Fails open: logs a stderr warning and falls back to a baked-in list (which a drift test holds in sync with default.yaml).
+- `mcp-server/src/tools.ts` — in `loadVaultConfig`, loads `path.resolve(__dirname, "../../schema/default.yaml")` and uses its `directories` mapping as the fallback when `<vault>/schist.yaml` doesn't declare `directories:`. Fails open: logs a stderr warning and falls back to a baked-in list (which a drift test holds in sync with default.yaml).
 
 **Asymmetric failure modes are intentional:**
 - Python (`rate_limit.py`) runs inside `pre-receive` — a short-lived per-push process. A crash there fails-closed at the git level, blocking the bad push with a clear error. Operator notices on the next push.
@@ -92,7 +92,7 @@ write_branch: drafts
 ### Layer 4 — Docs
 
 - `schema/vault-yaml.md` — flip "subdirectory (default)" → "flat (default)"; add a sentence noting `default_scope` should normally be `"global"` under flat; mention `source_agent` frontmatter as the authorship trace. Update the example block at line 80-104.
-- `schema/SCHEMA.md` — update lines 163-199. Doc currently references `.schist/config.yaml` as the schema-override path, but code reads `<vault>/vault.yaml` (mcp-server) and `<vault>/schist.yaml` (`schist schema` CLI). Fix to reflect reality. Also update the directory-structure example at lines 148-159 to include `research/`, `decisions/`, `ops/`, `projects/`.
+- `schema/SCHEMA.md` — update lines 163-199. Doc currently references `.schist/config.yaml` as the schema-override path, but the actual file is `<vault>/schist.yaml` (read by both `mcp-server/src/tools.ts:loadVaultConfig` and `cli/schist/commands.py:schema`). Note that `<vault>/vault.yaml` is a *different* file with a different role (ACL/scope config, parsed by `cli/schist/acl.py`). Fix the doc to reflect reality. Also update the directory-structure example at lines 148-159 to include `research/`, `decisions/`, `ops/`, `projects/`.
 - `docs/hub-spoke-setup.md` — lines 109-110, 184: rewrite `--scope research/hpc-cluster`, `--scope research/pi` examples to flat scopes (e.g., `--scope research` or `--scope global`; pick at impl based on what spoke-init actually accepts).
 - `docs/hub-spoke-pi-hpc-mac.md` → `git mv docs/hub-spoke-pi-orcd-dragonfly.md`. Substitutions throughout the 556-line file: `hpc → orcd`, `mac → dragonfly`, `research/hpc → research`, `research/mac → research`, `schist-hpc.sif → schist-orcd.sif`. Redraw the ASCII topology diagram. Two inbound links to fix in the same commit: `CHANGELOG.md` (the entry describing the doc) and `docs/hub-spoke-setup.md` (cross-reference at the top).
 - `CLAUDE.md` (project root) — add a brief note under "Architecture" or "Hub & spoke (multi-machine)" that the default `scope_convention` is `flat` and authorship is recorded in `source_agent` frontmatter.
