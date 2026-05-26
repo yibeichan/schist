@@ -95,7 +95,7 @@ schist/
 │   └── pre-commit                 # Rejects secrets/API keys
 ├── schema/
 │   ├── SCHEMA.md                  # Full markdown schema specification
-│   └── default.yaml               # Default schema config (connection types, statuses)
+│   └── default.yaml               # Default schema config (connection types, statuses; now lives at cli/schist/default.yaml)
 ├── docs/
 │   ├── agent-integration.md       # MCP config snippets for agents
 │   └── vault-setup.md             # How to create and configure a vault
@@ -541,7 +541,7 @@ This gives the agent a snapshot of the graph state before it starts working.
 ### Phase 1: Foundation (2-3 hours)
 **Goal:** Markdown schema + SQLite ingestion working end-to-end.
 
-- [ ] Write `schema/default.yaml` — connection types, statuses, directory config
+- [ ] Write `cli/schist/default.yaml` — connection types, statuses, directory config
 - [ ] Write `ingestion/schema.sql` — full DDL
 - [ ] Write `ingestion/ingest.py` — parse markdown vault → populate SQLite
 - [ ] Write `hooks/post-commit` — trigger ingestion
@@ -600,7 +600,7 @@ This gives the agent a snapshot of the graph state before it starts working.
 2. **No delete operations.** Append-only knowledge. Archive instead of delete. This is intentional — knowledge graphs should grow, not shrink.
 3. **Serialized writes via mutex.** One commit at a time. Concurrent agent writes queue up. This is simpler and more correct than merge conflict resolution.
 4. **Concept slugs are stable identifiers.** Once a concept slug exists, it never changes. Title can be updated, slug cannot.
-5. **Connection types are a closed set per schema.** Default: extends, contradicts, supports, replicates, applies-method-of, reinterprets, related. Configurable in `schema/default.yaml`.
+5. **Connection types are a closed set per schema.** Default: extends, contradicts, supports, replicates, applies-method-of, reinterprets, related. Configurable in `cli/schist/default.yaml`.
 6. **Vault is a separate repo.** `schist` is the tool, vault is the content. They're decoupled via `--vault-path`. One schist installation can serve multiple vaults.
 7. **Drafts branch for agent writes.** Agents commit to `drafts/`, human reviews and merges to `main`. This is the safety boundary.
 8. **FTS5 for search, not embeddings.** Embeddings add complexity (model dependency, vector DB). FTS5 is fast, zero-dependency, and sufficient for structured knowledge graphs where connections carry more signal than semantic similarity.
