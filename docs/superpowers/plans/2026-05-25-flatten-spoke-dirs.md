@@ -10,6 +10,12 @@
 
 **Reference spec:** `docs/superpowers/specs/2026-05-24-flatten-spoke-dirs-design.md`
 
+> **Implementation deviation (post-Task-1):** Setuptools 82+ rejected the planned `""` package-key for path-traversal package-data. The canonical YAML moved from `schema/default.yaml` to `cli/schist/default.yaml` (inside the Python package). All references in Tasks 2 / 5 / 6 below should use:
+> - **Python:** `Path(__file__).resolve().parent / "default.yaml"` (file is sibling of `rate_limit.py` in the package)
+> - **TypeScript:** `path.resolve(__dirname, "..", "..", "..", "cli", "schist", "default.yaml")` (from `mcp-server/dist/` go up 3 → `<repo>/cli/schist/default.yaml`)
+>
+> Task 1 also already updated `cli/schist/commands.py:198` and `schema/SCHEMA.md:199` to point at the new canonical. Task 6's SCHEMA.md edits skip the :199 line and do only the directory-tree expansion + the `.schist/config.yaml` → `<vault>/schist.yaml` correction.
+
 ---
 
 ## Task 1: Expand canonical `schema/default.yaml` + wire package-data

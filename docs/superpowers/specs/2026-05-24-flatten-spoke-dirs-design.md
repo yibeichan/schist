@@ -15,18 +15,20 @@ Beyond the original "flatten" scope, exploration surfaced **four separate "what 
 
 | Source | List | Used by |
 |---|---|---|
-| `schema/default.yaml` | `{notes, concepts}` | `cli/schist/commands.py:198` |
+| `cli/schist/default.yaml` | `{notes, concepts}` | `cli/schist/commands.py:198` |
 | `cli/schist/rate_limit.py:38` | `("notes/", "papers/", "concepts/")` | rate-limit note counting |
 | `mcp-server/src/tools.ts:98` fallback | `["notes", "papers", "concepts"]` | `create_note` `dir` validation (reads `<vault>/schist.yaml`, distinct from `vault.yaml`) |
 | Actual vault layout | notes, papers, concepts, research, decisions, ops, projects, shared, logs | reality |
 
-This refactor adopts the **C** scope: not just flip defaults, but make `schema/default.yaml` the single source of truth and have both consumers derive from it, with drift tests to keep it that way.
+This refactor adopts the **C** scope: not just flip defaults, but make `cli/schist/default.yaml` the single source of truth and have both consumers derive from it, with drift tests to keep it that way.
+
+> **Canonical location note:** During implementation, the originally planned `schema/default.yaml` location was moved to `cli/schist/default.yaml` because setuptools 82+ rejected the `""` package-key syntax for package-data path-traversal. The file now lives inside the Python package, which setuptools picks up natively via the `schist = ["*.sql", "*.yaml"]` package-data entry. The `schema/` top-level directory retains `SCHEMA.md` and `vault-yaml.md` (spec docs).
 
 ## Design decisions (interview record)
 
 1. **`scope_convention: subdirectory`** — keep fully supported, no deprecation warning. Existing/external deployments must continue to parse without noise.
 2. **Hub seed write list** — generic content-axis: `[research, concepts, decisions, notes, ops, papers]`. Per-spoke `default_scope: global`. No `*` or `shared/skills` baked into the generic template.
-3. **NOTE_DIRS** — expanded to all current content-axis dirs, sourced from canonical `schema/default.yaml`.
+3. **NOTE_DIRS** — expanded to all current content-axis dirs, sourced from canonical `cli/schist/default.yaml`.
 4. **SCHEMA.md doc fix** — included in this PR (stale paths contradict the work being done).
 5. **`docs/hub-spoke-pi-hpc-mac.md`** — rename to `docs/hub-spoke-pi-orcd-dragonfly.md`, rewrite hpc→orcd / mac→dragonfly, flip scopes to flat.
 6. **Approach C** — canonical schema file, both Python and TypeScript load from it, drift tests guard against future skew.
@@ -34,7 +36,7 @@ This refactor adopts the **C** scope: not just flip defaults, but make `schema/d
 
 ## Architecture
 
-Single canonical source at `schema/default.yaml`:
+Single canonical source at `cli/schist/default.yaml`:
 
 ```yaml
 connection_types: [extends, contradicts, supports, replicates, applies-method-of, reinterprets, related]
@@ -53,20 +55,20 @@ write_branch: drafts
 
 **Consumers:**
 
-- `cli/schist/rate_limit.py` — replaces the hardcoded `NOTE_DIRS` constant with `_DEFAULT_NOTE_DIRS` loaded once at module import via `Path(__file__).resolve().parent.parent.parent / "schema" / "default.yaml"`. Fails closed at import (RuntimeError) if file is missing or malformed — a broken install must not silently under-count.
-- `mcp-server/src/tools.ts` — in `loadVaultConfig`, loads `path.resolve(__dirname, "../../schema/default.yaml")` and uses its `directories` mapping as the fallback when `<vault>/schist.yaml` doesn't declare `directories:`. Fails open: logs a stderr warning and falls back to a baked-in list (which a drift test holds in sync with default.yaml).
+- `cli/schist/rate_limit.py` — replaces the hardcoded `NOTE_DIRS` constant with `_DEFAULT_NOTE_DIRS` loaded once at module import via `Path(__file__).resolve().parent / "default.yaml"` (the file lives inside the package post-Task-1). Fails closed at import (RuntimeError) if file is missing or malformed — a broken install must not silently under-count.
+- `mcp-server/src/tools.ts` — in `loadVaultConfig`, loads `path.resolve(__dirname, "../../cli/schist/default.yaml")` and uses its `directories` mapping as the fallback when `<vault>/schist.yaml` doesn't declare `directories:`. Fails open: logs a stderr warning and falls back to a baked-in list (which a drift test holds in sync with default.yaml).
 
 **Asymmetric failure modes are intentional:**
 - Python (`rate_limit.py`) runs inside `pre-receive` — a short-lived per-push process. A crash there fails-closed at the git level, blocking the bad push with a clear error. Operator notices on the next push.
 - TypeScript (`tools.ts`) runs in the long-lived MCP server. A crash would brick every agent in the session. The fail-open pattern is already the established response to config issues in this file.
 
-**Drift detection:** one test per side loads `schema/default.yaml` and asserts the consumer's loaded constant (Python) or hardcoded fallback (TypeScript) matches.
+**Drift detection:** one test per side loads `cli/schist/default.yaml` and asserts the consumer's loaded constant (Python) or hardcoded fallback (TypeScript) matches.
 
 ## Components
 
 ### Layer 1 — Canonical schema (single edit)
 
-- `schema/default.yaml`: expand `directories:` block from 2 → 8 entries.
+- `cli/schist/default.yaml`: expand `directories:` block from 2 → 8 entries.
 - `cli/pyproject.toml`: extend `[tool.setuptools.package-data]` so `default.yaml` ships with the wheel. Either (a) `schist = ["*.sql", "../schema/*.yaml"]` (relative reference) or (b) copy `default.yaml` into `cli/schist/` at build time. **Decision: (a) at impl** unless setuptools rejects the relative path, in which case fall back to (b) with a copy step.
 
 ### Layer 2 — Flat-default switch
@@ -82,11 +84,11 @@ write_branch: drafts
 
 - `cli/schist/rate_limit.py`:
   - Delete `NOTE_DIRS = (...)` constant.
-  - Add a `_load_default_dirs()` helper that opens `schema/default.yaml` (resolved via `Path(__file__).resolve().parent.parent.parent / "schema" / "default.yaml"` for the editable + sdist installs; if it fails, try `importlib.resources` fallback). Returns `tuple(yaml["directories"].values())` — values already include trailing slashes.
+  - Add a `_load_default_dirs()` helper that opens `cli/schist/default.yaml` (resolved via `Path(__file__).resolve().parent / "default.yaml"` — the file lives inside the package). Returns `tuple(yaml["directories"].values())` — values already include trailing slashes.
   - Bind result at module level: `_DEFAULT_NOTE_DIRS = _load_default_dirs()`.
   - `_count_note_files`: use `_DEFAULT_NOTE_DIRS` in the `subdirectory` branch; flat/multi-vault branches unchanged.
 - `mcp-server/src/tools.ts`:
-  - In `loadVaultConfig`, before reading vault.yaml, attempt to load `schema/default.yaml` via `path.resolve(__dirname, "../../schema/default.yaml")` + `yamlLoad`. If it fails, log `WARN: schema/default.yaml unreadable (<err>); using baked-in fallback` and fall back to a hardcoded list that matches default.yaml.
+  - In `loadVaultConfig`, before reading vault.yaml, attempt to load `cli/schist/default.yaml` via `path.resolve(__dirname, "../../cli/schist/default.yaml")` + `yamlLoad`. If it fails, log `WARN: cli/schist/default.yaml unreadable (<err>); using baked-in fallback` and fall back to a hardcoded list that matches default.yaml.
   - Pass the loaded `directories` mapping values (or fallback) as the `getStringList("directories", FALLBACK)` default in the existing call.
 
 ### Layer 4 — Docs
@@ -104,10 +106,10 @@ write_branch: drafts
 
 ## Data flow
 
-Both sides hit `schema/default.yaml` once at startup.
+Both sides hit `cli/schist/default.yaml` once at startup.
 
 ```
-schema/default.yaml (canonical)
+cli/schist/default.yaml (canonical)
   ├─► [Python, module import]
   │   _load_default_dirs() → _DEFAULT_NOTE_DIRS
   │   used by _count_note_files when scope_convention == "subdirectory"
@@ -131,10 +133,10 @@ Runtime read path unchanged. Hub init / spoke init unchanged in flow — only th
 ### New tests
 
 - `cli/tests/test_rate_limit.py`:
-  - **Drift test:** load `schema/default.yaml` directly, assert `_DEFAULT_NOTE_DIRS == tuple(yaml["directories"].values())`.
+  - **Drift test:** load `cli/schist/default.yaml` directly, assert `_DEFAULT_NOTE_DIRS == tuple(yaml["directories"].values())`.
   - **Expanded coverage:** `_count_note_files` under `subdirectory` correctly counts files under `research/`, `decisions/`, `ops/`, `projects/`. Today it silently returns 0 for these.
 - `mcp-server/tests/tools.test.ts`:
-  - **Drift test:** load `schema/default.yaml` via the same fs path the production code uses; parse; assert the hardcoded fallback list (export it from tools.ts for testability) matches `Object.values(yaml.directories)`.
+  - **Drift test:** load `cli/schist/default.yaml` via the same fs path the production code uses; parse; assert the hardcoded fallback list (export it from tools.ts for testability) matches `Object.values(yaml.directories)`.
 - `cli/tests/test_sync.py` (or wherever seed-builder tests live; if not yet present, add the file):
   - `_build_seed_vault` emits `scope_convention: flat`, each participant has `default_scope: global`, `access[p].write == ["research", "concepts", "decisions", "notes", "ops", "papers"]`.
 - `cli/tests/test_spoke_config.py`:
@@ -166,7 +168,7 @@ rm -rf /tmp/test-hub
 
 ## Acceptance criteria
 
-- `schema/default.yaml` has all 8 content-axis directories.
+- `cli/schist/default.yaml` has all 8 content-axis directories.
 - `cli/schist/rate_limit.py` loads NOTE_DIRS from `default.yaml` at import; the module-level binding `_DEFAULT_NOTE_DIRS` is derived from the YAML, not a hardcoded literal.
 - `mcp-server/src/tools.ts` loads the canonical list at startup; hardcoded fallback is kept in sync via a drift test.
 - `schist init --hub` and `schist init --standalone` generate vault.yaml with `scope_convention: flat` and `default_scope: global` for every participant.
