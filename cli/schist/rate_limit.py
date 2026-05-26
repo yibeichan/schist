@@ -35,7 +35,33 @@ WINDOW_SECONDS = 3600
 BUSY_TIMEOUT_MS = 5000
 
 # Path prefixes considered "note-bearing" for the subdirectory convention.
-NOTE_DIRS = ("notes/", "papers/", "concepts/")
+# Derived at import time from the canonical `cli/schist/default.yaml` so all
+# consumers (rate_limit, future mcp-server tools.ts, future loaders) see the
+# same list. Fails closed on missing/malformed file — a broken install must
+# not silently under-count.
+def _load_default_dirs() -> tuple[str, ...]:
+    import yaml
+
+    # default.yaml is a sibling of rate_limit.py inside the schist package,
+    # shipped via cli/pyproject.toml package-data. This path resolution
+    # works for both editable installs and wheel installs.
+    schema_path = Path(__file__).resolve().parent / "default.yaml"
+    try:
+        data = yaml.safe_load(schema_path.read_text())
+    except (OSError, yaml.YAMLError) as e:
+        raise RuntimeError(
+            f"schist install is broken: cannot read canonical {schema_path} ({e}). "
+            f"Reinstall the schist package."
+        ) from e
+    dirs = data.get("directories")
+    if not isinstance(dirs, dict) or not dirs:
+        raise RuntimeError(
+            f"schist install is broken: {schema_path} has no `directories:` mapping."
+        )
+    return tuple(dirs.values())
+
+
+_DEFAULT_NOTE_DIRS = _load_default_dirs()
 
 
 @dataclass
@@ -53,16 +79,16 @@ class RateLimitResult:
 def _count_note_files(changed_files: list[str], scope_convention: str) -> int:
     """Count note-bearing files in a push.
 
-    For ``subdirectory`` convention, only files under ``notes/``, ``papers/``,
-    or ``concepts/`` are counted — this is uncheatable because non-note files
-    never contribute to the count. For ``flat`` and ``multi-vault``, we fall
-    back to a ``.md`` suffix filter because there is no canonical directory
-    structure to key off of.
+    For ``subdirectory`` convention, only files under one of the content-axis
+    directories enumerated in ``cli/schist/default.yaml`` are counted — this
+    is uncheatable because non-note files never contribute to the count. For
+    ``flat`` and ``multi-vault``, we fall back to a ``.md`` suffix filter
+    because there is no canonical directory structure to key off of.
     """
     if scope_convention == "subdirectory":
         return sum(
             1 for f in changed_files
-            if any(f.startswith(prefix) for prefix in NOTE_DIRS)
+            if any(f.startswith(prefix) for prefix in _DEFAULT_NOTE_DIRS)
         )
     return sum(1 for f in changed_files if f.endswith(".md"))
 

@@ -121,6 +121,21 @@ class TestCountNoteFiles:
         files = ["tools/x.md", "docs/y.md"]
         assert _count_note_files(files, "subdirectory") == 0
 
+    def test_subdirectory_counts_research(self):
+        files = ["research/2026-05-25-foo.md", "research/sub/bar.md"]
+        assert _count_note_files(files, "subdirectory") == 2
+
+    def test_subdirectory_counts_decisions_ops_projects(self):
+        files = [
+            "decisions/2026-05-25-adr.md",
+            "ops/2026-05-25-runbook.md",
+            "projects/2026-05-25-kickoff.md",
+        ]
+        assert _count_note_files(files, "subdirectory") == 3
+
+    def test_subdirectory_counts_logs(self):
+        assert _count_note_files(["logs/2026-05-25-session.md"], "subdirectory") == 1
+
 
 # ---------------------------------------------------------------------------
 # _init_db — unit
@@ -666,3 +681,30 @@ class TestConcurrency:
 
         assert all(results["a"])
         assert all(results["b"])
+
+
+# ---------------------------------------------------------------------------
+# Canonical default.yaml drift — _DEFAULT_NOTE_DIRS must match the YAML
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultNoteDirsDrift:
+    def test_default_note_dirs_match_canonical_yaml(self):
+        """rate_limit._DEFAULT_NOTE_DIRS must mirror cli/schist/default.yaml's
+        `directories:` values verbatim. If a contributor adds a new
+        content-axis dir to default.yaml, this test fails until they update
+        the canonical loader (or stops failing once they do)."""
+        import yaml
+        from pathlib import Path
+
+        from schist.rate_limit import _DEFAULT_NOTE_DIRS
+
+        canonical_path = Path(__file__).resolve().parent.parent / "schist" / "default.yaml"
+        canonical = yaml.safe_load(canonical_path.read_text())
+        expected = tuple(canonical["directories"].values())
+
+        assert _DEFAULT_NOTE_DIRS == expected, (
+            f"_DEFAULT_NOTE_DIRS drift: expected {expected!r}, "
+            f"got {_DEFAULT_NOTE_DIRS!r}. "
+            f"Source of truth is {canonical_path}."
+        )
