@@ -196,7 +196,7 @@ directories:
 slug_pattern: "^[a-z0-9-]+$"
 ```
 
-If no config exists, `schema/default.yaml` from the schist installation is used.
+If no `schist.yaml` exists at the vault root, the canonical defaults are read from `cli/schist/default.yaml` (shipped inside the schist Python package). This is the single source of truth for the directory list — both Python (`rate_limit.py`) and TypeScript (`tools.ts`) load it directly.
 
 ## Validation Rules
 
