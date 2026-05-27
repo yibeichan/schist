@@ -195,7 +195,11 @@ def schema(args, vault_path: str, db_path: str):
 
     # Find schema config
     vault_schema = os.path.join(vault_path, 'schist.yaml')
-    default_schema = os.path.join(Path(__file__).resolve().parent.parent.parent, 'schema', 'default.yaml')
+    # Canonical default ships inside the package — see cli/schist/default.yaml.
+    # Path(__file__).parent works for both editable and wheel installs;
+    # the legacy <repo>/schema/default.yaml path was removed in the
+    # flatten-spoke-dirs refactor (single source of truth).
+    default_schema = str(Path(__file__).resolve().parent / 'default.yaml')
 
     schema_path = vault_schema if os.path.exists(vault_schema) else default_schema
     if not os.path.exists(schema_path):

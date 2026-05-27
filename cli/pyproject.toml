@@ -47,8 +47,12 @@ packages = ["schist"]
 # Ship schema.sql inside the wheel so `schist-ingest` works after
 # `pip install schist` — ingest.py reads schema.sql via
 # Path(__file__).parent / 'schema.sql'.
+# default.yaml is the canonical content-axis directory list, shipped
+# inside the wheel as in-package data. Loaders (commands.py, rate_limit.py,
+# and mcp-server tools.ts) resolve it via
+# Path(__file__).parent / 'default.yaml' for both editable and wheel installs.
 [tool.setuptools.package-data]
-schist = ["*.sql"]
+schist = ["*.sql", "default.yaml"]
 
 [tool.pytest.ini_options]
 markers = [

@@ -195,7 +195,10 @@ class TestInitStandalone:
         data = yaml.safe_load((target / "vault.yaml").read_text())
         assert data["vault_version"] == 1
         assert data["name"] == "roundtrip"
-        assert data["scope_convention"] == "subdirectory"
+        assert data["scope_convention"] == "flat"
+        # Refactor invariant: standalone seeds must never emit per-spoke
+        # subdirectory `default_scope`. See spec 2026-05-24-flatten-spoke-dirs.
+        assert "research/" not in (data["participants"][0].get("default_scope") or "")
         assert data["access"]["local"] == {"read": ["*"], "write": ["*"]}
 
     def test_initial_commit_on_main_branch(self, tmp_path):

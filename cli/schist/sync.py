@@ -17,6 +17,12 @@ from . import git_ops
 from .acl import ACLError, NAME_RE, parse_vault_data
 from .spoke_config import SpokeConfig, is_spoke, load_spoke_config, save_spoke_config
 
+# Historical default for the now-deprecated --scope-prefix flag. Retained
+# only so init_hub can detect a user-supplied custom value and warn. Keep
+# in sync with the argparse default in __main__.py (which imports it).
+_SCOPE_PREFIX_LEGACY_DEFAULT = "research"
+
+
 class _InitError(Exception):
     """Raised by init_* build steps so the outer function can clean up staging."""
 
@@ -483,21 +489,13 @@ def init_hub(args, hub_path: str) -> None:
         print("Error: at least one --participant is required", file=sys.stderr)
         sys.exit(1)
 
-    scope_prefix = getattr(args, "scope_prefix", None) or "research"
-    if scope_prefix and not NAME_RE.match(scope_prefix):
-        print(
-            f"Error: --scope-prefix '{scope_prefix}' must match ^[a-z][a-z0-9-]*$",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
     hub = Path(hub_path).resolve()
     if hub.exists() and any(hub.iterdir()):
         print(f"Error: hub path '{hub_path}' already exists and is not empty", file=sys.stderr)
         sys.exit(1)
 
     # Build vault.yaml data and validate before touching the filesystem.
-    vault_data = _build_seed_vault(name, participants, scope_prefix=scope_prefix)
+    vault_data = _build_seed_vault(name, participants)
     try:
         parse_vault_data(vault_data)
     except ACLError as e:
@@ -632,27 +630,32 @@ def _build_hub_in_staging(
                 raise _InitError(f"{' '.join(cmd)} failed: {r.stderr.strip()}")
 
 
-def _build_seed_vault(name: str, participants: list[str], scope_prefix: str = "research") -> dict:
-    """Construct a minimal valid vault.yaml data dict for the seed commit.
+def _build_seed_vault(name: str, participants: list[str]) -> dict:
+    """Construct a minimal valid vault.yaml data dict for the hub seed commit.
 
-    Each participant gets a default scope of `{scope_prefix}/{name}` and a matching
-    write grant, plus read:* so any participant can see the full graph.
+    Every participant gets `default_scope: global` and a content-axis write
+    list. Authorship is recorded in note frontmatter via `source_agent`, not
+    in directory placement — see schema/SCHEMA.md and ADR-002 in the vault.
+    Hub operators can broaden specific participants (e.g. a privileged spoke
+    that manages `shared/skills/`) by editing vault.yaml after init.
     """
-    participant_entries = []
-    access = {}
-    for p in participants:
-        scope = f"{scope_prefix}/{p}"
-        participant_entries.append({
-            "name": p,
-            "type": "spoke",
-            "default_scope": scope,
-        })
-        access[p] = {"read": ["*"], "write": [scope]}
+    # Participant write-grants. Intentionally a subset of cli/schist/default.yaml's
+    # directory list: `logs/` is infra-owned (rate-limit DB, audit records) and
+    # `projects/` is per-installation, so neither is a default participant write
+    # target. This is an ACL grant list, NOT the note-bearing-dirs list — the two
+    # are semantically distinct and deliberately not coupled.
+    content_axis_write = ["research", "concepts", "decisions", "notes", "ops", "papers"]
+
+    participant_entries = [
+        {"name": p, "type": "spoke", "default_scope": "global"}
+        for p in participants
+    ]
+    access = {p: {"read": ["*"], "write": list(content_axis_write)} for p in participants}
 
     return {
         "vault_version": 1,
         "name": name,
-        "scope_convention": "subdirectory",
+        "scope_convention": "flat",
         "participants": participant_entries,
         "access": access,
     }
@@ -799,14 +802,13 @@ def _build_standalone_vault(name: str, identity: str) -> dict:
     """Construct a minimal valid vault.yaml data dict for a standalone vault.
 
     Single-participant, single-agent, full-vault read+write. Kept separate from
-    `_build_seed_vault` because the two diverge on participant type, default
-    scope, and ACL shape — parametrizing would hide the difference behind
-    callbacks.
+    `_build_seed_vault` because the two diverge on participant type and ACL
+    shape — parametrizing would hide the difference behind callbacks.
     """
     return {
         "vault_version": 1,
         "name": name,
-        "scope_convention": "subdirectory",
+        "scope_convention": "flat",
         "participants": [{
             "name": identity,
             "type": "agent",
@@ -918,6 +920,17 @@ def _dispatch_init(args) -> None:
     spoke = getattr(args, "spoke", False)
     hub_url = getattr(args, "hub", None)
     standalone_path = getattr(args, "path", None)
+
+    # --scope-prefix is deprecated and ignored in every init mode (flat
+    # convention has no per-participant scope prefix). Warn once here, before
+    # dispatch, so spoke/standalone/hub all surface it consistently.
+    if getattr(args, "scope_prefix", None) not in (None, _SCOPE_PREFIX_LEGACY_DEFAULT):
+        print(
+            "Warning: --scope-prefix is deprecated and has no effect. "
+            "New vaults use scope_convention: flat; authorship is recorded in "
+            "the source_agent frontmatter, not via per-participant directories.",
+            file=sys.stderr,
+        )
 
     if hub_path and spoke:
         print("Error: --hub-path and --spoke are mutually exclusive", file=sys.stderr)

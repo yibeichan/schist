@@ -1,5 +1,7 @@
 import * as fs from "fs/promises";
+import { readFileSync } from "fs";
 import * as path from "path";
+import { fileURLToPath } from "url";
 import { spawn } from "child_process";
 import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
@@ -18,6 +20,69 @@ import {
   noteHighFrequency,
   snippetContent,
 } from "./protocol/index.js";
+
+// ---------------------------------------------------------------------------
+// Canonical directories — derived from cli/schist/default.yaml at runtime.
+// Fail-open: if the file is unreadable, the baked-in mirror keeps the server
+// running. A drift test in tests/tools.test.ts keeps the mirror in sync.
+// ---------------------------------------------------------------------------
+
+// Baked-in mirror of cli/schist/default.yaml's `directories:` values. Kept in
+// sync by the `default.yaml drift detection` describe block in tests/tools.test.ts.
+// Used when the canonical file is unreadable at startup (e.g. broken install)
+// so the MCP server stays up — fail-open. Asymmetric with cli/schist/acl.py
+// (rate_limit.py), which fails closed; see spec 2026-05-24-flatten-spoke-dirs.
+export const DEFAULT_DIRECTORIES_FALLBACK = [
+  "notes", "papers", "concepts",
+  "research", "decisions", "ops", "projects", "logs",
+] as const;
+
+let _canonicalDirsCache: readonly string[] | null = null;
+
+// Test-only: clear the canonical-directories cache so a test that simulates an
+// unreadable default.yaml (fail-open → baked-in fallback) can't poison the
+// cache for later tests in the same module. Mirrors resetSpokePushTrackerForTesting.
+export function resetCanonicalDirsCacheForTesting(): void {
+  _canonicalDirsCache = null;
+}
+
+function loadCanonicalDirectories(): readonly string[] {
+  if (_canonicalDirsCache !== null) return _canonicalDirsCache;
+  try {
+    // tools.ts compiles to mcp-server/dist/tools.js; cli/schist/default.yaml
+    // lives at <repo>/cli/schist/default.yaml. dist/ is one level under
+    // mcp-server/, which is one level under the repo root, so:
+    //   import.meta.url → file://<repo>/mcp-server/dist/tools.js
+    //   __dirname        → <repo>/mcp-server/dist
+    //   ../../           → <repo>
+    const __dirname_here = path.dirname(fileURLToPath(import.meta.url));
+    // NOTE: this relative path only resolves inside the monorepo tree
+    // (mcp-server/dist → ../../cli/schist/default.yaml). If @schist/mcp-server
+    // is ever published standalone to npm, cli/schist/ won't be present and
+    // this read fails — at which point the fail-open path below uses the
+    // baked-in DEFAULT_DIRECTORIES_FALLBACK. That degradation is correct, just
+    // noisier (a stderr warning on every startup).
+    const canonicalPath = path.resolve(__dirname_here, "..", "..", "cli", "schist", "default.yaml");
+    const raw = yamlLoad(readFileSync(canonicalPath, "utf-8")) as Record<string, unknown>;
+    const dirs = raw?.directories as Record<string, string> | undefined;
+    if (dirs && typeof dirs === "object") {
+      _canonicalDirsCache = Object.values(dirs).map((v) => v.replace(/\/$/, ""));
+      return _canonicalDirsCache;
+    }
+    console.warn(
+      `schist: cli/schist/default.yaml at ${canonicalPath} is missing the ` +
+      `'directories:' mapping. Using baked-in fallback.`,
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn(
+      `schist: cli/schist/default.yaml unreadable (${msg}); ` +
+      `using baked-in fallback.`,
+    );
+  }
+  _canonicalDirsCache = [...DEFAULT_DIRECTORIES_FALLBACK];
+  return _canonicalDirsCache;
+}
 
 function slugify(title: string): string {
   return (
@@ -95,7 +160,7 @@ export async function loadVaultConfig(vaultRoot: string): Promise<VaultConfig> {
   return {
     name: getString("name", path.basename(vaultRoot)),
     path: vaultRoot,
-    directories: getStringList("directories", ["notes", "papers", "concepts"]),
+    directories: getStringList("directories", [...loadCanonicalDirectories()]),
     connectionTypes: getStringList("connection_types", [
       "extends", "contradicts", "supports", "replicates",
       "applies-method-of", "reinterprets", "related",

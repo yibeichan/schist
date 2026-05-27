@@ -2,5 +2,11 @@ connection_types: [extends, contradicts, supports, replicates, applies-method-of
 statuses: [draft, review, final, archived]
 directories:
   notes: notes/
+  papers: papers/
   concepts: concepts/
+  research: research/
+  decisions: decisions/
+  ops: ops/
+  projects: projects/
+  logs: logs/
 write_branch: drafts

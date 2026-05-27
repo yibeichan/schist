@@ -1,10 +1,12 @@
 import * as fs from "fs/promises";
+import { readFileSync } from "node:fs";
 import * as path from "path";
 import * as os from "os";
 import { fileURLToPath } from "url";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
-import { loadVaultConfig, create_note, add_connection, get_context, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting } from "../src/tools.js";
+import { load as yamlLoadSync } from "js-yaml";
+import { loadVaultConfig, create_note, add_connection, get_context, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, DEFAULT_DIRECTORIES_FALLBACK } from "../src/tools.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -56,6 +58,12 @@ async function makeTempVault(extraYaml = ""): Promise<string> {
 // ---------------------------------------------------------------------------
 
 describe("loadVaultConfig (js-yaml)", () => {
+  beforeEach(() => {
+    // Each test starts with a cold canonical-dirs cache so a fail-open
+    // fallback in one test can't poison the canonical list for the next.
+    resetCanonicalDirsCacheForTesting();
+  });
+
   test("parses standard YAML config correctly", async () => {
     const vault = await makeTempVault();
     const config = await loadVaultConfig(vault);
@@ -85,6 +93,18 @@ describe("loadVaultConfig (js-yaml)", () => {
     );
     const config = await loadVaultConfig(vault);
     expect(config.name).toBe("Vault: Advanced");
+  });
+
+  test("falls back to canonical cli/schist/default.yaml when schist.yaml omits directories", async () => {
+    // schist.yaml has a name but no `directories:` field — config should pick
+    // up all eight content-axis dirs from the canonical default.yaml.
+    const vault = await fs.mkdtemp(path.join(os.tmpdir(), "schist-tools-test-"));
+    await fs.writeFile(path.join(vault, "schist.yaml"), "name: novel-vault\n", "utf-8");
+    const config = await loadVaultConfig(vault);
+    expect(config.directories).toEqual([
+      "notes", "papers", "concepts",
+      "research", "decisions", "ops", "projects", "logs",
+    ]);
   });
 });
 
@@ -871,6 +891,22 @@ describe("normalizeError", () => {
     expect(typeof result.message).toBe("string");
     // message must NOT be empty (the JSON.stringify non-enumerable bug)
     expect((result.message as string).length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Canonical default.yaml drift — TS fallback must mirror the YAML
+// ---------------------------------------------------------------------------
+
+describe("default.yaml drift detection", () => {
+  test("DEFAULT_DIRECTORIES_FALLBACK mirrors cli/schist/default.yaml directories", () => {
+    // tests/ is at <repo>/mcp-server/tests; canonical is at
+    // <repo>/cli/schist/default.yaml → up 2 from tests/ to <repo>, then into cli/schist.
+    const canonicalPath = path.resolve(__dirname, "..", "..", "cli", "schist", "default.yaml");
+    const raw = yamlLoadSync(readFileSync(canonicalPath, "utf-8")) as Record<string, unknown>;
+    const dirs = raw.directories as Record<string, string>;
+    const expected = Object.values(dirs).map((v) => v.replace(/\/$/, ""));
+    expect(DEFAULT_DIRECTORIES_FALLBACK).toEqual(expected);
   });
 });
 

@@ -121,6 +121,21 @@ class TestCountNoteFiles:
         files = ["tools/x.md", "docs/y.md"]
         assert _count_note_files(files, "subdirectory") == 0
 
+    def test_subdirectory_counts_research(self):
+        files = ["research/2026-05-25-foo.md", "research/sub/bar.md"]
+        assert _count_note_files(files, "subdirectory") == 2
+
+    def test_subdirectory_counts_decisions_ops_projects(self):
+        files = [
+            "decisions/2026-05-25-adr.md",
+            "ops/2026-05-25-runbook.md",
+            "projects/2026-05-25-kickoff.md",
+        ]
+        assert _count_note_files(files, "subdirectory") == 3
+
+    def test_subdirectory_counts_logs(self):
+        assert _count_note_files(["logs/2026-05-25-session.md"], "subdirectory") == 1
+
 
 # ---------------------------------------------------------------------------
 # _init_db — unit
@@ -666,3 +681,74 @@ class TestConcurrency:
 
         assert all(results["a"])
         assert all(results["b"])
+
+
+# ---------------------------------------------------------------------------
+# Canonical default.yaml — _DEFAULT_NOTE_DIRS must be derived from the YAML
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultNoteDirsDerivation:
+    def test_default_note_dirs_match_canonical_yaml(self):
+        """rate_limit._DEFAULT_NOTE_DIRS must equal cli/schist/default.yaml's
+        `directories:` values verbatim.
+
+        Unlike the TypeScript side (which keeps a baked-in
+        DEFAULT_DIRECTORIES_FALLBACK mirror that a true drift test guards),
+        the Python side derives _DEFAULT_NOTE_DIRS dynamically at import via
+        _load_default_dirs(). So this is not a stale-mirror drift guard —
+        it's a derivation guard: it fails if someone ever replaces the
+        dynamic load with a hardcoded literal, or if the loader stops
+        reading the canonical correctly. Loader fail-closed behavior is
+        covered by TestLoadDefaultDirs; note-counting by TestCountNoteFiles."""
+        import yaml
+        from pathlib import Path
+
+        from schist.rate_limit import _DEFAULT_NOTE_DIRS
+
+        canonical_path = Path(__file__).resolve().parent.parent / "schist" / "default.yaml"
+        canonical = yaml.safe_load(canonical_path.read_text())
+        expected = tuple(canonical["directories"].values())
+
+        assert _DEFAULT_NOTE_DIRS == expected, (
+            f"_DEFAULT_NOTE_DIRS drift: expected {expected!r}, "
+            f"got {_DEFAULT_NOTE_DIRS!r}. "
+            f"Source of truth is {canonical_path}."
+        )
+
+
+class TestLoadDefaultDirs:
+    """Fail-closed regression tests for _load_default_dirs().
+
+    These tests exercise the RuntimeError paths by passing a tmp file path
+    directly to the loader via the optional ``path`` parameter added for
+    testability. Production behavior is unchanged — the module-level binding
+    _DEFAULT_NOTE_DIRS = _load_default_dirs() uses the default (in-package) path.
+    """
+
+    def test_load_default_dirs_raises_on_missing_file(self, tmp_path):
+        """A missing default.yaml must fail closed with RuntimeError, not a
+        bare OSError or a silent fallback."""
+        from schist.rate_limit import _load_default_dirs
+
+        missing = tmp_path / "nonexistent.yaml"
+        with pytest.raises(RuntimeError, match="schist install is broken"):
+            _load_default_dirs(missing)
+
+    def test_load_default_dirs_raises_on_empty_yaml(self, tmp_path):
+        """Empty default.yaml (yaml.safe_load returns None) must fail closed."""
+        from schist.rate_limit import _load_default_dirs
+
+        empty_yaml = tmp_path / "default.yaml"
+        empty_yaml.write_text("", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="schist install is broken"):
+            _load_default_dirs(empty_yaml)
+
+    def test_load_default_dirs_raises_on_missing_directories_key(self, tmp_path):
+        """default.yaml without a `directories:` mapping must fail closed."""
+        from schist.rate_limit import _load_default_dirs
+
+        no_dirs = tmp_path / "default.yaml"
+        no_dirs.write_text("foo: bar\nbaz: qux\n", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="schist install is broken"):
+            _load_default_dirs(no_dirs)

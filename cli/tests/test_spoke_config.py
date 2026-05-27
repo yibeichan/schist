@@ -16,7 +16,7 @@ class TestSpokeConfig:
         assert loaded.hub == config.hub
         assert loaded.identity == config.identity
         assert loaded.scope == config.scope
-        assert loaded.scope_convention == "subdirectory"
+        assert loaded.scope_convention == "flat"
 
     def test_is_spoke_true(self, tmp_path):
         vault = str(tmp_path / "vault")
@@ -34,3 +34,16 @@ class TestSpokeConfig:
         save_spoke_config(vault, config)
         loaded = load_spoke_config(vault)
         assert loaded.scope_convention == "flat"
+
+    def test_subdirectory_scope_convention_roundtrip(self, tmp_path):
+        """Backward-compat: existing spoke.yaml files using subdirectory
+        must keep loading without warning. The default flipped to flat in
+        spec 2026-05-24-flatten-spoke-dirs, but subdirectory is still a
+        fully-supported value."""
+        config = SpokeConfig(
+            hub="url", identity="id", scope="s", scope_convention="subdirectory"
+        )
+        vault = str(tmp_path / "vault")
+        save_spoke_config(vault, config)
+        loaded = load_spoke_config(vault)
+        assert loaded.scope_convention == "subdirectory"
