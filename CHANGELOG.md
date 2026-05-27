@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `schist doctor` command — one-command health check for schist setup (Python, Node, Git, vault, SQLite, hooks, MCP config)
 - `schist init --print-mcp-config` — generates ready-to-paste MCP server config for Claude Code and Cursor
 - `docs/getting-started.md` — linear onboarding guide with platform-specific instructions (Linux, macOS, HPC)
-- `docs/hub-spoke-pi-hpc-mac.md` — opinionated topology guide for Pi hub + HPC/Mac spoke setup
+- `docs/hub-spoke-pi-orcd-dragonfly.md` — opinionated topology guide for Pi hub + orcd (HPC) + dragonfly (Mac) spoke setup
 - `schist doctor` reports `uv` availability (WARN if missing — pip still works as a fallback). Note: hosts without `uv` will now show one new `[WARN] uv: not found` line in the default check output; downstream scripts that scrape doctor output to assert "no warnings" may need adjustment.
 - `cli/uv.lock` — checked in for reproducible source installs across Mac / Pi / HPC. CI enforces freshness via `uv lock --check` to catch pyproject.toml edits that forget to regenerate the lock.
 

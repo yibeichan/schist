@@ -4,7 +4,7 @@ Walk-through for wiring up a schist hub and one or more spokes so that agents
 on different machines (laptop, HPC cluster, Raspberry Pi, etc.) share a single
 knowledge graph.
 
-> **Setting up Pi + HPC + Mac?** See the [Pi/HPC/Mac topology guide](hub-spoke-pi-hpc-mac.md)
+> **Setting up Pi + ORCD + Dragonfly?** See the [Pi/ORCD/Dragonfly topology guide](hub-spoke-pi-orcd-dragonfly.md)
 > for an opinionated, copy-paste-ready walkthrough for that specific setup.
 
 ## Topology
@@ -106,8 +106,9 @@ schist --vault ~/vault init --spoke \
   --identity laptop
 ```
 
-Repeat on the HPC cluster with `--identity hpc-cluster --scope research/hpc-cluster`,
-on the Pi with `--identity pi --scope research/pi`, and so on.
+Repeat on each spoke with `--identity <spoke-name> --scope research` (or whichever
+content-axis dir the spoke should sparse-checkout). Authorship is recorded in the
+auto-filled `source_agent` frontmatter, not via directory placement.
 
 **`SCHIST_IDENTITY` must be set in the shell profile** (`.bashrc`, `.zshrc`,
 or the SLURM job wrapper on HPC) so every process the MCP server spawns — and
@@ -181,11 +182,12 @@ notes from another scope in its own notes — but it can only *write* inside
 its declared scope. A typical cross-machine flow:
 
 1. Agent on the HPC spoke runs a training job and calls `create_note` with
-   path `research/hpc-cluster/2026-04-12-training-run.md`. The spoke pushes.
+   path `research/2026-04-12-training-run.md` (flat scope; `source_agent: orcd`
+   is set automatically). The spoke pushes.
 2. Agent on the laptop spoke later calls `get_context`. The spoke pulls and
    sees the HPC note.
 3. The laptop agent writes its own analysis at
-   `research/laptop/2026-04-12-analysis.md` and uses `add_connection` to add
+   `research/2026-04-12-analysis.md` and uses `add_connection` to add
    an `extends` edge pointing to the HPC note. The laptop pushes.
 4. On the next pull, the HPC spoke sees the connection.
 
