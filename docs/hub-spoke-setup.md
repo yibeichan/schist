@@ -102,7 +102,7 @@ export SCHIST_IDENTITY=laptop   # must match a participant name in vault.yaml
 
 schist --vault ~/vault init --spoke \
   --hub git@hub.example.com:/srv/git/vault.git \
-  --scope research/laptop \
+  --scope research \
   --identity laptop
 ```
 
