@@ -15,7 +15,7 @@ class SpokeConfig:
     hub: str
     identity: str
     scope: str
-    scope_convention: str = "subdirectory"
+    scope_convention: str = "flat"
 
 
 def spoke_config_path(vault_path: str) -> Path:
@@ -34,7 +34,7 @@ def load_spoke_config(vault_path: str) -> SpokeConfig:
         hub=data["hub"],
         identity=data["identity"],
         scope=data["scope"],
-        scope_convention=data.get("scope_convention", "subdirectory"),
+        scope_convention=data.get("scope_convention", "flat"),
     )
 
 
