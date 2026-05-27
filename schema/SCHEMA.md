@@ -152,20 +152,26 @@ vault/
 ├── notes/          # Timestamped research notes
 ├── papers/         # Paper summaries and analyses
 ├── concepts/       # Concept node files (stable slugs)
+├── research/       # Project-scoped research notes
+├── decisions/      # ADRs / decision records
+├── ops/            # Runbooks, ops notes
+├── projects/       # Project-kickoff and tracking notes
 ├── logs/           # Session logs, meeting notes
+├── shared/         # Cross-spoke shared content (e.g. shared/skills/)
+├── vault.yaml      # ACL + scope config (read by pre-receive hook)
+├── schist.yaml     # Schema/dir overrides (read by MCP server, optional)
 └── .schist/
-    ├── schist.db   # SQLite database (auto-generated, gitignored)
-    └── config.yaml # Vault-specific schema overrides
+    └── schist.db   # SQLite database (auto-generated, gitignored)
 ```
 
-The `.schist/` directory is auto-created and gitignored. It contains derived data only.
+The `.schist/` directory is auto-created and gitignored. It contains derived data only. The canonical default directory list is defined in `cli/schist/default.yaml` (shipped inside the schist Python package); a `schist.yaml` file at the vault root overrides it per-vault.
 
 ## Schema Configuration
 
-Vaults can override the default schema via `.schist/config.yaml`:
+Vaults can override the default schema by placing a `schist.yaml` file at the vault root. Both `mcp-server` (`loadVaultConfig` in `tools.ts`) and the `schist schema` CLI (`commands.py:schema`) read this file, falling back to `cli/schist/default.yaml` when fields are absent. `vault.yaml` (also at the vault root) is a separate file for ACL/scope configuration and is parsed by `cli/schist/acl.py`.
 
 ```yaml
-# .schist/config.yaml
+# schist.yaml (at vault root)
 connection_types:
   - extends
   - contradicts
@@ -188,6 +194,10 @@ directories:
   notes: notes/
   papers: papers/
   concepts: concepts/
+  research: research/
+  decisions: decisions/
+  ops: ops/
+  projects: projects/
   logs: logs/
   # Add custom:
   experiments: experiments/

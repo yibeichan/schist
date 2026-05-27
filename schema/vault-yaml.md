@@ -9,7 +9,7 @@ Located at the root of a schist vault. Optional — schist works without it.
 | vault_version | integer | yes (v1+) | Schema version. Currently `1`. Omitting triggers a v0 deprecation warning. |
 | name | string | yes | Human-readable vault name |
 | participants | [string \| object] | yes | Agent identity names. Can be simple strings or objects (see below) |
-| scope_convention | string | yes (v1) | How scope maps to filesystem: `subdirectory` (default), `flat`, `multi-vault` |
+| scope_convention | string | yes (v1) | How scope maps to filesystem: `flat` (default, recommended), `subdirectory`, `multi-vault` |
 | access | {identity: {read, write}} | yes | Per-participant read/write scope grants |
 | rate_limits | {identity: limits} | no | Per-participant rate limiting overrides |
 
@@ -39,7 +39,7 @@ participants:
 |-------|------|----------|-------------|
 | name | string | yes | Must match `^[a-z][a-z0-9-]*$` |
 | type | string | no | `agent` (default) or `spoke` |
-| default_scope | string | no | Scope resolved for `scope: "inherit"` queries. Defaults to `"global"` |
+| default_scope | string | no | Scope resolved for `scope: "inherit"` queries. Defaults to `"global"`. Under `scope_convention: flat`, leave at `"global"` — authorship is recorded via the auto-filled `source_agent` frontmatter field, not via directory placement. |
 | transport | string | no | `ssh-and-git` (default) or `git-only` |
 | metadata | {string: string} | no | Arbitrary key-value pairs (both keys and values must be strings) |
 
@@ -80,7 +80,7 @@ rate_limits:
 ```yaml
 vault_version: 1
 name: my-team
-scope_convention: subdirectory
+scope_convention: flat
 participants:
   - name: agent-a
     type: agent
@@ -90,7 +90,7 @@ participants:
       repo: https://github.com/example/repo
   - name: agent-b
     type: spoke
-    default_scope: project:myapp
+    default_scope: global
 access:
   agent-a:
     read: ["*"]
@@ -106,5 +106,5 @@ rate_limits:
 ## Notes
 
 - `participants` uses agent names only. Human contributions use `source: human` on individual notes.
-- `scope_convention` tells tools how to derive scope from directory structure.
+- `scope_convention` tells tools how to derive scope from directory structure. `flat` is the default; new schist deployments should prefer it. `subdirectory` and `multi-vault` are fully supported for existing deployments.
 - `vault_version` is required for v1 vaults. Omitting it triggers a deprecation warning and defaults to v0 behavior.

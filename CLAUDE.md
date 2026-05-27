@@ -69,6 +69,7 @@ behaviors on top of the data flow above:
   silently on failure so a flaky hub never stalls reads. Other read tools
   (`search_notes`, `query_graph`, `list_concepts`) do NOT auto-pull — agents
   call `get_context` at session start to refresh.
+- **Default scope_convention is `flat`:** authorship of a note is recorded in the auto-filled `source_agent` frontmatter, not in directory placement. Notes live in content-axis directories (`research/`, `decisions/`, `ops/`, `projects/`, `notes/`, `papers/`, `concepts/`, `logs/`) regardless of which spoke wrote them. `scope_convention: subdirectory` and `multi-vault` remain supported for existing deployments.
 
 The hub is a bare git repo with a pre-receive hook that enforces vault.yaml
 ACLs. Create one with `schist init --hub --hub-path /path --name X
