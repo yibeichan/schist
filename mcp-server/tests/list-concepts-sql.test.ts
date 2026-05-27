@@ -4,10 +4,13 @@ import * as path from "path";
 import * as os from "os";
 import Database from "better-sqlite3";
 
+const createdDirs = new Set<string>();
+
 async function makeConceptVault(
   concepts: Array<{ slug: string; title: string; edgeCount?: number }>
 ): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-concepts-test-"));
+  createdDirs.add(dir);
   const dbDir = path.join(dir, ".schist");
   await fs.mkdir(dbDir, { recursive: true });
   const dbPath = path.join(dbDir, "schist.db");
@@ -56,6 +59,12 @@ async function makeConceptVault(
 }
 
 describe("listConcepts — cursor pagination", () => {
+  afterAll(async () => {
+    for (const dir of createdDirs) {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   // Case 1: offset 0 default returns results without error
   it("offset 0 default: no opts yields first page", async () => {
     const vault = await makeConceptVault([

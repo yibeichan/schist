@@ -22,8 +22,11 @@ import {
 
 const execFile = promisify(execFileCb);
 
+const createdDirs = new Set<string>();
+
 async function makeTempVault(extraYaml = ""): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-vw-identity-"));
+  createdDirs.add(dir);
   await execFile("git", ["init"], { cwd: dir });
   await execFile("git", ["config", "user.email", "test@test.com"], { cwd: dir });
   await execFile("git", ["config", "user.name", "Test"], { cwd: dir });
@@ -47,6 +50,12 @@ async function makeTempVault(extraYaml = ""): Promise<string> {
 }
 
 describe("#63 vault-write identity enforcement", () => {
+  afterAll(async () => {
+    for (const dir of createdDirs) {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   beforeEach(() => {
     delete process.env.SCHIST_AGENT_ID;
     delete process.env.SCHIST_ALLOWED_AGENTS;

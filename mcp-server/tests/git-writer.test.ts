@@ -7,8 +7,11 @@ import { promisify } from "util";
 
 const execFile = promisify(execFileCb);
 
+const createdDirs = new Set<string>();
+
 async function makeTempVault(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-test-"));
+  createdDirs.add(dir);
   await execFile("git", ["init"], { cwd: dir });
   await execFile("git", ["config", "user.email", "test@test.com"], { cwd: dir });
   await execFile("git", ["config", "user.name", "Test"], { cwd: dir });
@@ -19,6 +22,11 @@ async function makeTempVault(): Promise<string> {
 }
 
 describe("git-writer", () => {
+  afterAll(async () => {
+    for (const dir of createdDirs) {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
   test("PATH_TRAVERSAL: rejects writes outside vault root", async () => {
     const vault = await makeTempVault();
     await expect(writeNote(vault, "../../etc/passwd", "evil")).rejects.toMatchObject({
