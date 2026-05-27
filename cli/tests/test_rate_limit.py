@@ -684,20 +684,23 @@ class TestConcurrency:
 
 
 # ---------------------------------------------------------------------------
-# Canonical default.yaml drift — _DEFAULT_NOTE_DIRS must match the YAML
+# Canonical default.yaml — _DEFAULT_NOTE_DIRS must be derived from the YAML
 # ---------------------------------------------------------------------------
 
 
-class TestDefaultNoteDirsDrift:
+class TestDefaultNoteDirsDerivation:
     def test_default_note_dirs_match_canonical_yaml(self):
-        """rate_limit._DEFAULT_NOTE_DIRS must mirror cli/schist/default.yaml's
-        `directories:` values verbatim. If a contributor adds a new
-        content-axis dir to default.yaml, this test fails until they update
-        the canonical loader (or stops failing once they do).
+        """rate_limit._DEFAULT_NOTE_DIRS must equal cli/schist/default.yaml's
+        `directories:` values verbatim.
 
-        Note: this catches stale-cache / file-vs-binding drift, not loader
-        bugs — a loader that silently drops entries would also drop them here;
-        the counting tests cover loader correctness."""
+        Unlike the TypeScript side (which keeps a baked-in
+        DEFAULT_DIRECTORIES_FALLBACK mirror that a true drift test guards),
+        the Python side derives _DEFAULT_NOTE_DIRS dynamically at import via
+        _load_default_dirs(). So this is not a stale-mirror drift guard —
+        it's a derivation guard: it fails if someone ever replaces the
+        dynamic load with a hardcoded literal, or if the loader stops
+        reading the canonical correctly. Loader fail-closed behavior is
+        covered by TestLoadDefaultDirs; note-counting by TestCountNoteFiles."""
         import yaml
         from pathlib import Path
 
