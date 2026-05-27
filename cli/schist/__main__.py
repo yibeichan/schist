@@ -74,7 +74,7 @@ def main():
     p_init.add_argument('--name', help='(hub/standalone) Vault name for vault.yaml')
     p_init.add_argument('--participant', action='append',
                         help='(hub) Participant name (repeatable)')
-    p_init.add_argument('--scope-prefix', default='research',
+    p_init.add_argument('--scope-prefix', default=sync._SCOPE_PREFIX_LEGACY_DEFAULT,
                         help='(deprecated, ignored) Retained for backward-compat; flat-convention hubs do not use a per-participant scope prefix')
     p_init.add_argument('--print-mcp-config', action='store_true', dest='print_mcp_config',
                         help='Print MCP server config and exit (no vault creation)')

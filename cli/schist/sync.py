@@ -17,6 +17,12 @@ from . import git_ops
 from .acl import ACLError, NAME_RE, parse_vault_data
 from .spoke_config import SpokeConfig, is_spoke, load_spoke_config, save_spoke_config
 
+# Historical default for the now-deprecated --scope-prefix flag. Retained
+# only so init_hub can detect a user-supplied custom value and warn. Keep
+# in sync with the argparse default in __main__.py (which imports it).
+_SCOPE_PREFIX_LEGACY_DEFAULT = "research"
+
+
 class _InitError(Exception):
     """Raised by init_* build steps so the outer function can clean up staging."""
 
@@ -476,7 +482,7 @@ def init_hub(args, hub_path: str) -> None:
     name = getattr(args, "name", None)
     participants = list(getattr(args, "participant", None) or [])
 
-    if getattr(args, "scope_prefix", None) not in (None, "research"):
+    if getattr(args, "scope_prefix", None) not in (None, _SCOPE_PREFIX_LEGACY_DEFAULT):
         print(
             "Warning: --scope-prefix is deprecated and has no effect. "
             "New hubs use scope_convention: flat; authorship is recorded in "
@@ -641,6 +647,11 @@ def _build_seed_vault(name: str, participants: list[str]) -> dict:
     Hub operators can broaden specific participants (e.g. a privileged spoke
     that manages `shared/skills/`) by editing vault.yaml after init.
     """
+    # Participant write-grants. Intentionally a subset of cli/schist/default.yaml's
+    # directory list: `logs/` is infra-owned (rate-limit DB, audit records) and
+    # `projects/` is per-installation, so neither is a default participant write
+    # target. This is an ACL grant list, NOT the note-bearing-dirs list — the two
+    # are semantically distinct and deliberately not coupled.
     content_axis_write = ["research", "concepts", "decisions", "notes", "ops", "papers"]
 
     participant_entries = [
