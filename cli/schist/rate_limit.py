@@ -37,9 +37,9 @@ BUSY_TIMEOUT_MS = 5000
 
 # Path prefixes considered "note-bearing" for the subdirectory convention.
 # Derived at import time from the canonical `cli/schist/default.yaml` so all
-# consumers (rate_limit, future mcp-server tools.ts, future loaders) see the
-# same list. Fails closed on missing/malformed file — a broken install must
-# not silently under-count.
+# consumers (this module and mcp-server's tools.ts) see the same list. Fails
+# closed on missing/malformed file — a broken install must not silently
+# under-count.
 def _load_default_dirs(path: Path | None = None) -> tuple[str, ...]:
     import yaml
 

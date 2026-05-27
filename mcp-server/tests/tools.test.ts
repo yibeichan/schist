@@ -6,7 +6,7 @@ import { fileURLToPath } from "url";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { load as yamlLoadSync } from "js-yaml";
-import { loadVaultConfig, create_note, add_connection, get_context, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, DEFAULT_DIRECTORIES_FALLBACK } from "../src/tools.js";
+import { loadVaultConfig, create_note, add_connection, get_context, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, DEFAULT_DIRECTORIES_FALLBACK } from "../src/tools.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -58,6 +58,12 @@ async function makeTempVault(extraYaml = ""): Promise<string> {
 // ---------------------------------------------------------------------------
 
 describe("loadVaultConfig (js-yaml)", () => {
+  beforeEach(() => {
+    // Each test starts with a cold canonical-dirs cache so a fail-open
+    // fallback in one test can't poison the canonical list for the next.
+    resetCanonicalDirsCacheForTesting();
+  });
+
   test("parses standard YAML config correctly", async () => {
     const vault = await makeTempVault();
     const config = await loadVaultConfig(vault);

@@ -39,6 +39,13 @@ export const DEFAULT_DIRECTORIES_FALLBACK = [
 
 let _canonicalDirsCache: readonly string[] | null = null;
 
+// Test-only: clear the canonical-directories cache so a test that simulates an
+// unreadable default.yaml (fail-open → baked-in fallback) can't poison the
+// cache for later tests in the same module. Mirrors resetSpokePushTrackerForTesting.
+export function resetCanonicalDirsCacheForTesting(): void {
+  _canonicalDirsCache = null;
+}
+
 function loadCanonicalDirectories(): readonly string[] {
   if (_canonicalDirsCache !== null) return _canonicalDirsCache;
   try {

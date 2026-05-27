@@ -482,14 +482,6 @@ def init_hub(args, hub_path: str) -> None:
     name = getattr(args, "name", None)
     participants = list(getattr(args, "participant", None) or [])
 
-    if getattr(args, "scope_prefix", None) not in (None, _SCOPE_PREFIX_LEGACY_DEFAULT):
-        print(
-            "Warning: --scope-prefix is deprecated and has no effect. "
-            "New hubs use scope_convention: flat; authorship is recorded in "
-            "the source_agent frontmatter, not via per-participant directories.",
-            file=sys.stderr,
-        )
-
     if not name:
         print("Error: --name is required for hub init", file=sys.stderr)
         sys.exit(1)
@@ -928,6 +920,17 @@ def _dispatch_init(args) -> None:
     spoke = getattr(args, "spoke", False)
     hub_url = getattr(args, "hub", None)
     standalone_path = getattr(args, "path", None)
+
+    # --scope-prefix is deprecated and ignored in every init mode (flat
+    # convention has no per-participant scope prefix). Warn once here, before
+    # dispatch, so spoke/standalone/hub all surface it consistently.
+    if getattr(args, "scope_prefix", None) not in (None, _SCOPE_PREFIX_LEGACY_DEFAULT):
+        print(
+            "Warning: --scope-prefix is deprecated and has no effect. "
+            "New vaults use scope_convention: flat; authorship is recorded in "
+            "the source_agent frontmatter, not via per-participant directories.",
+            file=sys.stderr,
+        )
 
     if hub_path and spoke:
         print("Error: --hub-path and --spoke are mutually exclusive", file=sys.stderr)

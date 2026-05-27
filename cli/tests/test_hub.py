@@ -244,12 +244,17 @@ class TestInitHub:
         assert not acl.can_write("a", "my-vault/a")
 
     def test_scope_prefix_custom_warns(self, tmp_path, capsys):
-        """A non-default --scope-prefix is deprecated; user must be warned it's ignored."""
-        from schist.sync import init_hub
+        """A non-default --scope-prefix is deprecated; user must be warned it's
+        ignored. The warning is surfaced once at dispatch so every init mode
+        (hub/spoke/standalone) emits it consistently."""
+        from schist.sync import _dispatch_init
 
         hub = tmp_path / "hub.git"
-        args = SimpleNamespace(name="v", participant=["alpha"], scope_prefix="custom-thing")
-        init_hub(args, str(hub))
+        args = SimpleNamespace(
+            print_mcp_config=False, hub_path=str(hub), spoke=False, hub=None,
+            path=None, name="v", participant=["alpha"], scope_prefix="custom-thing",
+        )
+        _dispatch_init(args)
 
         captured = capsys.readouterr()
         assert "deprecated" in captured.err.lower()
@@ -263,11 +268,30 @@ class TestInitHub:
 
     def test_scope_prefix_default_no_warn(self, tmp_path, capsys):
         """Default scope_prefix must NOT emit the deprecation warning (no noise)."""
-        from schist.sync import init_hub
+        from schist.sync import _dispatch_init
 
         hub = tmp_path / "hub.git"
-        args = SimpleNamespace(name="v", participant=["alpha"], scope_prefix="research")
-        init_hub(args, str(hub))
+        args = SimpleNamespace(
+            print_mcp_config=False, hub_path=str(hub), spoke=False, hub=None,
+            path=None, name="v", participant=["alpha"], scope_prefix="research",
+        )
+        _dispatch_init(args)
 
         captured = capsys.readouterr()
         assert "deprecated" not in captured.err.lower()
+
+    def test_scope_prefix_warns_in_standalone_mode(self, tmp_path, capsys):
+        """Regression for the prior hub-only placement: a non-default
+        --scope-prefix must warn in non-hub init modes too. Standalone init is
+        the cheapest non-hub path (no network), so it proves the generalization."""
+        from schist.sync import _dispatch_init
+
+        vault = tmp_path / "standalone"
+        args = SimpleNamespace(
+            print_mcp_config=False, hub_path=None, spoke=False, hub=None,
+            path=str(vault), name="v", identity="local", scope_prefix="custom-thing",
+        )
+        _dispatch_init(args)
+
+        captured = capsys.readouterr()
+        assert "deprecated" in captured.err.lower()
