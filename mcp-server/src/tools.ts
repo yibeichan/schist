@@ -49,6 +49,12 @@ function loadCanonicalDirectories(): readonly string[] {
     //   __dirname        → <repo>/mcp-server/dist
     //   ../../           → <repo>
     const __dirname_here = path.dirname(fileURLToPath(import.meta.url));
+    // NOTE: this relative path only resolves inside the monorepo tree
+    // (mcp-server/dist → ../../cli/schist/default.yaml). If @schist/mcp-server
+    // is ever published standalone to npm, cli/schist/ won't be present and
+    // this read fails — at which point the fail-open path below uses the
+    // baked-in DEFAULT_DIRECTORIES_FALLBACK. That degradation is correct, just
+    // noisier (a stderr warning on every startup).
     const canonicalPath = path.resolve(__dirname_here, "..", "..", "cli", "schist", "default.yaml");
     const raw = yamlLoad(readFileSync(canonicalPath, "utf-8")) as Record<string, unknown>;
     const dirs = raw?.directories as Record<string, string> | undefined;
@@ -61,8 +67,9 @@ function loadCanonicalDirectories(): readonly string[] {
       `'directories:' mapping. Using baked-in fallback.`,
     );
   } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
     console.warn(
-      `schist: cli/schist/default.yaml unreadable (${(e as Error).message}); ` +
+      `schist: cli/schist/default.yaml unreadable (${msg}); ` +
       `using baked-in fallback.`,
     );
   }
