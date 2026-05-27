@@ -483,21 +483,13 @@ def init_hub(args, hub_path: str) -> None:
         print("Error: at least one --participant is required", file=sys.stderr)
         sys.exit(1)
 
-    scope_prefix = getattr(args, "scope_prefix", None) or "research"
-    if scope_prefix and not NAME_RE.match(scope_prefix):
-        print(
-            f"Error: --scope-prefix '{scope_prefix}' must match ^[a-z][a-z0-9-]*$",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
     hub = Path(hub_path).resolve()
     if hub.exists() and any(hub.iterdir()):
         print(f"Error: hub path '{hub_path}' already exists and is not empty", file=sys.stderr)
         sys.exit(1)
 
     # Build vault.yaml data and validate before touching the filesystem.
-    vault_data = _build_seed_vault(name, participants, scope_prefix=scope_prefix)
+    vault_data = _build_seed_vault(name, participants)
     try:
         parse_vault_data(vault_data)
     except ACLError as e:
@@ -632,27 +624,27 @@ def _build_hub_in_staging(
                 raise _InitError(f"{' '.join(cmd)} failed: {r.stderr.strip()}")
 
 
-def _build_seed_vault(name: str, participants: list[str], scope_prefix: str = "research") -> dict:
-    """Construct a minimal valid vault.yaml data dict for the seed commit.
+def _build_seed_vault(name: str, participants: list[str]) -> dict:
+    """Construct a minimal valid vault.yaml data dict for the hub seed commit.
 
-    Each participant gets a default scope of `{scope_prefix}/{name}` and a matching
-    write grant, plus read:* so any participant can see the full graph.
+    Every participant gets `default_scope: global` and a content-axis write
+    list. Authorship is recorded in note frontmatter via `source_agent`, not
+    in directory placement — see schema/SCHEMA.md and ADR-002 in the vault.
+    Hub operators can broaden specific participants (e.g. a privileged spoke
+    that manages `shared/skills/`) by editing vault.yaml after init.
     """
-    participant_entries = []
-    access = {}
-    for p in participants:
-        scope = f"{scope_prefix}/{p}"
-        participant_entries.append({
-            "name": p,
-            "type": "spoke",
-            "default_scope": scope,
-        })
-        access[p] = {"read": ["*"], "write": [scope]}
+    content_axis_write = ["research", "concepts", "decisions", "notes", "ops", "papers"]
+
+    participant_entries = [
+        {"name": p, "type": "spoke", "default_scope": "global"}
+        for p in participants
+    ]
+    access = {p: {"read": ["*"], "write": list(content_axis_write)} for p in participants}
 
     return {
         "vault_version": 1,
         "name": name,
-        "scope_convention": "subdirectory",
+        "scope_convention": "flat",
         "participants": participant_entries,
         "access": access,
     }
@@ -799,14 +791,13 @@ def _build_standalone_vault(name: str, identity: str) -> dict:
     """Construct a minimal valid vault.yaml data dict for a standalone vault.
 
     Single-participant, single-agent, full-vault read+write. Kept separate from
-    `_build_seed_vault` because the two diverge on participant type, default
-    scope, and ACL shape — parametrizing would hide the difference behind
-    callbacks.
+    `_build_seed_vault` because the two diverge on participant type and ACL
+    shape — parametrizing would hide the difference behind callbacks.
     """
     return {
         "vault_version": 1,
         "name": name,
-        "scope_convention": "subdirectory",
+        "scope_convention": "flat",
         "participants": [{
             "name": identity,
             "type": "agent",

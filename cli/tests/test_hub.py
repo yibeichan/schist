@@ -76,8 +76,11 @@ class TestInitHub:
         assert "name: research-graph" in content
         assert "alpha" in content
         assert "beta" in content
-        assert "research/alpha" in content
-        assert "research/beta" in content
+        # Flat seed: content-axis dirs, no per-participant subdirectories
+        assert "scope_convention: flat" in content
+        assert "default_scope: global" in content
+        assert "research/alpha" not in content
+        assert "research/beta" not in content
 
     def test_seeded_yaml_passes_acl_validation(self, tmp_path):
         """The generated vault.yaml must parse as a valid v1 ACL."""
@@ -97,11 +100,13 @@ class TestInitHub:
         acl = parse_vault_yaml(work / "vault.yaml")
         assert acl.name == "v"
         assert {p.name for p in acl.participants} == {"a", "b", "c"}
-        # Each participant can write only their own scope
-        assert acl.can_write("a", "research/a")
-        assert not acl.can_write("a", "research/b")
+        # Flat seed: all participants write the content-axis dirs
+        assert acl.can_write("a", "research")
+        assert acl.can_write("b", "research")
+        assert acl.can_write("a", "concepts")
         # All can read everything
-        assert acl.can_read("a", "research/b")
+        assert acl.can_read("a", "research")
+        assert acl.scope_convention == "flat"
 
     def test_failed_init_leaves_no_hub_path(self, tmp_path, capsys, monkeypatch):
         """If init_hub fails partway, hub_path must not exist (no half-init).
@@ -142,7 +147,11 @@ class TestInitHub:
         assert not leftover, f"staging dir not cleaned up: {leftover}"
 
     def test_hub_push_then_rejects_out_of_scope(self, tmp_path):
-        """After init_hub, a spoke push outside its scope is rejected."""
+        """After init_hub, a spoke push to a dir outside the content-axis write list is rejected.
+
+        Under flat seed, all participants share the content-axis dirs (research/, concepts/, etc.).
+        A push to an unlisted dir (e.g. shared/) must still be rejected.
+        """
         from schist.sync import init_hub
 
         hub = tmp_path / "hub.git"
@@ -151,17 +160,17 @@ class TestInitHub:
             str(hub),
         )
 
-        # Clone as alpha, try to write beta's scope
+        # Clone as alpha, try to write to 'shared/' which is not in the content-axis write list
         work = tmp_path / "work-alpha"
         subprocess.run(["git", "clone", str(hub), str(work)], check=True, capture_output=True)
         subprocess.run(["git", "config", "user.email", "a@test"], cwd=work, check=True)
         subprocess.run(["git", "config", "user.name", "a"], cwd=work, check=True)
 
-        (work / "research" / "beta").mkdir(parents=True)
-        (work / "research" / "beta" / "note.md").write_text("# hi\n")
-        subprocess.run(["git", "add", "research/beta/note.md"], cwd=work, check=True)
+        (work / "shared").mkdir(parents=True)
+        (work / "shared" / "note.md").write_text("# hi\n")
+        subprocess.run(["git", "add", "shared/note.md"], cwd=work, check=True)
         subprocess.run(
-            ["git", "commit", "-m", "invalid cross-scope write"],
+            ["git", "commit", "-m", "invalid out-of-scope write"],
             cwd=work, check=True, capture_output=True,
         )
         env = os.environ.copy()
@@ -173,10 +182,12 @@ class TestInitHub:
         assert result.returncode != 0
         assert "REJECTED" in result.stderr or "rejected" in result.stderr
 
-    # --- --scope-prefix tests (Issue #34) ---
+    # --- --scope-prefix tests (Issue #34, updated for flat default) ---
+    # scope_prefix is now a no-op: the CLI flag is accepted for backward-compat
+    # but ignored. All new hubs seed with scope_convention: flat.
 
-    def test_scope_prefix_default(self, tmp_path):
-        """Without --scope-prefix, vault.yaml uses research/<name> (backwards compat)."""
+    def test_scope_prefix_ignored_flat_seed(self, tmp_path):
+        """--scope-prefix is accepted but ignored; vault still uses flat convention."""
         from schist.sync import init_hub
 
         hub = tmp_path / "hub.git"
@@ -188,11 +199,12 @@ class TestInitHub:
             cwd=hub, capture_output=True, text=True, check=True,
         )
         content = result.stdout
-        assert "research/alpha" in content
+        assert "scope_convention: flat" in content
+        assert "research/alpha" not in content
         assert "vault_version: 1" in content
 
-    def test_scope_prefix_override(self, tmp_path):
-        """With --scope-prefix vault, vault.yaml uses vault/<name> instead of research/<name>."""
+    def test_scope_prefix_override_still_flat(self, tmp_path):
+        """--scope-prefix override is accepted but ignored; seed is still flat."""
         from schist.sync import init_hub
 
         hub = tmp_path / "hub.git"
@@ -204,24 +216,12 @@ class TestInitHub:
             cwd=hub, capture_output=True, text=True, check=True,
         )
         content = result.stdout
-        assert "vault/alpha" in content
-        assert "vault/beta" in content
-        assert "research/" not in content
-
-    def test_scope_prefix_invalid(self, tmp_path, capsys):
-        """Invalid --scope-prefix (spaces, dots, uppercase) is rejected."""
-        from schist.sync import init_hub
-
-        for bad in ["BAD NAME", "../evil", "has.dots", "UPPER"]:
-            hub = tmp_path / f"hub-{bad.replace('/', '_')}"
-            args = SimpleNamespace(name="v", participant=["alpha"], scope_prefix=bad)
-            with pytest.raises(SystemExit):
-                init_hub(args, str(hub))
-            assert not hub.exists(), f"hub created despite invalid prefix '{bad}'"
-            capsys.readouterr()  # clear output
+        assert "scope_convention: flat" in content
+        assert "vault/alpha" not in content
+        assert "vault/beta" not in content
 
     def test_scope_prefix_seeded_yaml_passes_acl(self, tmp_path):
-        """Vault.yaml with custom scope_prefix passes ACL validation."""
+        """Vault.yaml seeded by init_hub (with any scope_prefix) passes ACL validation."""
         from schist.acl import parse_vault_yaml
         from schist.sync import init_hub
 
@@ -236,6 +236,9 @@ class TestInitHub:
         )
         acl = parse_vault_yaml(work / "vault.yaml")
         assert acl.name == "v"
-        assert acl.can_write("a", "my-vault/a")
-        assert not acl.can_write("a", "my-vault/b")
-        assert acl.can_read("a", "my-vault/b")
+        assert acl.scope_convention == "flat"
+        # All participants can write content-axis dirs
+        assert acl.can_write("a", "research")
+        assert acl.can_write("b", "research")
+        # Nobody can write 'my-vault' (not in content-axis list)
+        assert not acl.can_write("a", "my-vault/a")

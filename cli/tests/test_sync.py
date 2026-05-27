@@ -666,3 +666,56 @@ class TestRebuildIndexSideTablePreservation:
                 )
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Seed-vault template — flat default + content-axis writes
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSeedVault:
+    def test_seed_uses_flat_scope_convention(self):
+        from schist.sync import _build_seed_vault
+
+        data = _build_seed_vault(name="hub-x", participants=["alice", "bob"])
+        assert data["scope_convention"] == "flat"
+
+    def test_seed_participants_default_scope_global(self):
+        from schist.sync import _build_seed_vault
+
+        data = _build_seed_vault(name="hub-x", participants=["alice", "bob"])
+        for p in data["participants"]:
+            assert p["default_scope"] == "global", p
+
+    def test_seed_write_list_is_content_axis(self):
+        from schist.sync import _build_seed_vault
+
+        data = _build_seed_vault(name="hub-x", participants=["alice"])
+        expected = ["research", "concepts", "decisions", "notes", "ops", "papers"]
+        assert data["access"]["alice"]["write"] == expected
+
+    def test_seed_validates_under_acl_parser(self):
+        """Generated seed must round-trip through parse_vault_data without errors."""
+        from schist.acl import parse_vault_data
+        from schist.sync import _build_seed_vault
+
+        data = _build_seed_vault(name="hub-x", participants=["alice", "bob"])
+        acl = parse_vault_data(data)
+        assert acl.scope_convention == "flat"
+        assert acl.get_participant("alice").default_scope == "global"
+
+
+class TestBuildStandaloneVault:
+    def test_standalone_uses_flat_scope_convention(self):
+        from schist.sync import _build_standalone_vault
+
+        data = _build_standalone_vault(name="v", identity="local")
+        assert data["scope_convention"] == "flat"
+
+    def test_standalone_validates_under_acl_parser(self):
+        from schist.acl import parse_vault_data
+        from schist.sync import _build_standalone_vault
+
+        data = _build_standalone_vault(name="v", identity="local")
+        acl = parse_vault_data(data)
+        assert acl.scope_convention == "flat"
