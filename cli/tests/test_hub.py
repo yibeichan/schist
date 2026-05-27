@@ -242,3 +242,32 @@ class TestInitHub:
         assert acl.can_write("b", "research")
         # Nobody can write 'my-vault' (not in content-axis list)
         assert not acl.can_write("a", "my-vault/a")
+
+    def test_scope_prefix_custom_warns(self, tmp_path, capsys):
+        """A non-default --scope-prefix is deprecated; user must be warned it's ignored."""
+        from schist.sync import init_hub
+
+        hub = tmp_path / "hub.git"
+        args = SimpleNamespace(name="v", participant=["alpha"], scope_prefix="custom-thing")
+        init_hub(args, str(hub))
+
+        captured = capsys.readouterr()
+        assert "deprecated" in captured.err.lower()
+        # The seed must still be flat despite the custom prefix
+        result = subprocess.run(
+            ["git", "show", "main:vault.yaml"],
+            cwd=hub, capture_output=True, text=True, check=True,
+        )
+        assert "scope_convention: flat" in result.stdout
+        assert "custom-thing" not in result.stdout
+
+    def test_scope_prefix_default_no_warn(self, tmp_path, capsys):
+        """Default scope_prefix must NOT emit the deprecation warning (no noise)."""
+        from schist.sync import init_hub
+
+        hub = tmp_path / "hub.git"
+        args = SimpleNamespace(name="v", participant=["alpha"], scope_prefix="research")
+        init_hub(args, str(hub))
+
+        captured = capsys.readouterr()
+        assert "deprecated" not in captured.err.lower()

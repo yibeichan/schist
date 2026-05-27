@@ -476,6 +476,14 @@ def init_hub(args, hub_path: str) -> None:
     name = getattr(args, "name", None)
     participants = list(getattr(args, "participant", None) or [])
 
+    if getattr(args, "scope_prefix", None) not in (None, "research"):
+        print(
+            "Warning: --scope-prefix is deprecated and has no effect. "
+            "New hubs use scope_convention: flat; authorship is recorded in "
+            "the source_agent frontmatter, not via per-participant directories.",
+            file=sys.stderr,
+        )
+
     if not name:
         print("Error: --name is required for hub init", file=sys.stderr)
         sys.exit(1)
