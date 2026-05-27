@@ -34,25 +34,33 @@ SCHEMA_VERSION = "1"
 WINDOW_SECONDS = 3600
 BUSY_TIMEOUT_MS = 5000
 
+
 # Path prefixes considered "note-bearing" for the subdirectory convention.
 # Derived at import time from the canonical `cli/schist/default.yaml` so all
 # consumers (rate_limit, future mcp-server tools.ts, future loaders) see the
 # same list. Fails closed on missing/malformed file — a broken install must
 # not silently under-count.
-def _load_default_dirs() -> tuple[str, ...]:
+def _load_default_dirs(path: Path | None = None) -> tuple[str, ...]:
     import yaml
 
     # default.yaml is a sibling of rate_limit.py inside the schist package,
     # shipped via cli/pyproject.toml package-data. This path resolution
     # works for both editable installs and wheel installs.
-    schema_path = Path(__file__).resolve().parent / "default.yaml"
+    if path is None:
+        path = Path(__file__).resolve().parent / "default.yaml"
+    schema_path = path
     try:
-        data = yaml.safe_load(schema_path.read_text())
-    except (OSError, yaml.YAMLError) as e:
+        data = yaml.safe_load(schema_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, yaml.YAMLError) as e:
         raise RuntimeError(
             f"schist install is broken: cannot read canonical {schema_path} ({e}). "
             f"Reinstall the schist package."
         ) from e
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"schist install is broken: {schema_path} did not parse to a YAML "
+            f"mapping (got {type(data).__name__}). Reinstall the schist package."
+        )
     dirs = data.get("directories")
     if not isinstance(dirs, dict) or not dirs:
         raise RuntimeError(

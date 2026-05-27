@@ -693,7 +693,11 @@ class TestDefaultNoteDirsDrift:
         """rate_limit._DEFAULT_NOTE_DIRS must mirror cli/schist/default.yaml's
         `directories:` values verbatim. If a contributor adds a new
         content-axis dir to default.yaml, this test fails until they update
-        the canonical loader (or stops failing once they do)."""
+        the canonical loader (or stops failing once they do).
+
+        Note: this catches stale-cache / file-vs-binding drift, not loader
+        bugs — a loader that silently drops entries would also drop them here;
+        the counting tests cover loader correctness."""
         import yaml
         from pathlib import Path
 
@@ -708,3 +712,40 @@ class TestDefaultNoteDirsDrift:
             f"got {_DEFAULT_NOTE_DIRS!r}. "
             f"Source of truth is {canonical_path}."
         )
+
+
+class TestLoadDefaultDirs:
+    """Fail-closed regression tests for _load_default_dirs().
+
+    These tests exercise the RuntimeError paths by passing a tmp file path
+    directly to the loader via the optional ``path`` parameter added for
+    testability. Production behavior is unchanged — the module-level binding
+    _DEFAULT_NOTE_DIRS = _load_default_dirs() uses the default (in-package) path.
+    """
+
+    def test_load_default_dirs_raises_on_missing_file(self, tmp_path):
+        """A missing default.yaml must fail closed with RuntimeError, not a
+        bare OSError or a silent fallback."""
+        from schist.rate_limit import _load_default_dirs
+
+        missing = tmp_path / "nonexistent.yaml"
+        with pytest.raises(RuntimeError, match="schist install is broken"):
+            _load_default_dirs(missing)
+
+    def test_load_default_dirs_raises_on_empty_yaml(self, tmp_path):
+        """Empty default.yaml (yaml.safe_load returns None) must fail closed."""
+        from schist.rate_limit import _load_default_dirs
+
+        empty_yaml = tmp_path / "default.yaml"
+        empty_yaml.write_text("", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="schist install is broken"):
+            _load_default_dirs(empty_yaml)
+
+    def test_load_default_dirs_raises_on_missing_directories_key(self, tmp_path):
+        """default.yaml without a `directories:` mapping must fail closed."""
+        from schist.rate_limit import _load_default_dirs
+
+        no_dirs = tmp_path / "default.yaml"
+        no_dirs.write_text("foo: bar\nbaz: qux\n", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="schist install is broken"):
+            _load_default_dirs(no_dirs)
