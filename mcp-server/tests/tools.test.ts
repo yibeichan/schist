@@ -62,6 +62,59 @@ async function makeTempVault(extraYaml = ""): Promise<string> {
   return dir;
 }
 
+async function makeTempVaultWithAcl(
+  identity: string,
+  writeGrants: string[],
+): Promise<string> {
+  // Build the vault using the standard helper (no vault.yaml, so existing
+  // tests that call makeTempVault() stay unaffected). Then:
+  //   1. Overwrite schist.yaml to include notes, papers, AND projects so
+  //      directory-validation doesn't block the parent-grant test.
+  //   2. Write vault.yaml with the supplied identity + write grants.
+  //   3. Commit both so git HEAD is clean for create_note.
+  const vault = await makeTempVault();
+
+  // Extend schist.yaml to include `projects` as a valid directory
+  const schistedYaml = [
+    "name: Test Vault",
+    "write_branch: drafts",
+    "directories:",
+    "  - notes",
+    "  - papers",
+    "  - projects",
+    "statuses:",
+    "  - draft",
+    "  - review",
+    "  - final",
+    "connection_types:",
+    "  - extends",
+    "  - supports",
+    "",
+  ].join("\n");
+  await fs.writeFile(path.join(vault, "schist.yaml"), schistedYaml, "utf-8");
+
+  const grantList = writeGrants.map((g) => `"${g}"`).join(", ");
+  const vaultYaml = [
+    "vault_version: 1",
+    "name: test-acl-vault",
+    "scope_convention: flat",
+    "participants:",
+    `  - name: ${identity}`,
+    "    type: spoke",
+    "    default_scope: global",
+    "access:",
+    `  ${identity}:`,
+    '    read: ["*"]',
+    `    write: [${grantList}]`,
+    "",
+  ].join("\n");
+  await fs.writeFile(path.join(vault, "vault.yaml"), vaultYaml, "utf-8");
+
+  await execFile("git", ["add", "schist.yaml", "vault.yaml"], { cwd: vault });
+  await execFile("git", ["commit", "-m", "add vault.yaml + extended schist.yaml"], { cwd: vault });
+  return vault;
+}
+
 // ---------------------------------------------------------------------------
 // loadVaultConfig — YAML parser
 // ---------------------------------------------------------------------------
@@ -1035,5 +1088,72 @@ describe("default.yaml drift detection", () => {
     const expected = Object.values(dirs).map((v) => v.replace(/\/$/, ""));
     expect(DEFAULT_DIRECTORIES_FALLBACK).toEqual(expected);
   });
+});
+
+// ---------------------------------------------------------------------------
+// create_note — ACL enforcement against vault.yaml (#155)
+// ---------------------------------------------------------------------------
+
+describe("create_note ACL enforcement (#155)", () => {
+  test("write to a granted directory succeeds", async () => {
+    const vault = await makeTempVaultWithAcl(TEST_AGENT, ["notes"]);
+    const config = await loadVaultConfig(vault);
+    const result = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Allowed", body: "x", directory: "notes" },
+      config,
+    ) as { id: string; path: string; commitSha: string };
+    expect(result.path).toBeDefined();
+  }, 30000);
+
+  test("write to an ungranted directory returns ACL_DENIED", async () => {
+    const vault = await makeTempVaultWithAcl(TEST_AGENT, ["notes"]);
+    const config = await loadVaultConfig(vault);
+    const result = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Denied", body: "x", directory: "papers" },
+      config,
+    ) as { error: string; message: string };
+    expect(result.error).toBe("ACL_DENIED");
+    expect(result.message).toMatch(/papers/);
+    expect(result.message).toMatch(new RegExp(TEST_AGENT));
+  }, 30000);
+
+  test("parent grant covers nested target directory", async () => {
+    // Vault grants 'projects'; create_note targets 'projects/foo' — the
+    // parent-grant rule in scopeMatches must let this through.
+    // makeTempVaultWithAcl always includes 'projects' in schist.yaml directories.
+    const vault = await makeTempVaultWithAcl(TEST_AGENT, ["projects"]);
+    const config = await loadVaultConfig(vault);
+    const result = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Nested", body: "x", directory: "projects/foo" },
+      config,
+    ) as { id: string; path: string };
+    expect(result.path?.startsWith("projects/foo/")).toBe(true);
+  }, 30000);
+
+  test("identity not in vault.yaml access returns ACL_DENIED", async () => {
+    // Vault grants 'other-agent' but TEST_AGENT is unknown to the access map.
+    const vault = await makeTempVaultWithAcl("other-agent", ["notes"]);
+    const config = await loadVaultConfig(vault);
+    const result = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Stranger", body: "x", directory: "notes" },
+      config,
+    ) as { error: string; message: string };
+    expect(result.error).toBe("ACL_DENIED");
+  }, 30000);
+
+  test("no vault.yaml → check is skipped, write succeeds", async () => {
+    const vault = await makeTempVault();  // no vault.yaml
+    const config = await loadVaultConfig(vault);
+    const result = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "No ACL", body: "x", directory: "notes" },
+      config,
+    ) as { id: string; path: string };
+    expect(result.path).toBeDefined();
+  }, 30000);
 });
 

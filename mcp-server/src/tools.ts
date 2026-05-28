@@ -9,6 +9,7 @@ import { writeNote } from "./git-writer.js";
 import { buildNote, buildConnectionLine } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse } from "./types.js";
+import { loadVaultAcl, canWrite, deriveScope } from "./vault-acl.js";
 import {
   canonicalizeQueryHash,
   decodeCursor,
@@ -705,6 +706,28 @@ export async function create_note(
       relPath = `${directory}/${date}-${slug}-${timeSuffix}.md`;
     } catch {
       // File does not exist — use base path as-is
+    }
+
+    // #155: intersect with vault.yaml write-grants so we never produce a
+    // local commit the hub's pre-receive will reject. Fail-open when
+    // vault.yaml is missing or malformed (see loadVaultAcl's comment).
+    //
+    // PIVOT POINT: if we ever want soft-warn instead of hard-reject
+    // (produce the note, attach a warning to the response), flip this
+    // early-return into a syncWarning accumulator entry alongside the
+    // existing one. One branch to change — keep it that way.
+    const acl = loadVaultAcl(vaultRoot);
+    if (acl !== null) {
+      const scope = deriveScope(relPath);
+      if (!canWrite(acl, owner, scope)) {
+        return {
+          error: "ACL_DENIED",
+          message:
+            `Identity '${owner}' is not granted write access to scope ` +
+            `'${scope}' by vault.yaml. Hub push would reject this write. ` +
+            `Ask the hub admin to extend your write grant.`,
+        } satisfies ToolError;
+      }
     }
 
     const metadata: Record<string, unknown> = {
