@@ -1,0 +1,5 @@
+[
+  { "identity": "known", "scope": "notes", "canWrite": true },
+  { "identity": "unknown-agent", "scope": "notes", "canWrite": false },
+  { "identity": "", "scope": "notes", "canWrite": false }
+]

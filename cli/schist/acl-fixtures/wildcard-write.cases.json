@@ -1,0 +1,7 @@
+[
+  { "identity": "admin", "scope": "notes", "canWrite": true },
+  { "identity": "admin", "scope": "logs", "canWrite": true },
+  { "identity": "admin", "scope": "projects/foo", "canWrite": true },
+  { "identity": "admin", "scope": "", "canWrite": true },
+  { "identity": "other", "scope": "notes", "canWrite": false }
+]

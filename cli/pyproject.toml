@@ -52,7 +52,7 @@ packages = ["schist"]
 # and mcp-server tools.ts) resolve it via
 # Path(__file__).parent / 'default.yaml' for both editable and wheel installs.
 [tool.setuptools.package-data]
-schist = ["*.sql", "default.yaml"]
+schist = ["*.sql", "default.yaml", "acl-fixtures/*.yaml", "acl-fixtures/*.json", "acl-fixtures/*.md"]
 
 [tool.pytest.ini_options]
 markers = [

@@ -1,0 +1,17 @@
+vault_version: 1
+name: test-basic
+scope_convention: flat
+participants:
+  - name: alice
+    type: spoke
+    default_scope: global
+  - name: bob
+    type: spoke
+    default_scope: global
+access:
+  alice:
+    read: ["*"]
+    write: [notes, papers]
+  bob:
+    read: [notes]
+    write: [notes]

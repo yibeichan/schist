@@ -1,0 +1,11 @@
+vault_version: 1
+name: test-wildcard
+scope_convention: flat
+participants:
+  - name: admin
+    type: agent
+    default_scope: global
+access:
+  admin:
+    read: ["*"]
+    write: ["*"]
