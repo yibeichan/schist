@@ -1,7 +1,7 @@
 /**
  * vault.yaml ACL read-side — TypeScript port of cli/schist/acl.py.
  *
- * Only the read path is ported (parseVaultAcl, canWrite, scopeMatches,
+ * Only the read path is ported (loadVaultAcl, canWrite, scopeMatches,
  * deriveScope). The hub's pre-receive remains the trust boundary that
  * validates vault.yaml content; this module is a UX optimisation that
  * fails fast locally before a doomed commit lands.
@@ -13,6 +13,8 @@
  * See docs/superpowers/specs/2026-05-28-mcp-hub-acl-intersection-design.md.
  */
 
+// Imports below are used by loadVaultAcl (Task 3) and deriveScope (Task 4),
+// which currently exist as STUBs. Keep them so those tasks plug in cleanly.
 import { readFileSync } from "fs";
 import * as path from "path";
 import { load as yamlLoad } from "js-yaml";
