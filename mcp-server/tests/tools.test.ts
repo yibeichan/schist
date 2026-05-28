@@ -152,6 +152,80 @@ describe("create_note filename collision", () => {
 });
 
 // ---------------------------------------------------------------------------
+// create_note — date-prefix title rejection (#118)
+// ---------------------------------------------------------------------------
+
+describe("create_note date-prefix title rejection (#118)", () => {
+  test("rejects title beginning with YYYY-MM-DD followed by space", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const result = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "2026-05-02 brain-states-friends — merge cleanup", body: "x" },
+      config
+    ) as { error: string; message: string };
+
+    expect(result.error).toBe("VALIDATION_ERROR");
+    expect(result.message).toMatch(/date prefix/i);
+  }, 30000);
+
+  test("rejects title beginning with YYYY-MM-DD followed by hyphen", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const result = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "2026-05-02-incident-postmortem", body: "x" },
+      config
+    ) as { error: string; message: string };
+
+    expect(result.error).toBe("VALIDATION_ERROR");
+  }, 30000);
+
+  test("rejects title that is exactly a YYYY-MM-DD date", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const result = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "2026-05-02", body: "x" },
+      config
+    ) as { error: string; message: string };
+
+    expect(result.error).toBe("VALIDATION_ERROR");
+  }, 30000);
+
+  test("accepts title containing a year-only token", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const result = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "2026 retrospective", body: "x" },
+      config
+    ) as { id: string; path: string; commitSha: string };
+
+    expect(result.path).toBeDefined();
+    expect(result.path).toMatch(/2026-\d{2}-\d{2}-2026-retrospective\.md$/);
+  }, 30000);
+
+  test("accepts title with a date that isn't at the start", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const result = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Incident on 2026-05-02 root cause", body: "x" },
+      config
+    ) as { id: string; path: string; commitSha: string };
+
+    expect(result.path).toBeDefined();
+    expect(result.path).toMatch(/incident-on-2026-05-02-root-cause\.md$/);
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
 // create_note — directory validation (top-level-segment match)
 // ---------------------------------------------------------------------------
 

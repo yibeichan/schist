@@ -664,6 +664,20 @@ export async function create_note(
     }
 
     const slug = slugify(args.title);
+
+    // #118: reject titles starting with a YYYY-MM-DD date prefix. The
+    // filename builder already prepends the date, so accepting a date-
+    // prefixed title silently produces e.g. `2026-05-02-2026-05-02-foo.md`.
+    // Match the strict zero-padded form followed by `-` or end-of-slug;
+    // looser date-like forms (e.g. `2026/5/2`) are intentionally not
+    // covered — they don't produce a doubled-date filename.
+    if (/^\d{4}-\d{2}-\d{2}(-|$)/.test(slug)) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: "Title must not start with a YYYY-MM-DD date prefix — the filename already prefixes the date.",
+      } satisfies ToolError;
+    }
+
     const date = today();
 
     // Guard against same-day same-title collision: append HH-MM-SS suffix when
