@@ -656,14 +656,36 @@ export async function create_note(
       } satisfies ToolError;
     }
 
-    if (rawSlug(args.title) === "") {
+    // NFKC fold before validation/slugify so compatibility digits (fullwidth
+    // `２０２６`, Arabic-Indic `٢٠٢٦`) that the user clearly intended as a date
+    // prefix can't bypass the date-prefix check below by being stripped as
+    // non-ASCII by slugify.
+    const normalizedTitle = args.title.normalize("NFKC");
+
+    if (rawSlug(normalizedTitle) === "") {
       return {
         error: "VALIDATION_ERROR",
         message: "Title must contain at least one alphanumeric character",
       } satisfies ToolError;
     }
 
-    const slug = slugify(args.title);
+    const slug = slugify(normalizedTitle);
+
+    // #118: reject titles starting with a YYYY-MM-DD date prefix. The
+    // filename builder already prepends the date, so accepting a date-
+    // prefixed title silently produces e.g. `2026-05-02-2026-05-02-foo.md`.
+    // Match the strict zero-padded form followed by `-` or end-of-slug;
+    // looser date-like forms (e.g. `2026/5/2`) are intentionally not
+    // covered — they don't produce a doubled-date filename. Allow
+    // optional leading hyphens because slugify converts leading whitespace
+    // (or a literal leading `-`) into a hyphen that survives `.trim()`.
+    if (/^-*\d{4}-\d{2}-\d{2}(-|$)/.test(slug)) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: "Title must not start with a YYYY-MM-DD date prefix — the filename already prefixes the date.",
+      } satisfies ToolError;
+    }
+
     const date = today();
 
     // Guard against same-day same-title collision: append HH-MM-SS suffix when
