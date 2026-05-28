@@ -794,6 +794,23 @@ export async function add_connection(
       return { error: "NOT_FOUND", message: `Source note not found: ${args.source}` } satisfies ToolError;
     }
 
+    // #155: ACL check — mirror create_note's guard. args.source is the
+    // vault-relative path; scope derivation uses the same rule as
+    // pre_receive.py:derive_scope on the hub.
+    const acl = loadVaultAcl(vaultRoot);
+    if (acl !== null) {
+      const scope = deriveScope(args.source);
+      if (!canWrite(acl, owner, scope)) {
+        return {
+          error: "ACL_DENIED",
+          message:
+            `Identity '${owner}' is not granted write access to scope ` +
+            `'${scope}' by vault.yaml. Hub push would reject this write. ` +
+            `Ask the hub admin to extend your write grant.`,
+        } satisfies ToolError;
+      }
+    }
+
     const conn = { target: args.target, type: args.type, context: args.context };
     const connLine = buildConnectionLine(conn);
 

@@ -1157,3 +1157,47 @@ describe("create_note ACL enforcement (#155)", () => {
   }, 30000);
 });
 
+// ---------------------------------------------------------------------------
+// add_connection — ACL enforcement against vault.yaml (#155)
+// ---------------------------------------------------------------------------
+
+describe("add_connection ACL enforcement (#155)", () => {
+  test("appending to a note in an ungranted directory returns ACL_DENIED", async () => {
+    // Step 1: write a note with 'notes' AND 'papers' granted
+    const vault = await makeTempVaultWithAcl(TEST_AGENT, ["notes", "papers"]);
+    const config = await loadVaultConfig(vault);
+    const created = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Target", body: "x", directory: "papers" },
+      config,
+    ) as { id: string; path: string };
+    expect(created.path).toBeDefined();
+
+    // Step 2: rewrite vault.yaml to revoke papers (now only 'notes')
+    const tighterYaml =
+      `vault_version: 1
+name: test-acl-vault
+scope_convention: flat
+participants:
+  - name: ${TEST_AGENT}
+    type: spoke
+    default_scope: global
+access:
+  ${TEST_AGENT}:
+    read: ["*"]
+    write: [notes]
+`;
+    await fs.writeFile(path.join(vault, "vault.yaml"), tighterYaml, "utf-8");
+    await execFile("git", ["add", "vault.yaml"], { cwd: vault });
+    await execFile("git", ["commit", "-m", "revoke papers"], { cwd: vault });
+
+    // Step 3: add_connection should now be denied for the papers note
+    const result = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: created.path, target: "[[Some Concept]]", type: "related" },
+    ) as { error: string; message: string };
+    expect(result.error).toBe("ACL_DENIED");
+    expect(result.message).toMatch(/papers/);
+  }, 30000);
+});
+
