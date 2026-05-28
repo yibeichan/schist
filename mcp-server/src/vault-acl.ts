@@ -49,8 +49,60 @@ export function deriveScope(filepath: string): string {
   return "";
 }
 
+function isENOENT(e: unknown): boolean {
+  return e !== null && typeof e === "object" && "code" in e &&
+    (e as { code: string }).code === "ENOENT";
+}
+
+/**
+ * Read <vaultRoot>/vault.yaml and return a minimal VaultAcl.
+ *
+ * Returns null in three "fall-open" cases (the caller skips the ACL
+ * check entirely):
+ *   1. vault.yaml does not exist (backward compat — standalone vaults,
+ *      pre-vault.yaml deployments, existing MCP test fixtures).
+ *      If vault.yaml is ever made mandatory (e.g. a future schist v0.3
+ *      invariant), remove this branch and let the caller throw.
+ *   2. vault.yaml is unreadable / unparseable as YAML — warn + skip.
+ *   3. vault.yaml is valid YAML but missing the 'access' mapping —
+ *      warn + skip.
+ *
+ * Asymmetric with cli/schist/rate_limit.py (fail-closed) by design:
+ * the MCP-side check is a UX optimisation; the hub's pre-receive is
+ * the trust boundary. Logging-and-skipping matches the existing
+ * fail-open posture in tools.ts:loadCanonicalDirectories.
+ */
 export function loadVaultAcl(vaultRoot: string): VaultAcl | null {
-  // STUB — implemented in Task 3.
-  void vaultRoot;
-  return null;
+  const aclPath = path.join(vaultRoot, "vault.yaml");
+  let raw: unknown;
+  try {
+    raw = yamlLoad(readFileSync(aclPath, "utf-8"));
+  } catch (e) {
+    if (isENOENT(e)) return null;
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn(`schist: vault.yaml unreadable (${msg}); skipping local ACL check.`);
+    return null;
+  }
+
+  if (
+    !raw || typeof raw !== "object" ||
+    !("access" in (raw as object)) ||
+    typeof (raw as { access: unknown }).access !== "object" ||
+    (raw as { access: unknown }).access === null
+  ) {
+    console.warn(`schist: vault.yaml at ${aclPath} is missing the 'access' mapping; skipping local ACL check.`);
+    return null;
+  }
+
+  const access: VaultAcl["access"] = {};
+  for (const [identity, entry] of Object.entries((raw as { access: Record<string, unknown> }).access)) {
+    if (entry && typeof entry === "object") {
+      const e = entry as { read?: unknown; write?: unknown };
+      access[identity] = {
+        read: Array.isArray(e.read) ? e.read.map((v) => (v == null ? "" : String(v))) : [],
+        write: Array.isArray(e.write) ? e.write.map((v) => (v == null ? "" : String(v))) : [],
+      };
+    }
+  }
+  return { access };
 }

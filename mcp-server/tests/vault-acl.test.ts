@@ -1,5 +1,7 @@
-import { describe, expect, test } from "@jest/globals";
-import { scopeMatches, canWrite, type VaultAcl } from "../src/vault-acl.js";
+import { describe, expect, test, afterAll, jest } from "@jest/globals";
+import * as fs from "fs/promises";
+import * as os from "os";
+import { scopeMatches, canWrite, type VaultAcl, loadVaultAcl } from "../src/vault-acl.js";
 
 describe("scopeMatches", () => {
   test("exact match returns true", () => {
@@ -45,5 +47,74 @@ describe("canWrite", () => {
   test("wildcard write grants every scope", () => {
     expect(canWrite(acl, "admin", "anything")).toBe(true);
     expect(canWrite(acl, "admin", "")).toBe(true);
+  });
+});
+
+const tmpDirs: string[] = [];
+afterAll(async () => {
+  for (const d of tmpDirs) {
+    await fs.rm(d, { recursive: true, force: true });
+  }
+});
+
+async function makeTempVault(vaultYaml: string | null): Promise<string> {
+  const dir = await fs.mkdtemp(`${os.tmpdir()}/schist-acl-`);
+  tmpDirs.push(dir);
+  if (vaultYaml !== null) {
+    await fs.writeFile(`${dir}/vault.yaml`, vaultYaml, "utf-8");
+  }
+  return dir;
+}
+
+describe("loadVaultAcl", () => {
+  test("returns null when vault.yaml is missing", async () => {
+    const dir = await makeTempVault(null);
+    expect(loadVaultAcl(dir)).toBeNull();
+  });
+
+  test("returns null and logs warning on malformed YAML", async () => {
+    const dir = await makeTempVault(":::not yaml:::");
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+    expect(loadVaultAcl(dir)).toBeNull();
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  test("returns null when 'access' is missing", async () => {
+    const dir = await makeTempVault("name: nope\n");
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+    expect(loadVaultAcl(dir)).toBeNull();
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  test("parses a valid vault.yaml", async () => {
+    const dir = await makeTempVault(`
+vault_version: 1
+name: t
+scope_convention: flat
+participants: [{name: alice}]
+access:
+  alice:
+    read: ["*"]
+    write: [notes, papers]
+`);
+    const acl = loadVaultAcl(dir);
+    expect(acl).not.toBeNull();
+    expect(acl!.access.alice.write).toEqual(["notes", "papers"]);
+    expect(acl!.access.alice.read).toEqual(["*"]);
+  });
+
+  test("coerces non-string write entries defensively", async () => {
+    // If vault.yaml has weird types, fall back to empty list rather than crash.
+    const dir = await makeTempVault(`
+access:
+  alice:
+    read: ["*"]
+    write: [notes, 42, null]
+`);
+    const acl = loadVaultAcl(dir);
+    expect(acl).not.toBeNull();
+    expect(acl!.access.alice.write).toEqual(["notes", "42", ""]);
   });
 });
