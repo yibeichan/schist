@@ -348,6 +348,79 @@ def check_spoke(vault_path: Optional[str]) -> CheckResult:
                            "Re-run `schist init --spoke`.")
 
 
+def check_spoke_acl_drift(vault_path: Optional[str]) -> CheckResult:
+    """Flag schist.yaml directories not present in this spoke's hub write grant.
+
+    Runs only on spokes (skips standalone vaults and contexts without spoke.yaml).
+    Reads schist.yaml directories, the spoke's identity from .schist/spoke.yaml,
+    and the per-identity write grant from vault.yaml's access map. Reports any
+    schema dir that doesn't match any of the identity's write scopes (using the
+    same parent->child rule as the hub's pre-receive).
+    """
+    label = "Spoke ACL"
+
+    if not vault_path:
+        return CheckResult("SKIP", label, "no vault path supplied")
+
+    vault = Path(vault_path)
+    if not is_spoke(vault_path):
+        return CheckResult("SKIP", label, "not a spoke")
+
+    vault_yaml = vault / "vault.yaml"
+    if not vault_yaml.exists():
+        return CheckResult("SKIP", label, "no vault.yaml")
+
+    # Identity from spoke.yaml
+    try:
+        cfg = load_spoke_config(vault_path)
+        identity = cfg.identity
+    except Exception as e:  # noqa: BLE001 — surface as SKIP so doctor never crashes
+        return CheckResult("SKIP", label, f"could not read spoke.yaml: {e}")
+
+    # Schema dirs from schist.yaml — inline yaml.safe_load
+    try:
+        schist_data = yaml.safe_load((vault / "schist.yaml").read_text()) or {}
+    except Exception as e:  # noqa: BLE001
+        return CheckResult("SKIP", label, f"could not read schist.yaml: {e}")
+
+    dirs_field = schist_data.get("directories") or {}
+    # `directories:` can be either a dict (canonical default.yaml form) or a list (some test fixtures).
+    if isinstance(dirs_field, dict):
+        schema_dirs = [v.rstrip("/") for v in dirs_field.values()]
+    elif isinstance(dirs_field, list):
+        schema_dirs = [str(v).rstrip("/") for v in dirs_field]
+    else:
+        return CheckResult("SKIP", label, "schist.yaml 'directories' field is malformed")
+
+    if not schema_dirs:
+        return CheckResult("SKIP", label, "schist.yaml has no directories declared")
+
+    # Parse vault.yaml and resolve the identity's write grant
+    try:
+        from schist.acl import _scope_matches, parse_vault_yaml
+        acl = parse_vault_yaml(vault_yaml)
+    except Exception as e:  # noqa: BLE001
+        return CheckResult("SKIP", label, f"could not parse vault.yaml: {e}")
+
+    entry = acl.access.get(identity)
+    if entry is None:
+        return CheckResult(
+            "WARN", label,
+            f"identity '{identity}' has no access entry in vault.yaml — ask the hub admin to add one",
+        )
+
+    # Find schema dirs the identity is NOT granted write on.
+    drift = [d for d in schema_dirs if not _scope_matches(entry.write, d)]
+    if not drift:
+        return CheckResult("PASS", label, f"identity '{identity}' is granted all schema directories")
+
+    return CheckResult(
+        "WARN", label,
+        f"identity '{identity}' has no hub write grant for: {', '.join(drift)}. "
+        f"Ask the hub admin to extend your write scope in vault.yaml.",
+    )
+
+
 def _auto_detect_mcp_path() -> Optional[str]:
     """Locate `mcp-server/dist/index.js` relative to this checkout.
 
@@ -622,6 +695,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_hooks_path(vault_path),
         check_ingest_available(vault_path),
         check_spoke(vault_path),
+        check_spoke_acl_drift(vault_path),
         check_mcp_config(vault_path),
         check_mcp_schema_alignment(vault_path),
     ]
