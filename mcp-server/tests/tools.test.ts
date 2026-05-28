@@ -25,8 +25,17 @@ afterAll(() => {
   delete process.env.SCHIST_AGENT_ID;
 });
 
+const createdDirs = new Set<string>();
+
+afterAll(async () => {
+  for (const dir of createdDirs) {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 async function makeTempVault(extraYaml = ""): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-tools-test-"));
+  createdDirs.add(dir);
   await execFile("git", ["init"], { cwd: dir });
   await execFile("git", ["config", "user.email", "test@test.com"], { cwd: dir });
   await execFile("git", ["config", "user.name", "Test"], { cwd: dir });
@@ -99,6 +108,7 @@ describe("loadVaultConfig (js-yaml)", () => {
     // schist.yaml has a name but no `directories:` field — config should pick
     // up all eight content-axis dirs from the canonical default.yaml.
     const vault = await fs.mkdtemp(path.join(os.tmpdir(), "schist-tools-test-"));
+    createdDirs.add(vault);
     await fs.writeFile(path.join(vault, "schist.yaml"), "name: novel-vault\n", "utf-8");
     const config = await loadVaultConfig(vault);
     expect(config.directories).toEqual([

@@ -21,8 +21,11 @@ import * as sqliteReader from "../src/sqlite-reader.js";
 
 const execFile = promisify(execFileCb);
 
+const createdDirs = new Set<string>();
+
 async function makeTempVault(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-confidence-"));
+  createdDirs.add(dir);
   await execFile("git", ["init"], { cwd: dir });
   await execFile("git", ["config", "user.email", "test@test.com"], { cwd: dir });
   await execFile("git", ["config", "user.name", "Test"], { cwd: dir });
@@ -52,6 +55,12 @@ beforeAll(() => {
 });
 afterAll(() => {
   delete process.env.SCHIST_AGENT_ID;
+});
+
+afterAll(async () => {
+  for (const dir of createdDirs) {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 describe("create_note confidence frontmatter", () => {
@@ -129,6 +138,7 @@ describe("search_notes confidence filter", () => {
   // unit-scoped: it exercises the SQL filter, not the ingestion pipeline.
   async function seedVault(): Promise<string> {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-conf-search-"));
+    createdDirs.add(dir);
     const dbDir = path.join(dir, ".schist");
     await fs.mkdir(dbDir, { recursive: true });
     const db = new Database(path.join(dbDir, "schist.db"));
@@ -220,6 +230,7 @@ describe("schema-drift auto-rebuild", () => {
   // read succeeds instead of throwing `no such column`.
   async function makeStaleSchemaVault(): Promise<string> {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-drift-"));
+    createdDirs.add(dir);
     // Real vault — has schist.yaml so drift detection engages.
     await execFile("git", ["init"], { cwd: dir });
     await execFile("git", ["config", "user.email", "test@test.com"], { cwd: dir });

@@ -4,8 +4,11 @@ import * as path from "path";
 import * as os from "os";
 import Database from "better-sqlite3";
 
+const createdDirs = new Set<string>();
+
 async function makeTempDb(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-db-test-"));
+  createdDirs.add(dir);
   const dbDir = path.join(dir, ".schist");
   await fs.mkdir(dbDir, { recursive: true });
   const dbPath = path.join(dbDir, "schist.db");
@@ -48,6 +51,12 @@ async function makeTempDb(): Promise<string> {
 }
 
 describe("sqlite-reader", () => {
+  afterAll(async () => {
+    for (const dir of createdDirs) {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("queryGraph: DROP TABLE is rejected with INVALID_SQL", async () => {
     const vaultRoot = await makeTempDb();
     expect(() => queryGraph(vaultRoot, "DROP TABLE docs")).toThrow(
@@ -76,6 +85,7 @@ describe("sqlite-reader", () => {
 
 async function makeScopedVault(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-scope-test-"));
+  createdDirs.add(dir);
   const dbDir = path.join(dir, ".schist");
   await fs.mkdir(dbDir, { recursive: true });
   const dbPath = path.join(dbDir, "schist.db");
