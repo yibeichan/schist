@@ -1,7 +1,7 @@
 import { describe, expect, test, afterAll, jest } from "@jest/globals";
 import * as fs from "fs/promises";
 import * as os from "os";
-import { scopeMatches, canWrite, type VaultAcl, loadVaultAcl } from "../src/vault-acl.js";
+import { scopeMatches, canWrite, type VaultAcl, loadVaultAcl, deriveScope } from "../src/vault-acl.js";
 
 describe("scopeMatches", () => {
   test("exact match returns true", () => {
@@ -116,5 +116,26 @@ access:
     const acl = loadVaultAcl(dir);
     expect(acl).not.toBeNull();
     expect(acl!.access.alice.write).toEqual(["notes", "42", ""]);
+  });
+});
+
+describe("deriveScope", () => {
+  test("top-level file under a directory returns the directory", () => {
+    expect(deriveScope("notes/2026-05-28-foo.md")).toBe("notes");
+  });
+  test("nested directory returns the full parent path", () => {
+    expect(deriveScope("projects/foo/2026-05-28-bar.md")).toBe("projects/foo");
+  });
+  test("deeply nested path", () => {
+    expect(deriveScope("projects/foo/sub/2026-05-28-baz.md")).toBe("projects/foo/sub");
+  });
+  test("root-level file returns empty string", () => {
+    expect(deriveScope("vault.yaml")).toBe("");
+  });
+  test("leading ./ is normalised away", () => {
+    expect(deriveScope("./notes/foo.md")).toBe("notes");
+  });
+  test("trailing slash in input is normalised", () => {
+    expect(deriveScope("notes/")).toBe("");
   });
 });

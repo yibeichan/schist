@@ -13,8 +13,6 @@
  * See docs/superpowers/specs/2026-05-28-mcp-hub-acl-intersection-design.md.
  */
 
-// Imports below are used by loadVaultAcl (Task 3) and deriveScope (Task 4),
-// which currently exist as STUBs. Keep them so those tasks plug in cleanly.
 import { readFileSync } from "fs";
 import * as path from "path";
 import { load as yamlLoad } from "js-yaml";
@@ -43,10 +41,24 @@ export function canWrite(acl: VaultAcl, identity: string, scope: string): boolea
   return scopeMatches(entry.write, scope);
 }
 
+/**
+ * Derive the ACL scope from a file path. Mirrors
+ * cli/schist/pre_receive.py:derive_scope verbatim.
+ *
+ *   notes/2026-05-28-foo.md   → "notes"
+ *   projects/foo/bar.md        → "projects/foo"
+ *   vault.yaml                 → ""        (root-level)
+ *
+ * The returned scope is the directory portion of the path, POSIX-
+ * normalised so callers that pass "./foo" get the same answer as "foo".
+ * Path-traversal segments are NOT defended against here; the upstream
+ * assertPathSafe guard in git-writer.ts rejects "../" before this is
+ * reached.
+ */
 export function deriveScope(filepath: string): string {
-  // STUB — implemented in Task 4.
-  void filepath;
-  return "";
+  const normalized = path.posix.normalize(filepath);
+  const parent = path.posix.dirname(normalized);
+  return parent === "." ? "" : parent;
 }
 
 function isENOENT(e: unknown): boolean {
