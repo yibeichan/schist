@@ -1,6 +1,9 @@
 import { describe, expect, test, afterAll, jest } from "@jest/globals";
 import * as fs from "fs/promises";
 import * as os from "os";
+import { readdirSync, readFileSync as readFileSyncForFixtures } from "fs";
+import { join as pathJoin, dirname as pathDirname } from "path";
+import { fileURLToPath } from "url";
 import { scopeMatches, canWrite, type VaultAcl, loadVaultAcl, deriveScope } from "../src/vault-acl.js";
 
 describe("scopeMatches", () => {
@@ -138,4 +141,53 @@ describe("deriveScope", () => {
   test("trailing slash in input is normalised", () => {
     expect(deriveScope("notes/")).toBe("");
   });
+});
+
+// Fixtures live at <repo>/cli/schist/acl-fixtures/. The test file is at
+// <repo>/mcp-server/tests/vault-acl.test.ts → walk up two directories.
+const FIXTURES_DIR_TS = pathJoin(
+  pathDirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "cli",
+  "schist",
+  "acl-fixtures",
+);
+
+interface ParityCase {
+  identity: string;
+  scope: string;
+  canWrite: boolean;
+}
+
+describe("vault-acl parity fixtures", () => {
+  const yamlFiles = readdirSync(FIXTURES_DIR_TS).filter((f) => f.endsWith(".yaml"));
+  // Sanity-check: discover at least the four fixtures from Task 1.
+  test("discovers parity fixtures", () => {
+    expect(yamlFiles.length).toBeGreaterThanOrEqual(4);
+  });
+
+  for (const yamlFile of yamlFiles) {
+    const base = yamlFile.replace(/\.yaml$/, "");
+    test(`${base}: TS canWrite matches every case in ${base}.cases.json`, async () => {
+      // Build a temp vault containing JUST this fixture as vault.yaml.
+      const dir = await fs.mkdtemp(`${os.tmpdir()}/schist-parity-${base}-`);
+      tmpDirs.push(dir);
+      const yamlBody = readFileSyncForFixtures(pathJoin(FIXTURES_DIR_TS, yamlFile), "utf-8");
+      await fs.writeFile(pathJoin(dir, "vault.yaml"), yamlBody, "utf-8");
+
+      const acl = loadVaultAcl(dir);
+      expect(acl).not.toBeNull();
+
+      const cases: ParityCase[] = JSON.parse(
+        readFileSyncForFixtures(pathJoin(FIXTURES_DIR_TS, `${base}.cases.json`), "utf-8"),
+      );
+      for (const c of cases) {
+        expect({ ...c, actual: canWrite(acl!, c.identity, c.scope) }).toEqual({
+          ...c,
+          actual: c.canWrite,
+        });
+      }
+    });
+  }
 });
