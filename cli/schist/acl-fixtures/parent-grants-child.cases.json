@@ -1,0 +1,8 @@
+[
+  { "identity": "orcd", "scope": "projects", "canWrite": true },
+  { "identity": "orcd", "scope": "projects/brain-states-friends", "canWrite": true },
+  { "identity": "orcd", "scope": "projects/brain-states-friends/subnotes", "canWrite": true },
+  { "identity": "orcd", "scope": "research", "canWrite": true },
+  { "identity": "orcd", "scope": "researchx", "canWrite": false },
+  { "identity": "orcd", "scope": "notes", "canWrite": false }
+]

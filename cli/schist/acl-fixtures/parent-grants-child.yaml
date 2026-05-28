@@ -1,0 +1,11 @@
+vault_version: 1
+name: test-parent
+scope_convention: flat
+participants:
+  - name: orcd
+    type: spoke
+    default_scope: global
+access:
+  orcd:
+    read: ["*"]
+    write: [projects, research]

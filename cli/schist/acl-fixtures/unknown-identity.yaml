@@ -1,0 +1,11 @@
+vault_version: 1
+name: test-unknown
+scope_convention: flat
+participants:
+  - name: known
+    type: spoke
+    default_scope: global
+access:
+  known:
+    read: [notes]
+    write: [notes]

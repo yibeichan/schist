@@ -645,3 +645,126 @@ class TestRunDoctor:
                         "Post-commit hook", "Hooks path", "Ingest"}
         vault_results = [r for r in results if r.label in vault_labels]
         assert all(r.status == "PASS" for r in vault_results)
+
+
+# ---------------------------------------------------------------------------
+# check_spoke_acl_drift tests
+# ---------------------------------------------------------------------------
+
+from schist.doctor import check_spoke_acl_drift  # noqa: E402
+
+
+def _write_vault(tmp_path: Path, schist_yaml: str, vault_yaml: str | None,
+                 spoke_yaml: str | None) -> Path:
+    (tmp_path / "schist.yaml").write_text(schist_yaml)
+    if vault_yaml is not None:
+        (tmp_path / "vault.yaml").write_text(vault_yaml)
+    if spoke_yaml is not None:
+        (tmp_path / ".schist").mkdir(exist_ok=True)
+        (tmp_path / ".schist" / "spoke.yaml").write_text(spoke_yaml)
+    return tmp_path
+
+
+def test_drift_present_warns(tmp_path: Path) -> None:
+    _write_vault(
+        tmp_path,
+        schist_yaml="directories:\n  notes: notes/\n  papers: papers/\n  logs: logs/\n",
+        vault_yaml="""\
+vault_version: 1
+name: test
+scope_convention: flat
+participants:
+  - name: orcd
+    type: spoke
+    default_scope: global
+access:
+  orcd:
+    read: ["*"]
+    write: [notes, papers]
+""",
+        spoke_yaml="hub: file:///fake\nidentity: orcd\nscope: global\n",
+    )
+    result = check_spoke_acl_drift(str(tmp_path))
+    assert result.status == "WARN"
+    assert "logs" in result.message
+    assert "orcd" in result.message
+
+
+def test_no_drift_passes(tmp_path: Path) -> None:
+    _write_vault(
+        tmp_path,
+        schist_yaml="directories:\n  notes: notes/\n",
+        vault_yaml="""\
+vault_version: 1
+name: test
+scope_convention: flat
+participants:
+  - name: orcd
+    type: spoke
+    default_scope: global
+access:
+  orcd:
+    read: ["*"]
+    write: [notes]
+""",
+        spoke_yaml="hub: file:///fake\nidentity: orcd\nscope: global\n",
+    )
+    result = check_spoke_acl_drift(str(tmp_path))
+    assert result.status == "PASS"
+
+
+def test_no_vault_yaml_skips(tmp_path: Path) -> None:
+    _write_vault(
+        tmp_path,
+        schist_yaml="directories:\n  notes: notes/\n",
+        vault_yaml=None,
+        spoke_yaml="hub: file:///fake\nidentity: orcd\nscope: global\n",
+    )
+    result = check_spoke_acl_drift(str(tmp_path))
+    assert result.status == "SKIP"
+
+
+def test_not_a_spoke_skips(tmp_path: Path) -> None:
+    _write_vault(
+        tmp_path,
+        schist_yaml="directories:\n  notes: notes/\n",
+        vault_yaml="""\
+vault_version: 1
+name: standalone
+scope_convention: flat
+participants:
+  - name: local
+    type: agent
+    default_scope: global
+access:
+  local:
+    read: ["*"]
+    write: ["*"]
+""",
+        spoke_yaml=None,  # not a spoke
+    )
+    result = check_spoke_acl_drift(str(tmp_path))
+    assert result.status == "SKIP"
+
+
+def test_wildcard_grant_passes(tmp_path: Path) -> None:
+    _write_vault(
+        tmp_path,
+        schist_yaml="directories:\n  notes: notes/\n  logs: logs/\n",
+        vault_yaml="""\
+vault_version: 1
+name: test
+scope_convention: flat
+participants:
+  - name: admin
+    type: spoke
+    default_scope: global
+access:
+  admin:
+    read: ["*"]
+    write: ["*"]
+""",
+        spoke_yaml="hub: file:///fake\nidentity: admin\nscope: global\n",
+    )
+    result = check_spoke_acl_drift(str(tmp_path))
+    assert result.status == "PASS"

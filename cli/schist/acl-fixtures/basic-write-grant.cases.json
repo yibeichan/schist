@@ -1,0 +1,8 @@
+[
+  { "identity": "alice", "scope": "notes", "canWrite": true },
+  { "identity": "alice", "scope": "papers", "canWrite": true },
+  { "identity": "alice", "scope": "logs", "canWrite": false },
+  { "identity": "bob", "scope": "notes", "canWrite": true },
+  { "identity": "bob", "scope": "papers", "canWrite": false },
+  { "identity": "carol", "scope": "notes", "canWrite": false }
+]
