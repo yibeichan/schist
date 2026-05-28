@@ -196,6 +196,49 @@ describe("create_note date-prefix title rejection (#118)", () => {
     expect(result.error).toBe("VALIDATION_ERROR");
   }, 30000);
 
+  test("rejects title with fullwidth digits in the date prefix (NFKC fold)", async () => {
+    // ２０２６ would normally slip through slugify (non-ASCII digits stripped),
+    // bypassing the regex. NFKC normalization folds them to 2026 first.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const result = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "２０２６-05-02 incident", body: "x" },
+      config
+    ) as { error: string; message: string };
+
+    expect(result.error).toBe("VALIDATION_ERROR");
+  }, 30000);
+
+  test("rejects title with leading literal hyphen before the date prefix", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const result = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "-2026-05-02-incident", body: "x" },
+      config
+    ) as { error: string; message: string };
+
+    expect(result.error).toBe("VALIDATION_ERROR");
+  }, 30000);
+
+  test("rejects title with leading whitespace before the date prefix", async () => {
+    // slugify turns leading whitespace into a leading hyphen that survives
+    // .trim(); the regex must allow the hyphen so this case is rejected.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const result = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: " 2026-05-02 incident", body: "x" },
+      config
+    ) as { error: string; message: string };
+
+    expect(result.error).toBe("VALIDATION_ERROR");
+  }, 30000);
+
   test("accepts title containing a year-only token", async () => {
     const vault = await makeTempVault();
     const config = await loadVaultConfig(vault);
