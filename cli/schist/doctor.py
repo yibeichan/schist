@@ -471,6 +471,7 @@ def check_hub_acl_drift(hub_path: Optional[str]) -> CheckResult:
             capture_output=True, text=True, check=True,
         ).stdout
         acl = parse_vault_data(yaml.safe_load(text))
+        expected_dirs = _hub_expected_dirs(hub)
     except Exception as e:  # noqa: BLE001 — surface as SKIP so doctor never crashes
         return CheckResult("SKIP", label, f"could not read/parse hub vault.yaml: {e}")
 
@@ -478,7 +479,7 @@ def check_hub_acl_drift(hub_path: Optional[str]) -> CheckResult:
 
     # Signal (a): expected schema dir not granted to one-or-more participants.
     a_problems: list[str] = []
-    for d in _hub_expected_dirs(hub):
+    for d in expected_dirs:
         missing = [n for n in names if not _scope_matches(acl.access[n].write, d)]
         if missing:
             a_problems.append(f"'{d}' not granted to: {', '.join(missing)}")

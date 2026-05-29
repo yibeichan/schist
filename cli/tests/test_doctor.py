@@ -817,3 +817,15 @@ class TestHubAclDrift:
         # Seed grants all 6 content dirs to both; infra dirs (logs/projects)
         # excluded from expected -> no drift.
         assert r.status == "PASS"
+
+    def test_skip_when_expected_dirs_unavailable(self, tmp_path, monkeypatch):
+        import schist.doctor as doctor_mod
+        from schist.doctor import check_hub_acl_drift
+        hub = self._make_hub(tmp_path)
+
+        def boom(_hub):
+            raise FileNotFoundError("default.yaml missing")
+
+        monkeypatch.setattr(doctor_mod, "_hub_expected_dirs", boom)
+        r = check_hub_acl_drift(str(hub))
+        assert r.status == "SKIP"
