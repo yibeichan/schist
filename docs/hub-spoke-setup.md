@@ -231,3 +231,39 @@ Not directly — hosted git providers do not run `pre-receive` hooks, so the
 ACL is bypassed. Options: (a) self-host a small hub (a Pi works), (b) run the
 hook in CI on every push (clunky — it's post-push by then), or (c) skip ACLs
 and rely on branch protection + review. Schist is designed around (a).
+
+## Administering ACLs
+
+ACL changes are made **on the hub host**, against the bare repo, with the
+`schist hub` commands. Admin authority is filesystem access to the bare repo —
+the same trust level required to create the hub with `schist init --hub`. These
+commands commit `vault.yaml` directly via git plumbing, so they never go through
+the `pre-receive` hook.
+
+```bash
+# Grant / revoke a participant's write scope on a directory
+schist hub grant   <participant> --write <dir> --hub-path /srv/vault.git
+schist hub revoke  <participant> --write <dir> --hub-path /srv/vault.git
+
+# Manage participants
+schist hub participant add    <name> [--write <dir> ...] [--type spoke] --hub-path /srv/vault.git
+schist hub participant rename <old> <new>                                --hub-path /srv/vault.git
+schist hub participant remove <name> --yes                               --hub-path /srv/vault.git
+```
+
+**`'*'` write grants are refused.** On the hub, `'*'` write is also the gate for
+editing `vault.yaml` itself, so granting it to a participant would let that
+spoke rewrite the ACL over SSH. Administer ACLs from the hub host and grant
+concrete directories instead.
+
+**Renaming a participant is a two-part operation.** `schist hub participant
+rename` rekeys the hub-side `vault.yaml` only. The renamed spoke must also
+update `identity:` in its local `.schist/spoke.yaml`, or its pushes will be
+rejected. Notes already written under the old name keep their `source_agent:`
+value (history is append-only).
+
+**Spotting drift.** Run `schist doctor --hub-path /srv/vault.git` on the hub to
+flag directories in the schema that no participant can write, or directories
+some participants can write but others cannot. Spokes get the matching
+spoke-side warning automatically from `schist doctor` (it checks the local
+schema against the spoke's hub write grant).
