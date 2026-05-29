@@ -246,10 +246,12 @@ schist hub grant   <participant> --write <dir> --hub-path /srv/vault.git
 schist hub revoke  <participant> --write <dir> --hub-path /srv/vault.git
 
 # Manage participants
-schist hub participant add    <name> [--write <dir> ...] [--type spoke] --hub-path /srv/vault.git
+schist hub participant add    <name> --write <dir> [--write <dir> ...] [--type spoke] --hub-path /srv/vault.git
 schist hub participant rename <old> <new>                                --hub-path /srv/vault.git
 schist hub participant remove <name> --yes                               --hub-path /srv/vault.git
 ```
+
+Every participant must be granted at least one write scope; read-only participants are not supported by the schema.
 
 **`'*'` write grants are refused.** On the hub, `'*'` write is also the gate for
 editing `vault.yaml` itself, so granting it to a participant would let that

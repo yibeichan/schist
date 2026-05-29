@@ -84,7 +84,7 @@ class TestGrantWrite:
 
     def test_invalid_scope_syntax(self):
         data = _seed_data()
-        with pytest.raises(Exception):  # ACLError from _validate_scope
+        with pytest.raises(HubAdminError):
             hub_admin.grant_write(data, "alpha", "ops/")
 
 
@@ -100,11 +100,13 @@ class TestRevokeWrite:
         changed = hub_admin.revoke_write(data, "alpha", "ops")
         assert changed is False
 
-    def test_allows_emptying_write_list(self):
+    def test_refuses_revoking_last_scope(self):
         data = _seed_data()
-        hub_admin.revoke_write(data, "alpha", "research")
-        hub_admin.revoke_write(data, "alpha", "notes")
-        assert data["access"]["alpha"]["write"] == []
+        # alpha seeded with ["research", "notes"]; drain to one, then the last must refuse
+        assert hub_admin.revoke_write(data, "alpha", "research") is True
+        with pytest.raises(HubAdminError, match="last write scope"):
+            hub_admin.revoke_write(data, "alpha", "notes")
+        assert data["access"]["alpha"]["write"] == ["notes"]
 
     def test_unknown_participant(self):
         data = _seed_data()
@@ -120,11 +122,10 @@ class TestParticipantAdd:
         assert hub_admin._participant_index(data, "gamma") is not None
         assert data["access"]["gamma"] == {"read": ["*"], "write": ["ops"]}
 
-    def test_default_write_is_empty(self):
+    def test_requires_at_least_one_write(self):
         data = _seed_data()
-        hub_admin.participant_add(data, "gamma")
-        assert data["access"]["gamma"]["write"] == []
-        assert data["access"]["gamma"]["read"] == ["*"]
+        with pytest.raises(HubAdminError, match="at least one write scope"):
+            hub_admin.participant_add(data, "gamma")
 
     def test_rejects_existing_name(self):
         data = _seed_data()
@@ -306,3 +307,14 @@ class TestHubCLIDispatch:
         )
         assert r.returncode != 0
         assert "refusing to grant" in r.stderr
+
+    def test_invalid_scope_clean_error_via_cli(self, tmp_path):
+        hub = _make_hub(tmp_path)
+        r = subprocess.run(
+            ["python", "-m", "schist", "hub", "grant", "alpha",
+             "--write", "res*", "--hub-path", str(hub)],
+            capture_output=True, text=True,
+        )
+        assert r.returncode != 0
+        assert "Traceback" not in r.stderr
+        assert "Error:" in r.stderr

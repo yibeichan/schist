@@ -24,6 +24,14 @@ class HubAdminError(Exception):
     """Raised when a hub admin operation cannot be completed."""
 
 
+def _validate_scope_or_raise(scope: str) -> None:
+    """Validate a scope, surfacing acl.ACLError as HubAdminError for clean CLI errors."""
+    try:
+        _validate_scope(scope)
+    except ACLError as e:
+        raise HubAdminError(str(e))
+
+
 def _participant_index(data: dict, name: str):
     """Return the index of participant `name` in data['participants'], or None.
 
@@ -49,7 +57,7 @@ def grant_write(data: dict, participant: str, scope: str) -> bool:
             "over SSH (privilege escalation). Administer ACLs from the hub host "
             "and grant concrete directories, e.g. --write research."
         )
-    _validate_scope(scope)  # raises ACLError on bad syntax
+    _validate_scope_or_raise(scope)
     if _participant_index(data, participant) is None:
         raise HubAdminError(
             f"unknown participant '{participant}'. Add it first with "
@@ -68,8 +76,9 @@ def grant_write(data: dict, participant: str, scope: str) -> bool:
 def revoke_write(data: dict, participant: str, scope: str) -> bool:
     """Remove `scope` from participant's write list. Returns True if changed.
 
-    Idempotent: returns False if the scope was not present. An empty write list
-    is valid (a read-only participant).
+    Idempotent: returns False if the scope was not present. A participant must
+    retain at least one write scope; to remove a participant entirely use
+    `participant_remove`.
     """
     entry = data.get("access", {}).get(participant)
     if entry is None:
@@ -77,6 +86,12 @@ def revoke_write(data: dict, participant: str, scope: str) -> bool:
     write = entry.get("write", [])
     if scope not in write:
         return False
+    if len(write) == 1:
+        raise HubAdminError(
+            f"cannot revoke '{participant}'s last write scope ('{scope}'): a "
+            f"participant must retain at least one write scope. Use "
+            f"`schist hub participant remove {participant}` to delete them."
+        )
     write.remove(scope)
     return True
 
@@ -102,18 +117,23 @@ def participant_add(
         raise HubAdminError(f"participant '{name}' already exists")
 
     write = list(write or [])
+    if not write:
+        raise HubAdminError(
+            "a participant must be granted at least one write scope; "
+            "pass --write <dir> (e.g. --write research)."
+        )
     for s in write:
         if s == "*":
             raise HubAdminError(
                 "refusing '*' write: it also authorizes editing vault.yaml over "
                 "SSH. Grant concrete directories instead."
             )
-        _validate_scope(s)
+        _validate_scope_or_raise(s)
 
     read = list(read or ["*"])
     for s in read:
         if s != "*":
-            _validate_scope(s)
+            _validate_scope_or_raise(s)
 
     data.setdefault("participants", []).append(
         {"name": name, "type": ptype, "default_scope": "global"}
