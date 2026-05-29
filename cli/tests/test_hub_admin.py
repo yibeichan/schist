@@ -54,3 +54,27 @@ class TestGrantWrite:
         data = _seed_data()
         with pytest.raises(Exception):  # ACLError from _validate_scope
             hub_admin.grant_write(data, "alpha", "ops/")
+
+
+class TestRevokeWrite:
+    def test_removes_scope(self):
+        data = _seed_data()
+        changed = hub_admin.revoke_write(data, "alpha", "notes")
+        assert changed is True
+        assert "notes" not in data["access"]["alpha"]["write"]
+
+    def test_absent_scope_returns_false(self):
+        data = _seed_data()
+        changed = hub_admin.revoke_write(data, "alpha", "ops")
+        assert changed is False
+
+    def test_allows_emptying_write_list(self):
+        data = _seed_data()
+        hub_admin.revoke_write(data, "alpha", "research")
+        hub_admin.revoke_write(data, "alpha", "notes")
+        assert data["access"]["alpha"]["write"] == []
+
+    def test_unknown_participant(self):
+        data = _seed_data()
+        with pytest.raises(HubAdminError, match="unknown participant"):
+            hub_admin.revoke_write(data, "ghost", "notes")

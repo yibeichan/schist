@@ -63,3 +63,19 @@ def grant_write(data: dict, participant: str, scope: str) -> bool:
         return False
     write.append(scope)
     return True
+
+
+def revoke_write(data: dict, participant: str, scope: str) -> bool:
+    """Remove `scope` from participant's write list. Returns True if changed.
+
+    Idempotent: returns False if the scope was not present. An empty write list
+    is valid (a read-only participant).
+    """
+    entry = data.get("access", {}).get(participant)
+    if entry is None:
+        raise HubAdminError(f"unknown participant '{participant}'")
+    write = entry.get("write", [])
+    if scope not in write:
+        return False
+    write.remove(scope)
+    return True
