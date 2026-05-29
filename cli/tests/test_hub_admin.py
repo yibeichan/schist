@@ -78,3 +78,33 @@ class TestRevokeWrite:
         data = _seed_data()
         with pytest.raises(HubAdminError, match="unknown participant"):
             hub_admin.revoke_write(data, "ghost", "notes")
+
+
+class TestParticipantAdd:
+    def test_adds_participant_and_access(self):
+        data = _seed_data()
+        changed = hub_admin.participant_add(data, "gamma", write=["ops"])
+        assert changed is True
+        assert hub_admin._participant_index(data, "gamma") is not None
+        assert data["access"]["gamma"] == {"read": ["*"], "write": ["ops"]}
+
+    def test_default_write_is_empty(self):
+        data = _seed_data()
+        hub_admin.participant_add(data, "gamma")
+        assert data["access"]["gamma"]["write"] == []
+        assert data["access"]["gamma"]["read"] == ["*"]
+
+    def test_rejects_existing_name(self):
+        data = _seed_data()
+        with pytest.raises(HubAdminError, match="already exists"):
+            hub_admin.participant_add(data, "alpha")
+
+    def test_rejects_invalid_name(self):
+        data = _seed_data()
+        with pytest.raises(HubAdminError, match="invalid participant name"):
+            hub_admin.participant_add(data, "Bad_Name")
+
+    def test_refuses_wildcard_write(self):
+        data = _seed_data()
+        with pytest.raises(HubAdminError, match="refusing"):
+            hub_admin.participant_add(data, "gamma", write=["*"])
