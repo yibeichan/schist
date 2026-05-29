@@ -120,3 +120,46 @@ def participant_add(
     )
     data.setdefault("access", {})[name] = {"read": read, "write": write}
     return True
+
+
+def participant_rename(data: dict, old: str, new: str) -> bool:
+    """Rekey a participant entry + its access map key. Returns True.
+
+    Hub-side only: the renamed spoke's local .schist/spoke.yaml and the
+    source_agent in already-written notes are NOT touched (the CLI layer prints
+    the operator warning). Raises on missing old / existing new / invalid new.
+    """
+    idx = _participant_index(data, old)
+    if idx is None:
+        raise HubAdminError(f"unknown participant '{old}'")
+    if _participant_index(data, new) is not None:
+        raise HubAdminError(f"participant '{new}' already exists")
+    if not NAME_RE.match(new):
+        raise HubAdminError(
+            f"invalid participant name '{new}': must match {NAME_RE.pattern}"
+        )
+
+    entry = data["participants"][idx]
+    if isinstance(entry, dict):
+        entry["name"] = new
+    else:
+        data["participants"][idx] = new
+
+    access = data.setdefault("access", {})
+    if old in access:
+        access[new] = access.pop(old)
+    return True
+
+
+def participant_remove(data: dict, name: str) -> bool:
+    """Drop a participant entry + its access entry. Returns True.
+
+    Their already-written notes remain (append-only); only their ability to push
+    is removed. Raises on unknown name.
+    """
+    idx = _participant_index(data, name)
+    if idx is None:
+        raise HubAdminError(f"unknown participant '{name}'")
+    data["participants"].pop(idx)
+    data.get("access", {}).pop(name, None)
+    return True

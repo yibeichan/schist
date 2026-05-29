@@ -108,3 +108,43 @@ class TestParticipantAdd:
         data = _seed_data()
         with pytest.raises(HubAdminError, match="refusing"):
             hub_admin.participant_add(data, "gamma", write=["*"])
+
+
+class TestParticipantRename:
+    def test_rekeys_entry_and_access(self):
+        data = _seed_data()
+        changed = hub_admin.participant_rename(data, "alpha", "alpha-laptop")
+        assert changed is True
+        assert hub_admin._participant_index(data, "alpha") is None
+        assert hub_admin._participant_index(data, "alpha-laptop") is not None
+        assert "alpha" not in data["access"]
+        assert data["access"]["alpha-laptop"]["write"] == ["research", "notes"]
+
+    def test_unknown_old(self):
+        data = _seed_data()
+        with pytest.raises(HubAdminError, match="unknown participant"):
+            hub_admin.participant_rename(data, "ghost", "new")
+
+    def test_new_already_exists(self):
+        data = _seed_data()
+        with pytest.raises(HubAdminError, match="already exists"):
+            hub_admin.participant_rename(data, "alpha", "beta")
+
+    def test_rejects_invalid_new_name(self):
+        data = _seed_data()
+        with pytest.raises(HubAdminError, match="invalid participant name"):
+            hub_admin.participant_rename(data, "alpha", "Bad_Name")
+
+
+class TestParticipantRemove:
+    def test_drops_entry_and_access(self):
+        data = _seed_data()
+        changed = hub_admin.participant_remove(data, "beta")
+        assert changed is True
+        assert hub_admin._participant_index(data, "beta") is None
+        assert "beta" not in data["access"]
+
+    def test_unknown_name(self):
+        data = _seed_data()
+        with pytest.raises(HubAdminError, match="unknown participant"):
+            hub_admin.participant_remove(data, "ghost")
