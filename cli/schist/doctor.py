@@ -421,6 +421,91 @@ def check_spoke_acl_drift(vault_path: Optional[str]) -> CheckResult:
     )
 
 
+def _hub_expected_dirs(hub: Path) -> list[str]:
+    """Directories a hub's participants are expected to be granted.
+
+    Prefer HEAD:schist.yaml if the hub has one; else fall back to the packaged
+    default.yaml directory list MINUS infra dirs (logs/, projects/), which the
+    seed deliberately does not grant (see sync.py:_build_seed_vault).
+    """
+    import subprocess
+
+    INFRA = {"logs", "projects"}
+
+    def _dirs_from(text: str) -> list[str]:
+        d = yaml.safe_load(text) or {}
+        dirs = d.get("directories") or {}
+        vals = dirs.values() if isinstance(dirs, dict) else dirs
+        return [str(v).rstrip("/") for v in vals]
+
+    r = subprocess.run(
+        ["git", "--git-dir", str(hub), "show", "HEAD:schist.yaml"],
+        capture_output=True, text=True,
+    )
+    if r.returncode == 0:
+        return _dirs_from(r.stdout)
+
+    # Fallback: packaged default.yaml (sibling of this module), minus infra dirs.
+    default_path = Path(__file__).resolve().parent / "default.yaml"
+    dirs = _dirs_from(default_path.read_text())
+    return [d for d in dirs if d not in INFRA]
+
+
+def check_hub_acl_drift(hub_path: Optional[str]) -> CheckResult:
+    """Flag ACL drift on a bare hub: schema dirs not granted (a), and dirs that
+    some participants have but others lack (b).
+    """
+    label = "Hub ACL drift"
+    if not hub_path:
+        return CheckResult("SKIP", label, "no --hub-path supplied")
+
+    hub = Path(hub_path)
+    if not (hub / "objects").is_dir():
+        return CheckResult("SKIP", label, f"not a git repository: {hub_path}")
+
+    try:
+        import subprocess
+        from schist.acl import _scope_matches, parse_vault_data
+        text = subprocess.run(
+            ["git", "--git-dir", str(hub), "show", "HEAD:vault.yaml"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        acl = parse_vault_data(yaml.safe_load(text))
+    except Exception as e:  # noqa: BLE001 — surface as SKIP so doctor never crashes
+        return CheckResult("SKIP", label, f"could not read/parse hub vault.yaml: {e}")
+
+    names = sorted(acl.access.keys())
+
+    # Signal (a): expected schema dir not granted to one-or-more participants.
+    a_problems: list[str] = []
+    for d in _hub_expected_dirs(hub):
+        missing = [n for n in names if not _scope_matches(acl.access[n].write, d)]
+        if missing:
+            a_problems.append(f"'{d}' not granted to: {', '.join(missing)}")
+
+    # Signal (b): a concrete dir some participants have in write but others lack.
+    name_set = set(names)
+    holders: dict[str, set] = {}
+    for n in names:
+        for s in acl.access[n].write:
+            if s != "*":
+                holders.setdefault(s, set()).add(n)
+    b_problems: list[str] = []
+    for s, who in sorted(holders.items()):
+        lacking = name_set - who
+        if lacking:
+            b_problems.append(f"'{s}' held by {', '.join(sorted(who))} but not {', '.join(sorted(lacking))}")
+
+    if not a_problems and not b_problems:
+        return CheckResult("PASS", label, f"{len(names)} participants, no ACL drift")
+
+    msg_parts = a_problems + b_problems
+    return CheckResult(
+        "WARN", label, "; ".join(msg_parts),
+        fix="Grant missing scopes from the hub host, e.g. `schist hub grant <participant> --write <dir> --hub-path <hub>`.",
+    )
+
+
 def _auto_detect_mcp_path() -> Optional[str]:
     """Locate `mcp-server/dist/index.js` relative to this checkout.
 

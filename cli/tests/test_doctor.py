@@ -768,3 +768,52 @@ access:
     )
     result = check_spoke_acl_drift(str(tmp_path))
     assert result.status == "PASS"
+
+
+class TestHubAclDrift:
+    def _make_hub(self, tmp_path):
+        import shutil
+        if shutil.which("git") is None:
+            import pytest as _pytest
+            _pytest.skip("git not available")
+        from types import SimpleNamespace
+        from schist.sync import init_hub
+        hub = tmp_path / "hub.git"
+        init_hub(SimpleNamespace(name="v", participant=["alpha", "beta"]), str(hub))
+        return hub
+
+    def test_skip_without_hub_path(self):
+        from schist.doctor import check_hub_acl_drift
+        r = check_hub_acl_drift(None)
+        assert r.status == "SKIP"
+
+    def test_warns_on_dir_granted_to_nobody(self, tmp_path):
+        # 'decisions' is in default.yaml expected dirs and seeded to both;
+        # revoke from BOTH -> signal (a) fires.
+        from schist import hub_admin
+        from schist.doctor import check_hub_acl_drift
+        hub = self._make_hub(tmp_path)
+        hub_admin.apply_mutation(hub, lambda d: hub_admin.revoke_write(d, "alpha", "decisions"), "m")
+        hub_admin.apply_mutation(hub, lambda d: hub_admin.revoke_write(d, "beta", "decisions"), "m")
+        r = check_hub_acl_drift(str(hub))
+        assert r.status == "WARN"
+        assert "decisions" in r.message
+
+    def test_warns_on_cross_participant_inconsistency(self, tmp_path):
+        # Grant 'logs' to alpha only -> signal (b). 'logs' is infra (excluded
+        # from expected dirs) so signal (a) won't fire for it.
+        from schist import hub_admin
+        from schist.doctor import check_hub_acl_drift
+        hub = self._make_hub(tmp_path)
+        hub_admin.apply_mutation(hub, lambda d: hub_admin.grant_write(d, "alpha", "logs"), "m")
+        r = check_hub_acl_drift(str(hub))
+        assert r.status == "WARN"
+        assert "logs" in r.message
+
+    def test_pass_when_consistent_and_covered(self, tmp_path):
+        from schist.doctor import check_hub_acl_drift
+        hub = self._make_hub(tmp_path)
+        r = check_hub_acl_drift(str(hub))
+        # Seed grants all 6 content dirs to both; infra dirs (logs/projects)
+        # excluded from expected -> no drift.
+        assert r.status == "PASS"
