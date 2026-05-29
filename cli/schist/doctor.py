@@ -766,7 +766,7 @@ def check_mcp_schema_alignment(vault_path: Optional[str]) -> CheckResult:
 
 
 def run_doctor(vault_path: Optional[str], db_path: Optional[str],
-               as_json: bool = False) -> list[CheckResult]:
+               as_json: bool = False, hub_path: Optional[str] = None) -> list[CheckResult]:
     checks = [
         check_python(),
         check_node(),
@@ -785,6 +785,8 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_mcp_config(vault_path),
         check_mcp_schema_alignment(vault_path),
     ]
+    if hub_path:
+        checks.append(check_hub_acl_drift(hub_path))
 
     if as_json:
         data = []
@@ -810,7 +812,8 @@ def doctor(args) -> None:
     if vault_path and not db_path:
         db_path = str(Path(vault_path) / ".schist" / "schist.db")
     as_json = getattr(args, "as_json", False)
+    hub_path = getattr(args, "hub_path", None)
 
-    results = run_doctor(vault_path, db_path, as_json)
+    results = run_doctor(vault_path, db_path, as_json, hub_path=hub_path)
     if any(r.status == "FAIL" for r in results):
         sys.exit(1)

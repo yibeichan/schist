@@ -829,3 +829,26 @@ class TestHubAclDrift:
         monkeypatch.setattr(doctor_mod, "_hub_expected_dirs", boom)
         r = check_hub_acl_drift(str(hub))
         assert r.status == "SKIP"
+
+
+class TestDoctorHubWiring:
+    def test_run_doctor_includes_hub_check_when_path_given(self, tmp_path, capsys):
+        import shutil
+        if shutil.which("git") is None:
+            import pytest as _pytest
+            _pytest.skip("git not available")
+        from types import SimpleNamespace
+        from schist.sync import init_hub
+        from schist.doctor import run_doctor
+        hub = tmp_path / "hub.git"
+        init_hub(SimpleNamespace(name="v", participant=["alpha"]), str(hub))
+
+        results = run_doctor(None, None, as_json=False, hub_path=str(hub))
+        labels = [r.label for r in results]
+        assert "Hub ACL drift" in labels
+
+    def test_run_doctor_omits_hub_check_without_path(self):
+        from schist.doctor import run_doctor
+        results = run_doctor(None, None, as_json=False)
+        labels = [r.label for r in results]
+        assert "Hub ACL drift" not in labels

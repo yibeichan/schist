@@ -59,6 +59,8 @@ def main():
     p_doctor = sub.add_parser('doctor', help='Health check for schist setup')
     p_doctor.add_argument('--json', action='store_true', dest='as_json',
                           help='Output results as JSON')
+    p_doctor.add_argument('--hub-path', dest='hub_path', default=None,
+                          help='(hub) Path to a bare hub repo to run hub-mode checks against')
 
     # init
     p_init = sub.add_parser('init', help='Initialize a vault (standalone, hub, or spoke)')
