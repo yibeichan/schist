@@ -163,3 +163,98 @@ def participant_remove(data: dict, name: str) -> bool:
     data["participants"].pop(idx)
     data.get("access", {}).pop(name, None)
     return True
+
+
+# ---------------------------------------------------------------------------
+# Git plumbing I/O layer
+# ---------------------------------------------------------------------------
+
+_DEFAULT_AUTHOR = {
+    "GIT_AUTHOR_NAME": "schist",
+    "GIT_AUTHOR_EMAIL": "schist@local",
+    "GIT_COMMITTER_NAME": "schist",
+    "GIT_COMMITTER_EMAIL": "schist@local",
+}
+
+
+def _git(hub_path: Path, *args: str, input_text: str | None = None,
+         env: dict | None = None, check: bool = True) -> subprocess.CompletedProcess:
+    """Run a git plumbing command against the bare repo at hub_path."""
+    cmd = ["git", "--git-dir", str(hub_path), *args]
+    full_env = {**os.environ, **(env or {})}
+    r = subprocess.run(cmd, input=input_text, capture_output=True, text=True, env=full_env)
+    if check and r.returncode != 0:
+        raise HubAdminError(f"git {' '.join(args)} failed: {r.stderr.strip()}")
+    return r
+
+
+def read_hub_vault(hub_path: Path) -> tuple[str, str]:
+    """Return (HEAD commit sha, vault.yaml text) from the bare repo."""
+    hub_path = Path(hub_path)
+    if not (hub_path / "objects").is_dir():
+        raise HubAdminError(f"not a git repository: {hub_path}")
+    sha = _git(hub_path, "rev-parse", "HEAD").stdout.strip()
+    text = _git(hub_path, "show", "HEAD:vault.yaml").stdout
+    return sha, text
+
+
+def commit_vault_yaml(hub_path: Path, new_text: str, message: str,
+                      expected_old_sha: str) -> str:
+    """Commit `new_text` as vault.yaml directly into the bare repo.
+
+    Builds a new tree from HEAD's tree via a throwaway index, then advances the
+    branch ref with a compare-and-swap (update-ref <new> <expected_old_sha>).
+    Never invokes receive-pack, so pre-receive does not run. Raises HubAdminError
+    if the ref moved since expected_old_sha was read.
+    """
+    hub_path = Path(hub_path)
+    branch = _git(hub_path, "symbolic-ref", "--short", "HEAD").stdout.strip()
+    blob = _git(hub_path, "hash-object", "-w", "--stdin", input_text=new_text).stdout.strip()
+
+    with tempfile.NamedTemporaryFile(prefix="schist-hub-idx-") as idxf:
+        idx_env = {"GIT_INDEX_FILE": idxf.name}
+        _git(hub_path, "read-tree", "HEAD", env=idx_env)
+        _git(hub_path, "update-index", "--add", "--cacheinfo",
+             f"100644,{blob},vault.yaml", env=idx_env)
+        tree = _git(hub_path, "write-tree", env=idx_env).stdout.strip()
+
+    author_env = {k: v for k, v in _DEFAULT_AUTHOR.items() if k not in os.environ}
+    commit = _git(hub_path, "commit-tree", tree, "-p", expected_old_sha,
+                  "-m", message, env=author_env).stdout.strip()
+
+    cas = _git(hub_path, "update-ref", f"refs/heads/{branch}", commit,
+               expected_old_sha, check=False)
+    if cas.returncode != 0:
+        raise HubAdminError(
+            "hub changed since vault.yaml was read (ref compare-and-swap failed); "
+            "re-run the command to retry."
+        )
+    return commit
+
+
+def apply_mutation(hub_path, mutate, message: str) -> bool:
+    """Read HEAD vault.yaml, apply mutate(data)->bool, validate, commit if changed.
+
+    `mutate` is one of the pure mutation functions, applied to the parsed dict.
+    Returns True if a commit was made, False if mutate was a no-op. Fail-closed:
+    a mutated dict that fails strict parse_vault_data() validation aborts before
+    any write.
+    """
+    hub_path = Path(hub_path)
+    old_sha, text = read_hub_vault(hub_path)
+    data = yaml.safe_load(text)
+    if not isinstance(data, dict):
+        raise HubAdminError("hub vault.yaml is not a YAML mapping")
+
+    changed = mutate(data)
+    if not changed:
+        return False
+
+    try:
+        parse_vault_data(copy.deepcopy(data))
+    except ACLError as e:
+        raise HubAdminError(f"refusing to commit invalid vault.yaml: {e}")
+
+    new_text = yaml.dump(data, default_flow_style=False, sort_keys=False)
+    commit_vault_yaml(hub_path, new_text, message, old_sha)
+    return True
