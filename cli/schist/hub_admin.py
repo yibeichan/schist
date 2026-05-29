@@ -258,3 +258,67 @@ def apply_mutation(hub_path, mutate, message: str) -> bool:
     new_text = yaml.dump(data, default_flow_style=False, sort_keys=False)
     commit_vault_yaml(hub_path, new_text, message, old_sha)
     return True
+
+
+# ---------------------------------------------------------------------------
+# CLI entry functions (thin wrappers over apply_mutation + pure mutations)
+# ---------------------------------------------------------------------------
+
+def cmd_grant(args) -> None:
+    p, scope, hub = args.participant, args.write, args.hub_path
+    changed = apply_mutation(
+        hub, lambda d: grant_write(d, p, scope), f"hub: grant {p} write:{scope}"
+    )
+    if changed:
+        print(f"Granted write:{scope} to {p}.")
+    else:
+        print(f"{p} already has write:{scope}; no change.")
+
+
+def cmd_revoke(args) -> None:
+    p, scope, hub = args.participant, args.write, args.hub_path
+    changed = apply_mutation(
+        hub, lambda d: revoke_write(d, p, scope), f"hub: revoke {p} write:{scope}"
+    )
+    if changed:
+        print(f"Revoked write:{scope} from {p}.")
+    else:
+        print(f"{p} did not have write:{scope}; no change.")
+
+
+def cmd_participant_add(args) -> None:
+    name, hub = args.name, args.hub_path
+    apply_mutation(
+        hub,
+        lambda d: participant_add(d, name, ptype=args.type,
+                                  write=args.write, read=args.read),
+        f"hub: add participant {name}",
+    )
+    print(f"Added participant {name} (type={args.type}, write={args.write or []}).")
+
+
+def cmd_participant_rename(args) -> None:
+    old, new, hub = args.old, args.new, args.hub_path
+    apply_mutation(
+        hub, lambda d: participant_rename(d, old, new),
+        f"hub: rename participant {old} -> {new}",
+    )
+    print(f"Renamed {old} -> {new} in vault.yaml.\n")
+    print(f"⚠  ACTION REQUIRED on spoke '{old}':")
+    print(f"   update .schist/spoke.yaml identity to '{new}', or its pushes")
+    print(f"   will be rejected. Existing notes keep source_agent: {old}")
+    print(f"   (history is append-only).")
+
+
+def cmd_participant_remove(args) -> None:
+    name, hub = args.name, args.hub_path
+    if not getattr(args, "yes", False):
+        raise HubAdminError(
+            f"removing participant '{name}' is irreversible (their notes remain "
+            f"but they lose push access). Re-run with --yes to confirm."
+        )
+    apply_mutation(
+        hub, lambda d: participant_remove(d, name),
+        f"hub: remove participant {name}",
+    )
+    print(f"Removed participant {name}.")

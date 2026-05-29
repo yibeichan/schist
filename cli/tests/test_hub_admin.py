@@ -234,3 +234,48 @@ class TestApplyMutation:
         with pytest.raises(HubAdminError, match="invalid vault.yaml"):
             hub_admin.apply_mutation(hub, break_it, "hub: break")
         assert _hub_head(hub) == before  # nothing committed
+
+
+@needs_git
+class TestCmdFunctions:
+    def test_cmd_grant_then_push_accepted_by_pre_receive(self, tmp_path, capsys):
+        from schist.acl import parse_vault_data
+        from schist.pre_receive import check_push
+        import yaml
+        hub = _make_hub(tmp_path)
+
+        # Before: alpha has no write on 'projects' -> a write there violates.
+        # check_push(identity, changed_files, acl, refname) -> list[Violation]
+        acl_before = parse_vault_data(yaml.safe_load(_hub_vault_text(hub)))
+        v_before = check_push("alpha", ["projects/2026-05-28-x.md"], acl_before, "refs/heads/main")
+        assert len(v_before) == 1  # rejected
+
+        hub_admin.cmd_grant(SimpleNamespace(participant="alpha", write="projects", hub_path=str(hub)))
+        assert "Granted" in capsys.readouterr().out
+
+        # After: the same write is now in-scope (would be accepted).
+        acl_after = parse_vault_data(yaml.safe_load(_hub_vault_text(hub)))
+        v_after = check_push("alpha", ["projects/2026-05-28-x.md"], acl_after, "refs/heads/main")
+        assert v_after == []  # accepted
+
+    def test_cmd_grant_idempotent_notice(self, tmp_path, capsys):
+        hub = _make_hub(tmp_path)
+        hub_admin.cmd_grant(SimpleNamespace(participant="alpha", write="research", hub_path=str(hub)))
+        assert "no change" in capsys.readouterr().out.lower()
+
+    def test_cmd_participant_rename_prints_warning(self, tmp_path, capsys):
+        hub = _make_hub(tmp_path)
+        hub_admin.cmd_participant_rename(
+            SimpleNamespace(old="alpha", new="alpha-laptop", hub_path=str(hub))
+        )
+        out = capsys.readouterr().out
+        assert "ACTION REQUIRED" in out
+        assert "spoke.yaml" in out
+        assert "source_agent: alpha" in out
+
+    def test_cmd_participant_remove_requires_yes(self, tmp_path):
+        hub = _make_hub(tmp_path)
+        with pytest.raises(HubAdminError, match="--yes"):
+            hub_admin.cmd_participant_remove(
+                SimpleNamespace(name="beta", hub_path=str(hub), yes=False)
+            )
