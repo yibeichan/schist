@@ -49,7 +49,7 @@ def grant_write(data: dict, participant: str, scope: str) -> bool:
     """Add `scope` to participant's write list. Returns True if changed.
 
     Refuses '*' (it also authorizes editing vault.yaml over SSH). Raises
-    HubAdminError on unknown participant; ACLError on invalid scope syntax.
+    HubAdminError on unknown participant or invalid scope syntax.
     """
     if scope == "*":
         raise HubAdminError(
@@ -202,7 +202,8 @@ def _git(hub_path: Path, *args: str, input_text: str | None = None,
     """Run a git plumbing command against the bare repo at hub_path."""
     cmd = ["git", "--git-dir", str(hub_path), *args]
     full_env = {**os.environ, **(env or {})}
-    r = subprocess.run(cmd, input=input_text, capture_output=True, text=True, env=full_env)
+    r = subprocess.run(cmd, input=input_text, capture_output=True, text=True,
+                       env=full_env, timeout=30)
     if check and r.returncode != 0:
         raise HubAdminError(f"git {' '.join(args)} failed: {r.stderr.strip()}")
     return r
@@ -213,6 +214,14 @@ def read_hub_vault(hub_path: Path) -> tuple[str, str]:
     hub_path = Path(hub_path)
     if not (hub_path / "objects").is_dir():
         raise HubAdminError(f"not a git repository: {hub_path}")
+    # The trust model is "admin = filesystem access to the bare hub". A working
+    # repo would have its working tree silently desynced by a direct ref update
+    # (and its next commit could clobber the ACL edit), so refuse non-bare repos.
+    if _git(hub_path, "rev-parse", "--is-bare-repository").stdout.strip() != "true":
+        raise HubAdminError(
+            f"{hub_path} is not a bare repository. Administer ACLs against the "
+            f"bare hub repo (the one created by `schist init --hub`)."
+        )
     sha = _git(hub_path, "rev-parse", "HEAD").stdout.strip()
     text = _git(hub_path, "show", "HEAD:vault.yaml").stdout
     return sha, text
@@ -275,7 +284,8 @@ def apply_mutation(hub_path, mutate, message: str) -> bool:
     except ACLError as e:
         raise HubAdminError(f"refusing to commit invalid vault.yaml: {e}")
 
-    new_text = yaml.dump(data, default_flow_style=False, sort_keys=False)
+    new_text = yaml.dump(data, default_flow_style=False, sort_keys=False,
+                         allow_unicode=True)
     commit_vault_yaml(hub_path, new_text, message, old_sha)
     return True
 

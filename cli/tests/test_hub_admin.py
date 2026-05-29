@@ -224,6 +224,15 @@ class TestApplyMutation:
         with pytest.raises(HubAdminError, match="hub changed"):
             hub_admin.commit_vault_yaml(hub, text, "msg", expected_old_sha=stale)
 
+    def test_rejects_non_bare_repo(self, tmp_path):
+        # Pointing at a working repo's .git must be refused — the trust model
+        # and the plumbing-commit safety only hold for a bare hub.
+        work = tmp_path / "work"
+        work.mkdir()
+        subprocess.run(["git", "init", str(work)], capture_output=True, check=True)
+        with pytest.raises(HubAdminError, match="not a bare repository"):
+            hub_admin.read_hub_vault(work / ".git")
+
     def test_invalid_result_is_rejected(self, tmp_path):
         hub = _make_hub(tmp_path)
         before = _hub_head(hub)
@@ -280,6 +289,34 @@ class TestCmdFunctions:
             hub_admin.cmd_participant_remove(
                 SimpleNamespace(name="beta", hub_path=str(hub), yes=False)
             )
+
+    def test_cmd_participant_remove_with_yes(self, tmp_path, capsys):
+        from schist.acl import parse_vault_data
+        import yaml
+        hub = _make_hub(tmp_path)
+        hub_admin.cmd_participant_remove(
+            SimpleNamespace(name="beta", hub_path=str(hub), yes=True)
+        )
+        assert "Removed participant beta" in capsys.readouterr().out
+        acl = parse_vault_data(yaml.safe_load(_hub_vault_text(hub)))
+        assert "beta" not in acl.access
+
+    def test_cmd_revoke_changed_and_noop(self, tmp_path, capsys):
+        from schist.acl import parse_vault_data
+        import yaml
+        hub = _make_hub(tmp_path)
+        # alpha is seeded with several scopes incl. 'ops'; revoking it is a real change.
+        hub_admin.cmd_revoke(
+            SimpleNamespace(participant="alpha", write="ops", hub_path=str(hub))
+        )
+        assert "Revoked write:ops from alpha." in capsys.readouterr().out
+        acl = parse_vault_data(yaml.safe_load(_hub_vault_text(hub)))
+        assert acl.can_write("alpha", "ops") is False
+        # revoking again is a no-op with a clear notice
+        hub_admin.cmd_revoke(
+            SimpleNamespace(participant="alpha", write="ops", hub_path=str(hub))
+        )
+        assert "did not have write:ops" in capsys.readouterr().out
 
 
 @needs_git

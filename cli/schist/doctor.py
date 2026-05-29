@@ -425,8 +425,9 @@ def _hub_expected_dirs(hub: Path) -> list[str]:
     """Directories a hub's participants are expected to be granted.
 
     Prefer HEAD:schist.yaml if the hub has one; else fall back to the packaged
-    default.yaml directory list MINUS infra dirs (logs/, projects/), which the
-    seed deliberately does not grant (see sync.py:_build_seed_vault).
+    default.yaml directory list. Either way, exclude infra dirs (logs/, projects/),
+    which the seed deliberately does not grant (see sync.py:_build_seed_vault) —
+    so they are never flagged as "missing" drift.
     """
     import subprocess
 
@@ -440,14 +441,16 @@ def _hub_expected_dirs(hub: Path) -> list[str]:
 
     r = subprocess.run(
         ["git", "--git-dir", str(hub), "show", "HEAD:schist.yaml"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=10,
     )
     if r.returncode == 0:
-        return _dirs_from(r.stdout)
+        dirs = _dirs_from(r.stdout)
+    else:
+        # Fallback: packaged default.yaml (sibling of this module).
+        default_path = Path(__file__).resolve().parent / "default.yaml"
+        dirs = _dirs_from(default_path.read_text())
 
-    # Fallback: packaged default.yaml (sibling of this module), minus infra dirs.
-    default_path = Path(__file__).resolve().parent / "default.yaml"
-    dirs = _dirs_from(default_path.read_text())
+    # Infra dirs are never expected participant grants, regardless of source.
     return [d for d in dirs if d not in INFRA]
 
 
@@ -468,7 +471,7 @@ def check_hub_acl_drift(hub_path: Optional[str]) -> CheckResult:
         from schist.acl import _scope_matches, parse_vault_data
         text = subprocess.run(
             ["git", "--git-dir", str(hub), "show", "HEAD:vault.yaml"],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, check=True, timeout=10,
         ).stdout
         acl = parse_vault_data(yaml.safe_load(text))
         expected_dirs = _hub_expected_dirs(hub)
