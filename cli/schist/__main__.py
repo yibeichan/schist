@@ -102,6 +102,45 @@ def main():
         help='Also overwrite hooks marked `# schist-hook-version: pinned` (opt-out marker)',
     )
 
+    # hub: filesystem-side ACL administration of a bare hub repo
+    p_hub = sub.add_parser('hub', help='Administer a bare hub vault.yaml (filesystem)')
+    hub_sub = p_hub.add_subparsers(dest='hub_action')
+
+    p_hub_grant = hub_sub.add_parser('grant', help='Grant a participant write on a directory')
+    p_hub_grant.add_argument('participant', help='Participant name')
+    p_hub_grant.add_argument('--write', required=True, help='Directory scope to grant')
+    p_hub_grant.add_argument('--hub-path', dest='hub_path', required=True,
+                             help='Path to the bare hub repo')
+
+    p_hub_revoke = hub_sub.add_parser('revoke', help='Revoke a participant write on a directory')
+    p_hub_revoke.add_argument('participant', help='Participant name')
+    p_hub_revoke.add_argument('--write', required=True, help='Directory scope to revoke')
+    p_hub_revoke.add_argument('--hub-path', dest='hub_path', required=True,
+                              help='Path to the bare hub repo')
+
+    p_hub_part = hub_sub.add_parser('participant', help='Manage participants')
+    part_sub = p_hub_part.add_subparsers(dest='participant_action')
+
+    p_part_add = part_sub.add_parser('add', help='Add a participant')
+    p_part_add.add_argument('name', help='New participant name')
+    p_part_add.add_argument('--type', default='spoke', help='Participant type (default: spoke)')
+    p_part_add.add_argument('--write', nargs='*', default=None, help='Write scopes to grant')
+    p_part_add.add_argument('--read', nargs='*', default=None, help="Read scopes (default: ['*'])")
+    p_part_add.add_argument('--hub-path', dest='hub_path', required=True,
+                            help='Path to the bare hub repo')
+
+    p_part_rename = part_sub.add_parser('rename', help='Rename a participant')
+    p_part_rename.add_argument('old', help='Current participant name')
+    p_part_rename.add_argument('new', help='New participant name')
+    p_part_rename.add_argument('--hub-path', dest='hub_path', required=True,
+                               help='Path to the bare hub repo')
+
+    p_part_remove = part_sub.add_parser('remove', help='Remove a participant')
+    p_part_remove.add_argument('name', help='Participant name')
+    p_part_remove.add_argument('--yes', action='store_true', help='Confirm removal')
+    p_part_remove.add_argument('--hub-path', dest='hub_path', required=True,
+                               help='Path to the bare hub repo')
+
     args = parser.parse_args()
 
     if not args.command:
@@ -117,6 +156,32 @@ def main():
     # doctor: tolerates missing vault, runs before vault-required check
     if args.command == 'doctor':
         doctor_mod.doctor(args)
+        sys.exit(0)
+
+    # hub: filesystem ACL admin — needs --hub-path, not --vault
+    if args.command == 'hub':
+        from schist import hub_admin
+        try:
+            if args.hub_action == 'grant':
+                hub_admin.cmd_grant(args)
+            elif args.hub_action == 'revoke':
+                hub_admin.cmd_revoke(args)
+            elif args.hub_action == 'participant':
+                if args.participant_action == 'add':
+                    hub_admin.cmd_participant_add(args)
+                elif args.participant_action == 'rename':
+                    hub_admin.cmd_participant_rename(args)
+                elif args.participant_action == 'remove':
+                    hub_admin.cmd_participant_remove(args)
+                else:
+                    print('Usage: schist hub participant {add|rename|remove}', file=sys.stderr)
+                    sys.exit(1)
+            else:
+                print('Usage: schist hub {grant|revoke|participant}', file=sys.stderr)
+                sys.exit(1)
+        except hub_admin.HubAdminError as e:
+            print(f'Error: {e}', file=sys.stderr)
+            sys.exit(1)
         sys.exit(0)
 
     vault_path = args.vault

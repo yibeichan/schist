@@ -279,3 +279,30 @@ class TestCmdFunctions:
             hub_admin.cmd_participant_remove(
                 SimpleNamespace(name="beta", hub_path=str(hub), yes=False)
             )
+
+
+@needs_git
+class TestHubCLIDispatch:
+    def test_grant_via_module_invocation(self, tmp_path):
+        from schist.acl import parse_vault_data
+        import yaml
+        hub = _make_hub(tmp_path)
+        r = subprocess.run(
+            ["python", "-m", "schist", "hub", "grant", "alpha",
+             "--write", "projects", "--hub-path", str(hub)],
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 0, r.stderr
+        assert "Granted" in r.stdout
+        acl = parse_vault_data(yaml.safe_load(_hub_vault_text(hub)))
+        assert acl.can_write("alpha", "projects") is True
+
+    def test_grant_wildcard_rejected_via_cli(self, tmp_path):
+        hub = _make_hub(tmp_path)
+        r = subprocess.run(
+            ["python", "-m", "schist", "hub", "grant", "alpha",
+             "--write", "*", "--hub-path", str(hub)],
+            capture_output=True, text=True,
+        )
+        assert r.returncode != 0
+        assert "refusing to grant" in r.stderr
