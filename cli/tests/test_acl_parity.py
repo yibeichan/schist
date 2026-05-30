@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from schist.acl import parse_vault_yaml
+from schist.acl import parse_vault_yaml, ACLError
 
 FIXTURES_DIR = Path(__file__).parent.parent / "schist" / "acl-fixtures"
 
@@ -27,10 +27,24 @@ def _fixture_pairs() -> list:
 
 
 @pytest.mark.parametrize("yaml_path,cases_path", _fixture_pairs())
-def test_can_write_matches_fixture(yaml_path: Path, cases_path: Path) -> None:
-    acl = parse_vault_yaml(yaml_path)
+def test_acl_matches_fixture(yaml_path: Path, cases_path: Path) -> None:
     assert cases_path.exists(), f"Missing cases file: {cases_path.name}"
     cases = json.loads(cases_path.read_text())
+
+    # Reject fixture: the strict parser must raise, mirroring TS returning None.
+    # A dict-shaped cases file is ALWAYS a reject fixture; guard against a typo'd
+    # key or `reject: false` silently falling through to the accept loop (which
+    # would crash on `case["identity"]` with an unhelpful error).
+    if isinstance(cases, dict):
+        assert cases.get("reject") is True, (
+            f"{cases_path.name}: dict-shaped cases file must be "
+            f'{{"reject": true, ...}}, got {cases!r}'
+        )
+        with pytest.raises(ACLError):
+            parse_vault_yaml(yaml_path)
+        return
+
+    acl = parse_vault_yaml(yaml_path)
     for case in cases:
         actual = acl.can_write(case["identity"], case["scope"])
         assert actual == case["canWrite"], (

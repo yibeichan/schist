@@ -1,0 +1,7 @@
+vault_version: 1
+name: test-reject-missing-participants
+scope_convention: flat
+access:
+  alice:
+    read: [notes]
+    write: [notes]

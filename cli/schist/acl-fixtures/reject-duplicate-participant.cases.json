@@ -1,0 +1,1 @@
+{ "reject": true, "reason": "duplicate participant name 'alice' (acl.py:207); TS gate 3" }

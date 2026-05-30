@@ -1,0 +1,1 @@
+{ "reject": true, "reason": "participant name 'Alice' fails NAME_RE (acl.py:201); TS gate 2" }
