@@ -1095,6 +1095,25 @@ describe("default.yaml drift detection", () => {
 // ---------------------------------------------------------------------------
 
 describe("create_note ACL enforcement (#155)", () => {
+  // Hermeticity: the ACL identity now resolves from SCHIST_IDENTITY / GL_USER
+  // (mirroring the hub), falling back to owner only when neither is set. These
+  // tests pin owner == participant, so clear any ambient machine identity (a
+  // dev box may export SCHIST_IDENTITY) to exercise the owner-fallback path.
+  let savedIdentity: string | undefined;
+  let savedGlUser: string | undefined;
+  beforeAll(() => {
+    savedIdentity = process.env.SCHIST_IDENTITY;
+    savedGlUser = process.env.GL_USER;
+    delete process.env.SCHIST_IDENTITY;
+    delete process.env.GL_USER;
+  });
+  afterAll(() => {
+    if (savedIdentity === undefined) delete process.env.SCHIST_IDENTITY;
+    else process.env.SCHIST_IDENTITY = savedIdentity;
+    if (savedGlUser === undefined) delete process.env.GL_USER;
+    else process.env.GL_USER = savedGlUser;
+  });
+
   test("write to a granted directory succeeds", async () => {
     const vault = await makeTempVaultWithAcl(TEST_AGENT, ["notes"]);
     const config = await loadVaultConfig(vault);
@@ -1155,6 +1174,51 @@ describe("create_note ACL enforcement (#155)", () => {
     ) as { id: string; path: string };
     expect(result.path).toBeDefined();
   }, 30000);
+
+  test("ACL keys on SCHIST_IDENTITY, not the agent owner", async () => {
+    // The hub's pre-receive keys access on the machine identity, and so must
+    // the local intersection. vault.yaml grants the machine identity
+    // 'dragonfly'; the agent owner 'claude-desktop' is NOT in the access map.
+    // Pre-fix this falsely returned ACL_DENIED ("claude-desktop lacks grant")
+    // even though the hub would accept the push as dragonfly.
+    const vault = await makeTempVaultWithAcl("dragonfly", ["notes"]);
+    const config = await loadVaultConfig(vault);
+    process.env.SCHIST_IDENTITY = "dragonfly";
+    process.env.SCHIST_AGENT_ID = "claude-desktop";  // agent ≠ machine identity
+    try {
+      const result = await create_note(
+        vault,
+        { owner: "claude-desktop", title: "Decision", body: "x", directory: "notes" },
+        config,
+      ) as { id: string; path: string };
+      expect(result.path?.startsWith("notes/")).toBe(true);
+    } finally {
+      delete process.env.SCHIST_IDENTITY;
+      process.env.SCHIST_AGENT_ID = TEST_AGENT;
+    }
+  }, 30000);
+
+  test("ungranted SCHIST_IDENTITY is denied and message names the identity", async () => {
+    // vault.yaml grants 'dragonfly'; the machine identity is 'orcd' (no grant).
+    // The owner happens to match a participant name, but owner must NOT rescue
+    // an ungranted machine identity — the hub would reject this push.
+    const vault = await makeTempVaultWithAcl("dragonfly", ["notes"]);
+    const config = await loadVaultConfig(vault);
+    process.env.SCHIST_IDENTITY = "orcd";
+    process.env.SCHIST_AGENT_ID = "dragonfly";  // owner happens to name a participant
+    try {
+      const result = await create_note(
+        vault,
+        { owner: "dragonfly", title: "Decision", body: "x", directory: "notes" },
+        config,
+      ) as { error: string; message: string };
+      expect(result.error).toBe("ACL_DENIED");
+      expect(result.message).toMatch(/orcd/);
+    } finally {
+      delete process.env.SCHIST_IDENTITY;
+      process.env.SCHIST_AGENT_ID = TEST_AGENT;
+    }
+  }, 30000);
 });
 
 // ---------------------------------------------------------------------------
@@ -1162,6 +1226,23 @@ describe("create_note ACL enforcement (#155)", () => {
 // ---------------------------------------------------------------------------
 
 describe("add_connection ACL enforcement (#155)", () => {
+  // Same hermeticity guard as create_note: clear ambient machine identity so
+  // the owner-fallback path is exercised deterministically.
+  let savedIdentity: string | undefined;
+  let savedGlUser: string | undefined;
+  beforeAll(() => {
+    savedIdentity = process.env.SCHIST_IDENTITY;
+    savedGlUser = process.env.GL_USER;
+    delete process.env.SCHIST_IDENTITY;
+    delete process.env.GL_USER;
+  });
+  afterAll(() => {
+    if (savedIdentity === undefined) delete process.env.SCHIST_IDENTITY;
+    else process.env.SCHIST_IDENTITY = savedIdentity;
+    if (savedGlUser === undefined) delete process.env.GL_USER;
+    else process.env.GL_USER = savedGlUser;
+  });
+
   test("appending to a note in an ungranted directory returns ACL_DENIED", async () => {
     // Step 1: write a note with 'notes' AND 'papers' granted
     const vault = await makeTempVaultWithAcl(TEST_AGENT, ["notes", "papers"]);
