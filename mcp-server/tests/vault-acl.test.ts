@@ -148,6 +148,8 @@ access:
   test("coerces non-string write entries defensively", async () => {
     // If vault.yaml has weird types, fall back to empty list rather than crash.
     const dir = await makeTempVault(`
+participants:
+  - name: alice
 access:
   alice:
     read: ["*"]
@@ -206,19 +208,28 @@ describe("vault-acl parity fixtures", () => {
 
   for (const yamlFile of yamlFiles) {
     const base = yamlFile.replace(/\.yaml$/, "");
-    test(`${base}: TS canWrite matches every case in ${base}.cases.json`, async () => {
+    test(`${base}: TS parser matches the fixture contract`, async () => {
       // Build a temp vault containing JUST this fixture as vault.yaml.
       const dir = await fs.mkdtemp(`${os.tmpdir()}/schist-parity-${base}-`);
       tmpDirs.push(dir);
       const yamlBody = readFileSyncForFixtures(pathJoin(FIXTURES_DIR_TS, yamlFile), "utf-8");
       await fs.writeFile(pathJoin(dir, "vault.yaml"), yamlBody, "utf-8");
 
-      const acl = loadVaultAcl(dir);
-      expect(acl).not.toBeNull();
-
-      const cases: ParityCase[] = JSON.parse(
+      const cases: ParityCase[] | { reject?: boolean } = JSON.parse(
         readFileSyncForFixtures(pathJoin(FIXTURES_DIR_TS, `${base}.cases.json`), "utf-8"),
       );
+
+      // Reject fixture: TS must fail open (return null), mirroring acl.py raising ACLError.
+      if (!Array.isArray(cases)) {
+        const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+        expect(loadVaultAcl(dir)).toBeNull();
+        expect(warnSpy).toHaveBeenCalled();
+        warnSpy.mockRestore();
+        return;
+      }
+
+      const acl = loadVaultAcl(dir);
+      expect(acl).not.toBeNull();
       for (const c of cases) {
         expect({ ...c, actual: canWrite(acl!, c.identity, c.scope) }).toEqual({
           ...c,
