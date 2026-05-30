@@ -1,0 +1,1 @@
+{ "reject": true, "reason": "participant entry has no 'name' (acl.py:198); TS gate 2 no-usable-name branch" }
