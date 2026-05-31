@@ -1280,5 +1280,64 @@ access:
     expect(result.error).toBe("ACL_DENIED");
     expect(result.message).toMatch(/papers/);
   }, 30000);
+
+  test("ACL keys on SCHIST_IDENTITY, not the agent owner", async () => {
+    // Mirror of the create_note regression: vault.yaml grants the machine
+    // identity 'dragonfly'; the agent owner 'claude-desktop' is absent from
+    // the access map. add_connection must resolve via SCHIST_IDENTITY so the
+    // append is allowed (the hub would accept it as dragonfly).
+    const vault = await makeTempVaultWithAcl("dragonfly", ["notes"]);
+    const config = await loadVaultConfig(vault);
+    process.env.SCHIST_IDENTITY = "dragonfly";
+    process.env.SCHIST_AGENT_ID = "claude-desktop";
+    try {
+      const created = await create_note(
+        vault,
+        { owner: "claude-desktop", title: "Target", body: "x", directory: "notes" },
+        config,
+      ) as { id: string; path: string };
+      expect(created.path).toBeDefined();
+
+      const result = await add_connection(
+        vault,
+        { owner: "claude-desktop", source: created.path, target: "[[Some Concept]]", type: "related" },
+      ) as { commitSha?: string; error?: string };
+      expect(result.error).toBeUndefined();
+    } finally {
+      delete process.env.SCHIST_IDENTITY;
+      process.env.SCHIST_AGENT_ID = TEST_AGENT;
+    }
+  }, 30000);
+
+  test("ungranted SCHIST_IDENTITY denies the append and names the identity", async () => {
+    // Note authored while 'dragonfly' holds the grant, then the machine
+    // identity flips to ungranted 'orcd'. The append must be denied even
+    // though the owner names a granted participant — owner must not rescue
+    // an ungranted machine identity.
+    const vault = await makeTempVaultWithAcl("dragonfly", ["notes"]);
+    const config = await loadVaultConfig(vault);
+    process.env.SCHIST_IDENTITY = "dragonfly";
+    process.env.SCHIST_AGENT_ID = "dragonfly";
+    let created: { path: string };
+    try {
+      created = await create_note(
+        vault,
+        { owner: "dragonfly", title: "Target", body: "x", directory: "notes" },
+        config,
+      ) as { id: string; path: string };
+      expect(created.path).toBeDefined();
+
+      process.env.SCHIST_IDENTITY = "orcd";
+      const result = await add_connection(
+        vault,
+        { owner: "dragonfly", source: created.path, target: "[[Some Concept]]", type: "related" },
+      ) as { error: string; message: string };
+      expect(result.error).toBe("ACL_DENIED");
+      expect(result.message).toMatch(/orcd/);
+    } finally {
+      delete process.env.SCHIST_IDENTITY;
+      process.env.SCHIST_AGENT_ID = TEST_AGENT;
+    }
+  }, 30000);
 });
 

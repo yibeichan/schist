@@ -55,6 +55,13 @@ export function canWrite(acl: VaultAcl, identity: string, scope: string): boolea
  * Falls back to `fallback` (the calling agent's owner id) only when no machine
  * identity is configured — preserving single-axis deployments where the
  * vault.yaml participant is named after the agent.
+ *
+ * Known gap (pre-existing): on a SPOKE with neither env var set, this falls
+ * back to owner and may locally ALLOW a write the hub then rejects ("cannot
+ * determine push identity", pre_receive.py:286). That surfaces as a delayed
+ * push failure / syncWarning rather than an upfront ACL_DENIED — git stays
+ * canonical, so it's a sync hiccup, not corruption. A misconfigured spoke is
+ * the real fault; `schist doctor` is the place to fail-fast on it.
  */
 export function resolveAclIdentity(fallback: string): string {
   return process.env.SCHIST_IDENTITY || process.env.GL_USER || fallback;

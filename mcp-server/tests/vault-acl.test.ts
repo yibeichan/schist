@@ -1,10 +1,10 @@
-import { describe, expect, test, afterAll, jest } from "@jest/globals";
+import { describe, expect, test, beforeEach, afterEach, afterAll, jest } from "@jest/globals";
 import * as fs from "fs/promises";
 import * as os from "os";
 import { readdirSync, readFileSync as readFileSyncForFixtures } from "fs";
 import { join as pathJoin, dirname as pathDirname } from "path";
 import { fileURLToPath } from "url";
-import { scopeMatches, canWrite, type VaultAcl, loadVaultAcl, deriveScope } from "../src/vault-acl.js";
+import { scopeMatches, canWrite, resolveAclIdentity, type VaultAcl, loadVaultAcl, deriveScope } from "../src/vault-acl.js";
 
 describe("scopeMatches", () => {
   test("exact match returns true", () => {
@@ -50,6 +50,43 @@ describe("canWrite", () => {
   test("wildcard write grants every scope", () => {
     expect(canWrite(acl, "admin", "anything")).toBe(true);
     expect(canWrite(acl, "admin", "")).toBe(true);
+  });
+});
+
+describe("resolveAclIdentity", () => {
+  // Mirrors cli/schist/pre_receive.py:resolve_identity precedence:
+  // SCHIST_IDENTITY -> GL_USER -> fallback. Save/restore env so cases are
+  // hermetic regardless of the ambient identity on a dev box.
+  let savedIdentity: string | undefined;
+  let savedGlUser: string | undefined;
+  beforeEach(() => {
+    savedIdentity = process.env.SCHIST_IDENTITY;
+    savedGlUser = process.env.GL_USER;
+    delete process.env.SCHIST_IDENTITY;
+    delete process.env.GL_USER;
+  });
+  afterEach(() => {
+    if (savedIdentity === undefined) delete process.env.SCHIST_IDENTITY;
+    else process.env.SCHIST_IDENTITY = savedIdentity;
+    if (savedGlUser === undefined) delete process.env.GL_USER;
+    else process.env.GL_USER = savedGlUser;
+  });
+
+  test("prefers SCHIST_IDENTITY over GL_USER and fallback", () => {
+    process.env.SCHIST_IDENTITY = "dragonfly";
+    process.env.GL_USER = "gl-user";
+    expect(resolveAclIdentity("claude-desktop")).toBe("dragonfly");
+  });
+  test("falls back to GL_USER when SCHIST_IDENTITY is unset", () => {
+    process.env.GL_USER = "gl-user";
+    expect(resolveAclIdentity("claude-desktop")).toBe("gl-user");
+  });
+  test("falls back to owner when neither env var is set", () => {
+    expect(resolveAclIdentity("claude-desktop")).toBe("claude-desktop");
+  });
+  test("empty-string SCHIST_IDENTITY falls through (matches Python `or`)", () => {
+    process.env.SCHIST_IDENTITY = "";
+    expect(resolveAclIdentity("claude-desktop")).toBe("claude-desktop");
   });
 });
 
