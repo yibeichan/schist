@@ -75,6 +75,20 @@ describe("listAllTools — unconditional tool exposure", () => {
     expect(REMOVED_TOOLS).toHaveProperty("request_capabilities");
   });
 
+  test("tombstone lookup must use own-property check, not `in`", () => {
+    // The router dispatches an unknown tool to the REMOVED_TOOLS tombstone.
+    // `name` is client-controlled, so `name in REMOVED_TOOLS` would match
+    // inherited Object.prototype members ("constructor", "toString",
+    // "__proto__", "valueOf", "hasOwnProperty") and return a malformed
+    // TOOL_REMOVED (the value is a function, dropped by JSON.stringify).
+    // index.ts must use Object.hasOwn; this guards the contract it relies on.
+    for (const polluted of ["constructor", "toString", "__proto__", "valueOf", "hasOwnProperty"]) {
+      expect(polluted in REMOVED_TOOLS).toBe(true); // the footgun
+      expect(Object.hasOwn(REMOVED_TOOLS, polluted)).toBe(false); // the fix
+    }
+    expect(Object.hasOwn(REMOVED_TOOLS, "request_capabilities")).toBe(true);
+  });
+
   test("vault-write tools mark `owner` as required in inputSchema (#63)", () => {
     // Regression guard: validateOwner enforces identity at the data layer,
     // but agents discover required fields from the inputSchema. If `owner`

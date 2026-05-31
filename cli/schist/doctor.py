@@ -634,15 +634,25 @@ _REQUIRED_DOCS_RE = re.compile(
 )
 _DOC_COL_STRING_RE = re.compile(r"""['"]([a-zA-Z_][a-zA-Z0-9_]*)['"]""")
 
-# Tool definitions in the compiled tool-registry.js are the only `name: "..."`
-# properties in that file (inputSchema props use other keys), so this captures
-# exactly the live tool set the server exposes.
-_MCP_TOOL_NAME_RE = re.compile(r'name:\s*"([a-z][a-z0-9_]*)"')
+# Tool definitions in the compiled tool-registry.js are object literals whose
+# first property is `name: "..."`. Requiring the preceding `{` scopes the match
+# to those literals so a `name: "x"` that appears inside a description string or
+# a comment (tsc keeps comments) can't be harvested as a phantom live tool —
+# which would silently mask a stale skill reference (false negative).
+_MCP_TOOL_NAME_RE = re.compile(r'\{\s*name:\s*"([a-z][a-z0-9_]*)"')
 # Keys of the REMOVED_TOOLS tombstone map, to tell "retired" apart from "typo".
+# Bound the block at the closing brace on its own line (`\n}`): a `}` inside a
+# tombstone message string sits within quotes mid-line, never line-leading, so
+# this won't truncate early and drop later keys. A regex can't balance braces;
+# this matches the shape `tsc` emits and degrades to an empty set otherwise.
 _MCP_REMOVED_BLOCK_RE = re.compile(
-    r"REMOVED_TOOLS\s*=\s*\{(.*?)\}", re.DOTALL
+    r"REMOVED_TOOLS\s*=\s*\{(.*?)\n\s*\}", re.DOTALL
 )
-_MCP_REMOVED_KEY_RE = re.compile(r"(?:^|\s)([a-z][a-z0-9_]*)\s*:")
+# Match only line-leading keys (`  toolname:`). Object keys sit at the start of
+# their line; a `word:` inside a tombstone message string (e.g. "unlock step:")
+# falls on a continuation line that starts with a quote, so MULTILINE-anchoring
+# to ^ keeps prose colons from being misread as removed-tool names.
+_MCP_REMOVED_KEY_RE = re.compile(r"^\s*([a-z][a-z0-9_]*)\s*:", re.MULTILINE)
 # How skills reference a schist tool: the `mcp__schist__<tool>` prefix form,
 # used in both `allowed-tools:` frontmatter and inline prose.
 _SKILL_TOOL_REF_RE = re.compile(r"mcp__schist__([a-z][a-z0-9_]*)")
@@ -738,16 +748,26 @@ def _extract_mcp_removed_tools(dist_dir: Path) -> set[str]:
 def _scan_skill_tool_refs(skills_dir: Path) -> dict[str, set[str]]:
     """Map each referenced schist tool name to the set of skill files that
     reference it (via the `mcp__schist__<tool>` form), scanning all markdown
-    under skills_dir.
+    under skills_dir. Files are recorded as paths relative to skills_dir
+    (e.g. `learn/SKILL.md`) — every skill's file is named SKILL.md, so the
+    bare basename would collapse distinct skills and hide which one to fix.
     """
     refs: dict[str, set[str]] = {}
-    for md in skills_dir.rglob("*.md"):
-        try:
-            text = md.read_text()
-        except (OSError, UnicodeDecodeError):
-            continue
-        for tool in _SKILL_TOOL_REF_RE.findall(text):
-            refs.setdefault(tool, set()).add(md.name)
+    # os.walk(followlinks=True), not Path.rglob: shared skills are commonly
+    # symlinked into the vault, and rglob does not descend into symlinked
+    # directories — it would skip exactly the skills this check exists to scan.
+    for root, _dirs, files in os.walk(skills_dir, followlinks=True):
+        for fname in files:
+            if not fname.endswith(".md"):
+                continue
+            md = Path(root) / fname
+            try:
+                text = md.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+            rel = str(md.relative_to(skills_dir))
+            for tool in _SKILL_TOOL_REF_RE.findall(text):
+                refs.setdefault(tool, set()).add(rel)
     return refs
 
 
