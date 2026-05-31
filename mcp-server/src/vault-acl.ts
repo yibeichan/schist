@@ -25,6 +25,18 @@ import { load as yamlLoad } from "js-yaml";
  */
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
 
+/**
+ * YAML 1.1 scalar tokens that js-yaml (YAML 1.2 core schema) keeps as the
+ * literal string but the hub's PyYAML `safe_load` (YAML 1.1) coerces to a
+ * bool / None. Used as a participant name + access key these pass NAME_RE on
+ * this side yet make the hub's strict parser reject the file (a bool/None key
+ * never matches the string participant set) — a false grant. Reject them so
+ * loadVaultAcl fails open in parity with the hub. Only lowercase forms appear
+ * here: case variants (Yes, NO, …) already fail NAME_RE, and a non-matching
+ * access key is caught by the gate-4 set check.
+ */
+const YAML11_RESERVED = new Set(["true", "false", "yes", "no", "on", "off", "null"]);
+
 export interface AccessEntry {
   read: string[];
   write: string[];
@@ -113,8 +125,11 @@ function isENOENT(e: unknown): boolean {
  *   3. vault.yaml is valid YAML but missing the 'access' mapping —
  *      warn + skip.
  *   4. vault.yaml fails an identity-layer invariant the hub enforces —
- *      'participants' absent/empty, a malformed or duplicate participant
+ *      'participants' absent/empty, a malformed/reserved/duplicate participant
  *      name, or participant-names != access-keys as sets — warn + skip.
+ *      ("Reserved" = a YAML 1.1 bool/null token like yes/no/on/off/true/
+ *      false/null, which the hub's PyYAML coerces to a non-string; js-yaml
+ *      keeps it a string, so we must reject it for parity.)
  *      Participant attributes and grant content (scope syntax, read/write
  *      shape, rate_limits) are NOT checked here; they remain hub-only, so a
  *      vault.yaml that is identity-valid but attribute/content-invalid can
@@ -182,6 +197,12 @@ export function loadVaultAcl(vaultRoot: string): VaultAcl | null {
     }
     if (!NAME_RE.test(name)) {
       console.warn(`schist: vault.yaml at ${aclPath} has a participant name '${name}' that violates ${NAME_RE.source}; skipping local ACL check.`);
+      return null;
+    }
+    // Gate 2b: reject YAML 1.1 bool/null tokens the hub's PyYAML coerces to a
+    // non-string (js-yaml keeps them as strings, so they would pass otherwise).
+    if (YAML11_RESERVED.has(name)) {
+      console.warn(`schist: vault.yaml at ${aclPath} uses reserved YAML token '${name}' as a participant name (the hub parses it as a non-string); skipping local ACL check.`);
       return null;
     }
     // Gate 3: no duplicate participant names (acl.py:206-207).

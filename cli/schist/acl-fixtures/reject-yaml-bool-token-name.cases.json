@@ -1,0 +1,1 @@
+{ "reject": true, "reason": "YAML 1.1 token 'yes' as access key: PyYAML coerces to bool True and rejects; js-yaml keeps it a string. TS gate 2b reserved-token check (#160)" }

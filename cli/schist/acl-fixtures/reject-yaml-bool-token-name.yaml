@@ -1,0 +1,11 @@
+vault_version: 1
+name: test-reject-yaml-bool-token
+scope_convention: flat
+participants:
+  - name: "yes"
+    type: spoke
+    default_scope: global
+access:
+  yes:
+    read: [notes]
+    write: [notes]
