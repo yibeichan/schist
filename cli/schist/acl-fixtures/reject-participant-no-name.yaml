@@ -1,0 +1,13 @@
+vault_version: 1
+name: test-reject-no-name
+scope_convention: flat
+participants:
+  - name: alice
+    type: spoke
+    default_scope: global
+  - type: spoke
+    default_scope: global
+access:
+  alice:
+    read: [notes]
+    write: [notes]

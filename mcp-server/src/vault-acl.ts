@@ -10,12 +10,32 @@
  * in cli/schist/acl-fixtures/, loaded by both
  * mcp-server/tests/vault-acl.test.ts and cli/tests/test_acl_parity.py.
  *
- * See docs/superpowers/specs/2026-05-28-mcp-hub-acl-intersection-design.md.
+ * See docs/superpowers/specs/2026-05-28-mcp-hub-acl-intersection-design.md
+ * and docs/superpowers/specs/2026-05-30-mcp-acl-participants-parity-design.md
+ * (the participant-identity gates added for #160).
  */
 
 import { readFileSync } from "fs";
 import * as path from "path";
 import { load as yamlLoad } from "js-yaml";
+
+/**
+ * Participant-name syntax, mirrored verbatim from cli/schist/acl.py NAME_RE.
+ * A name is a lowercase letter followed by lowercase letters, digits, hyphens.
+ */
+const NAME_RE = /^[a-z][a-z0-9-]*$/;
+
+/**
+ * YAML 1.1 scalar tokens that js-yaml (YAML 1.2 core schema) keeps as the
+ * literal string but the hub's PyYAML `safe_load` (YAML 1.1) coerces to a
+ * bool / None. Used as a participant name + access key these pass NAME_RE on
+ * this side yet make the hub's strict parser reject the file (a bool/None key
+ * never matches the string participant set) — a false grant. Reject them so
+ * loadVaultAcl fails open in parity with the hub. Only lowercase forms appear
+ * here: case variants (Yes, NO, …) already fail NAME_RE, and a non-matching
+ * access key is caught by the gate-4 set check.
+ */
+const YAML11_RESERVED = new Set(["true", "false", "yes", "no", "on", "off", "null"]);
 
 export interface AccessEntry {
   read: string[];
@@ -104,6 +124,19 @@ function isENOENT(e: unknown): boolean {
  *   2. vault.yaml is unreadable / unparseable as YAML — warn + skip.
  *   3. vault.yaml is valid YAML but missing the 'access' mapping —
  *      warn + skip.
+ *   4. vault.yaml fails an identity-layer invariant the hub enforces —
+ *      'participants' absent/empty, a malformed/reserved/duplicate participant
+ *      name, or participant-names != access-keys as sets — warn + skip.
+ *      ("Reserved" = a YAML 1.1 bool/null token like yes/no/on/off/true/
+ *      false/null, which the hub's PyYAML coerces to a non-string; js-yaml
+ *      keeps it a string, so we must reject it for parity.)
+ *      Participant attributes and grant content (scope syntax, read/write
+ *      shape, rate_limits) are NOT checked here; they remain hub-only, so a
+ *      vault.yaml that is identity-valid but attribute/content-invalid can
+ *      still yield a local grant the hub rejects (documented residual, #160).
+ *      Note: a content-invalid access entry (e.g. a non-mapping value) is
+ *      dropped from the returned map rather than skipped, so it surfaces as a
+ *      local ACL_DENIED here, not a fall-open — still never a false grant.
  *
  * Asymmetric with cli/schist/rate_limit.py (fail-closed) by design:
  * the MCP-side check is a UX optimisation; the hub's pre-receive is
@@ -132,8 +165,63 @@ export function loadVaultAcl(vaultRoot: string): VaultAcl | null {
     return null;
   }
 
+  // #160: identity-layer parity with cli/schist/acl.py:parse_vault_data.
+  // Gates are short-circuit and evaluated in order; return null (fail-open) on
+  // the first failure. This mirrors the participant-identity invariants the hub
+  // enforces (participants present; names well-formed + unique; participants and
+  // access keys are the same set). Participant ATTRIBUTES (type/transport/
+  // default_scope/metadata) and grant CONTENT (read/write shape, scope syntax,
+  // rate_limits) are NOT validated here — they remain hub-only, and a
+  // vault.yaml that is identity-valid but attribute/content-invalid will still
+  // produce a local grant the hub rejects (documented residual).
+  const rawObj = raw as { participants?: unknown; access: Record<string, unknown> };
+
+  // Gate 1: participants must be a non-empty array (acl.py:184-185).
+  const rawParticipants = rawObj.participants;
+  if (!Array.isArray(rawParticipants) || rawParticipants.length === 0) {
+    console.warn(`schist: vault.yaml at ${aclPath} has no valid 'participants' list; skipping local ACL check.`);
+    return null;
+  }
+
+  // Gate 2: every entry is a string or {name: <non-empty string matching NAME_RE>}
+  // (acl.py:189-208). Short-circuit here so the participant-name set used by
+  // gate 4 contains only valid names (a bad name must never reach gate 4).
+  const participantNames = new Set<string>();
+  for (const p of rawParticipants) {
+    const name: unknown = typeof p === "string"
+      ? p
+      : (p && typeof p === "object" ? (p as { name?: unknown }).name : undefined);
+    if (typeof name !== "string" || name.length === 0) {
+      console.warn(`schist: vault.yaml at ${aclPath} has a participant with no usable name; skipping local ACL check.`);
+      return null;
+    }
+    if (!NAME_RE.test(name)) {
+      console.warn(`schist: vault.yaml at ${aclPath} has a participant name '${name}' that violates ${NAME_RE.source}; skipping local ACL check.`);
+      return null;
+    }
+    // Gate 2b: reject YAML 1.1 bool/null tokens the hub's PyYAML coerces to a
+    // non-string (js-yaml keeps them as strings, so they would pass otherwise).
+    if (YAML11_RESERVED.has(name)) {
+      console.warn(`schist: vault.yaml at ${aclPath} uses reserved YAML token '${name}' as a participant name (the hub parses it as a non-string); skipping local ACL check.`);
+      return null;
+    }
+    // Gate 3: no duplicate participant names (acl.py:206-207).
+    if (participantNames.has(name)) {
+      console.warn(`schist: vault.yaml at ${aclPath} has a duplicate participant name '${name}'; skipping local ACL check.`);
+      return null;
+    }
+    participantNames.add(name);
+  }
+
+  // Gate 4: set(participant names) == set(access keys) (acl.py:268 + :273).
+  const accessKeys = Object.keys(rawObj.access);
+  if (accessKeys.length !== participantNames.size || !accessKeys.every((k) => participantNames.has(k))) {
+    console.warn(`schist: vault.yaml at ${aclPath} participants and access keys do not match; skipping local ACL check.`);
+    return null;
+  }
+
   const access: VaultAcl["access"] = {};
-  for (const [identity, entry] of Object.entries((raw as { access: Record<string, unknown> }).access)) {
+  for (const [identity, entry] of Object.entries(rawObj.access)) {
     if (entry && typeof entry === "object") {
       const e = entry as { read?: unknown; write?: unknown };
       access[identity] = {

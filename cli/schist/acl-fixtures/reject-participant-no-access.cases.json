@@ -1,0 +1,1 @@
+{ "reject": true, "reason": "participant 'bob' has no access entry (acl.py:268); TS gate 4" }

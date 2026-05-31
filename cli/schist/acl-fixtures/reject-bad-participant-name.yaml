@@ -1,0 +1,11 @@
+vault_version: 1
+name: test-reject-bad-name
+scope_convention: flat
+participants:
+  - name: Alice
+    type: spoke
+    default_scope: global
+access:
+  Alice:
+    read: [notes]
+    write: [notes]

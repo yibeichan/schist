@@ -15,3 +15,15 @@ automatically.
 These are SHIPPED in the schist wheel as package data so the fixtures are
 available to consumers of the installed CLI. The TS side reads them via a
 relative path from the schist source tree.
+
+## Case-file shapes
+
+`<name>.cases.json` has one of two shapes:
+
+- **Accept** — a JSON *array* of `{ identity, scope, canWrite }` tuples. Both
+  parsers must accept the `<name>.yaml` (non-null / no raise) and agree on
+  `can_write` / `canWrite` for every tuple.
+- **Reject** — a JSON *object* `{ "reject": true, "reason": "<why>" }`. The
+  strict Python parser (`parse_vault_yaml`) must raise `ACLError`, and the TS
+  reader (`loadVaultAcl`) must return `null` (fail-open). Used to pin the
+  participant-identity invariants both parsers enforce (#160).
