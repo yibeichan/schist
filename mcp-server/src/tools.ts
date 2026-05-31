@@ -9,7 +9,7 @@ import { writeNote } from "./git-writer.js";
 import { buildNote, buildConnectionLine } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse } from "./types.js";
-import { loadVaultAcl, canWrite, deriveScope } from "./vault-acl.js";
+import { loadVaultAcl, canWrite, deriveScope, resolveAclIdentity } from "./vault-acl.js";
 import {
   canonicalizeQueryHash,
   decodeCursor,
@@ -719,11 +719,12 @@ export async function create_note(
     const acl = loadVaultAcl(vaultRoot);
     if (acl !== null) {
       const scope = deriveScope(relPath);
-      if (!canWrite(acl, owner, scope)) {
+      const aclIdentity = resolveAclIdentity(owner);
+      if (!canWrite(acl, aclIdentity, scope)) {
         return {
           error: "ACL_DENIED",
           message:
-            `Identity '${owner}' is not granted write access to scope ` +
+            `Identity '${aclIdentity}' is not granted write access to scope ` +
             `'${scope}' by vault.yaml. Hub push would reject this write. ` +
             `Ask the hub admin to extend your write grant.`,
         } satisfies ToolError;
@@ -800,11 +801,12 @@ export async function add_connection(
     const acl = loadVaultAcl(vaultRoot);
     if (acl !== null) {
       const scope = deriveScope(args.source);
-      if (!canWrite(acl, owner, scope)) {
+      const aclIdentity = resolveAclIdentity(owner);
+      if (!canWrite(acl, aclIdentity, scope)) {
         return {
           error: "ACL_DENIED",
           message:
-            `Identity '${owner}' is not granted write access to scope ` +
+            `Identity '${aclIdentity}' is not granted write access to scope ` +
             `'${scope}' by vault.yaml. Hub push would reject this write. ` +
             `Ask the hub admin to extend your write grant.`,
         } satisfies ToolError;

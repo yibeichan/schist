@@ -42,6 +42,32 @@ export function canWrite(acl: VaultAcl, identity: string, scope: string): boolea
 }
 
 /**
+ * Resolve the identity used for the vault.yaml ACL lookup — the SAME identity
+ * the hub's pre-receive resolves (cli/schist/pre_receive.py:resolve_identity):
+ * SCHIST_IDENTITY, then GL_USER. This is the per-MACHINE/spoke identity that
+ * `schist sync push` forwards to the hub — NOT the per-AGENT SCHIST_AGENT_ID.
+ *
+ * vault.yaml's `access` map is keyed by machine identity (e.g. `dragonfly`),
+ * so the local intersection (#155) must look up the machine identity too;
+ * keying it on the agent owner (e.g. `claude-desktop`) produces a FALSE
+ * ACL_DENIED on writes the hub would actually accept.
+ *
+ * Falls back to `fallback` (the calling agent's owner id) only when no machine
+ * identity is configured — preserving single-axis deployments where the
+ * vault.yaml participant is named after the agent.
+ *
+ * Known gap (pre-existing): on a SPOKE with neither env var set, this falls
+ * back to owner and may locally ALLOW a write the hub then rejects ("cannot
+ * determine push identity", pre_receive.py:286). That surfaces as a delayed
+ * push failure / syncWarning rather than an upfront ACL_DENIED — git stays
+ * canonical, so it's a sync hiccup, not corruption. A misconfigured spoke is
+ * the real fault; `schist doctor` is the place to fail-fast on it.
+ */
+export function resolveAclIdentity(fallback: string): string {
+  return process.env.SCHIST_IDENTITY || process.env.GL_USER || fallback;
+}
+
+/**
  * Derive the ACL scope from a file path. Mirrors
  * cli/schist/pre_receive.py:derive_scope verbatim.
  *
