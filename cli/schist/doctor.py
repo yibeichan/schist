@@ -634,6 +634,19 @@ _REQUIRED_DOCS_RE = re.compile(
 )
 _DOC_COL_STRING_RE = re.compile(r"""['"]([a-zA-Z_][a-zA-Z0-9_]*)['"]""")
 
+# Tool definitions in the compiled tool-registry.js are the only `name: "..."`
+# properties in that file (inputSchema props use other keys), so this captures
+# exactly the live tool set the server exposes.
+_MCP_TOOL_NAME_RE = re.compile(r'name:\s*"([a-z][a-z0-9_]*)"')
+# Keys of the REMOVED_TOOLS tombstone map, to tell "retired" apart from "typo".
+_MCP_REMOVED_BLOCK_RE = re.compile(
+    r"REMOVED_TOOLS\s*=\s*\{(.*?)\}", re.DOTALL
+)
+_MCP_REMOVED_KEY_RE = re.compile(r"(?:^|\s)([a-z][a-z0-9_]*)\s*:")
+# How skills reference a schist tool: the `mcp__schist__<tool>` prefix form,
+# used in both `allowed-tools:` frontmatter and inline prose.
+_SKILL_TOOL_REF_RE = re.compile(r"mcp__schist__([a-z][a-z0-9_]*)")
+
 
 def _mcp_dist_dir_from_config(vault_path: Optional[str]) -> Optional[Path]:
     """Return the dist/ directory of the configured MCP entry, or None.
@@ -691,6 +704,51 @@ def _extract_mcp_required_columns(dist_dir: Path) -> Optional[set[str]]:
     if not m:
         return None
     return set(_DOC_COL_STRING_RE.findall(m.group(1)))
+
+
+def _extract_mcp_tool_names(dist_dir: Path) -> Optional[set[str]]:
+    """Read the live tool names from the MCP server's compiled
+    tool-registry.js. Returns None when the file can't be read or no tool
+    names are found (older builds, or a moved registry).
+    """
+    registry = dist_dir / "tool-registry.js"
+    try:
+        text = registry.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    names = set(_MCP_TOOL_NAME_RE.findall(text))
+    return names or None
+
+
+def _extract_mcp_removed_tools(dist_dir: Path) -> set[str]:
+    """Read the keys of the REMOVED_TOOLS tombstone map from the compiled
+    tool-registry.js. Returns an empty set when absent (pre-tombstone builds).
+    """
+    registry = dist_dir / "tool-registry.js"
+    try:
+        text = registry.read_text()
+    except (OSError, UnicodeDecodeError):
+        return set()
+    block = _MCP_REMOVED_BLOCK_RE.search(text)
+    if not block:
+        return set()
+    return set(_MCP_REMOVED_KEY_RE.findall(block.group(1)))
+
+
+def _scan_skill_tool_refs(skills_dir: Path) -> dict[str, set[str]]:
+    """Map each referenced schist tool name to the set of skill files that
+    reference it (via the `mcp__schist__<tool>` form), scanning all markdown
+    under skills_dir.
+    """
+    refs: dict[str, set[str]] = {}
+    for md in skills_dir.rglob("*.md"):
+        try:
+            text = md.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for tool in _SKILL_TOOL_REF_RE.findall(text):
+            refs.setdefault(tool, set()).add(md.name)
+    return refs
 
 
 def _canonical_docs_columns() -> Optional[set[str]]:
@@ -768,6 +826,68 @@ def check_mcp_schema_alignment(vault_path: Optional[str]) -> CheckResult:
     )
 
 
+def check_skill_tool_references(vault_path: Optional[str]) -> CheckResult:
+    """Catch skills that call schist MCP tools the installed server no longer
+    exposes — the failure mode that surfaced as the `request_capabilities`
+    removal (#72/#76) leaving dangling `mcp__schist__request_capabilities`
+    calls in shared skills, which agents hit as a confusing runtime error.
+
+    Cross-checks every `mcp__schist__<tool>` reference under
+    `<vault>/shared/skills/` against the live tool set parsed from the
+    installed MCP server's tool-registry.js. Known-removed tools (present in
+    the REMOVED_TOOLS tombstone map) are reported distinctly from unknown
+    names (likely typos or a rename the skill missed).
+
+    SKIPs when no MCP entry is configured, no shared/skills directory exists,
+    or the registry can't be parsed (older dist).
+    """
+    label = "Skill tool references"
+    if not vault_path:
+        return CheckResult("SKIP", label, "skipped (no vault path)")
+    skills_dir = Path(vault_path) / "shared" / "skills"
+    if not skills_dir.is_dir():
+        return CheckResult("SKIP", label, "skipped (no shared/skills directory)")
+
+    dist_dir = _mcp_dist_dir_from_config(vault_path)
+    if dist_dir is None:
+        return CheckResult("SKIP", label, "skipped (no MCP config)")
+
+    live = _extract_mcp_tool_names(dist_dir)
+    if live is None:
+        return CheckResult(
+            "SKIP", label,
+            f"skipped (no tool names found in {dist_dir / 'tool-registry.js'})",
+        )
+
+    removed = _extract_mcp_removed_tools(dist_dir)
+    refs = _scan_skill_tool_refs(skills_dir)
+    stale = {tool: files for tool, files in refs.items() if tool not in live}
+    if not stale:
+        return CheckResult(
+            "PASS", label,
+            f"all skill tool references resolve ({len(refs)} distinct tools referenced)",
+        )
+
+    retired = {t: f for t, f in stale.items() if t in removed}
+    unknown = {t: f for t, f in stale.items() if t not in removed}
+    parts = []
+    for t, f in sorted(retired.items()):
+        parts.append(f"{t} (removed; in {', '.join(sorted(f))})")
+    for t, f in sorted(unknown.items()):
+        parts.append(f"{t} (unknown; in {', '.join(sorted(f))})")
+    return CheckResult(
+        "WARN", label,
+        "skills reference tools the server does not expose: " + "; ".join(parts),
+        fix=(
+            "Update the offending skills under <vault>/shared/skills/ to stop "
+            "calling these tools. Removed tools return a TOOL_REMOVED message "
+            "explaining the replacement; unknown names are likely typos or a "
+            "missed rename. Restart Claude Code / Claude Desktop after editing "
+            "so they reload the skills."
+        ),
+    )
+
+
 def run_doctor(vault_path: Optional[str], db_path: Optional[str],
                as_json: bool = False, hub_path: Optional[str] = None) -> list[CheckResult]:
     checks = [
@@ -787,6 +907,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_spoke_acl_drift(vault_path),
         check_mcp_config(vault_path),
         check_mcp_schema_alignment(vault_path),
+        check_skill_tool_references(vault_path),
     ]
     if hub_path:
         checks.append(check_hub_acl_drift(hub_path))

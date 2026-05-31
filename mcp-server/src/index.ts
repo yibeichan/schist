@@ -24,7 +24,7 @@ import {
   add_concept_alias,
 } from "./tools.js";
 import type { VaultConfig } from "./types.js";
-import { listAllTools } from "./tool-registry.js";
+import { listAllTools, REMOVED_TOOLS } from "./tool-registry.js";
 
 function resolveVaultPath(): string {
   const envVault = process.env.SCHIST_VAULT_PATH;
@@ -135,7 +135,11 @@ async function main() {
           result = await add_concept_alias(vaultRoot, toolArgs as Parameters<typeof add_concept_alias>[1]);
           break;
         default:
-          result = { error: "VALIDATION_ERROR", message: `Unknown tool: ${name}` };
+          if (name in REMOVED_TOOLS) {
+            result = { error: "TOOL_REMOVED", message: REMOVED_TOOLS[name] };
+          } else {
+            result = { error: "VALIDATION_ERROR", message: `Unknown tool: ${name}` };
+          }
       }
     } catch (e: unknown) {
       result = { error: "INGEST_ERROR", message: String(e), details: e };
