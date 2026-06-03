@@ -6,7 +6,7 @@ import { fileURLToPath } from "url";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { load as yamlLoadSync } from "js-yaml";
-import { loadVaultConfig, create_note, add_connection, get_context, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, DEFAULT_DIRECTORIES_FALLBACK } from "../src/tools.js";
+import { loadVaultConfig, create_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, DEFAULT_DIRECTORIES_FALLBACK } from "../src/tools.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -60,6 +60,19 @@ async function makeTempVault(extraYaml = ""): Promise<string> {
   await execFile("git", ["add", "."], { cwd: dir });
   await execFile("git", ["commit", "-m", "init"], { cwd: dir });
   return dir;
+}
+
+async function makeTempSpokeVault(): Promise<string> {
+  const vault = await makeTempVault();
+  await fs.writeFile(path.join(vault, ".gitignore"), ".schist/\n");
+  await execFile("git", ["add", ".gitignore"], { cwd: vault });
+  await execFile("git", ["commit", "-m", "ignore schist runtime state"], { cwd: vault });
+  await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+  await fs.writeFile(
+    path.join(vault, ".schist", "spoke.yaml"),
+    "hub: file:///nonexistent\nidentity: test\nscope: notes\n",
+  );
+  return vault;
 }
 
 async function makeTempVaultWithAcl(
@@ -671,6 +684,161 @@ describe("maybeSpokePull", () => {
   }, 10000);
 });
 
+describe("sync_status + sync_retry (#135)", () => {
+  beforeEach(() => {
+    resetSpokePushTrackerForTesting();
+  });
+
+  test("sync_status reports spoke head, clean tree, and last sync error without identity", async () => {
+    const vault = await makeTempSpokeVault();
+    await fs.writeFile(
+      path.join(vault, ".schist", "last-sync-error"),
+      "2026-06-02T12:00:00.000Z push exited with code 1\n",
+    );
+
+    const result = await sync_status(vault) as Record<string, unknown>;
+
+    expect(result.is_spoke).toBe(true);
+    expect(typeof result.spoke_head).toBe("string");
+    expect((result.spoke_head as string).length).toBeGreaterThan(0);
+    expect(result.hub_head).toBeNull();
+    expect(result.clean_working_tree).toBe(true);
+    expect(result.last_sync_error).toEqual({
+      timestamp: "2026-06-02T12:00:00.000Z",
+      contents: "push exited with code 1",
+    });
+  }, 10000);
+
+  test("sync_retry push-only calls only sync push and clears unchanged sentinel", async () => {
+    const vault = await makeTempSpokeVault();
+    const sentinelPath = path.join(vault, ".schist", "last-sync-error");
+    await fs.writeFile(sentinelPath, "2026-06-02T12:00:00.000Z push exited with code 1\n");
+
+    const logPath = path.join(vault, ".schist", "retry-log");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const stub = path.join(stubDir, "schist");
+    await fs.writeFile(stub, `#!/bin/sh\necho "$@" >> "${logPath}"\nexit 0\n`, { mode: 0o755 });
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "push-only" }) as Record<string, unknown>;
+      expect(result.ok).toBe(true);
+      expect(result.cleared_last_sync_error).toBe(true);
+      await expect(fs.access(sentinelPath)).rejects.toBeDefined();
+      const log = await fs.readFile(logPath, "utf-8");
+      expect(log.trim()).toBe(`--vault ${vault} sync push`);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  test("sync_retry pull-rebase-push pulls before pushing", async () => {
+    const vault = await makeTempSpokeVault();
+    const logPath = path.join(vault, ".schist", "retry-log");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const stub = path.join(stubDir, "schist");
+    await fs.writeFile(stub, `#!/bin/sh\necho "$@" >> "${logPath}"\nexit 0\n`, { mode: 0o755 });
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as Record<string, unknown>;
+      expect(result.ok).toBe(true);
+      const lines = (await fs.readFile(logPath, "utf-8")).trim().split("\n");
+      expect(lines).toEqual([
+        `--vault ${vault} sync pull`,
+        `--vault ${vault} sync push`,
+      ]);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  test("sync_retry classifies ACL/pre-receive push rejection as non-retriable", async () => {
+    const vault = await makeTempSpokeVault();
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const stub = path.join(stubDir, "schist");
+    await fs.writeFile(
+      stub,
+      "#!/bin/sh\necho 'Push rejected by hub: ACL violation' >&2\nexit 1\n",
+      { mode: 0o755 },
+    );
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "push-only" }) as Record<string, unknown>;
+      expect(result.ok).toBe(false);
+      expect(result.retriable).toBe(false);
+      expect(result.reason).toBe("ACL violation");
+      expect(result.phase).toBe("push");
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  test("sync_retry aborts after pull-rebase conflict and does not push", async () => {
+    const vault = await makeTempSpokeVault();
+    const logPath = path.join(vault, ".schist", "retry-log");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const stub = path.join(stubDir, "schist");
+    await fs.writeFile(
+      stub,
+      `#!/bin/sh\necho "$@" >> "${logPath}"\necho 'CONFLICT: could not apply commit' >&2\nexit 1\n`,
+      { mode: 0o755 },
+    );
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as Record<string, unknown>;
+      expect(result.ok).toBe(false);
+      expect(result.retriable).toBe(false);
+      expect(result.reason).toBe("Rebase conflict");
+      const log = await fs.readFile(logPath, "utf-8");
+      expect(log.trim()).toBe(`--vault ${vault} sync pull`);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  test("sync_retry awaits an in-flight background push instead of spawning a competitor", async () => {
+    const vault = await makeTempSpokeVault();
+    const countFile = path.join(vault, ".schist", "spawn-count");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const stub = path.join(stubDir, "schist");
+    await fs.writeFile(
+      stub,
+      `#!/bin/sh\necho "x" >> "${countFile}"\nsleep 0.3\nexit 0\n`,
+      { mode: 0o755 },
+    );
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      triggerSpokePush(vault);
+      for (let i = 0; i < 60; i++) {
+        const exists = await fs.access(countFile).then(() => true).catch(() => false);
+        if (exists) break;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "push-only" }) as Record<string, unknown>;
+      expect(result.ok).toBe(true);
+      expect(result.awaited_in_flight).toBe(true);
+      const count = (await fs.readFile(countFile, "utf-8")).split("\n").filter(Boolean).length;
+      expect(count).toBe(1);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+});
+
 describe("sync error sentinel", () => {
   test("get_context surfaces last-sync-error as syncWarning and clears it", async () => {
     const vault = await makeTempVault();
@@ -922,7 +1090,9 @@ describe("write-tool syncWarning surfacing (#120)", () => {
     // Negative: no imperative.
     expect(result.syncWarning).not.toMatch(/Call get_context to acknowledge/);
     // Positive: descriptive.
-    expect(result.syncWarning).toMatch(/`get_context` will clear this/);
+    expect(result.syncWarning).toMatch(/`sync_status` reports divergence/);
+    expect(result.syncWarning).toMatch(/`sync_retry` can retry the push/);
+    expect(result.syncWarning).toMatch(/`get_context` clears this/);
   });
 
   test("syncWarning sanitizes non-printable bytes in sentinel content", async () => {
