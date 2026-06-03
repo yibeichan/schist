@@ -251,3 +251,22 @@ export function listAllTools(config: VaultConfig) {
     ...makeMemoryWriteTools(config),
   ];
 }
+
+/**
+ * Tombstones for tools that once existed and were removed. Callers that
+ * still reference them — stale skill text, MCP clients that cached an old
+ * tool list, copy-pasted snippets — would otherwise hit the bare
+ * "Unknown tool: X" path and stall on a confusing error. Mapping the name
+ * to actionable guidance turns that dead end into a self-correcting one
+ * the agent can act on without a human. Add an entry here whenever a tool
+ * is retired; never silently drop it from the switch in index.ts.
+ */
+export const REMOVED_TOOLS: Record<string, string> = {
+  request_capabilities:
+    "request_capabilities was removed in schist #72/#76. There is no longer " +
+    "a capability-unlock step: write tools (create_note, add_connection, " +
+    "add_memory, set_agent_state, delete_agent_state, add_concept_alias) are " +
+    "callable directly. Authorization is enforced at write time by " +
+    "validateOwner against SCHIST_AGENT_ID / SCHIST_ALLOWED_AGENTS. Drop the " +
+    "request_capabilities call and retry the write directly.",
+};

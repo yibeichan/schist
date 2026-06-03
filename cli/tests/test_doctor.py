@@ -22,6 +22,7 @@ from schist.doctor import (
     check_post_commit_hook,
     check_python,
     check_schist_yaml,
+    check_skill_tool_references,
     check_spoke,
     check_sqlite,
     check_uv,
@@ -595,6 +596,177 @@ class TestCheckMcpSchemaAlignment:
         r = check_mcp_schema_alignment(None)
         assert r.status == "SKIP"
         assert "REQUIRED_DOCS_COLUMNS not declared" in r.message
+
+
+class TestCheckSkillToolReferences:
+    """Guard against skills calling MCP tools the server no longer exposes —
+    the request_capabilities (#72/#76) removal left dangling
+    `mcp__schist__request_capabilities` calls in shared skills."""
+
+    def _write_registry(self, dist_dir: Path, live: list[str], removed: list[str]) -> None:
+        dist_dir.mkdir(parents=True, exist_ok=True)
+        (dist_dir / "index.js").write_text("// stub\n")
+        tool_defs = "\n".join(
+            f'  {{ name: "{t}", description: "x" }},' for t in live
+        )
+        removed_keys = "\n".join(f'  {t}: "gone",' for t in removed)
+        (dist_dir / "tool-registry.js").write_text(
+            f"export const tools = [\n{tool_defs}\n];\n"
+            f"export const REMOVED_TOOLS = {{\n{removed_keys}\n}};\n"
+        )
+
+    def _write_claude_json(self, home: Path, dist_dir: Path) -> None:
+        (home / ".claude.json").write_text(json.dumps({
+            "mcpServers": {"schist": {
+                "command": "node", "args": [str(dist_dir / "index.js")],
+            }}
+        }))
+
+    def _write_skill(self, skills_dir: Path, name: str, tools: list[str]) -> None:
+        d = skills_dir / name
+        d.mkdir(parents=True, exist_ok=True)
+        refs = "\n".join(f"  - mcp__schist__{t}" for t in tools)
+        (d / "SKILL.md").write_text(f"---\nallowed-tools:\n{refs}\n---\n# {name}\n")
+
+    def test_pass_when_all_refs_resolve(self, tmp_path, monkeypatch):
+        vault = tmp_path / "vault"
+        skills = vault / "shared" / "skills"
+        self._write_skill(skills, "learn", ["add_memory", "search_memory"])
+        dist_dir = tmp_path / "mcp" / "dist"
+        self._write_registry(dist_dir, ["add_memory", "search_memory"], [])
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_skill_tool_references(str(vault))
+        assert r.status == "PASS", r.message
+
+    def test_warn_on_removed_tool(self, tmp_path, monkeypatch):
+        vault = tmp_path / "vault"
+        skills = vault / "shared" / "skills"
+        self._write_skill(skills, "learn", ["add_memory", "request_capabilities"])
+        dist_dir = tmp_path / "mcp" / "dist"
+        self._write_registry(dist_dir, ["add_memory"], ["request_capabilities"])
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_skill_tool_references(str(vault))
+        assert r.status == "WARN"
+        assert "request_capabilities (removed" in r.message
+        # The relative path names the offending skill, not a bare basename —
+        # every skill's file is SKILL.md, so "learn/SKILL.md" must survive.
+        assert "learn/SKILL.md" in r.message
+        assert r.fix is not None and "restart" in r.fix.lower()
+
+    def test_lists_each_skill_separately(self, tmp_path, monkeypatch):
+        # Two skills reference the same removed tool. The bare basename would
+        # collapse both to "SKILL.md"; the relative path keeps them distinct so
+        # the user knows every file to fix.
+        vault = tmp_path / "vault"
+        skills = vault / "shared" / "skills"
+        self._write_skill(skills, "learn", ["request_capabilities"])
+        self._write_skill(skills, "handoff", ["request_capabilities"])
+        dist_dir = tmp_path / "mcp" / "dist"
+        self._write_registry(dist_dir, ["add_memory"], ["request_capabilities"])
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_skill_tool_references(str(vault))
+        assert r.status == "WARN"
+        assert "learn/SKILL.md" in r.message
+        assert "handoff/SKILL.md" in r.message
+
+    def test_removed_parser_ignores_prose_colons(self, tmp_path):
+        # A tombstone message containing "word:" (e.g. "unlock step: write")
+        # must not be misread as a removed-tool key — only line-leading object
+        # keys count.
+        from schist.doctor import _extract_mcp_removed_tools
+        dist_dir = tmp_path / "mcp" / "dist"
+        dist_dir.mkdir(parents=True)
+        (dist_dir / "tool-registry.js").write_text(
+            "export const REMOVED_TOOLS = {\n"
+            '    request_capabilities: "removed. there is no unlock step: write "\n'
+            '        + "tools are callable directly. note: just call them.",\n'
+            "};\n"
+        )
+        assert _extract_mcp_removed_tools(dist_dir) == {"request_capabilities"}
+
+    def test_removed_parser_handles_brace_in_message(self, tmp_path):
+        # A tombstone message containing a literal `}` must not truncate the
+        # block early and drop later keys.
+        from schist.doctor import _extract_mcp_removed_tools
+        dist_dir = tmp_path / "mcp" / "dist"
+        dist_dir.mkdir(parents=True)
+        (dist_dir / "tool-registry.js").write_text(
+            "export const REMOVED_TOOLS = {\n"
+            '    old_one: "use the object } literal form instead",\n'
+            '    old_two: "also gone",\n'
+            "};\n"
+        )
+        assert _extract_mcp_removed_tools(dist_dir) == {"old_one", "old_two"}
+
+    def test_tool_name_parser_ignores_name_in_description(self, tmp_path):
+        # A `name: "x"` inside a description string or comment must not be
+        # harvested as a live tool — that would mask a stale skill reference.
+        from schist.doctor import _extract_mcp_tool_names
+        dist_dir = tmp_path / "mcp" / "dist"
+        dist_dir.mkdir(parents=True)
+        (dist_dir / "tool-registry.js").write_text(
+            '// name: "comment_ghost" should be ignored\n'
+            "export const tools = [\n"
+            '  { name: "real_tool", description: "mentions name: \\"prose_ghost\\" inline" },\n'
+            "];\n"
+        )
+        names = _extract_mcp_tool_names(dist_dir)
+        assert names == {"real_tool"}
+
+    def test_scans_symlinked_skill_dir(self, tmp_path, monkeypatch):
+        # Shared skills are commonly symlinked into the vault. The scan must
+        # descend into symlinked directories or it misses exactly those skills.
+        vault = tmp_path / "vault"
+        skills = vault / "shared" / "skills"
+        skills.mkdir(parents=True)
+        real_skill = tmp_path / "real-skills" / "learn"
+        real_skill.mkdir(parents=True)
+        (real_skill / "SKILL.md").write_text(
+            "---\nallowed-tools:\n  - mcp__schist__request_capabilities\n---\n"
+        )
+        (skills / "learn").symlink_to(real_skill, target_is_directory=True)
+        dist_dir = tmp_path / "mcp" / "dist"
+        self._write_registry(dist_dir, ["add_memory"], ["request_capabilities"])
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_skill_tool_references(str(vault))
+        assert r.status == "WARN"
+        assert "request_capabilities (removed" in r.message
+        assert "learn/SKILL.md" in r.message
+
+    def test_warn_on_unknown_tool(self, tmp_path, monkeypatch):
+        vault = tmp_path / "vault"
+        skills = vault / "shared" / "skills"
+        self._write_skill(skills, "weird", ["frobnicate"])
+        dist_dir = tmp_path / "mcp" / "dist"
+        self._write_registry(dist_dir, ["add_memory"], [])
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_skill_tool_references(str(vault))
+        assert r.status == "WARN"
+        assert "frobnicate (unknown" in r.message
+
+    def test_skip_when_no_skills_dir(self, tmp_path, monkeypatch):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        dist_dir = tmp_path / "mcp" / "dist"
+        self._write_registry(dist_dir, ["add_memory"], [])
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_skill_tool_references(str(vault))
+        assert r.status == "SKIP"
+        assert "shared/skills" in r.message
+
+    def test_skip_when_no_mcp_config(self, tmp_path, monkeypatch):
+        vault = tmp_path / "vault"
+        self._write_skill(vault / "shared" / "skills", "learn", ["add_memory"])
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_skill_tool_references(str(vault))
+        assert r.status == "SKIP"
+        assert "no MCP config" in r.message
 
 
 # ---------------------------------------------------------------------------

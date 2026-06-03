@@ -24,7 +24,7 @@ import {
   add_concept_alias,
 } from "./tools.js";
 import type { VaultConfig } from "./types.js";
-import { listAllTools } from "./tool-registry.js";
+import { listAllTools, REMOVED_TOOLS } from "./tool-registry.js";
 
 function resolveVaultPath(): string {
   const envVault = process.env.SCHIST_VAULT_PATH;
@@ -135,7 +135,16 @@ async function main() {
           result = await add_concept_alias(vaultRoot, toolArgs as Parameters<typeof add_concept_alias>[1]);
           break;
         default:
-          result = { error: "VALIDATION_ERROR", message: `Unknown tool: ${name}` };
+          // Object.hasOwn, not `name in REMOVED_TOOLS`: `name` is
+          // client-controlled, and `in` walks the prototype chain — a call
+          // named "constructor"/"toString"/"__proto__" would otherwise match
+          // an inherited Object.prototype member and return a malformed
+          // TOOL_REMOVED (non-string value, dropped by JSON.stringify).
+          if (Object.hasOwn(REMOVED_TOOLS, name)) {
+            result = { error: "TOOL_REMOVED", message: REMOVED_TOOLS[name] };
+          } else {
+            result = { error: "VALIDATION_ERROR", message: `Unknown tool: ${name}` };
+          }
       }
     } catch (e: unknown) {
       result = { error: "INGEST_ERROR", message: String(e), details: e };

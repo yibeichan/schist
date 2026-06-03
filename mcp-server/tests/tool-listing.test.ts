@@ -1,4 +1,4 @@
-import { listAllTools } from "../src/tool-registry.js";
+import { listAllTools, REMOVED_TOOLS } from "../src/tool-registry.js";
 import type { VaultConfig } from "../src/types.js";
 
 function testConfig(): VaultConfig {
@@ -59,6 +59,34 @@ describe("listAllTools — unconditional tool exposure", () => {
     // validateOwner in agent-identity.ts is the real authorization layer.
     const names = listAllTools(testConfig()).map((t) => t.name);
     expect(names).not.toContain("request_capabilities");
+  });
+
+  test("removed tools have a tombstone and are not also listed as live", () => {
+    // A removed tool must guide callers (stale skills, cached clients) instead
+    // of hitting the bare "Unknown tool" path — but it must never reappear in
+    // the live listing, or clients would try to call a dead tool.
+    const names = listAllTools(testConfig()).map((t) => t.name);
+    for (const removed of Object.keys(REMOVED_TOOLS)) {
+      expect(names).not.toContain(removed);
+      expect(REMOVED_TOOLS[removed].length).toBeGreaterThan(0);
+    }
+    // request_capabilities specifically: the symptom that motivated the
+    // tombstone was skills calling it and getting an unactionable error.
+    expect(REMOVED_TOOLS).toHaveProperty("request_capabilities");
+  });
+
+  test("tombstone lookup must use own-property check, not `in`", () => {
+    // The router dispatches an unknown tool to the REMOVED_TOOLS tombstone.
+    // `name` is client-controlled, so `name in REMOVED_TOOLS` would match
+    // inherited Object.prototype members ("constructor", "toString",
+    // "__proto__", "valueOf", "hasOwnProperty") and return a malformed
+    // TOOL_REMOVED (the value is a function, dropped by JSON.stringify).
+    // index.ts must use Object.hasOwn; this guards the contract it relies on.
+    for (const polluted of ["constructor", "toString", "__proto__", "valueOf", "hasOwnProperty"]) {
+      expect(polluted in REMOVED_TOOLS).toBe(true); // the footgun
+      expect(Object.hasOwn(REMOVED_TOOLS, polluted)).toBe(false); // the fix
+    }
+    expect(Object.hasOwn(REMOVED_TOOLS, "request_capabilities")).toBe(true);
   });
 
   test("vault-write tools mark `owner` as required in inputSchema (#63)", () => {
