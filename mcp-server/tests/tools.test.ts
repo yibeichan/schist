@@ -592,14 +592,32 @@ describe("triggerSpokePush", () => {
     process.env.PATH = `${stubDir}:${origPath}`;
     try {
       triggerSpokePush(vault);
-      await new Promise((r) => setTimeout(r, 200));
-      triggerSpokePush(vault);
-      await new Promise((r) => setTimeout(r, 200));
+      // The spawn path starts after an async fs.access() check; under full
+      // suite load, fixed sleeps can fire the second trigger before the first
+      // child has even populated/cleared the in-flight map. Poll the observable
+      // spawn count instead so this test verifies behavior, not scheduler luck.
+      let count = 0;
+      for (let i = 0; i < 60; i++) {
+        try {
+          const content = await fs.readFile(countFile, "utf-8");
+          count = content.split("\n").filter(Boolean).length;
+          if (count >= 1) break;
+        } catch {
+          // not spawned yet
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(count).toBe(1);
 
-      const content = await fs.readFile(countFile, "utf-8");
-      const count = content.split("\n").filter(Boolean).length;
-      // The first push exited before the second was fired, so the in-flight
-      // marker was cleared; the second push DOES spawn.
+      for (let i = 0; i < 60; i++) {
+        triggerSpokePush(vault);
+        await new Promise((r) => setTimeout(r, 50));
+        const content = await fs.readFile(countFile, "utf-8");
+        count = content.split("\n").filter(Boolean).length;
+        if (count >= 2) break;
+      }
+      // After the first push exits and clears the in-flight marker, a later
+      // trigger spawns a fresh push.
       expect(count).toBe(2);
     } finally {
       process.env.PATH = origPath;
