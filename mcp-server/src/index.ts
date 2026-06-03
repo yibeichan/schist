@@ -14,6 +14,8 @@ import {
   list_concepts,
   query_graph,
   get_context,
+  sync_status,
+  sync_retry,
   loadVaultConfig,
   // Memory V2
   add_memory,
@@ -115,6 +117,12 @@ async function main() {
           break;
         case "get_context":
           result = await get_context(vaultRoot, toolArgs as Parameters<typeof get_context>[1]);
+          break;
+        case "sync_status":
+          result = await sync_status(vaultRoot);
+          break;
+        case "sync_retry":
+          result = await sync_retry(vaultRoot, toolArgs as Parameters<typeof sync_retry>[1]);
           break;
         case "search_memory":
           result = await search_memory(vaultRoot, toolArgs as Parameters<typeof search_memory>[1]);

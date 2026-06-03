@@ -30,6 +30,8 @@ describe("listAllTools — unconditional tool exposure", () => {
       "search_memory",
       "search_notes",
       "set_agent_state",
+      "sync_retry",
+      "sync_status",
     ].sort();
 
     expect(names).toEqual(expected);
@@ -48,6 +50,7 @@ describe("listAllTools — unconditional tool exposure", () => {
       "set_agent_state",
       "delete_agent_state",
       "add_concept_alias",
+      "sync_retry",
     ]) {
       expect(names).toContain(tool);
     }

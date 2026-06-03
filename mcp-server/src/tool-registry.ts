@@ -22,6 +22,14 @@ export function makeReadTools(config: VaultConfig) {
       },
     },
     {
+      name: "sync_status",
+      description: "Read spoke/hub sync state. Fetches with a bounded timeout, reports ahead/behind counts, working-tree cleanliness, and any last background sync error. Does not require owner identity.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {},
+      },
+    },
+    {
       name: "search_notes",
       description: "Full-text search across all notes in the knowledge graph. Returns id+title+snippet rows; call `get_note` for the full body. Paginated: when results are capped, the response includes a `cursor` token — echo it back on the next call to advance, or refine the query. Identical queries within 300s without a cursor are refused with CURSOR_REQUIRED.",
       inputSchema: {
@@ -197,6 +205,18 @@ export function makeWriteTools(config: VaultConfig) {
           context: { type: "string" },
         },
         required: ["owner", "source", "target", "type"],
+      },
+    },
+    {
+      name: "sync_retry",
+      description: "Retry spoke-to-hub sync. owner is identity-gated. mode='push-only' retries push without pulling or rebasing; mode='pull-rebase-push' pulls with rebase then pushes. Never force-pushes.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          owner: { type: "string", description: "Agent identity. Required; validated against SCHIST_ALLOWED_AGENTS or SCHIST_AGENT_ID." },
+          mode: { type: "string", enum: ["push-only", "pull-rebase-push"] },
+        },
+        required: ["owner", "mode"],
       },
     },
     {

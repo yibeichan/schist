@@ -81,6 +81,34 @@ export interface GetContextResponse {
   verboseNote?: string;
 }
 
+export interface SyncStatusResponse {
+  is_spoke: boolean;
+  spoke_head: string;
+  hub_head: string | null;
+  ahead: number | null;
+  behind: number | null;
+  last_sync_error: {
+    timestamp?: string;
+    contents: string;
+  } | null;
+  clean_working_tree: boolean;
+  hub_error?: string;
+}
+
+export interface SyncRetryResponse {
+  ok: boolean;
+  mode: "push-only" | "pull-rebase-push";
+  phase: "await-in-flight" | "pull-rebase" | "push";
+  retriable: boolean;
+  reason?: string;
+  message: string;
+  code?: number;
+  signal?: NodeJS.Signals;
+  timed_out?: boolean;
+  cleared_last_sync_error?: boolean;
+  awaited_in_flight?: boolean;
+}
+
 export interface VaultConfig {
   name: string;
   path: string;
