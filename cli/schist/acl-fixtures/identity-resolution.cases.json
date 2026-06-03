@@ -1,0 +1,48 @@
+[
+  {
+    "name": "schist_identity_wins",
+    "env": {
+      "SCHIST_IDENTITY": "dragonfly",
+      "GL_USER": "gitolite-user"
+    },
+    "fallback": "agent-owner",
+    "hubIdentity": "dragonfly",
+    "mcpIdentity": "dragonfly"
+  },
+  {
+    "name": "gl_user_fallback",
+    "env": {
+      "GL_USER": "gitolite-user"
+    },
+    "fallback": "agent-owner",
+    "hubIdentity": "gitolite-user",
+    "mcpIdentity": "gitolite-user"
+  },
+  {
+    "name": "mcp_owner_fallback_is_intentional_asymmetry",
+    "env": {},
+    "fallback": "agent-owner",
+    "hubIdentity": null,
+    "mcpIdentity": "agent-owner"
+  },
+  {
+    "name": "empty_schist_identity_falls_through_to_gl_user",
+    "env": {
+      "SCHIST_IDENTITY": "",
+      "GL_USER": "gitolite-user"
+    },
+    "fallback": "agent-owner",
+    "hubIdentity": "gitolite-user",
+    "mcpIdentity": "gitolite-user"
+  },
+  {
+    "name": "empty_env_values_fall_through",
+    "env": {
+      "SCHIST_IDENTITY": "",
+      "GL_USER": ""
+    },
+    "fallback": "agent-owner",
+    "hubIdentity": null,
+    "mcpIdentity": "agent-owner"
+  }
+]

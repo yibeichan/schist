@@ -348,6 +348,46 @@ def check_spoke(vault_path: Optional[str]) -> CheckResult:
                            "Re-run `schist init --spoke`.")
 
 
+def _resolve_push_identity_env() -> Optional[str]:
+    """Mirror hub pre-receive identity env precedence.
+
+    Spoke pushes are authorized by the hub's pre-receive hook, which reads the
+    machine/spoke identity from SCHIST_IDENTITY first, then GL_USER. Empty
+    strings fall through the same way Python's `or` does in pre_receive.py.
+    """
+    return os.environ.get("SCHIST_IDENTITY") or os.environ.get("GL_USER") or None
+
+
+def check_spoke_identity_env(vault_path: Optional[str]) -> CheckResult:
+    """Fail fast when a spoke cannot identify itself to the hub.
+
+    MCP's local ACL check can fall back to the agent owner for UX, but the hub
+    cannot: a spoke push with neither SCHIST_IDENTITY nor GL_USER set is
+    rejected by pre_receive.py. Doctor surfaces that launcher/config problem
+    before agents accumulate local commits that only fail on background push.
+    """
+    label = "Spoke identity"
+    if not vault_path:
+        return CheckResult("SKIP", label, "skipped (no vault)")
+    if not is_spoke(vault_path):
+        return CheckResult("SKIP", label, "not a spoke vault")
+
+    identity = _resolve_push_identity_env()
+    if identity:
+        return CheckResult("PASS", label, f"push identity resolves to '{identity}'")
+
+    return CheckResult(
+        "FAIL",
+        label,
+        "spoke push identity is not configured; hub pushes will be rejected",
+        (
+            "Set SCHIST_IDENTITY in the MCP/launcher environment, or GL_USER "
+            "for gitolite-compatible deployments. This must be the spoke's "
+            "machine identity from vault.yaml, not just the MCP owner."
+        ),
+    )
+
+
 def check_spoke_acl_drift(vault_path: Optional[str]) -> CheckResult:
     """Flag schist.yaml directories not present in this spoke's hub write grant.
 
@@ -924,6 +964,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_hooks_path(vault_path),
         check_ingest_available(vault_path),
         check_spoke(vault_path),
+        check_spoke_identity_env(vault_path),
         check_spoke_acl_drift(vault_path),
         check_mcp_config(vault_path),
         check_mcp_schema_alignment(vault_path),

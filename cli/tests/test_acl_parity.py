@@ -8,8 +8,10 @@ from pathlib import Path
 import pytest
 
 from schist.acl import parse_vault_yaml, ACLError
+from schist.pre_receive import resolve_identity
 
 FIXTURES_DIR = Path(__file__).parent.parent / "schist" / "acl-fixtures"
+IDENTITY_CASES = json.loads((FIXTURES_DIR / "identity-resolution.cases.json").read_text())
 
 
 def _fixture_pairs() -> list:
@@ -51,3 +53,13 @@ def test_acl_matches_fixture(yaml_path: Path, cases_path: Path) -> None:
             f"{yaml_path.name}: identity={case['identity']!r} "
             f"scope={case['scope']!r} expected {case['canWrite']} got {actual}"
         )
+
+
+@pytest.mark.parametrize("case", IDENTITY_CASES, ids=[c["name"] for c in IDENTITY_CASES])
+def test_hub_identity_resolution_matches_fixture(case, monkeypatch) -> None:
+    monkeypatch.delenv("SCHIST_IDENTITY", raising=False)
+    monkeypatch.delenv("GL_USER", raising=False)
+    for key, value in case["env"].items():
+        monkeypatch.setenv(key, value)
+
+    assert resolve_identity() == case["hubIdentity"]
