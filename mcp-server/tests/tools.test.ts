@@ -789,12 +789,13 @@ describe("sync error sentinel", () => {
       "hub: file:///nonexistent\nidentity: test\nscope: notes\n"
     );
 
-    // Stub that runs long enough for the test to send SIGKILL.
+    // Stub that kills itself, so the spawned child exits via signal without
+    // relying on platform-specific `pkill -f <script path>` matching.
     const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
     const stub = path.join(stubDir, "schist");
     await fs.writeFile(
       stub,
-      "#!/bin/sh\nsleep 10\n",
+      "#!/bin/sh\nkill -KILL $$\n",
       { mode: 0o755 },
     );
 
@@ -802,18 +803,6 @@ describe("sync error sentinel", () => {
     process.env.PATH = `${stubDir}:${origPath}`;
     try {
       triggerSpokePush(vault);
-      // Give the spawn a moment to launch, then SIGKILL it via pgrep.
-      await new Promise((r) => setTimeout(r, 200));
-      const { execFile } = await import("child_process");
-      const exec = promisify(execFile);
-      try {
-        // pkill on the temp stub's full path — bounded to our process group.
-        await exec("pkill", ["-9", "-f", stub]);
-      } catch {
-        // pkill returns 1 if no processes matched — that means the spawn
-        // hadn't started yet, which is fine; the test below will then
-        // skip-equivalent (no sentinel) and we'll just retry the check.
-      }
       // Poll for the sentinel.
       const sentinelPath = path.join(vault, ".schist", "last-sync-error");
       let found = false;
@@ -1340,4 +1329,3 @@ access:
     }
   }, 30000);
 });
-

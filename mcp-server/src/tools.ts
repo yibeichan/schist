@@ -361,23 +361,15 @@ export function triggerSpokePush(vaultRoot: string): void {
       ["--vault", vaultRoot, "sync", "push"],
       { cwd: vaultRoot, stdio: "ignore", env: process.env, detached: true }
     );
-    child.unref();
 
     // Clean up the in-flight marker on terminal events. Wrap in helper so
-    // both error and exit can call it idempotently — handlers can fire in
-    // either order depending on the failure mode.
+    // error, exit, and close handlers stay idempotent — handlers can fire in
+    // different orders depending on the failure mode.
     const cleanup = (): void => { inFlightSpokePushes.delete(vaultRoot); };
-
-    child.on("error", (err) => {
-      cleanup();
-      // spawn error = schist binary not on PATH, or permission denied.
-      // Silent by default is a footgun — write a sentinel so the next
-      // get_context (or write-tool response — see readSyncWarning) can
-      // surface it. Also log for operators watching stderr.
-      console.error("[schist] spoke push failed:", err);
-      writeSyncError(vaultRoot, `push spawn failed: ${err.message}`);
-    });
-    child.on("exit", (code, signal) => {
+    let terminalHandled = false;
+    const handleTerminal = (code: number | null, signal: NodeJS.Signals | null): void => {
+      if (terminalHandled) return;
+      terminalHandled = true;
       cleanup();
       if (code !== null && code !== 0) {
         writeSyncError(vaultRoot, `push exited with code ${code}`);
@@ -387,7 +379,21 @@ export function triggerSpokePush(vaultRoot: string): void {
         // push died silently and the next get_context would report "healthy."
         writeSyncError(vaultRoot, `push killed by signal ${signal}`);
       }
+    };
+
+    child.on("error", (err) => {
+      terminalHandled = true;
+      cleanup();
+      // spawn error = schist binary not on PATH, or permission denied.
+      // Silent by default is a footgun — write a sentinel so the next
+      // get_context (or write-tool response — see readSyncWarning) can
+      // surface it. Also log for operators watching stderr.
+      console.error("[schist] spoke push failed:", err);
+      writeSyncError(vaultRoot, `push spawn failed: ${err.message}`);
     });
+    child.on("exit", handleTerminal);
+    child.on("close", handleTerminal);
+    child.unref();
   }).catch(() => {
     // Not a spoke vault — silent no-op
   });
