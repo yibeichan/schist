@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `schist doctor` gained a `Spoke identity` fail-fast check (#164): spoke vaults now FAIL when neither `SCHIST_IDENTITY` nor `GL_USER` is set, because the hub pre-receive hook will reject background pushes even if MCP's local ACL UX check can fall back to the agent owner. A shared `identity-resolution.cases.json` fixture now pins the hub (`resolve_identity`) and MCP (`resolveAclIdentity`) precedence chain across Python and TypeScript, including the intentional MCP-only owner fallback.
 - MCP gained `sync_status` and `sync_retry` tools (#135). `sync_status` is read-only and reports spoke/hub heads, ahead/behind counts, working-tree cleanliness, and the last background sync sentinel with bounded git calls. `sync_retry` is identity-gated, supports explicit `push-only` and `pull-rebase-push` modes, awaits any in-flight background push, never force-pushes, aborts conflicted rebases, treats ACL/pre-receive rejection as non-retriable, and clears `.schist/last-sync-error` only after a successful push when the sentinel has not changed.
 
+### Fixed
+- `schist sync push` now stages existing canonical content directories for logical `scope: global` instead of trying `git add global/`, and now fails explicitly if staging the configured scope fails. Fixes the misleading "Nothing to push" path when global-scope spokes had dirty tracked files under directories like `concepts/` (#79).
+
 ### Added
 - `confidence` field on docs schema and `create_note` MCP tool. Optional enum (`low | medium | high`); omitted from frontmatter when not declared. Ingestion populates `docs.confidence` (NULL when undeclared — deliberately distinct from "agent said medium"). `search_notes` accepts an optional `confidence` filter that selects matching docs and excludes NULL-confidence rows. `get_note` returns the field when set, omits it when NULL. Closes #69.
 

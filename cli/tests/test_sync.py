@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -491,6 +492,22 @@ class TestSyncPush:
         mock_push.assert_called_once()
         assert "Pushed to hub" in capsys.readouterr().out
 
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=True)
+    @patch("schist.sync.git_ops.stage_scope_files", return_value=(False, "fatal: pathspec 'global/' did not match"))
+    def test_stage_failure_is_reported(self, mock_stage, mock_changes, tmp_path, capsys):
+        from schist.sync import sync_push
+
+        vault = _make_spoke(tmp_path)
+        args = MagicMock()
+
+        with pytest.raises(SystemExit) as exc:
+            sync_push(args, vault, "db.sqlite")
+
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "failed to stage scope" in err
+        assert "pathspec" in err
+
     @patch("schist.sync.git_ops.push", return_value=(False, "REJECTED: push contains out-of-scope writes"))
     @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
     @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
@@ -515,6 +532,70 @@ class TestSyncPush:
             sync_push(args, vault, "db.sqlite")
         err = capsys.readouterr().err
         assert "unreachable" in err.lower() or "saved locally" in err.lower()
+
+
+class TestStageScopeFiles:
+    def test_global_scope_stages_existing_canonical_dirs(self, tmp_path):
+        from schist import git_ops
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        subprocess.run(["git", "init"], cwd=vault, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=vault, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=vault, check=True)
+        (vault / "concepts").mkdir()
+        (vault / "notes").mkdir()
+        (vault / "concepts" / "existing.md").write_text("before\n", encoding="utf-8")
+        subprocess.run(["git", "add", "concepts/existing.md"], cwd=vault, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=vault, check=True, capture_output=True, text=True)
+
+        (vault / "concepts" / "existing.md").write_text("after\n", encoding="utf-8")
+
+        ok, output = git_ops.stage_scope_files(str(vault), "global")
+
+        assert ok, output
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=vault, check=True, capture_output=True, text=True,
+        ).stdout.splitlines()
+        assert staged == ["concepts/existing.md"]
+
+    def test_global_scope_with_no_content_dirs_is_noop_success(self, tmp_path):
+        from schist import git_ops
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        subprocess.run(["git", "init"], cwd=vault, check=True, capture_output=True, text=True)
+
+        ok, output = git_ops.stage_scope_files(str(vault), "global")
+
+        assert ok is True
+        assert output == ""
+
+    def test_global_scope_stages_deleted_tracked_file(self, tmp_path):
+        from schist import git_ops
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        subprocess.run(["git", "init"], cwd=vault, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=vault, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=vault, check=True)
+        (vault / "concepts").mkdir()
+        tracked = vault / "concepts" / "gone.md"
+        tracked.write_text("before\n", encoding="utf-8")
+        subprocess.run(["git", "add", "concepts/gone.md"], cwd=vault, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=vault, check=True, capture_output=True, text=True)
+        tracked.unlink()
+        (vault / "concepts").rmdir()
+
+        ok, output = git_ops.stage_scope_files(str(vault), "global")
+
+        assert ok, output
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-status"],
+            cwd=vault, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        assert staged == "D\tconcepts/gone.md"
 
 
 # ---------------------------------------------------------------------------

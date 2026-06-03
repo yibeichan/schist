@@ -1,6 +1,15 @@
 """Git operations for vault commits."""
 
+from pathlib import Path
 import subprocess
+
+import yaml
+
+
+GLOBAL_SCOPE_FALLBACK_DIRS = [
+    "notes", "papers", "concepts",
+    "research", "decisions", "ops", "projects", "logs",
+]
 
 
 def commit(vault_path: str, message: str, files: list[str] | None = None) -> tuple[bool, str]:
@@ -151,11 +160,50 @@ def stage_scope_files(vault_path: str, scope: str) -> tuple[bool, str]:
     schist.yaml) are NOT staged — spokes should not modify those.
     """
     try:
+        if scope == "global":
+            targets = _global_scope_targets(vault_path)
+            if not targets:
+                return True, ""
+            add_args = ['git', 'add', '--'] + targets
+        else:
+            add_args = ['git', 'add', '--', scope.rstrip('/') + '/']
+
         result = subprocess.run(
-            ['git', 'add', scope + '/'],
+            add_args,
             cwd=vault_path, capture_output=True, text=True,
         )
         output = result.stdout + result.stderr
         return result.returncode == 0, output.strip()
     except subprocess.CalledProcessError as e:
         return False, (e.stdout or '') + (e.stderr or '')
+
+
+def _global_scope_dirs() -> list[str]:
+    """Return canonical content directories for logical `global` scope."""
+    default_yaml = Path(__file__).resolve().parent / "default.yaml"
+    try:
+        raw = yaml.safe_load(default_yaml.read_text(encoding="utf-8"))
+        dirs = raw.get("directories") if isinstance(raw, dict) else None
+        if isinstance(dirs, dict):
+            return [str(v).rstrip("/") for v in dirs.values()]
+        if isinstance(dirs, list):
+            return [str(v).rstrip("/") for v in dirs]
+    except Exception:
+        pass
+    return GLOBAL_SCOPE_FALLBACK_DIRS
+
+
+def _global_scope_targets(vault_path: str) -> list[str]:
+    targets: list[str] = []
+    for d in _global_scope_dirs():
+        target = f"{d}/"
+        if (Path(vault_path) / d).exists():
+            targets.append(target)
+            continue
+        tracked = subprocess.run(
+            ['git', 'ls-files', '--', target],
+            cwd=vault_path, capture_output=True, text=True,
+        )
+        if tracked.returncode == 0 and tracked.stdout.strip():
+            targets.append(target)
+    return targets
