@@ -6,6 +6,17 @@ import { join as pathJoin, dirname as pathDirname } from "path";
 import { fileURLToPath } from "url";
 import { scopeMatches, canWrite, resolveAclIdentity, type VaultAcl, loadVaultAcl, deriveScope } from "../src/vault-acl.js";
 
+// Fixtures live at <repo>/cli/schist/acl-fixtures/. The test file is at
+// <repo>/mcp-server/tests/vault-acl.test.ts → walk up two directories.
+const FIXTURES_DIR_TS = pathJoin(
+  pathDirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "cli",
+  "schist",
+  "acl-fixtures",
+);
+
 describe("scopeMatches", () => {
   test("exact match returns true", () => {
     expect(scopeMatches(["notes"], "notes")).toBe(true);
@@ -72,21 +83,25 @@ describe("resolveAclIdentity", () => {
     else process.env.GL_USER = savedGlUser;
   });
 
-  test("prefers SCHIST_IDENTITY over GL_USER and fallback", () => {
-    process.env.SCHIST_IDENTITY = "dragonfly";
-    process.env.GL_USER = "gl-user";
-    expect(resolveAclIdentity("claude-desktop")).toBe("dragonfly");
-  });
-  test("falls back to GL_USER when SCHIST_IDENTITY is unset", () => {
-    process.env.GL_USER = "gl-user";
-    expect(resolveAclIdentity("claude-desktop")).toBe("gl-user");
-  });
-  test("falls back to owner when neither env var is set", () => {
-    expect(resolveAclIdentity("claude-desktop")).toBe("claude-desktop");
-  });
-  test("empty-string SCHIST_IDENTITY falls through (matches Python `or`)", () => {
-    process.env.SCHIST_IDENTITY = "";
-    expect(resolveAclIdentity("claude-desktop")).toBe("claude-desktop");
+  type IdentityCase = {
+    name: string;
+    env: Record<string, string>;
+    fallback: string;
+    mcpIdentity: string;
+  };
+
+  const identityCases = JSON.parse(
+    readFileSyncForFixtures(
+      pathJoin(FIXTURES_DIR_TS, "identity-resolution.cases.json"),
+      "utf-8",
+    ),
+  ) as IdentityCase[];
+
+  test.each(identityCases)("$name", (c) => {
+    for (const [key, value] of Object.entries(c.env)) {
+      process.env[key] = value;
+    }
+    expect(resolveAclIdentity(c.fallback)).toBe(c.mcpIdentity);
   });
 });
 
@@ -181,17 +196,6 @@ describe("deriveScope", () => {
     expect(deriveScope("notes/")).toBe("");
   });
 });
-
-// Fixtures live at <repo>/cli/schist/acl-fixtures/. The test file is at
-// <repo>/mcp-server/tests/vault-acl.test.ts → walk up two directories.
-const FIXTURES_DIR_TS = pathJoin(
-  pathDirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "cli",
-  "schist",
-  "acl-fixtures",
-);
 
 interface ParityCase {
   identity: string;

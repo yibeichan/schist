@@ -16,6 +16,13 @@ These are SHIPPED in the schist wheel as package data so the fixtures are
 available to consumers of the installed CLI. The TS side reads them via a
 relative path from the schist source tree.
 
+`identity-resolution.cases.json` is a standalone parity matrix for the
+hub-vs-MCP identity precedence chain. It is not paired with a vault.yaml
+fixture. Python asserts `pre_receive.resolve_identity()` returns
+`hubIdentity`; TypeScript asserts `resolveAclIdentity(fallback)` returns
+`mcpIdentity`. The one intentional asymmetry is the MCP-side owner fallback
+when neither `SCHIST_IDENTITY` nor `GL_USER` is set.
+
 ## Case-file shapes
 
 `<name>.cases.json` has one of two shapes:

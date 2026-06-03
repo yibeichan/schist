@@ -22,6 +22,7 @@ from schist.doctor import (
     check_post_commit_hook,
     check_python,
     check_schist_yaml,
+    check_spoke_identity_env,
     check_skill_tool_references,
     check_spoke,
     check_sqlite,
@@ -377,6 +378,65 @@ class TestCheckSpoke:
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="git", timeout=10)):
             r = check_spoke(str(tmp_path))
             assert r.status == "WARN"
+
+
+class TestCheckSpokeIdentityEnv:
+    def test_no_path(self):
+        r = check_spoke_identity_env(None)
+        assert r.status == "SKIP"
+
+    def test_not_spoke(self, tmp_path):
+        r = check_spoke_identity_env(str(tmp_path))
+        assert r.status == "SKIP"
+
+    def test_fails_on_spoke_without_identity_env(self, tmp_path, monkeypatch):
+        spoke_dir = tmp_path / ".schist"
+        spoke_dir.mkdir()
+        (spoke_dir / "spoke.yaml").write_text(yaml.dump({
+            "hub": "file:///fake",
+            "identity": "dragonfly",
+            "scope": "global",
+        }))
+        monkeypatch.delenv("SCHIST_IDENTITY", raising=False)
+        monkeypatch.delenv("GL_USER", raising=False)
+
+        r = check_spoke_identity_env(str(tmp_path))
+
+        assert r.status == "FAIL"
+        assert "hub pushes will be rejected" in r.message
+        assert r.fix and "SCHIST_IDENTITY" in r.fix and "GL_USER" in r.fix
+
+    def test_passes_with_schist_identity(self, tmp_path, monkeypatch):
+        spoke_dir = tmp_path / ".schist"
+        spoke_dir.mkdir()
+        (spoke_dir / "spoke.yaml").write_text(yaml.dump({
+            "hub": "file:///fake",
+            "identity": "dragonfly",
+            "scope": "global",
+        }))
+        monkeypatch.setenv("SCHIST_IDENTITY", "dragonfly")
+        monkeypatch.delenv("GL_USER", raising=False)
+
+        r = check_spoke_identity_env(str(tmp_path))
+
+        assert r.status == "PASS"
+        assert "dragonfly" in r.message
+
+    def test_empty_schist_identity_falls_through_to_gl_user(self, tmp_path, monkeypatch):
+        spoke_dir = tmp_path / ".schist"
+        spoke_dir.mkdir()
+        (spoke_dir / "spoke.yaml").write_text(yaml.dump({
+            "hub": "file:///fake",
+            "identity": "gitolite-user",
+            "scope": "global",
+        }))
+        monkeypatch.setenv("SCHIST_IDENTITY", "")
+        monkeypatch.setenv("GL_USER", "gitolite-user")
+
+        r = check_spoke_identity_env(str(tmp_path))
+
+        assert r.status == "PASS"
+        assert "gitolite-user" in r.message
 
 
 class TestCheckMcpConfig:
