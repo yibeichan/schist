@@ -428,7 +428,10 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
 
     # Auto-commit if there are uncommitted changes
     if git_ops.has_uncommitted_changes(vault_path):
-        git_ops.stage_scope_files(vault_path, config.scope)
+        ok, output = git_ops.stage_scope_files(vault_path, config.scope)
+        if not ok:
+            print(f"Error: failed to stage scope '{config.scope}': {output}", file=sys.stderr)
+            sys.exit(1)
 
         # Count staged files
         import subprocess
