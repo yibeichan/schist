@@ -250,6 +250,27 @@ function sanitizeSentinelContent(raw: string): string {
   return cleaned.length > 500 ? cleaned.slice(0, 500) + "…" : cleaned;
 }
 
+function parseSyncErrorText(sanitized: string): { timestamp?: string; contents: string } {
+  const match = sanitized.match(/^(\S+)\s+([\s\S]*)$/);
+  const timestamp = match?.[1]?.match(/^\d{4}-\d{2}-\d{2}T/) ? match[1] : undefined;
+  return { timestamp, contents: timestamp ? (match?.[2] ?? "") : sanitized };
+}
+
+function formatSyncErrorAge(timestamp?: string): string | undefined {
+  if (!timestamp) return undefined;
+  const then = Date.parse(timestamp);
+  if (!Number.isFinite(then)) return undefined;
+  const ageMs = Date.now() - then;
+  if (ageMs < 0) return "less than 1 minute ago";
+  const minutes = Math.floor(ageMs / 60_000);
+  if (minutes < 1) return "less than 1 minute ago";
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
 async function readSyncWarning(vaultRoot: string): Promise<string | undefined> {
   const sentinelPath = path.join(vaultRoot, SYNC_ERROR_SENTINEL);
   let rawText: string;
@@ -267,10 +288,13 @@ async function readSyncWarning(vaultRoot: string): Promise<string | undefined> {
   }
   const errText = sanitizeSentinelContent(rawText);
   if (!errText) return undefined;
+  const parsed = parseSyncErrorText(errText);
+  const age = formatSyncErrorAge(parsed.timestamp);
+  const ageClause = age ? ` Sync failed ${age}.` : "";
   // Descriptive phrasing (not imperative). Agents reading this on every
   // write should NOT abandon their current task to "acknowledge" — the
   // sentinel will be cleared the next time get_context runs anyway.
-  return `Recent background sync failure: ${errText}. Writes may not have reached the hub. \`sync_status\` reports divergence and \`sync_retry\` can retry the push; \`get_context\` clears this on its next call.`;
+  return `Recent background sync failure:${ageClause} ${parsed.contents}. Writes may not have reached the hub. \`sync_status\` reports divergence and \`sync_retry\` can retry the push; \`get_context\` clears this on its next call.`;
 }
 
 async function readSyncErrorState(vaultRoot: string): Promise<SyncStatusResponse["last_sync_error"] & { mtimeMs: number } | null> {
@@ -282,9 +306,7 @@ async function readSyncErrorState(vaultRoot: string): Promise<SyncStatusResponse
     ]);
     const sanitized = sanitizeSentinelContent(rawText);
     if (!sanitized) return null;
-    const match = sanitized.match(/^(\S+)\s+([\s\S]*)$/);
-    const timestamp = match?.[1]?.match(/^\d{4}-\d{2}-\d{2}T/) ? match[1] : undefined;
-    const contents = timestamp ? (match?.[2] ?? "") : sanitized;
+    const { timestamp, contents } = parseSyncErrorText(sanitized);
     return { timestamp, contents, mtimeMs: stat.mtimeMs };
   } catch {
     return null;
@@ -440,15 +462,55 @@ async function runCommand(
   });
 }
 
-function runSchistSync(vaultRoot: string, action: "pull" | "push", timeoutMs = SYNC_RETRY_TIMEOUT_MS): Promise<SyncCommandOutcome> {
+function runSchistSync(
+  vaultRoot: string,
+  action: "pull" | "push",
+  timeoutMs = SYNC_RETRY_TIMEOUT_MS,
+  force = false,
+): Promise<SyncCommandOutcome> {
+  const args = ["--vault", vaultRoot, "sync", action];
+  if (force) args.push("--force");
   return runCommand(
     schistCliBin("schist"),
-    ["--vault", vaultRoot, "sync", action],
+    args,
     { cwd: vaultRoot, timeoutMs, env: process.env, capture: true },
   );
 }
 
 const inFlightSpokePushes = new Map<string, Promise<SyncCommandOutcome>>();
+
+async function hasStaleGitOperation(vaultRoot: string): Promise<boolean> {
+  const gitDir = path.join(vaultRoot, ".git");
+  const sentinels = [
+    path.join(gitDir, "rebase-merge"),
+    path.join(gitDir, "rebase-apply"),
+    path.join(gitDir, "MERGE_HEAD"),
+    path.join(gitDir, "index.lock"),
+  ];
+  for (const sentinel of sentinels) {
+    try {
+      await fs.access(sentinel);
+      return true;
+    } catch {
+      // absent is healthy for this sentinel
+    }
+  }
+  return false;
+}
+
+function pushFailureMessage(outcome: SyncCommandOutcome): string | null {
+  if (outcome.error && outcome.code === undefined && outcome.signal === undefined && !outcome.timedOut) {
+    return `push spawn failed: ${outcome.error}`;
+  }
+  if (outcome.timedOut) return "push timed out after 30000ms";
+  if (outcome.code !== null && outcome.code !== undefined && outcome.code !== 0) {
+    return `push exited with code ${outcome.code}`;
+  }
+  if (outcome.code === null && outcome.signal) {
+    return `push killed by signal ${outcome.signal}`;
+  }
+  return null;
+}
 
 /** Fire-and-forget spoke push after a write. No-op for non-spoke vaults. */
 export function triggerSpokePush(vaultRoot: string): void {
@@ -462,26 +524,34 @@ export function triggerSpokePush(vaultRoot: string): void {
     // the synchronous check above and we beat them to fs.access. Cheap.
     if (inFlightSpokePushes.has(vaultRoot)) return;
 
-    const pushPromise = runCommand(
-      schistCliBin("schist"),
-      ["--vault", vaultRoot, "sync", "push"],
-      { cwd: vaultRoot, timeoutMs: SYNC_RETRY_TIMEOUT_MS, env: process.env, capture: false },
-    ).then(async (outcome) => {
-      if (outcome.error && outcome.code === undefined && outcome.signal === undefined && !outcome.timedOut) {
-        console.error("[schist] spoke push failed:", outcome.error);
-        await writeSyncError(vaultRoot, `push spawn failed: ${outcome.error}`);
-      } else if (outcome.timedOut) {
-        await writeSyncError(vaultRoot, "push timed out after 30000ms");
-      } else if (outcome.code !== null && outcome.code !== undefined && outcome.code !== 0) {
-        await writeSyncError(vaultRoot, `push exited with code ${outcome.code}`);
-      } else if (outcome.code === null && outcome.signal) {
-        // Signal-killed: SIGTERM / SIGKILL from OOM killer, parent shutdown
-        // sending TERM down the process group, etc. Without this branch the
-        // push died silently and the next get_context would report "healthy."
-        await writeSyncError(vaultRoot, `push killed by signal ${outcome.signal}`);
+    const pushPromise = (async () => {
+      const sentinelBeforePush = await readSyncErrorState(vaultRoot);
+      let outcome = await runCommand(
+        schistCliBin("schist"),
+        ["--vault", vaultRoot, "sync", "push"],
+        { cwd: vaultRoot, timeoutMs: SYNC_RETRY_TIMEOUT_MS, env: process.env, capture: false },
+      );
+
+      let failure = pushFailureMessage(outcome);
+      if (failure !== null && await hasStaleGitOperation(vaultRoot)) {
+        console.error("[schist] spoke push failed with stale git state; retrying with sync push --force");
+        const retry = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS, true);
+        if (retry.ok) {
+          outcome = retry;
+          failure = null;
+        } else {
+          outcome = retry;
+          failure = `push failed after stale-state cleanup retry: ${outcomeMessage(retry)}`;
+        }
+      }
+
+      if (failure === null) {
+        await clearSyncErrorIfUnchanged(vaultRoot, sentinelBeforePush?.mtimeMs ?? null);
+      } else {
+        await writeSyncError(vaultRoot, failure);
       }
       return outcome;
-    }).finally(() => {
+    })().finally(() => {
       inFlightSpokePushes.delete(vaultRoot);
     });
     inFlightSpokePushes.set(vaultRoot, pushPromise);

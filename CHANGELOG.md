@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP gained `sync_status` and `sync_retry` tools (#135). `sync_status` is read-only and reports spoke/hub heads, ahead/behind counts, working-tree cleanliness, and the last background sync sentinel with bounded git calls. `sync_retry` is identity-gated, supports explicit `push-only` and `pull-rebase-push` modes, awaits any in-flight background push, never force-pushes, aborts conflicted rebases, treats ACL/pre-receive rejection as non-retriable, and clears `.schist/last-sync-error` only after a successful push when the sentinel has not changed.
 
 ### Fixed
+- `schist sync` gained stale git-operation recovery for spoke pushes (#143). `sync pull` still self-heals leftover rebase state, and `sync push --force` / `sync --force` now clears stale rebase, merge, and `.git/index.lock` state before retrying. MCP background `triggerSpokePush` detects stale git state after a failed push, retries once with `sync push --force`, clears an unchanged `last-sync-error` sentinel after successful pushes, and write-tool `syncWarning` messages now include the sentinel age.
 - `schist sync push` now stages existing canonical content directories for logical `scope: global` instead of trying `git add global/`, and now fails explicitly if staging the configured scope fails. Fixes the misleading "Nothing to push" path when global-scope spokes had dirty tracked files under directories like `concepts/` (#79).
 
 ### Added
