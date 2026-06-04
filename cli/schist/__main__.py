@@ -88,9 +88,25 @@ def main():
 
     # sync
     p_sync = sub.add_parser('sync', help='Sync spoke vault with hub')
+    p_sync.add_argument(
+        '--force', action='store_true',
+        help='Clear stale git rebase/merge/index-lock state before syncing',
+    )
+    p_sync.add_argument(
+        '--pull', action='store_true',
+        help='With --force and no subcommand, pull before pushing',
+    )
     sync_sub = p_sync.add_subparsers(dest='sync_action')
-    sync_sub.add_parser('pull', help='Pull updates from hub')
-    sync_sub.add_parser('push', help='Push local changes to hub')
+    p_sync_pull = sync_sub.add_parser('pull', help='Pull updates from hub')
+    p_sync_pull.add_argument(
+        '--force', action='store_true', default=argparse.SUPPRESS,
+        help='Clear stale git rebase/merge/index-lock state before pulling',
+    )
+    p_sync_push = sync_sub.add_parser('push', help='Push local changes to hub')
+    p_sync_push.add_argument(
+        '--force', action='store_true', default=argparse.SUPPRESS,
+        help='Clear stale git rebase/merge/index-lock state before pushing',
+    )
 
     # hooks
     p_hooks = sub.add_parser('hooks', help='Manage installed git hooks')
@@ -199,8 +215,12 @@ def main():
             sync.sync_pull(args, vault_path, db_path)
         elif args.sync_action == 'push':
             sync.sync_push(args, vault_path, db_path)
+        elif args.force:
+            if args.pull:
+                sync.sync_pull(args, vault_path, db_path)
+            sync.sync_push(args, vault_path, db_path)
         else:
-            print('Usage: schist sync {pull|push}', file=sys.stderr)
+            print('Usage: schist sync [--force [--pull]] {pull|push}', file=sys.stderr)
             sys.exit(1)
         sys.exit(0)
 

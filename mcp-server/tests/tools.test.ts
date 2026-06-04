@@ -624,6 +624,56 @@ describe("triggerSpokePush", () => {
       await fs.rm(stubDir, { recursive: true, force: true });
     }
   }, 10000);
+
+  test("stale git state triggers one forced background push retry (#143)", async () => {
+    const vault = await makeTempVault();
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, ".schist", "spoke.yaml"),
+      "hub: file:///nonexistent\nidentity: test\nscope: notes\n"
+    );
+
+    const logPath = path.join(vault, ".schist", "push-log");
+    const sentinelPath = path.join(vault, ".schist", "last-sync-error");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const stub = path.join(stubDir, "schist");
+    await fs.writeFile(
+      stub,
+      `#!/bin/sh
+echo "$@" >> "${logPath}"
+case "$*" in
+  *"--force"*) exit 0 ;;
+  *) mkdir -p "${path.join(vault, ".git", "rebase-merge")}"; exit 1 ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      triggerSpokePush(vault);
+      let lines: string[] = [];
+      for (let i = 0; i < 80; i++) {
+        try {
+          lines = (await fs.readFile(logPath, "utf-8")).trim().split("\n").filter(Boolean);
+          if (lines.length >= 2) break;
+        } catch {
+          // not spawned yet
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+
+      expect(lines).toEqual([
+        `--vault ${vault} sync push`,
+        `--vault ${vault} sync push --force`,
+      ]);
+      await expect(fs.access(sentinelPath)).rejects.toBeDefined();
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
 });
 
 describe("triggerIngestion — SCHIST_INGEST_BIN env override (#123)", () => {
@@ -1041,6 +1091,7 @@ describe("write-tool syncWarning surfacing (#120)", () => {
     expect(result.syncWarning).toBeDefined();
     expect(result.syncWarning).toContain("push exited with code 1");
     expect(result.syncWarning).toContain("Recent background sync failure");
+    expect(result.syncWarning).toMatch(/Sync failed .* ago/);
 
     // Sentinel is NOT cleared by write tools — get_context still owns that.
     const sentinelPath = path.join(vault, ".schist", "last-sync-error");

@@ -285,6 +285,113 @@ def _build_spoke_in_staging(
     _install_local_hooks(str(staging))
 
 
+def _run_git_cleanup(vault_path: str, args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=vault_path,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _cleanup_rebase_state(vault_path: str) -> None:
+    print("Aborting leftover rebase state...", file=sys.stderr)
+    abort = _run_git_cleanup(vault_path, ["rebase", "--abort"])
+    if abort.returncode == 0:
+        return
+
+    # --abort can fail if the rebase is in a weird state (e.g. git is
+    # still running, or an orphan rebase-merge without a HEAD ref). Try
+    # --quit, which drops rebase state without restoring HEAD.
+    quit_result = _run_git_cleanup(vault_path, ["rebase", "--quit"])
+    if quit_result.returncode == 0:
+        return
+
+    print(
+        "Error: could not clear rebase state automatically.\n"
+        f"  rebase --abort: {abort.stderr.strip()}\n"
+        f"  rebase --quit:  {quit_result.stderr.strip()}\n"
+        "  Manual fix: rm -rf .git/rebase-merge .git/rebase-apply",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _cleanup_merge_state(vault_path: str) -> None:
+    print("Aborting leftover merge state...", file=sys.stderr)
+    abort = _run_git_cleanup(vault_path, ["merge", "--abort"])
+    if abort.returncode == 0:
+        return
+
+    print(
+        "Error: could not clear merge state automatically.\n"
+        f"  merge --abort: {abort.stderr.strip()}\n"
+        "  Manual fix: inspect git status, resolve or abort the merge manually, then rerun sync.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _cleanup_stale_index_lock(vault_path: str) -> None:
+    lock_path = Path(vault_path) / ".git" / "index.lock"
+    if not lock_path.exists():
+        return
+    print("Removing stale git index.lock...", file=sys.stderr)
+    try:
+        lock_path.unlink()
+    except OSError as e:
+        print(
+            "Error: could not remove stale .git/index.lock automatically.\n"
+            f"  {e}\n"
+            "  Manual fix: ensure no git process is running, then remove .git/index.lock.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def cleanup_stale_git_state(vault_path: str, *, force: bool) -> None:
+    """Clear stale git operation sentinels before sync.
+
+    Rebase state is always cleaned because a killed `sync pull` leaves the
+    spoke permanently unusable until it is removed. Merge and index-lock cleanup
+    are gated behind --force: merge abort can touch the worktree, and lock files
+    should only be removed as an explicit recovery action. Under --force, remove
+    index.lock before aborting a merge so Git gets a fair chance to restore the
+    worktree. Never drop MERGE_* sentinels after abort failure; that can hide
+    unresolved merge content from later status/staging checks.
+    """
+    git_dir = Path(vault_path) / ".git"
+    rebase_present = any((git_dir / d).exists() for d in ("rebase-merge", "rebase-apply"))
+    if rebase_present:
+        _cleanup_rebase_state(vault_path)
+
+    merge_present = (git_dir / "MERGE_HEAD").exists()
+    index_lock_present = (git_dir / "index.lock").exists()
+    if index_lock_present:
+        if not force:
+            print(
+                "Error: git index.lock present. Run `schist sync --force` after "
+                "confirming no git process is active.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _cleanup_stale_index_lock(vault_path)
+
+    if merge_present:
+        if not force:
+            print(
+                "Error: merge in progress. Run `schist sync --force` after "
+                "confirming no manual merge is active.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _cleanup_merge_state(vault_path)
+
+
+def _force_enabled(args) -> bool:
+    return getattr(args, "force", False) is True
+
+
 def sync_pull(args, vault_path: str, db_path: str) -> None:
     """Pull updates from hub and rebuild SQLite index."""
     if not is_spoke(vault_path):
@@ -292,38 +399,7 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
         sys.exit(1)
 
     config = load_spoke_config(vault_path)
-
-    # Self-heal: a prior pull may have been SIGKILL'd mid-rebase (e.g. by the
-    # MCP server's 5s maybeSpokePull timeout). Detect leftover rebase state
-    # and abort before starting a fresh pull. Without this, every subsequent
-    # sync fails with "rebase in progress" until manual cleanup.
-    rebase_present = any(
-        (Path(vault_path) / d).exists()
-        for d in (".git/rebase-merge", ".git/rebase-apply")
-    )
-    if rebase_present:
-        print("Aborting leftover rebase state...", file=sys.stderr)
-        abort = subprocess.run(
-            ["git", "rebase", "--abort"],
-            cwd=vault_path, capture_output=True, text=True,
-        )
-        if abort.returncode != 0:
-            # --abort can fail if the rebase is in a weird state (e.g. git is
-            # still running, or an orphan rebase-merge without a HEAD ref).
-            # Try --quit, which drops rebase state without restoring HEAD.
-            quit_result = subprocess.run(
-                ["git", "rebase", "--quit"],
-                cwd=vault_path, capture_output=True, text=True,
-            )
-            if quit_result.returncode != 0:
-                print(
-                    "Error: could not clear rebase state automatically.\n"
-                    f"  rebase --abort: {abort.stderr.strip()}\n"
-                    f"  rebase --quit:  {quit_result.stderr.strip()}\n"
-                    "  Manual fix: rm -rf .git/rebase-merge .git/rebase-apply",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+    cleanup_stale_git_state(vault_path, force=_force_enabled(args))
 
     print(f"Pulling from hub as {config.identity}...")
 
@@ -425,6 +501,7 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
         sys.exit(1)
 
     config = load_spoke_config(vault_path)
+    cleanup_stale_git_state(vault_path, force=_force_enabled(args))
 
     # Auto-commit if there are uncommitted changes
     if git_ops.has_uncommitted_changes(vault_path):

@@ -533,6 +533,102 @@ class TestSyncPush:
         err = capsys.readouterr().err
         assert "unreachable" in err.lower() or "saved locally" in err.lower()
 
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_push_blocks_index_lock_without_force(self, mock_changes, tmp_path, capsys):
+        from schist.sync import sync_push
+
+        vault = _make_spoke(tmp_path)
+        (Path(vault) / ".git" / "index.lock").write_text("")
+        args = MagicMock(force=False)
+
+        with pytest.raises(SystemExit):
+            sync_push(args, vault, "db.sqlite")
+
+        assert "index.lock" in capsys.readouterr().err
+
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=False)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_push_force_removes_index_lock(self, mock_changes, mock_unpushed, tmp_path, capsys):
+        from schist.sync import sync_push
+
+        vault = _make_spoke(tmp_path)
+        lock = Path(vault) / ".git" / "index.lock"
+        lock.write_text("")
+        args = MagicMock(force=True)
+
+        sync_push(args, vault, "db.sqlite")
+
+        assert not lock.exists()
+        assert "Removing stale git index.lock" in capsys.readouterr().err
+
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=False)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    @patch("subprocess.run")
+    def test_push_force_aborts_merge_state(
+        self, mock_run, mock_changes, mock_unpushed, tmp_path, capsys
+    ):
+        from schist.sync import sync_push
+
+        vault = _make_spoke(tmp_path)
+        (Path(vault) / ".git" / "MERGE_HEAD").write_text("deadbeef\n")
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        args = MagicMock(force=True)
+
+        sync_push(args, vault, "db.sqlite")
+
+        calls = [call.args[0] for call in mock_run.call_args_list if call.args]
+        assert ["git", "merge", "--abort"] in calls
+        assert "Aborting leftover merge state" in capsys.readouterr().err
+
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=False)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    @patch("subprocess.run")
+    def test_push_force_removes_lock_before_merge_abort(
+        self, mock_run, mock_changes, mock_unpushed, tmp_path, capsys
+    ):
+        from schist.sync import sync_push
+
+        vault = _make_spoke(tmp_path)
+        git_dir = Path(vault) / ".git"
+        lock = git_dir / "index.lock"
+        lock.write_text("")
+        (git_dir / "MERGE_HEAD").write_text("deadbeef\n")
+
+        def merge_abort(args, **kwargs):
+            assert args == ["git", "merge", "--abort"]
+            assert not lock.exists()
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = merge_abort
+        args = MagicMock(force=True)
+
+        sync_push(args, vault, "db.sqlite")
+
+        err = capsys.readouterr().err
+        assert "Removing stale git index.lock" in err
+        assert "Aborting leftover merge state" in err
+
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    @patch("subprocess.run")
+    def test_push_force_keeps_merge_head_when_abort_fails(
+        self, mock_run, mock_changes, tmp_path, capsys
+    ):
+        from schist.sync import sync_push
+
+        vault = _make_spoke(tmp_path)
+        merge_head = Path(vault) / ".git" / "MERGE_HEAD"
+        merge_head.write_text("deadbeef\n")
+        mock_run.return_value = MagicMock(returncode=128, stdout="", stderr="fatal: unresolved merge")
+        args = MagicMock(force=True)
+
+        with pytest.raises(SystemExit):
+            sync_push(args, vault, "db.sqlite")
+
+        assert merge_head.exists()
+        err = capsys.readouterr().err
+        assert "could not clear merge state" in err
+        assert "resolve or abort the merge manually" in err
+
 
 class TestStageScopeFiles:
     def test_global_scope_stages_existing_canonical_dirs(self, tmp_path):
