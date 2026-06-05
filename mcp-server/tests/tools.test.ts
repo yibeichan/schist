@@ -802,6 +802,28 @@ describe("sync_status + sync_retry (#135)", () => {
     }
   }, 10000);
 
+  test("sync_retry clears unchanged unreadable sentinel after successful push", async () => {
+    const vault = await makeTempSpokeVault();
+    const sentinelPath = path.join(vault, ".schist", "last-sync-error");
+    await fs.mkdir(sentinelPath);
+
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const stub = path.join(stubDir, "schist");
+    await fs.writeFile(stub, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "push-only" }) as Record<string, unknown>;
+      expect(result.ok).toBe(true);
+      expect(result.cleared_last_sync_error).toBe(true);
+      await expect(fs.access(sentinelPath)).rejects.toBeDefined();
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
   test("sync_retry pull-rebase-push pulls before pushing", async () => {
     const vault = await makeTempSpokeVault();
     const logPath = path.join(vault, ".schist", "retry-log");
@@ -908,7 +930,7 @@ describe("sync_status + sync_retry (#135)", () => {
 });
 
 describe("sync error sentinel", () => {
-  test("get_context surfaces last-sync-error as syncWarning and clears it", async () => {
+  test("get_context surfaces last-sync-error as syncWarning without clearing it", async () => {
     const vault = await makeTempVault();
     await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
     const sentinelPath = path.join(vault, ".schist", "last-sync-error");
@@ -921,17 +943,13 @@ describe("sync error sentinel", () => {
     expect(result.syncWarning).toBeDefined();
     expect(result.syncWarning as string).toContain("push spawn failed");
 
-    // Sentinel should be cleared after surfacing
-    const cleared = await fs.access(sentinelPath).then(() => false).catch(() => true);
-    expect(cleared).toBe(true);
+    // Reading context is not proof that local commits reached the hub; only a
+    // successful push/retry clears the dirty sentinel.
+    const stillExists = await fs.access(sentinelPath).then(() => true).catch(() => false);
+    expect(stillExists).toBe(true);
   }, 10000);
 
-  test("get_context clears sentinel atomically via rename → read → unlink (#124)", async () => {
-    // Atomic clear verification: after get_context returns, the canonical
-    // sentinel path is gone (consumed by the rename). A concurrent reader
-    // wouldn't have observed a partially-unlinked state because the rename
-    // is a single POSIX syscall. Verifies the new contract that pre-#124
-    // get_context used readFile + unlink (two syscalls, TOCTOU window).
+  test("get_context leaves sentinel in place until sync retry clears it (#75)", async () => {
     const vault = await makeTempVault();
     await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
     const sentinelPath = path.join(vault, ".schist", "last-sync-error");
@@ -939,14 +957,8 @@ describe("sync error sentinel", () => {
 
     await get_context(vault, { depth: "minimal" });
 
-    // Canonical path is gone (rename consumed it; unlink finished cleanup).
     const stillExists = await fs.access(sentinelPath).then(() => true).catch(() => false);
-    expect(stillExists).toBe(false);
-
-    // No leftover `.consumed-*` tmp files in .schist/ either.
-    const dirents = await fs.readdir(path.join(vault, ".schist"));
-    const leftovers = dirents.filter(n => n.startsWith("last-sync-error.consumed-"));
-    expect(leftovers).toEqual([]);
+    expect(stillExists).toBe(true);
   });
 
   test("writeSyncError writes atomically via tmp + rename (#124)", async () => {
@@ -1063,22 +1075,20 @@ describe("sync error sentinel", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Write-tool sync-warning surfacing (#120)
+// Write-tool sync dirty blocking (#75)
 //
-// Write tools now read the .schist/last-sync-error sentinel and surface its
-// content as a `syncWarning` field on successful responses. Doesn't clear
-// the sentinel — get_context still owns clearing. The intent: write-heavy
-// sessions (e.g. distillation runs) that rarely call get_context will see
-// the warning on every write, instead of discovering the divergence at
-// session end.
+// Write tools read the .schist/last-sync-error sentinel before mutating and
+// fail fast with SYNC_DIRTY. This prevents write-heavy sessions from adding
+// more local commits while the spoke is already known to be diverged.
 // ---------------------------------------------------------------------------
 
-describe("write-tool syncWarning surfacing (#120)", () => {
-  test("create_note response includes syncWarning when sentinel exists", async () => {
-    const vault = await makeTempVault();
+describe("write-tool sync dirty blocking (#75)", () => {
+  test("create_note returns SYNC_DIRTY when sentinel exists", async () => {
+    const vault = await makeTempSpokeVault();
     await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    const sentinelPath = path.join(vault, ".schist", "last-sync-error");
     await fs.writeFile(
-      path.join(vault, ".schist", "last-sync-error"),
+      sentinelPath,
       "2026-05-22T23:06:22.980Z push exited with code 1\n",
     );
 
@@ -1086,42 +1096,49 @@ describe("write-tool syncWarning surfacing (#120)", () => {
       vault,
       { owner: TEST_AGENT, title: "Test sync surfacing", body: "body" },
       await loadVaultConfig(vault),
-    )) as { id: string; path: string; commitSha: string; syncWarning?: string };
+    )) as { error?: string; message?: string };
 
-    expect(result.syncWarning).toBeDefined();
-    expect(result.syncWarning).toContain("push exited with code 1");
-    expect(result.syncWarning).toContain("Recent background sync failure");
-    expect(result.syncWarning).toMatch(/Sync failed .* ago/);
+    expect(result.error).toBe("SYNC_DIRTY");
+    expect(result.message).toContain("push exited with code 1");
+    expect(result.message).toContain("Recent background sync failure");
+    expect(result.message).toMatch(/Sync failed .* ago/);
+    expect(result.message).toContain("Refusing this write");
 
-    // Sentinel is NOT cleared by write tools — get_context still owns that.
-    const sentinelPath = path.join(vault, ".schist", "last-sync-error");
     const stillExists = await fs.access(sentinelPath).then(() => true).catch(() => false);
     expect(stillExists).toBe(true);
+    await expect(fs.readdir(path.join(vault, "notes"))).rejects.toBeDefined();
   });
 
-  test("create_note response omits syncWarning when sentinel is absent", async () => {
+  test("create_note succeeds when sentinel is absent", async () => {
     const vault = await makeTempVault();
     const result = (await create_note(
       vault,
       { owner: TEST_AGENT, title: "Test no sync warn", body: "body" },
       await loadVaultConfig(vault),
-    )) as { id: string; syncWarning?: string };
-    expect(result.syncWarning).toBeUndefined();
+    )) as { id?: string; error?: string };
+    expect(result.error).toBeUndefined();
+    expect(result.id).toBeDefined();
   });
 
-  test("add_connection response includes syncWarning when sentinel exists", async () => {
+  test("add_connection returns SYNC_DIRTY when sentinel exists", async () => {
     const vault = await makeTempVault();
-    // Create a source note for add_connection to attach to.
+    // Create a source note for add_connection to attach to. Do this BEFORE
+    // promoting the vault to a spoke so the source create_note doesn't fire a
+    // background push that could race a competing sentinel into place.
     const noteResult = (await create_note(
       vault,
       { owner: TEST_AGENT, title: "Source", body: "body" },
       await loadVaultConfig(vault),
     )) as { path: string };
 
-    // Plant the sentinel after the create_note above. Ensure .schist exists
-    // since the vault setup may not have created it (only the post-commit
-    // ingest hook does, asynchronously).
+    // Promote to a spoke and plant the sentinel after the create_note above.
+    // Ensure .schist exists since the vault setup may not have created it
+    // (only the post-commit ingest hook does, asynchronously).
     await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, ".schist", "spoke.yaml"),
+      "hub: file:///nonexistent\nidentity: test\nscope: notes\n",
+    );
     await fs.writeFile(
       path.join(vault, ".schist", "last-sync-error"),
       "2026-05-22T23:07:00Z push spawn failed: spawn schist ENOENT\n",
@@ -1132,17 +1149,17 @@ describe("write-tool syncWarning surfacing (#120)", () => {
       source: noteResult.path,
       target: "some-target",
       type: "related",
-    })) as { source: string; target: string; type: string; commitSha: string; syncWarning?: string };
+    })) as { error?: string; message?: string };
 
-    expect(result.syncWarning).toBeDefined();
-    expect(result.syncWarning).toContain("push spawn failed");
+    expect(result.error).toBe("SYNC_DIRTY");
+    expect(result.message).toContain("push spawn failed");
   });
 
-  test("syncWarning text uses descriptive (not imperative) phrasing", async () => {
+  test("SYNC_DIRTY text uses descriptive (not imperative) phrasing", async () => {
     // Adversarial review #9: imperative "Call get_context to acknowledge"
     // pulls agents into instruction-following loops. Phrasing should
     // describe what get_context does, not command the agent to call it.
-    const vault = await makeTempVault();
+    const vault = await makeTempSpokeVault();
     await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
     await fs.writeFile(
       path.join(vault, ".schist", "last-sync-error"),
@@ -1153,23 +1170,23 @@ describe("write-tool syncWarning surfacing (#120)", () => {
       vault,
       { owner: TEST_AGENT, title: "Test phrasing", body: "body" },
       await loadVaultConfig(vault),
-    )) as { syncWarning?: string };
+    )) as { error?: string; message?: string };
 
-    expect(result.syncWarning).toBeDefined();
+    expect(result.error).toBe("SYNC_DIRTY");
+    expect(result.message).toBeDefined();
     // Negative: no imperative.
-    expect(result.syncWarning).not.toMatch(/Call get_context to acknowledge/);
+    expect(result.message).not.toMatch(/Call get_context to acknowledge/);
     // Positive: descriptive.
-    expect(result.syncWarning).toMatch(/`sync_status` reports divergence/);
-    expect(result.syncWarning).toMatch(/`sync_retry` can retry the push/);
-    expect(result.syncWarning).toMatch(/`get_context` clears this/);
+    expect(result.message).toMatch(/`sync_status` reports divergence/);
+    expect(result.message).toMatch(/`sync_retry` can retry and clear this state/);
   });
 
-  test("syncWarning sanitizes non-printable bytes in sentinel content", async () => {
+  test("SYNC_DIRTY sanitizes non-printable bytes in sentinel content", async () => {
     // Adversarial review #9: a vault-write attacker (or accidentally
     // corrupt sentinel) could embed ANSI escape sequences / fake newlines
     // / control chars into the agent-facing warning. Defense: replace
     // non-[\x20-\x7e\t\n] with '?'.
-    const vault = await makeTempVault();
+    const vault = await makeTempSpokeVault();
     await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
     // ANSI red + bell + null bytes + newline-injection attempt.
     await fs.writeFile(
@@ -1181,19 +1198,20 @@ describe("write-tool syncWarning surfacing (#120)", () => {
       vault,
       { owner: TEST_AGENT, title: "Test sanitize", body: "body" },
       await loadVaultConfig(vault),
-    )) as { syncWarning?: string };
+    )) as { error?: string; message?: string };
 
-    expect(result.syncWarning).toBeDefined();
+    expect(result.error).toBe("SYNC_DIRTY");
+    expect(result.message).toBeDefined();
     // No raw control bytes survive.
-    expect(result.syncWarning).not.toMatch(/\x1b/);
-    expect(result.syncWarning).not.toMatch(/\x00/);
-    expect(result.syncWarning).not.toMatch(/\x07/);
+    expect(result.message).not.toMatch(/\x1b/);
+    expect(result.message).not.toMatch(/\x00/);
+    expect(result.message).not.toMatch(/\x07/);
     // Each control byte becomes '?'.
-    expect(result.syncWarning).toMatch(/fail\?\[31m\?\? message/);
+    expect(result.message).toMatch(/fail\?\[31m\?\? message/);
   });
 
-  test("syncWarning truncates oversize sentinel content (DoS bound)", async () => {
-    const vault = await makeTempVault();
+  test("SYNC_DIRTY truncates oversize sentinel content (DoS bound)", async () => {
+    const vault = await makeTempSpokeVault();
     await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
     // 10KB of 'X' — far beyond the 500-char sanitize cap.
     await fs.writeFile(
@@ -1205,19 +1223,20 @@ describe("write-tool syncWarning surfacing (#120)", () => {
       vault,
       { owner: TEST_AGENT, title: "Test truncate", body: "body" },
       await loadVaultConfig(vault),
-    )) as { syncWarning?: string };
+    )) as { error?: string; message?: string };
 
-    expect(result.syncWarning).toBeDefined();
+    expect(result.error).toBe("SYNC_DIRTY");
+    expect(result.message).toBeDefined();
     // Wrapper prefix + 500-char cap + ellipsis + suffix is bounded.
-    expect(result.syncWarning!.length).toBeLessThan(700);
-    expect(result.syncWarning).toContain("…");
+    expect(result.message!.length).toBeLessThan(1000);
+    expect(result.message).toContain("…");
   });
 
   test("readSyncWarning distinguishes EISDIR from ENOENT (sentinel-as-dir)", async () => {
     // Adversarial review #6: a sentinel path that's been replaced with a
     // directory (e.g. some process did `mkdir .schist/last-sync-error`)
     // should surface a degraded warning, not be swallowed as "healthy".
-    const vault = await makeTempVault();
+    const vault = await makeTempSpokeVault();
     await fs.mkdir(path.join(vault, ".schist", "last-sync-error"), {
       recursive: true,
     });
@@ -1226,11 +1245,34 @@ describe("write-tool syncWarning surfacing (#120)", () => {
       vault,
       { owner: TEST_AGENT, title: "Test eisdir", body: "body" },
       await loadVaultConfig(vault),
-    )) as { syncWarning?: string };
+    )) as { error?: string; message?: string };
 
-    expect(result.syncWarning).toBeDefined();
-    expect(result.syncWarning).toMatch(/Sync-failure sentinel exists but is unreadable/);
-    expect(result.syncWarning).toMatch(/EISDIR/);
+    expect(result.error).toBe("SYNC_DIRTY");
+    expect(result.message).toMatch(/Sync-failure sentinel exists but is unreadable/);
+    expect(result.message).toMatch(/EISDIR/);
+  });
+
+  test("create_note does NOT block on a non-spoke vault with a stale sentinel (no-deadlock)", async () => {
+    // A standalone (non-spoke) vault has no hub to diverge from, and neither
+    // `sync_retry` nor `triggerSpokePush` (both spoke-gated) can clear a
+    // sentinel there. Blocking such a vault would be a permanent, unrecoverable
+    // deadlock — reachable via vault demotion or env-drift to a folder carrying
+    // a stale `.schist/last-sync-error`. The block must only apply to spokes.
+    const vault = await makeTempVault();
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, ".schist", "last-sync-error"),
+      "2026-05-22T23:06:22.980Z push exited with code 1\n",
+    );
+
+    const result = (await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Non-spoke write", body: "body" },
+      await loadVaultConfig(vault),
+    )) as { id?: string; error?: string };
+
+    expect(result.error).toBeUndefined();
+    expect(result.id).toBeDefined();
   });
 
 });
