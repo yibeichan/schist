@@ -1,6 +1,29 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to AI coding agents when working with code in this
+repository.
+
+## Required Agent Workflow
+
+Agents must use the same contribution workflow expected of human contributors:
+
+1. Create a branch from `main` before making commits:
+   `git checkout -b <agent-name>/<short-description>`
+2. Make clear, focused commits on that branch.
+3. Run the relevant tests before pushing.
+4. Push the branch, not `main`.
+5. Open a pull request against `main`.
+6. Wait for CI and review before merge.
+
+Never push directly to `main`, even when the user says to "keep going" or grants
+general permission to continue work. Continuing work means continuing on a
+branch and opening PRs. Direct pushes to `main` require an explicit,
+turn-local instruction naming the direct push to `main`.
+
+Do not bypass branch protection or required checks as part of normal agent work.
+If a change has already landed directly on `main` by mistake, do not rewrite
+history or force-push. Stop, report the mistake, and ask whether to remediate
+with a revert PR plus a normal replacement PR.
 
 ## What is schist
 
