@@ -33,11 +33,15 @@ async function useLocalSchistIngestBin(): Promise<void> {
   createdDirs.add(dir);
   const bin = path.join(dir, "schist-ingest-local");
   const python = path.join(repoRoot, "cli", ".venv", "bin", "python");
+  const cliDir = path.join(repoRoot, "cli");
   await fs.writeFile(
     bin,
     [
       "#!/bin/sh",
-      `PYTHONPATH=${JSON.stringify(path.join(repoRoot, "cli"))} exec ${JSON.stringify(python)} -m schist.ingest "$@"`,
+      `if [ -x ${JSON.stringify(python)} ]; then`,
+      `  PYTHONPATH=${JSON.stringify(cliDir)} exec ${JSON.stringify(python)} -m schist.ingest "$@"`,
+      "fi",
+      `cd ${JSON.stringify(cliDir)} && exec uv run --with . python -m schist.ingest "$@"`,
       "",
     ].join("\n"),
     { mode: 0o755 },
