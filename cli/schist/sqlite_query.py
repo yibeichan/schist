@@ -6,7 +6,7 @@ import sqlite3
 import sys
 
 
-ALLOWED_TABLES = {'docs', 'concepts', 'edges', 'docs_fts'}
+ALLOWED_TABLES = {'docs', 'concepts', 'edges', 'docs_fts', 'paper_metadata'}
 
 
 def get_db(vault_path: str, db_path: str | None = None) -> sqlite3.Connection:

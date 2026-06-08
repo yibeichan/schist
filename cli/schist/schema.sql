@@ -2,6 +2,7 @@
 -- NEVER the source of truth. Disposable. Delete and re-ingest anytime.
 
 DROP TABLE IF EXISTS docs_fts;
+DROP TABLE IF EXISTS paper_metadata;
 DROP TABLE IF EXISTS edges;
 DROP TABLE IF EXISTS concepts;
 DROP TABLE IF EXISTS docs;
@@ -44,6 +45,23 @@ CREATE TABLE edges (
     UNIQUE(source, target, type)
 );
 
+CREATE TABLE paper_metadata (
+    doc_id              TEXT PRIMARY KEY REFERENCES docs(id),
+    authors             TEXT,               -- JSON array
+    year                INTEGER,
+    venue               TEXT,
+    paper_type          TEXT,
+    doi                 TEXT,
+    arxiv_id            TEXT,
+    pubmed_pmid         TEXT,
+    bibtex_key          TEXT,
+    verified            INTEGER DEFAULT 0,
+    verified_by         TEXT,
+    verified_date       TEXT,
+    verification_source TEXT,
+    url                 TEXT
+);
+
 -- Full-text search over docs
 CREATE VIRTUAL TABLE docs_fts USING fts5(
     title,
@@ -72,6 +90,10 @@ CREATE INDEX idx_edges_type ON edges(type);
 CREATE INDEX idx_docs_status ON docs(status);
 CREATE INDEX idx_docs_date ON docs(date);
 CREATE INDEX idx_docs_file_ref ON docs(file_ref);
+CREATE INDEX idx_pm_verified ON paper_metadata(verified);
+CREATE INDEX idx_pm_year ON paper_metadata(year);
+CREATE INDEX idx_pm_doi ON paper_metadata(doi);
+CREATE INDEX idx_pm_bibtex ON paper_metadata(bibtex_key);
 
 -- ── MCP-written side table (survives commit-path rebuilds) ────────────────
 -- `concept_aliases` is written by the MCP `add_concept_alias` tool. It uses

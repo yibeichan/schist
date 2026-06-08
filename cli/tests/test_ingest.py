@@ -23,6 +23,7 @@ bug this test is here to catch.
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import sqlite3
 import subprocess
@@ -150,6 +151,106 @@ def test_ingest_indexes_file_ref_frontmatter(tmp_path: Path) -> None:
         conn.close()
 
     assert row == ("File Ref", "/mnt/data/papers/example.pdf")
+
+
+def test_ingest_indexes_paper_metadata(tmp_path: Path) -> None:
+    """Citation-grade paper frontmatter populates the paper_metadata side table."""
+    from schist.ingest import ingest
+    from schist.sqlite_query import raw_query
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "papers").mkdir()
+    (vault / "papers" / "2026-06-08-example-paper.md").write_text(
+        "---\n"
+        "title: Example Paper\n"
+        "date: 2026-06-08\n"
+        "authors:\n"
+        "  - Doe, Jane\n"
+        "  - Roe, Richard\n"
+        "year: 2024\n"
+        "venue: Journal of Examples\n"
+        "type: journal\n"
+        "doi: 10.1234/example\n"
+        "arxiv_id: ''\n"
+        "pubmed_pmid: '12345678'\n"
+        "bibtex_key: doe2024example\n"
+        "url: https://doi.org/10.1234/example\n"
+        "verification:\n"
+        "  verified_on: 2026-06-08\n"
+        "  verified_by: codex\n"
+        "  verified_against:\n"
+        "    - crossref:10.1234/example\n"
+        "---\n"
+        "\n"
+        "Body.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            """
+            SELECT pm.*, d.title
+            FROM paper_metadata pm
+            JOIN docs d ON d.id = pm.doc_id
+            WHERE d.title = 'Example Paper'
+            """
+        ).fetchone()
+        query = raw_query(
+            conn,
+            "SELECT d.title, pm.year FROM docs d JOIN paper_metadata pm ON pm.doc_id = d.id",
+        )
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert json.loads(row["authors"]) == ["Doe, Jane", "Roe, Richard"]
+    assert row["year"] == 2024
+    assert row["venue"] == "Journal of Examples"
+    assert row["paper_type"] == "journal"
+    assert row["doi"] == "10.1234/example"
+    assert row["pubmed_pmid"] == "12345678"
+    assert row["bibtex_key"] == "doe2024example"
+    assert row["verified"] == 1
+    assert row["verified_by"] == "codex"
+    assert row["verified_date"] == "2026-06-08"
+    assert row["verification_source"] == "crossref:10.1234/example"
+    assert row["url"] == "https://doi.org/10.1234/example"
+    assert query == {"columns": ["title", "year"], "rows": [["Example Paper", 2024]]}
+
+
+def test_papers_without_metadata_get_unverified_paper_row(tmp_path: Path) -> None:
+    """Every papers/ note gets a row, enabling 'show unverified papers' queries."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "papers").mkdir()
+    (vault / "papers" / "2026-06-08-unverified.md").write_text(
+        "---\ntitle: Unverified\ndate: 2026-06-08\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT verified, doi FROM paper_metadata WHERE doc_id = ?",
+            ("papers/2026-06-08-unverified.md",),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row == (0, None)
 
 
 def test_cli_add_writes_file_ref_frontmatter(tmp_path: Path) -> None:

@@ -17,6 +17,19 @@ CONNECTION_RE = re.compile(
     r'^-\s+(\S+):\s+(\S+)(?:\s+"([^"]*)")?(?:\s+—\s+(.*))?$'
 )
 
+PAPER_FIELDS = {
+    'authors',
+    'year',
+    'venue',
+    'type',
+    'doi',
+    'arxiv_id',
+    'pubmed_pmid',
+    'bibtex_key',
+    'url',
+    'verification',
+}
+
 
 def parse_connections(body: str) -> list[dict]:
     """Extract connections from ## Connections section."""
@@ -52,6 +65,76 @@ def title_from_filename(filename: str) -> str:
     # Strip leading date pattern
     stem = re.sub(r'^\d{4}-\d{2}-\d{2}-?', '', stem)
     return stem.replace('-', ' ').strip() or stem
+
+
+def _string_or_none(value) -> str | None:
+    if isinstance(value, str):
+        return value if value else None
+    if value is not None and not isinstance(value, (list, dict)):
+        return str(value)
+    return None
+
+
+def _int_or_none(value) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _authors_json(value) -> str | None:
+    if isinstance(value, list):
+        authors = [a for a in value if isinstance(a, str) and a]
+        return json.dumps(authors) if authors else None
+    if isinstance(value, str) and value:
+        return json.dumps([value])
+    return None
+
+
+def _first_verification_source(value) -> str | None:
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, str) and item:
+                return item
+            if isinstance(item, dict) and item:
+                key, val = next(iter(item.items()))
+                return f'{key}:{val}' if val is not None else str(key)
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def paper_metadata_from_frontmatter(meta: dict, rel: Path) -> tuple | None:
+    """Return a paper_metadata row tuple for paper-like frontmatter."""
+    is_paper_path = len(rel.parts) > 1 and rel.parts[0] == 'papers'
+    has_paper_fields = any(field in meta for field in PAPER_FIELDS)
+    if not is_paper_path and not has_paper_fields:
+        return None
+
+    verification = meta.get('verification')
+    if not isinstance(verification, dict):
+        verification = {}
+    verified_date = _string_or_none(verification.get('verified_on'))
+    verified_by = _string_or_none(verification.get('verified_by'))
+    verification_source = _first_verification_source(verification.get('verified_against'))
+    verified = 1 if verified_date else 0
+
+    return (
+        _authors_json(meta.get('authors')),
+        _int_or_none(meta.get('year')),
+        _string_or_none(meta.get('venue')),
+        _string_or_none(meta.get('type')),
+        _string_or_none(meta.get('doi')),
+        _string_or_none(meta.get('arxiv_id')),
+        _string_or_none(meta.get('pubmed_pmid')),
+        _string_or_none(meta.get('bibtex_key')),
+        verified,
+        verified_by,
+        verified_date,
+        verification_source,
+        _string_or_none(meta.get('url')),
+    )
 
 
 def ingest(vault_path: str, db_path: str):
@@ -167,6 +250,19 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
             (doc_id, title, date_val, meta.get('status', 'draft'), tags_json, concepts_json, body, scope, source, confidence, file_ref),
         )
         doc_count += 1
+
+        paper_row = paper_metadata_from_frontmatter(meta, rel)
+        if paper_row is not None:
+            conn.execute(
+                """
+                INSERT INTO paper_metadata (
+                    doc_id, authors, year, venue, paper_type, doi, arxiv_id,
+                    pubmed_pmid, bibtex_key, verified, verified_by,
+                    verified_date, verification_source, url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (doc_id, *paper_row),
+            )
 
         # Insert concept record if this is a concept file
         if is_concept:

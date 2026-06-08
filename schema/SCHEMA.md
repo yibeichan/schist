@@ -85,6 +85,14 @@ aliases: [self-attn, intra-attention, self-attention-mechanism]
 A mechanism where each element in a sequence attends to all other elements to compute a weighted representation. Core component of the Transformer architecture.
 ```
 
+### Rules
+
+- Concept files have **no date** field (they are timeless reference nodes)
+- Concept files have **no status** field (they are always active)
+- Concept files have **no `## Connections` section** (connections point TO concepts, not FROM them)
+- The filename slug IS the concept's stable identifier: `self-attention.md` → slug `self-attention`
+- Slugs are lowercase, hyphen-separated, no special characters: `[a-z0-9-]+`
+
 ## Citation-Grade Frontmatter (`papers/`)
 
 Paper notes can use extra frontmatter to act as citation records. These fields
@@ -118,13 +126,29 @@ Recommended body sections for citation-grade paper notes:
 
 See `CONVENTIONS.md` for the full authoring guide and example template.
 
-### Rules
+Ingest copies citation-grade paper fields into the `paper_metadata` SQLite side
+table keyed by `docs.id`. This keeps generic document rows compact while making
+paper integrity queries straightforward:
 
-- Concept files have **no date** field (they are timeless reference nodes)
-- Concept files have **no status** field (they are always active)
-- Concept files have **no `## Connections` section** (connections point TO concepts, not FROM them)
-- The filename slug IS the concept's stable identifier: `self-attention.md` → slug `self-attention`
-- Slugs are lowercase, hyphen-separated, no special characters: `[a-z0-9-]+`
+```sql
+-- Unverified papers
+SELECT d.title, pm.doi
+FROM docs d
+JOIN paper_metadata pm ON pm.doc_id = d.id
+WHERE pm.verified = 0;
+
+-- Papers by author/year/venue
+SELECT d.title, pm.year, pm.venue
+FROM docs d
+JOIN paper_metadata pm ON pm.doc_id = d.id
+WHERE pm.authors LIKE '%Hasson%';
+
+-- Papers without DOI
+SELECT d.title
+FROM docs d
+JOIN paper_metadata pm ON pm.doc_id = d.id
+WHERE pm.doi IS NULL;
+```
 
 ## Connection Types
 

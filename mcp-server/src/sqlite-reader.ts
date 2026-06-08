@@ -79,6 +79,7 @@ const REQUIRED_DOCS_COLUMNS: ReadonlySet<string> = new Set([
   "id", "title", "date", "status", "tags", "concepts",
   "body", "scope", "source", "confidence", "file_ref",
 ]);
+const REQUIRED_TABLES: ReadonlySet<string> = new Set(["paper_metadata"]);
 
 const verifiedVaults = new Set<string>();
 
@@ -112,10 +113,20 @@ function ensureSchemaCurrent(vaultRoot: string): void {
     try {
       const db = new Database(dbPath, { readonly: true });
       try {
+        const tableRows = db.prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table'",
+        ).all() as Array<{ name: string }>;
+        const tables = new Set(tableRows.map((r) => r.name));
+        const missingTables = [...REQUIRED_TABLES]
+          .filter((t) => !tables.has(t))
+          .map((t) => `table:${t}`);
         const cols = db.pragma("table_info(docs)") as Array<{ name: string }>;
-        if (cols.length === 0) return []; // no docs table — out of scope
+        if (cols.length === 0) return missingTables; // no docs table — only report side-table drift
         const present = new Set(cols.map((c) => c.name));
-        return [...REQUIRED_DOCS_COLUMNS].filter((c) => !present.has(c));
+        return [
+          ...missingTables,
+          ...[...REQUIRED_DOCS_COLUMNS].filter((c) => !present.has(c)),
+        ];
       } finally {
         db.close();
       }
