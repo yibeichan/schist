@@ -217,7 +217,7 @@ Agent ──MCP──▶ ┌─────────────────�
 - **MCP is the interface** — agents read and write through standard protocol
 - **Viewer is optional** — humans can browse, but agents don't need it
 
-Full architecture: [PLAN.md](./PLAN.md). Schema: [schema/SCHEMA.md](./schema/SCHEMA.md).
+Full architecture: [PLAN.md](./PLAN.md). Schema: [schema/SCHEMA.md](./schema/SCHEMA.md). Authoring conventions: [CONVENTIONS.md](./CONVENTIONS.md).
 
 ## Security
 

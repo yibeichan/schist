@@ -85,6 +85,39 @@ aliases: [self-attn, intra-attention, self-attention-mechanism]
 A mechanism where each element in a sequence attends to all other elements to compute a weighted representation. Core component of the Transformer architecture.
 ```
 
+## Citation-Grade Frontmatter (`papers/`)
+
+Paper notes can use extra frontmatter to act as citation records. These fields
+are optional on generic documents, but recommended for `papers/` notes that
+future agents should trust for citation reuse.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `authors` | string[] | no | `[]` | Author names in citation order, preferably `Lastname, Firstname` |
+| `year` | integer | no | `null` | Publication year, not note creation date |
+| `venue` | string | no | `null` | Journal, conference, publisher, archive, or dataset venue |
+| `type` | string | no | `null` | One of the local conventions: `journal`, `preprint`, `conference`, `book`, `thesis`, `report`, `dataset` |
+| `doi` | string | no | `null` | DOI without a URL wrapper |
+| `arxiv_id` | string | no | `null` | arXiv identifier when applicable |
+| `pubmed_pmid` | string | no | `null` | PubMed PMID when applicable |
+| `bibtex_key` | string | no | `null` | Stable local BibTeX key |
+| `url` | string | no | `null` | Canonical publisher, DOI, archive, or project URL |
+| `verification` | object | no | `null` | Verification record with `verified_on`, `verified_by`, `verified_against`, and optional `notes` |
+
+`verification.verified_against` should list sources in decreasing authority:
+`crossref:<doi>`, `pubmed:<pmid>`, `arxiv:<arxiv_id>`,
+`semantic-scholar:<paperId>`, then `publisher-doi-page:<url>`.
+
+Recommended body sections for citation-grade paper notes:
+
+1. `## Bibliographic Summary`
+2. `## Claims Supported By This Paper`
+3. `## Where Cited In Vault`
+4. `## Caveats And Audit Notes`
+5. `## Connections`
+
+See `CONVENTIONS.md` for the full authoring guide and example template.
+
 ### Rules
 
 - Concept files have **no date** field (they are timeless reference nodes)
