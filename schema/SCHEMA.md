@@ -19,7 +19,7 @@ All knowledge in a schist vault is stored as markdown files with YAML frontmatte
 | `date`     | string     | yes      | —         | ISO 8601 date: `2026-03-26` |
 | `tags`     | string[]   | no       | `[]`      | Lowercase, hyphenated tags |
 | `status`   | string     | no       | `draft`   | One of: `draft`, `review`, `final`, `archived` |
-| `concepts` | string[]   | no       | `[]`      | Concept slugs this note relates to |
+| `concepts` | string[]   | no       | `[]`      | Concept slugs this note relates to. Ingest creates implicit `references` graph edges from this field. |
 | `related`  | string[]   | no       | `[]`      | Relative paths to related notes |
 | `confidence` | string   | no       | `null`    | Agent-declared confidence: `low`, `medium`, or `high`. NULL = not declared (load-bearing distinction from `'medium'`) |
 | `source_agent` | string | no | `null` | Agent identity that originally created the note through MCP. Preserved on later mutations; it is not a "last modified by" field. |
@@ -104,6 +104,7 @@ Connections express typed, directed relationships between nodes.
 | `applies-method-of` | Uses methodology from | "Applies the training method of the original paper to a new domain" |
 | `reinterprets`      | Offers new interpretation of | "Reinterprets attention weights as a form of memory retrieval" |
 | `related`           | General association | "Related work in the same research area" |
+| `references`        | Implicit concept reference from frontmatter | "`concepts: [self-attention]` creates a graph edge to `self-attention`" |
 
 ### Connection Syntax
 
@@ -118,6 +119,22 @@ In the `## Connections` section of a document:
 - **CONTEXT**: Optional quoted string explaining the connection
 
 Multiple connections per document are allowed. One connection per line.
+
+### Implicit Concept Edges
+
+For document notes, every slug in frontmatter `concepts: [...]` creates an
+implicit graph edge:
+
+```
+source = <document id>
+target = <concept slug>
+type = references
+context = NULL
+```
+
+Agents do not need to duplicate these relationships in `## Connections`.
+Use explicit connections only when a more specific typed relationship or
+annotation is needed.
 
 ## Slug Derivation
 

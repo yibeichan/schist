@@ -188,6 +188,12 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
             # Don't double-count if already counted above
             if not (is_concept and c == meta.get('concept', '').lower().replace(' ', '-')):
                 concept_count += 1
+            if not is_concept:
+                result = conn.execute(
+                    'INSERT OR IGNORE INTO edges (source, target, type, context) VALUES (?, ?, ?, ?)',
+                    (doc_id, c, 'references', None),
+                )
+                edge_count += result.rowcount
 
         # Parse and insert edges
         for edge in parse_connections(body):

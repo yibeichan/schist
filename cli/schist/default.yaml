@@ -1,4 +1,4 @@
-connection_types: [extends, contradicts, supports, replicates, applies-method-of, reinterprets, related]
+connection_types: [extends, contradicts, supports, replicates, applies-method-of, reinterprets, related, references]
 statuses: [draft, review, final, archived]
 directories:
   notes: notes/

@@ -75,8 +75,47 @@ def _assert_vault_ingested(db_path: Path) -> None:
         assert "ingestion" in slugs, f"concepts missing ingestion: {slugs}"
         edge_types = {row[0] for row in conn.execute("SELECT type FROM edges")}
         assert "extends" in edge_types, f"edges missing extends: {edge_types}"
+        implicit = conn.execute(
+            "SELECT context FROM edges WHERE source = ? AND target = ? AND type = ?",
+            ("notes/2026-04-16-hello.md", "ingestion", "references"),
+        ).fetchone()
+        assert implicit == (None,), "frontmatter concepts should create an implicit references edge"
     finally:
         conn.close()
+
+
+def test_ingest_deduplicates_implicit_concept_edges(tmp_path: Path) -> None:
+    """Frontmatter concepts emit one references edge per unique source/target/type."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-06-08-duplicate-concepts.md",
+        "---\n"
+        "title: Duplicate Concepts\n"
+        "date: 2026-06-08\n"
+        "concepts: [ingestion, ingestion]\n"
+        "---\n"
+        "\n"
+        "Body.\n",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute(
+            "SELECT source, target, type FROM edges WHERE target = ? AND type = ?",
+            ("ingestion", "references"),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [("notes/2026-06-08-duplicate-concepts.md", "ingestion", "references")]
 
 
 def test_ingest_in_process(tmp_path: Path) -> None:
