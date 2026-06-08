@@ -22,6 +22,7 @@ All knowledge in a schist vault is stored as markdown files with YAML frontmatte
 | `concepts` | string[]   | no       | `[]`      | Concept slugs this note relates to |
 | `related`  | string[]   | no       | `[]`      | Relative paths to related notes |
 | `confidence` | string   | no       | `null`    | Agent-declared confidence: `low`, `medium`, or `high`. NULL = not declared (load-bearing distinction from `'medium'`) |
+| `source_agent` | string | no | `null` | Agent identity that originally created the note through MCP. Preserved on later mutations; it is not a "last modified by" field. |
 
 ### Example
 
@@ -33,6 +34,7 @@ tags: [attention, sparse, efficiency]
 status: draft
 concepts: [self-attention, computational-complexity]
 related: [notes/2026-03-20-dense-attention-limits.md]
+source_agent: claude
 ---
 
 The body of the note in standard markdown. Any valid markdown is accepted.
@@ -45,6 +47,16 @@ Code blocks, tables, images (local or URL), and LaTeX math ($e = mc^2$) are all 
 - supports: concepts/self-attention "Demonstrates self-attention works with sparse patterns"
 - contradicts: notes/2026-03-18-attention-must-be-dense.md "Shows dense attention is not required for quality"
 ```
+
+### Attribution Fields
+
+`source_agent` records the original authoring agent stamped by `create_note`.
+Later note mutations such as `add_connection` preserve the existing
+`source_agent` value. Those mutations are attributed to the mutating agent in
+the git commit subject, not by rewriting frontmatter.
+
+Agent memory uses a separate attribution surface: every memory row stores its
+writer in the `agent_memory.owner` column.
 
 ## Concept Nodes
 

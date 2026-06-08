@@ -228,6 +228,9 @@ Full architecture: [PLAN.md](./PLAN.md). Schema: [schema/SCHEMA.md](./schema/SCH
 - Write authorization enforced against `SCHIST_AGENT_ID` / `SCHIST_ALLOWED_AGENTS`
 - `query_graph` rejects non-SELECT SQL
 
+MCP read tools assume a trusted caller with full vault read access. Deployment
+constraints and the full trust model are documented in [SECURITY.md](./SECURITY.md).
+
 ## Cross-Project Agent Memory
 
 schist includes a shared memory subsystem scoped by agent identity. Any project using the schist MCP server can capture lessons, decisions, and blockers — and recall them from any other project on the same machine. Details: [`docs/cross-project-memory.md`](./docs/cross-project-memory.md).

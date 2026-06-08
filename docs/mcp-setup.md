@@ -31,21 +31,32 @@ SCHIST_VAULT_PATH=/path/to/vault node dist/index.js
 The server lists **all** tools at `ListTools` time and accepts calls to
 any of them unconditionally. There is no opt-in meta-tool.
 
+The MCP server assumes every caller that can speak to its stdio transport is a
+trusted first-party agent. Do not expose it to untrusted local processes or to a
+network without an external authentication and authorization proxy. The full
+threat model is in [`../SECURITY.md`](../SECURITY.md).
+
 Read tools:
 
-- `get_context`, `search_notes`, `get_note`, `list_concepts`, `query_graph` — vault read
+- `get_context`, `sync_status`, `search_notes`, `get_note`, `list_concepts`, `query_graph` — vault/sync read
 - `search_memory`, `get_agent_state` — memory read
 
 Write tools:
 
-- `create_note`, `add_connection` — vault write
-- `add_memory`, `set_agent_state`, `delete_agent_state`, `add_concept_alias` — memory write
+- `create_note`, `add_connection`, `sync_retry` — vault/sync write
+- `add_concept_alias` — vault DB side-table write
+- `add_memory`, `set_agent_state`, `delete_agent_state` — memory write
 
 **Where authorization lives.** Writes are authorized at the data layer by
 `validateOwner` (see `mcp-server/src/agent-identity.ts`), which checks the
-incoming `owner` against `SCHIST_AGENT_ID` / `SCHIST_ALLOWED_AGENTS`. A
-mismatched or missing owner produces `CONFIG_ERROR` or `VALIDATION_ERROR`.
-Reads are unrestricted.
+incoming caller identity (`owner`, or `created_by` for `add_concept_alias`)
+against `SCHIST_AGENT_ID` / `SCHIST_ALLOWED_AGENTS`. A mismatched or missing
+identity produces `CONFIG_ERROR` or `VALIDATION_ERROR`.
+Markdown note writes (`create_note` and `add_connection`) are additionally
+checked against `vault.yaml` write grants when that file is present and locally
+parseable, with the hub pre-receive hook as the authoritative enforcement point
+for git pushes. Reads are unrestricted: `vault.yaml` read grants are not
+enforced by local MCP read tools.
 
 **Why no capability meta-tool.** Earlier versions required agents to call
 `request_capabilities({capability: "write"})` before writes would succeed.
