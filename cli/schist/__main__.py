@@ -21,6 +21,7 @@ def main():
     p_add.add_argument('--body', default=None)
     p_add.add_argument('--tags', default=None, help='Comma-separated tags')
     p_add.add_argument('--concepts', default=None, help='Comma-separated concept slugs')
+    p_add.add_argument('--file-ref', default=None, dest='file_ref', help='External file path/reference to index in frontmatter')
     p_add.add_argument('--status', default='draft')
     p_add.add_argument('--dir', default='notes', dest='directory')
 

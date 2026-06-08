@@ -29,6 +29,8 @@ def add(args, vault_path: str, db_path: str):
         fm['tags'] = [t.strip() for t in args.tags.split(',')]
     if args.concepts:
         fm['concepts'] = [c.strip() for c in args.concepts.split(',')]
+    if args.file_ref:
+        fm['file_ref'] = args.file_ref
 
     markdown_io.write_note(filepath, fm, body)
 

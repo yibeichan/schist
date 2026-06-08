@@ -14,6 +14,7 @@ import * as path from "path";
 import * as os from "os";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
+import { fileURLToPath } from "url";
 import Database from "better-sqlite3";
 import { loadVaultConfig, create_note, get_note, search_notes } from "../src/tools.js";
 import { resetSchemaCacheForTesting } from "../src/sqlite-reader.js";
@@ -22,6 +23,27 @@ import * as sqliteReader from "../src/sqlite-reader.js";
 const execFile = promisify(execFileCb);
 
 const createdDirs = new Set<string>();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const repoRoot = path.resolve(__dirname, "..", "..");
+const envSnapshot: Record<string, string | undefined> = {};
+
+async function useLocalSchistIngestBin(): Promise<void> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-ingest-bin-"));
+  createdDirs.add(dir);
+  const bin = path.join(dir, "schist-ingest-local");
+  const python = path.join(repoRoot, "cli", ".venv", "bin", "python");
+  await fs.writeFile(
+    bin,
+    [
+      "#!/bin/sh",
+      `PYTHONPATH=${JSON.stringify(path.join(repoRoot, "cli"))} exec ${JSON.stringify(python)} -m schist.ingest "$@"`,
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  process.env.SCHIST_INGEST_BIN = bin;
+}
 
 async function makeTempVault(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-confidence-"));
@@ -51,10 +73,15 @@ async function makeTempVault(): Promise<string> {
 const TEST_AGENT = "test-agent";
 
 beforeAll(() => {
+  envSnapshot.SCHIST_AGENT_ID = process.env.SCHIST_AGENT_ID;
+  envSnapshot.SCHIST_INGEST_BIN = process.env.SCHIST_INGEST_BIN;
   process.env.SCHIST_AGENT_ID = TEST_AGENT;
 });
 afterAll(() => {
-  delete process.env.SCHIST_AGENT_ID;
+  if (envSnapshot.SCHIST_AGENT_ID === undefined) delete process.env.SCHIST_AGENT_ID;
+  else process.env.SCHIST_AGENT_ID = envSnapshot.SCHIST_AGENT_ID;
+  if (envSnapshot.SCHIST_INGEST_BIN === undefined) delete process.env.SCHIST_INGEST_BIN;
+  else process.env.SCHIST_INGEST_BIN = envSnapshot.SCHIST_INGEST_BIN;
 });
 
 afterAll(async () => {
@@ -299,6 +326,7 @@ describe("schema-drift auto-rebuild", () => {
   });
 
   test("ensureSchemaCurrent rebuilds when `docs.confidence` is missing", async () => {
+    await useLocalSchistIngestBin();
     const vault = await makeStaleSchemaVault();
     // Sanity-check the pre-state: confidence column does NOT exist yet.
     const preDb = new Database(path.join(vault, ".schist", "schist.db"), { readonly: true });

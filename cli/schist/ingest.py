@@ -147,6 +147,8 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         # "agent said medium" (don't default to medium here, see issue #69).
         raw_confidence = meta.get('confidence')
         confidence = raw_confidence if raw_confidence in {"low", "medium", "high"} else None
+        raw_file_ref = meta.get('file_ref')
+        file_ref = raw_file_ref if isinstance(raw_file_ref, str) and raw_file_ref else None
 
         doc_id = str(rel)
 
@@ -161,8 +163,8 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         if date_val is not None:
             date_val = str(date_val)
         conn.execute(
-            'INSERT INTO docs (id, title, date, status, tags, concepts, body, scope, source, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (doc_id, title, date_val, meta.get('status', 'draft'), tags_json, concepts_json, body, scope, source, confidence),
+            'INSERT INTO docs (id, title, date, status, tags, concepts, body, scope, source, confidence, file_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (doc_id, title, date_val, meta.get('status', 'draft'), tags_json, concepts_json, body, scope, source, confidence, file_ref),
         )
         doc_count += 1
 

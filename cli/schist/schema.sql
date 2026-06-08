@@ -21,6 +21,7 @@ CREATE TABLE docs (
     scope       TEXT DEFAULT 'global', -- derived from directory or frontmatter
     source      TEXT,                  -- "human" | "agent" | null
     confidence  TEXT CHECK(confidence IS NULL OR confidence IN ('low','medium','high')),  -- NULL = agent did not declare
+    file_ref    TEXT,                  -- optional external file pointer; schist does not manage the file
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now'))
 );
@@ -70,6 +71,7 @@ CREATE INDEX idx_edges_target ON edges(target);
 CREATE INDEX idx_edges_type ON edges(type);
 CREATE INDEX idx_docs_status ON docs(status);
 CREATE INDEX idx_docs_date ON docs(date);
+CREATE INDEX idx_docs_file_ref ON docs(file_ref);
 
 -- ── MCP-written side table (survives commit-path rebuilds) ────────────────
 -- `concept_aliases` is written by the MCP `add_concept_alias` tool. It uses

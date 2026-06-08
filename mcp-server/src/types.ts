@@ -18,6 +18,7 @@ export interface Note {
   scope?: string;      // e.g., "global", "decisions", "research/ai"
   source?: "human" | "agent"; // allowed values; omitted means undefined
   confidence?: "low" | "medium" | "high"; // omitted means agent did not declare
+  file_ref?: string; // external file pointer; schist does not manage the file
 }
 
 export interface Concept {

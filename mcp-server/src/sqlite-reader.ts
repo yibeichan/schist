@@ -77,7 +77,7 @@ function sanitizeFtsQuery(raw: string): string {
 // and existing deployments self-heal on next read.
 const REQUIRED_DOCS_COLUMNS: ReadonlySet<string> = new Set([
   "id", "title", "date", "status", "tags", "concepts",
-  "body", "scope", "source", "confidence",
+  "body", "scope", "source", "confidence", "file_ref",
 ]);
 
 const verifiedVaults = new Set<string>();
@@ -284,6 +284,7 @@ export function getNote(vaultRoot: string, id: string): Note | null {
       scope: (row.scope as string) ?? undefined,
       source: (row.source === "human" || row.source === "agent") ? row.source as "human" | "agent" : undefined,
       confidence: (conf === "low" || conf === "medium" || conf === "high") ? conf : undefined,
+      file_ref: typeof row.file_ref === "string" && row.file_ref ? row.file_ref : undefined,
     };
   } finally {
     db.close();

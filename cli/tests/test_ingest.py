@@ -27,6 +27,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,8 @@ def _assert_vault_ingested(db_path: Path) -> None:
             ("notes/2026-04-16-hello.md", "ingestion", "references"),
         ).fetchone()
         assert implicit == (None,), "frontmatter concepts should create an implicit references edge"
+        file_ref_cols = {row[1] for row in conn.execute("PRAGMA table_info(docs)")}
+        assert "file_ref" in file_ref_cols
     finally:
         conn.close()
 
@@ -116,6 +119,64 @@ def test_ingest_deduplicates_implicit_concept_edges(tmp_path: Path) -> None:
         conn.close()
 
     assert rows == [("notes/2026-06-08-duplicate-concepts.md", "ingestion", "references")]
+
+
+def test_ingest_indexes_file_ref_frontmatter(tmp_path: Path) -> None:
+    """`file_ref` is stored as a nullable docs column for query_graph lookup."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-06-08-file-ref.md",
+        "---\n"
+        "title: File Ref\n"
+        "date: 2026-06-08\n"
+        "file_ref: /mnt/data/papers/example.pdf\n"
+        "---\n"
+        "\n"
+        "Body.\n",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute("SELECT title, file_ref FROM docs WHERE title = 'File Ref'").fetchone()
+    finally:
+        conn.close()
+
+    assert row == ("File Ref", "/mnt/data/papers/example.pdf")
+
+
+def test_cli_add_writes_file_ref_frontmatter(tmp_path: Path) -> None:
+    """The CLI note-creation path can stamp `file_ref` into frontmatter."""
+    from schist.commands import add
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    subprocess.run(["git", "init"], cwd=vault, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=vault, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=vault, check=True)
+
+    args = SimpleNamespace(
+        title="CLI File Ref",
+        body="body",
+        tags=None,
+        concepts=None,
+        file_ref="/mnt/data/cli.pdf",
+        status="draft",
+        directory="notes",
+    )
+
+    add(args, str(vault), str(vault / ".schist" / "schist.db"))
+
+    written = next((vault / "notes").glob("*-cli-file-ref.md"))
+    content = written.read_text(encoding="utf-8")
+    assert "file_ref: /mnt/data/cli.pdf" in content
 
 
 def test_ingest_in_process(tmp_path: Path) -> None:

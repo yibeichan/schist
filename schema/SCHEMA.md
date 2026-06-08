@@ -23,6 +23,7 @@ All knowledge in a schist vault is stored as markdown files with YAML frontmatte
 | `related`  | string[]   | no       | `[]`      | Relative paths to related notes |
 | `confidence` | string   | no       | `null`    | Agent-declared confidence: `low`, `medium`, or `high`. NULL = not declared (load-bearing distinction from `'medium'`) |
 | `source_agent` | string | no | `null` | Agent identity that originally created the note through MCP. Preserved on later mutations; it is not a "last modified by" field. |
+| `file_ref` | string | no | `null` | External file path or reference indexed for lookup. Informative pointer only; schist does not store, sync, validate, or manage the file. |
 
 ### Example
 
@@ -35,6 +36,7 @@ status: draft
 concepts: [self-attention, computational-complexity]
 related: [notes/2026-03-20-dense-attention-limits.md]
 source_agent: claude
+file_ref: /mnt/data/papers/sparse-attention.pdf
 ---
 
 The body of the note in standard markdown. Any valid markdown is accepted.

@@ -940,6 +940,7 @@ export async function get_note(
     const meta = metadata as Record<string, unknown>;
 
     const confidence = meta.confidence;
+    const fileRef = meta.file_ref;
     return {
       id: args.id,
       title: (meta.title as string) ?? "",
@@ -952,6 +953,7 @@ export async function get_note(
       ...(confidence === "low" || confidence === "medium" || confidence === "high"
         ? { confidence }
         : {}),
+      ...(typeof fileRef === "string" && fileRef ? { file_ref: fileRef } : {}),
     };
   } catch (e: unknown) {
     return normalizeError(e, "INGEST_ERROR");
@@ -970,6 +972,7 @@ export async function create_note(
     connections?: Array<{ target: string; type: string; context?: string }>;
     directory?: string;
     confidence?: "low" | "medium" | "high";
+    file_ref?: string;
   },
   config: VaultConfig
 ): Promise<unknown> {
@@ -1093,6 +1096,9 @@ export async function create_note(
     };
     if (args.confidence !== undefined) {
       metadata.confidence = args.confidence;
+    }
+    if (typeof args.file_ref === "string" && args.file_ref) {
+      metadata.file_ref = args.file_ref;
     }
 
     const noteContent = buildNote(metadata, args.body, args.connections);

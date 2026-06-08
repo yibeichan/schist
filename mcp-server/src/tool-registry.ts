@@ -188,6 +188,10 @@ export function makeWriteTools(config: VaultConfig) {
             enum: ["low", "medium", "high"],
             description: "Optional. Agent's stated confidence in the note's content. Omit if not declared; do not default to 'medium' to preserve 'agent did not declare' vs 'agent said medium' as distinct states.",
           },
+          file_ref: {
+            type: "string",
+            description: "Optional external file path/reference. schist stores and indexes the pointer but does not manage the referenced file.",
+          },
         },
         required: ["owner", "title", "body"],
       },
