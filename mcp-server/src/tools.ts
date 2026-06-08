@@ -195,10 +195,8 @@ const SYNC_STATUS_TIMEOUT_MS = 10_000;
 
 /**
  * Write a sync-failure sentinel so agents have a visible trace when a
- * background push silently fails. `get_context` reads this and surfaces it
- * to the caller on the next read; `readSyncWarning` (below) also surfaces it
- * on the NEXT write tool's response so write-heavy sessions don't have to
- * call get_context to notice.
+ * background push silently fails. `readSyncWarning` surfaces it on reads and
+ * blocks subsequent write tools until successful sync recovery clears it.
  */
 async function writeSyncError(vaultRoot: string, message: string): Promise<void> {
   try {
@@ -220,23 +218,6 @@ async function writeSyncError(vaultRoot: string, message: string): Promise<void>
   }
 }
 
-/**
- * Read the sync-failure sentinel WITHOUT clearing it, formatted as a warning
- * string. Returns undefined if the file is missing, empty, or unreadable.
- *
- * Called from successful write-tool responses so an agent in a write-heavy
- * session (which rarely calls get_context between writes) sees the warning
- * on the next write rather than discovering the divergence at session end.
- *
- * Clearing is left to get_context — it's the explicit "I am syncing with
- * the world" call and a natural acknowledge point. Repeating the warning
- * across N writes until then is by design: until the agent acknowledges
- * via get_context, each write is committing into a vault that's diverging
- * from hub, and the agent should keep being told.
- *
- * Spec context: see #120 — pre-fix, agents accumulated 13+ MCP commits with
- * silent push failures before noticing the spoke had diverged from hub.
- */
 /**
  * Sanitize sentinel content before embedding it in an agent-facing warning.
  * Strips non-printable / control characters (which could include ANSI
@@ -291,25 +272,51 @@ async function readSyncWarning(vaultRoot: string): Promise<string | undefined> {
   const parsed = parseSyncErrorText(errText);
   const age = formatSyncErrorAge(parsed.timestamp);
   const ageClause = age ? ` Sync failed ${age}.` : "";
-  // Descriptive phrasing (not imperative). Agents reading this on every
-  // write should NOT abandon their current task to "acknowledge" — the
-  // sentinel will be cleared the next time get_context runs anyway.
-  return `Recent background sync failure:${ageClause} ${parsed.contents}. Writes may not have reached the hub. \`sync_status\` reports divergence and \`sync_retry\` can retry the push; \`get_context\` clears this on its next call.`;
+  // Descriptive phrasing (not imperative). A dirty sentinel is cleared only
+  // by successful sync recovery, not by context reads.
+  return `Recent background sync failure:${ageClause} ${parsed.contents}. Writes may not have reached the hub. \`sync_status\` reports divergence and \`sync_retry\` can retry and clear this state.`;
+}
+
+async function blockWriteIfSyncDirty(vaultRoot: string): Promise<ToolError | null> {
+  // Only spokes can diverge from a hub, and only spokes have a recovery path:
+  // both `sync_retry` and `triggerSpokePush` are spoke-gated. Blocking a
+  // non-spoke (e.g. a demoted vault or env-drift to a folder carrying a stale
+  // sentinel) would refuse writes with no way to clear them — a permanent
+  // deadlock. A standalone vault has no hub, so the divergence rationale
+  // doesn't apply; never block it.
+  if (!(await isSpokeVault(vaultRoot))) return null;
+  const syncWarning = await readSyncWarning(vaultRoot);
+  if (syncWarning === undefined) return null;
+  return {
+    error: "SYNC_DIRTY",
+    message:
+      `${syncWarning} Refusing this write to avoid compounding spoke/hub divergence. ` +
+      "Run `sync_retry` after checking `sync_status`; writes resume after a successful push clears the sync error. " +
+      "If recovery keeps failing, remove `.schist/last-sync-error` manually only as a last resort.",
+  };
 }
 
 async function readSyncErrorState(vaultRoot: string): Promise<SyncStatusResponse["last_sync_error"] & { mtimeMs: number } | null> {
   const sentinelPath = path.join(vaultRoot, SYNC_ERROR_SENTINEL);
+  let stat;
   try {
-    const [rawText, stat] = await Promise.all([
-      fs.readFile(sentinelPath, "utf-8"),
-      fs.stat(sentinelPath),
-    ]);
+    stat = await fs.stat(sentinelPath);
+  } catch {
+    return null;
+  }
+
+  try {
+    const rawText = await fs.readFile(sentinelPath, "utf-8");
     const sanitized = sanitizeSentinelContent(rawText);
     if (!sanitized) return null;
     const { timestamp, contents } = parseSyncErrorText(sanitized);
     return { timestamp, contents, mtimeMs: stat.mtimeMs };
-  } catch {
-    return null;
+  } catch (e: unknown) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return {
+      contents: `Sync-failure sentinel exists but is unreadable (${code ?? "unknown error"})`,
+      mtimeMs: stat.mtimeMs,
+    };
   }
 }
 
@@ -319,7 +326,7 @@ async function clearSyncErrorIfUnchanged(vaultRoot: string, originalMtimeMs: num
   try {
     const stat = await fs.stat(sentinelPath);
     if (stat.mtimeMs !== originalMtimeMs) return false;
-    await fs.unlink(sentinelPath);
+    await fs.rm(sentinelPath, { recursive: true, force: true });
     return true;
   } catch {
     return false;
@@ -973,6 +980,8 @@ export async function create_note(
     // both source_agent and the commit subject (avoids divergence when
     // the caller sends e.g. "atwood ").
     const owner = validateOwner(args.owner);
+    const syncDirty = await blockWriteIfSyncDirty(vaultRoot);
+    if (syncDirty !== null) return syncDirty;
     if (args.confidence !== undefined && !["low", "medium", "high"].includes(args.confidence)) {
       return {
         error: "VALIDATION_ERROR",
@@ -1124,6 +1133,8 @@ export async function add_connection(
     // Identity gate (#63): same ordering as create_note. Reassign to the
     // canonicalized owner for downstream stamps.
     const owner = validateOwner(args.owner);
+    const syncDirty = await blockWriteIfSyncDirty(vaultRoot);
+    if (syncDirty !== null) return syncDirty;
     const filePath = path.join(vaultRoot, args.source);
     const absVaultRoot = path.resolve(vaultRoot);
     const absFilePath = path.resolve(filePath);
@@ -1424,33 +1435,12 @@ export async function get_context(
 
   await maybeSpokePull(vaultRoot);
 
-  // Step 3: Read (and clear) any pending background-sync-failure sentinel so
-  // agents don't silently work against a stale local view. errText is
-  // sanitized via the same helper readSyncWarning uses, so write-path and
-  // get_context surfacing share one trust-boundary policy on sentinel content.
-  //
-  // Atomic clear (#124): rename → read → unlink. A concurrent write-tool's
-  // readSyncWarning call against the canonical path either runs BEFORE the
-  // rename (sees the sentinel; will surface the warning — fine, the agent
-  // gets one extra warning) or AFTER (sees no file; healthy state). It
-  // never observes a partially-unlinked state, and the warning isn't
-  // surfaced for follow-up writes after this get_context call has
-  // acknowledged it.
+  // Step 3: Surface any pending background-sync-failure sentinel without
+  // clearing it. A dirty spoke should stay machine-readable until a successful
+  // push path (`triggerSpokePush` or `sync_retry`) clears the sentinel; merely
+  // reading context is not proof that local commits reached the hub.
   let syncWarning: string | undefined;
-  const sentinelPath = path.join(vaultRoot, SYNC_ERROR_SENTINEL);
-  const consumedPath = `${sentinelPath}.consumed-${process.pid}-${Date.now()}`;
-  try {
-    await fs.rename(sentinelPath, consumedPath);
-    // From here on, the canonical path doesn't exist — concurrent
-    // readSyncWarning calls see ENOENT and report healthy.
-    const errText = sanitizeSentinelContent(await fs.readFile(consumedPath, "utf-8"));
-    if (errText) {
-      syncWarning = `Recent background sync failure: ${errText}. Writes may not have reached the hub.`;
-    }
-    await fs.unlink(consumedPath).catch(() => {});
-  } catch {
-    // ENOENT on rename = no sentinel — healthy state.
-  }
+  syncWarning = await readSyncWarning(vaultRoot);
 
   // Step 4: SQLite read at effectiveDepth.
   let context: Record<string, unknown>;

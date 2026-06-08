@@ -155,10 +155,11 @@ See [`mcp-setup.md`](./mcp-setup.md) for the full MCP wiring details.
 Once wired up, the MCP server detects the spoke (by looking for
 `.schist/spoke.yaml` in the vault root) and turns on two behaviours:
 
-- **On write** (`create_note`, `add_connection`): after the local commit and
-  ingestion, the server fires `python3 -m schist --vault <root> sync push` in
-  the background. The call is detached and never blocks the agent; errors are
-  logged to the MCP server's stderr.
+- **On write** (`create_note`, `add_connection`): before mutating, the server
+  checks for `.schist/last-sync-error`. If a prior background push failed, the
+  write returns `SYNC_DIRTY` so the agent does not compound spoke/hub
+  divergence. After a clean local commit and ingestion, the server fires
+  `schist --vault <root> sync push` in the background.
 - **On read** (`get_context` only): before querying SQLite, the server awaits
   `python3 -m schist --vault <root> sync pull` with a **5-second hard
   timeout**. If the hub is unreachable or slow, the pull is killed and the
@@ -171,6 +172,13 @@ Once wired up, the MCP server detects the spoke (by looking for
 directly without pulling. Agents that want fresh cross-spoke data should call
 `get_context` at session start — the minimal depth is cheap and costs one
 bounded pull.
+
+If `SYNC_DIRTY` appears, call `sync_status` to inspect divergence and
+`sync_retry` to retry the push. A successful retry or background push clears
+the dirty sentinel; `get_context` only surfaces the warning and does not clear
+it. The block applies only to spoke vaults — a standalone vault has no hub to
+diverge from and is never blocked. If recovery keeps failing, delete
+`.schist/last-sync-error` manually only as a last resort.
 
 If you need more control (e.g. a batch HPC job that writes many notes and
 should push at the end), the explicit `schist sync push` CLI still works.

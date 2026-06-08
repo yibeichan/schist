@@ -250,7 +250,7 @@ describe("get_context tool — rate-limit (noteHighFrequency) wiring", () => {
 // ── Case 8: sentinel + downgrade interaction ───────────────────────────────
 
 describe("get_context tool — sync sentinel + verbose downgrade coexistence", () => {
-  it("response carries BOTH syncWarning and verboseNote (downgrade); sentinel is deleted", async () => {
+  it("response carries BOTH syncWarning and verboseNote (downgrade); sentinel remains", async () => {
     const sentinelPath = path.join(vaultRoot, SENTINEL_REL);
     await fs.writeFile(sentinelPath, "background push failed: timeout");
     const r = await get_context(vaultRoot, { depth: "full" });
@@ -259,8 +259,8 @@ describe("get_context tool — sync sentinel + verbose downgrade coexistence", (
     expect(r.syncWarning).toContain("timeout");
     expect(r.verboseNote).toBeDefined();
     expect(r.verboseNote).toContain("downgraded");
-    // Sentinel is consumed after a successful read.
-    await expect(fs.access(sentinelPath)).rejects.toBeDefined();
+    // A context read is not proof that local commits reached the hub.
+    await expect(fs.access(sentinelPath)).resolves.toBeUndefined();
   });
 });
 
