@@ -1,4 +1,4 @@
-import { listConcepts } from "../src/sqlite-reader.js";
+import { getContext, listConcepts } from "../src/sqlite-reader.js";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
@@ -17,6 +17,21 @@ async function makeConceptVault(
 
   const db = new Database(dbPath);
   db.exec(`
+    CREATE TABLE docs (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      date TEXT,
+      status TEXT DEFAULT 'draft',
+      tags TEXT,
+      concepts TEXT,
+      body TEXT NOT NULL,
+      scope TEXT DEFAULT 'global',
+      source TEXT,
+      confidence TEXT,
+      file_ref TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
     CREATE TABLE concepts (
       slug TEXT PRIMARY KEY,
       title TEXT NOT NULL,
@@ -34,6 +49,9 @@ async function makeConceptVault(
       UNIQUE(source, target, type)
     );
   `);
+  db.prepare(
+    `INSERT INTO docs (id, title, body, tags) VALUES (?, ?, ?, ?)`,
+  ).run("notes/seed.md", "Seed", "body", "[]");
 
   const insertConcept = db.prepare(
     `INSERT INTO concepts (slug, title) VALUES (?, ?)`
@@ -145,5 +163,45 @@ describe("listConcepts — cursor pagination", () => {
 
     const results = listConcepts(vault, { limit: 2 });
     expect(results.length).toBe(2);
+  });
+
+  it("counts both slug and concepts/<slug>.md edge endpoints", async () => {
+    const vault = await makeConceptVault([
+      { slug: "backpropagation", title: "Backpropagation" },
+    ]);
+    const db = new Database(path.join(vault, ".schist", "schist.db"));
+    db.prepare(`INSERT INTO edges (source, target, type) VALUES (?, ?, ?)`).run(
+      "notes/seed.md", "backpropagation", "references",
+    );
+    db.prepare(`INSERT INTO edges (source, target, type) VALUES (?, ?, ?)`).run(
+      "notes/seed.md", "concepts/backpropagation.md", "extends",
+    );
+    db.close();
+
+    const [concept] = listConcepts(vault);
+
+    expect(concept.slug).toBe("backpropagation");
+    expect(concept.edgeCount).toBe(2);
+  });
+
+  it("uses the same path-aware edge count for getContext hotConcepts", async () => {
+    const vault = await makeConceptVault([
+      { slug: "backpropagation", title: "Backpropagation" },
+    ]);
+    const db = new Database(path.join(vault, ".schist", "schist.db"));
+    db.prepare(`INSERT INTO edges (source, target, type) VALUES (?, ?, ?)`).run(
+      "notes/seed.md", "backpropagation", "references",
+    );
+    db.prepare(`INSERT INTO edges (source, target, type) VALUES (?, ?, ?)`).run(
+      "notes/seed.md", "concepts/backpropagation.md", "extends",
+    );
+    db.close();
+
+    const context = getContext(vault) as { hotConcepts: Array<{ slug: string; edgeCount: number }> };
+
+    expect(context.hotConcepts[0]).toMatchObject({
+      slug: "backpropagation",
+      edgeCount: 2,
+    });
   });
 });
