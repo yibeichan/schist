@@ -22,7 +22,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-      issues: read
+      issues: write
       id-token: write
 
     steps:
@@ -31,8 +31,24 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Detect review workflow self-change
+        id: workflow-diff
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+
+          git fetch --no-tags --depth=1 origin "${BASE_REF}"
+          if git diff --name-only "origin/${BASE_REF}" HEAD \
+            | grep -Fxq ".github/workflows/claude-code-review.yml"; then
+            echo "self_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "self_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run Claude Code Review
         id: claude-review
+        if: steps.workflow-diff.outputs.self_changed != 'true'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -41,3 +57,61 @@ jobs:
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
+
+      - name: Confirm Claude review completed
+        if: success() && steps.workflow-diff.outputs.self_changed != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          marker="<!-- schist-claude-review-confirmation -->"
+          body_file="$(mktemp)"
+          cat > "$body_file" <<EOF
+          ${marker}
+          Claude Code review completed successfully.
+
+          If there are no inline Claude comments on this PR, Claude did not publish any actionable findings for this run.
+
+          Workflow run: ${RUN_URL}
+          EOF
+
+          comment_id="$(
+            gh api "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments" --paginate \
+              --jq ".[] | select(.body | contains(\"${marker}\")) | .id" \
+              | head -n 1
+          )"
+
+          if [ -n "$comment_id" ]; then
+            body="$(cat "$body_file")"
+            gh api \
+              --method PATCH \
+              "repos/${REPOSITORY}/issues/comments/${comment_id}" \
+              --field body="$body" >/dev/null
+          else
+            body="$(cat "$body_file")"
+            gh api \
+              --method POST \
+              "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --field body="$body" >/dev/null
+          fi
+
+      - name: Record Claude review skipped for workflow self-change
+        if: success() && steps.workflow-diff.outputs.self_changed == 'true'
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## Claude Code Review
+
+          Claude Code review was skipped because this PR changes the Claude review workflow itself.
+
+          The Claude Code Action requires the workflow file to match the default branch before it will exchange its OIDC token. After this workflow change is merged, future PRs will receive normal Claude review completion comments.
+
+          Workflow run: ${RUN_URL}
+          EOF
