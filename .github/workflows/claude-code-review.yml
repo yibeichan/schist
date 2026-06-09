@@ -83,20 +83,29 @@ jobs:
             gh api "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments" --paginate \
               --jq ".[] | select(.body | contains(\"${marker}\")) | .id" \
               | head -n 1
-          )"
+          )" || {
+            echo "GitHub token could not read existing PR comments; recording confirmation in the job summary." >> "$GITHUB_STEP_SUMMARY"
+            cat "$body_file" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
 
+          body="$(cat "$body_file")"
           if [ -n "$comment_id" ]; then
-            body="$(cat "$body_file")"
-            gh api \
+            if ! gh api \
               --method PATCH \
               "repos/${REPOSITORY}/issues/comments/${comment_id}" \
-              --field body="$body" >/dev/null
+              --field body="$body" >/dev/null; then
+              echo "GitHub token could not update the Claude confirmation PR comment; recording confirmation in the job summary." >> "$GITHUB_STEP_SUMMARY"
+              cat "$body_file" >> "$GITHUB_STEP_SUMMARY"
+            fi
           else
-            body="$(cat "$body_file")"
-            gh api \
+            if ! gh api \
               --method POST \
               "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments" \
-              --field body="$body" >/dev/null
+              --field body="$body" >/dev/null; then
+              echo "GitHub token could not create the Claude confirmation PR comment; recording confirmation in the job summary." >> "$GITHUB_STEP_SUMMARY"
+              cat "$body_file" >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
 
       - name: Record Claude review skipped for workflow self-change
