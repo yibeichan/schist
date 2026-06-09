@@ -7,6 +7,8 @@ import sys
 
 
 ALLOWED_TABLES = {'docs', 'concepts', 'edges', 'docs_fts', 'paper_metadata'}
+# Keep in sync with mcp-server/src/sqlite-reader.ts REQUIRED_TABLES.
+REQUIRED_TABLES = {'docs', 'paper_metadata'}
 
 
 def get_db(vault_path: str, db_path: str | None = None) -> sqlite3.Connection:
@@ -20,8 +22,13 @@ def get_db(vault_path: str, db_path: str | None = None) -> sqlite3.Connection:
     if not needs_ingest:
         conn = sqlite3.connect(db_path)
         try:
-            count = conn.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='docs'").fetchone()[0]
-            if count == 0:
+            table_names = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if not REQUIRED_TABLES.issubset(table_names):
                 needs_ingest = True
                 conn.close()
         except sqlite3.DatabaseError:
@@ -60,6 +67,10 @@ def _run_ingest(vault_path: str, db_path: str):
 def fts_search(db: sqlite3.Connection, query: str, limit: int = 20,
                status: str | None = None, tags: list[str] | None = None) -> list[dict]:
     """FTS5 search on docs_fts joined to docs."""
+    sanitized_query = _sanitize_fts_query(query)
+    if not sanitized_query:
+        return []
+
     sql = """
         SELECT d.id, d.title, d.date, d.status,
                snippet(docs_fts, 1, '[', ']', '...', 32) AS snippet
@@ -67,7 +78,7 @@ def fts_search(db: sqlite3.Connection, query: str, limit: int = 20,
         JOIN docs d ON d.rowid = fts.rowid
         WHERE docs_fts MATCH ?
     """
-    params: list = [query]
+    params: list = [sanitized_query]
 
     if status:
         sql += ' AND d.status = ?'
@@ -85,6 +96,12 @@ def fts_search(db: sqlite3.Connection, query: str, limit: int = 20,
     return [dict(r) for r in rows]
 
 
+def _sanitize_fts_query(query: str) -> str:
+    """Quote each token so FTS5 treats user input as literal search text."""
+    tokens = query.split()
+    return " ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
+
+
 def raw_query(db: sqlite3.Connection, sql: str, params: tuple = ()) -> dict:
     """Execute a validated SELECT query. Returns {columns, rows}."""
     _validate_sql(sql)
@@ -94,20 +111,76 @@ def raw_query(db: sqlite3.Connection, sql: str, params: tuple = ()) -> dict:
     return {'columns': columns, 'rows': rows}
 
 
+def _mask_sql_literals_and_comments(sql: str) -> str:
+    """Replace SQL string/comment contents with spaces before regex checks."""
+    chars = list(sql)
+    i = 0
+    state = "normal"
+
+    while i < len(chars):
+        ch = chars[i]
+        nxt = chars[i + 1] if i + 1 < len(chars) else ""
+
+        if state == "normal":
+            if ch == "'":
+                state = "single"
+            elif ch == '"':
+                state = "double"
+            elif ch == "-" and nxt == "-":
+                chars[i] = chars[i + 1] = " "
+                i += 1
+                state = "line_comment"
+            elif ch == "/" and nxt == "*":
+                chars[i] = chars[i + 1] = " "
+                i += 1
+                state = "block_comment"
+        elif state == "single":
+            if ch == "'" and nxt == "'":
+                chars[i] = chars[i + 1] = " "
+                i += 1
+            elif ch == "'":
+                state = "normal"
+            else:
+                chars[i] = " "
+        elif state == "double":
+            if ch == '"' and nxt == '"':
+                chars[i] = chars[i + 1] = " "
+                i += 1
+            elif ch == '"':
+                state = "normal"
+            else:
+                chars[i] = " "
+        elif state == "line_comment":
+            if ch == "\n":
+                state = "normal"
+            else:
+                chars[i] = " "
+        elif state == "block_comment":
+            if ch == "*" and nxt == "/":
+                chars[i] = chars[i + 1] = " "
+                i += 1
+                state = "normal"
+            else:
+                chars[i] = " "
+
+        i += 1
+
+    return "".join(chars)
+
+
 def _validate_sql(sql: str):
     """Ensure SQL is SELECT-only and uses only allowed tables."""
-    # Strip SQL comments
-    cleaned = re.sub(r'--.*$', '', sql, flags=re.MULTILINE)
-    cleaned = re.sub(r'/\*.*?\*/', '', cleaned, flags=re.DOTALL)
+    cleaned = _mask_sql_literals_and_comments(sql)
     cleaned = cleaned.strip()
 
-    if not cleaned.upper().startswith('SELECT'):
+    if not re.match(r'SELECT\b', cleaned, re.IGNORECASE):
         print('Error: only SELECT queries are allowed', file=sys.stderr)
         sys.exit(1)
 
-    # Check for disallowed statements
+    # sqlite3.execute() rejects multiple statements, but catch obvious stacked
+    # write attempts here so the CLI reports the same friendly validation style.
     for keyword in ('INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE', 'ATTACH'):
-        if re.search(rf'\b{keyword}\b', cleaned, re.IGNORECASE):
+        if re.search(rf';\s*{keyword}\b', cleaned, re.IGNORECASE):
             print(f'Error: {keyword} statements are not allowed', file=sys.stderr)
             sys.exit(1)
 
