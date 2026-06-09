@@ -68,21 +68,27 @@ def derive_scope(filepath: str) -> str:
 
 
 def get_changed_files(oldrev: str, newrev: str) -> list[str]:
-    """Get list of files changed between two revisions.
+    """Get list of files touched by commits introduced between two revisions.
 
     Handles special cases:
-    - New branch (oldrev is zero): diff against empty tree
+    - New branch (oldrev is zero): inspect commits not already reachable
     - Deleted branch (newrev is zero): no files to check
+
+    This intentionally enumerates per-commit file touches instead of using a
+    net diff. A multi-commit push can add an out-of-scope file in an
+    intermediate commit and remove it before the tip; the hook must still see
+    that file because it entered git history.
     """
     if newrev == ZERO_SHA:
         # Branch deletion — nothing to check
         return []
 
     if oldrev == ZERO_SHA:
-        # New branch — diff all files in the new ref against empty tree
-        # Use git diff-tree against the empty tree hash
+        # New branch — inspect commits introduced by this ref. Exclude commits
+        # already reachable from existing refs so creating a branch at an
+        # existing commit does not re-count old history.
         result = subprocess.run(
-            ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", newrev],
+            ["git", "log", "--name-only", "--format=", "-z", newrev, "--not", "--all"],
             capture_output=True,
             text=True,
             check=True,
@@ -90,14 +96,15 @@ def get_changed_files(oldrev: str, newrev: str) -> list[str]:
         )
     else:
         result = subprocess.run(
-            ["git", "diff", "--name-only", "-z", oldrev, newrev],
+            ["git", "log", "--name-only", "--format=", "-z", f"{oldrev}..{newrev}"],
             capture_output=True,
             text=True,
             check=True,
             timeout=30,
         )
 
-    return [f for f in result.stdout.strip("\0").split("\0") if f]
+    changed_files = [f for f in result.stdout.strip("\0").split("\0") if f]
+    return list(dict.fromkeys(changed_files))
 
 
 def check_push(

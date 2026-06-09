@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -428,24 +429,28 @@ class TestGetChangedFiles:
         result = get_changed_files("abc123", ZERO_SHA)
         assert result == []
 
-    def test_normal_diff(self):
+    def test_existing_branch_uses_commit_history_not_net_diff(self):
         from schist.pre_receive import get_changed_files
 
-        mock_result = type("Result", (), {"stdout": "a.md\0b.md\0", "returncode": 0})()
-        with patch("subprocess.run", return_value=mock_result):
+        mock_result = type("Result", (), {"stdout": "a.md\0b.md\0a.md\0", "returncode": 0})()
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
             result = get_changed_files("aaa", "bbb")
         assert result == ["a.md", "b.md"]
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ["git", "log", "--name-only", "--format=", "-z", "aaa..bbb"]
 
-    def test_new_branch_uses_diff_tree(self):
+    def test_new_branch_uses_commit_history_not_tip_diff(self):
         from schist.pre_receive import ZERO_SHA, get_changed_files
 
         mock_result = type("Result", (), {"stdout": "new-file.md\0", "returncode": 0})()
         with patch("subprocess.run", return_value=mock_result) as mock_run:
             result = get_changed_files(ZERO_SHA, "abc123")
         assert result == ["new-file.md"]
-        # Should use diff-tree for new branches
         cmd = mock_run.call_args[0][0]
-        assert "diff-tree" in cmd
+        assert cmd == [
+            "git", "log", "--name-only", "--format=", "-z",
+            "abc123", "--not", "--all",
+        ]
 
     def test_empty_diff_returns_empty(self):
         from schist.pre_receive import get_changed_files
@@ -454,6 +459,64 @@ class TestGetChangedFiles:
         with patch("subprocess.run", return_value=mock_result):
             result = get_changed_files("aaa", "bbb")
         assert result == []
+
+    @pytest.mark.integration
+    def test_intermediate_reverted_file_is_rejected(self, acl, tmp_path, monkeypatch, capsys):
+        """ACL checks must inspect every pushed commit, not only the net diff.
+
+        The simulated push starts at ``oldrev``. The first new commit writes an
+        out-of-scope file; the second removes it, so ``git diff oldrev newrev``
+        would not show that path. The pre-receive hook must still reject the
+        push because the unauthorized content entered git history.
+        """
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        def git(*args: str) -> str:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return result.stdout.strip()
+
+        git("init")
+        git("config", "user.email", "test@example.com")
+        git("config", "user.name", "Test User")
+
+        allowed = repo / "research" / "mario" / "ok.md"
+        allowed.parent.mkdir(parents=True)
+        allowed.write_text("ok\n")
+        git("add", "research/mario/ok.md")
+        git("commit", "-m", "base")
+        oldrev = git("rev-parse", "HEAD")
+
+        bad = repo / "security" / "bad.md"
+        bad.parent.mkdir(parents=True)
+        bad.write_text("bad\n")
+        git("add", "security/bad.md")
+        git("commit", "-m", "bad intermediate")
+
+        bad.unlink()
+        git("add", "security/bad.md")
+        git("commit", "-m", "revert bad")
+        newrev = git("rev-parse", "HEAD")
+
+        monkeypatch.chdir(repo)
+        rc = main(
+            stdin=[f"{oldrev} {newrev} refs/heads/main"],
+            acl=acl,
+            identity="cluster-mario",
+            log_path=tmp_path / "rejected-pushes.log",
+            db_path=tmp_path / "rate-limits.sqlite",
+        )
+
+        assert rc == 1
+        stderr = capsys.readouterr().err
+        assert "out-of-scope writes" in stderr
+        assert "security/bad.md" in stderr
 
 
 # ---------------------------------------------------------------------------
