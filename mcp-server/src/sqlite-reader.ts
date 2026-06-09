@@ -302,6 +302,15 @@ export function getNote(vaultRoot: string, id: string): Note | null {
   }
 }
 
+function conceptEdgeJoinCondition(edgeAlias: string, conceptAlias: string): string {
+  return `(
+    ${edgeAlias}.source = ${conceptAlias}.slug OR
+    ${edgeAlias}.target = ${conceptAlias}.slug OR
+    ${edgeAlias}.source = 'concepts/' || ${conceptAlias}.slug || '.md' OR
+    ${edgeAlias}.target = 'concepts/' || ${conceptAlias}.slug || '.md'
+  )`;
+}
+
 export function listConcepts(
   vaultRoot: string,
   opts?: { tags?: string[]; search?: string; limit?: number; offset?: number }
@@ -314,7 +323,7 @@ export function listConcepts(
       SELECT c.slug, c.title, c.description, c.tags,
              COUNT(e.id) as edgeCount
       FROM concepts c
-      LEFT JOIN edges e ON e.source = c.slug OR e.target = c.slug
+      LEFT JOIN edges e ON ${conceptEdgeJoinCondition("e", "c")}
     `;
     const params: unknown[] = [];
     const where: string[] = [];
@@ -438,7 +447,7 @@ export function getContext(
       .prepare(`
         SELECT c.slug, c.title, COUNT(e.id) as edgeCount
         FROM concepts c
-        LEFT JOIN edges e ON e.source = c.slug OR e.target = c.slug
+        LEFT JOIN edges e ON ${conceptEdgeJoinCondition("e", "c")}
         GROUP BY c.slug
         ORDER BY edgeCount DESC
         LIMIT 10
