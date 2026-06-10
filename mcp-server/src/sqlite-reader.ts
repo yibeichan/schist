@@ -2,7 +2,8 @@ import Database from "better-sqlite3";
 import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
-import { spawnSync } from "child_process";
+import { spawn, spawnSync } from "child_process";
+import { createRequire } from "module";
 import { load as yamlLoad } from "js-yaml";
 import type { SearchResult, Note, Concept, Connection, MemoryEntry, AgentStateEntry, ConceptAlias } from "./types.js";
 import { CONNECTION_RE, parseConnections as parseConnectionsSync } from "./markdown-parser.js";
@@ -82,6 +83,18 @@ const REQUIRED_DOCS_COLUMNS: ReadonlySet<string> = new Set([
 const REQUIRED_TABLES: ReadonlySet<string> = new Set(["paper_metadata"]);
 
 const verifiedVaults = new Set<string>();
+const requireForWorker = createRequire(import.meta.url);
+const betterSqlite3Path = requireForWorker.resolve("better-sqlite3");
+
+const QUERY_GRAPH_DEFAULT_TIMEOUT_MS = 5_000;
+const QUERY_GRAPH_DEFAULT_BYTE_BUDGET = 10 * 1024 * 1024;
+
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 /** Test-only — clears the per-process verified-vaults cache so drift detection re-fires. */
 export function resetSchemaCacheForTesting(): void {
@@ -358,12 +371,145 @@ export function listConcepts(
   }
 }
 
-export function queryGraph(
+type QueryGraphResult = { columns: string[]; rows: unknown[][]; rowCount: number };
+
+function runQueryGraphChild(
+  dbPath: string,
+  sql: string,
+  params: unknown[],
+  opts: { timeoutMs: number; byteBudget: number }
+): Promise<QueryGraphResult> {
+  const childSource = `
+    const Database = require(${JSON.stringify(betterSqlite3Path)});
+
+    function jsonBytes(value) {
+      return Buffer.byteLength(JSON.stringify(value), "utf8");
+    }
+
+    function respond(payload) {
+      process.stdout.write(JSON.stringify(payload));
+    }
+
+    let input = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { input += chunk; });
+    process.stdin.on("end", () => {
+      try {
+        const request = JSON.parse(input);
+        const db = new Database(request.dbPath, { readonly: true });
+        try {
+          const stmt = db.prepare(request.sql);
+          const columns = stmt.columns().map((c) => c.name);
+          const rows = [];
+          let totalBytes = jsonBytes({ columns, rows: [], rowCount: 0 });
+
+          for (const row of stmt.iterate(...request.params)) {
+            const rowValues = columns.map((c) => row[c]);
+            totalBytes += jsonBytes(rowValues) + 1;
+            if (totalBytes > request.byteBudget) {
+              const err = new Error(
+                "query_graph response exceeds byte budget (" +
+                totalBytes + " > " + request.byteBudget + " bytes)"
+              );
+              err.error = "QUERY_RESPONSE_TOO_LARGE";
+              throw err;
+            }
+            rows.push(rowValues);
+          }
+
+          respond({
+            ok: true,
+            result: { columns, rows, rowCount: rows.length },
+          });
+        } finally {
+          db.close();
+        }
+      } catch (e) {
+        respond({
+          ok: false,
+          error: {
+            error: e && (e.error || e.code) || "INVALID_SQL",
+            message: e && e.message || String(e),
+            stack: e && e.stack,
+          },
+        });
+      }
+    });
+  `;
+
+  return new Promise<QueryGraphResult>((resolve, reject) => {
+    const child = spawn(process.execPath, ["-e", childSource], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let settled = false;
+    let stdout = "";
+    let stderr = "";
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 500).unref?.();
+      finish(() => {
+        reject(Object.assign(
+          new Error(`query_graph exceeded timeout (${opts.timeoutMs}ms)`),
+          { error: "QUERY_TIMEOUT" },
+        ));
+      });
+    }, opts.timeoutMs);
+    timer.unref?.();
+
+    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+    child.on("error", (err) => finish(() => reject(err)));
+    child.on("close", (code, signal) => {
+      finish(() => {
+        if (code !== 0) {
+          reject(Object.assign(
+            new Error(`query_graph child exited with code ${code ?? "null"}${signal ? ` signal ${signal}` : ""}: ${stderr.trim()}`),
+            { error: "QUERY_GRAPH_EXECUTOR_ERROR" },
+          ));
+          return;
+        }
+        let message: {
+          ok: boolean;
+          result?: QueryGraphResult;
+          error?: { error?: string; message?: string; stack?: string };
+        };
+        try {
+          message = JSON.parse(stdout);
+        } catch {
+          reject(Object.assign(
+            new Error(`query_graph child returned invalid JSON: ${stdout.slice(0, 200)}`),
+            { error: "QUERY_GRAPH_EXECUTOR_ERROR" },
+          ));
+          return;
+        }
+        if (message.ok && message.result) {
+          resolve(message.result);
+          return;
+        }
+        const err = Object.assign(
+          new Error(message.error?.message ?? "query_graph failed"),
+          { error: message.error?.error ?? "INVALID_SQL" },
+        );
+        if (message.error?.stack) err.stack = message.error.stack;
+        reject(err);
+      });
+    });
+    child.stdin.end(JSON.stringify({ dbPath, sql, params, byteBudget: opts.byteBudget }));
+  });
+}
+
+export async function queryGraph(
   vaultRoot: string,
   sql: string,
   params?: unknown[],
   opts?: { limit?: number; offset?: number }
-): { columns: string[]; rows: unknown[][]; rowCount: number } {
+): Promise<QueryGraphResult> {
   // Strip trailing semicolon(s) + whitespace before either guard or wrap.
   // The subquery wrap below produces invalid SQL if the caller_sql ends in a
   // semicolon (`SELECT * FROM (SELECT 1;) ...`); accept the trailing `;` as a
@@ -405,24 +551,12 @@ export function queryGraph(
   const offset = opts?.offset ?? 0;
   const wrappedSql = `SELECT * FROM (${trimmed}) AS user_query LIMIT ? OFFSET ?`;
   const allParams = [...(params ?? []), limit, offset];
+  const timeoutMs = positiveIntEnv("SCHIST_QUERY_GRAPH_TIMEOUT_MS", QUERY_GRAPH_DEFAULT_TIMEOUT_MS);
+  const byteBudget = positiveIntEnv("SCHIST_QUERY_GRAPH_BYTE_BUDGET", QUERY_GRAPH_DEFAULT_BYTE_BUDGET);
 
-  const db = openDb(vaultRoot);
-  try {
-    const stmt = db.prepare(wrappedSql);
-    const rows = stmt.all(...allParams) as Record<string, unknown>[];
-    if (rows.length === 0) {
-      const columns = stmt.columns().map((c) => c.name);
-      return { columns, rows: [], rowCount: 0 };
-    }
-    const columns = Object.keys(rows[0]);
-    return {
-      columns,
-      rows: rows.map((r) => columns.map((c) => r[c])),
-      rowCount: rows.length,
-    };
-  } finally {
-    db.close();
-  }
+  ensureSchemaCurrent(vaultRoot);
+  const dbPath = path.join(vaultRoot, ".schist", "schist.db");
+  return runQueryGraphChild(dbPath, wrappedSql, allParams, { timeoutMs, byteBudget });
 }
 
 export function getContext(

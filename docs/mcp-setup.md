@@ -151,6 +151,20 @@ under "BREAKING: `query_graph`" for migration guidance.
 Only `SELECT` and `WITH` are allowed; mutation keywords are rejected with
 `INVALID_SQL`.
 
+`query_graph` is a trusted-agent tool, not a SQL sandbox. Callers can read any
+table in the vault SQLite database, including schema tables and side tables.
+Access control belongs at the MCP process boundary (`SCHIST_ALLOWED_AGENTS`,
+stdio process isolation, or an external auth proxy for any non-stdio
+transport). Do not expose the MCP server directly to a network.
+
+Two resource caps protect the MCP process from accidental or adversarial
+resource burn:
+
+- `SCHIST_QUERY_GRAPH_TIMEOUT_MS` — wall-clock timeout for the SQLite worker;
+  default `5000`.
+- `SCHIST_QUERY_GRAPH_BYTE_BUDGET` — maximum JSON response size before
+  `QUERY_RESPONSE_TOO_LARGE`; default `10485760` (10 MiB).
+
 ### Reason-string verbose
 
 `search_memory` and `get_context` accept an optional `verbose: "<reason>"`

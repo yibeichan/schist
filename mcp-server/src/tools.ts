@@ -1358,7 +1358,7 @@ export async function query_graph(
 
   let result: { columns: string[]; rows: unknown[][]; rowCount: number };
   try {
-    result = sqliteReader.queryGraph(vaultRoot, args.sql, args.params, {
+    result = await sqliteReader.queryGraph(vaultRoot, args.sql, args.params, {
       limit: effectiveLimit + 1,
       offset,
     });

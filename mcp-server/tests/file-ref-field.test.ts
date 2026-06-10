@@ -190,7 +190,7 @@ describe("schema-drift auto-rebuild for file_ref", () => {
     preDb.close();
     expect(preCols).not.toContain("file_ref");
 
-    const result = sqliteReader.queryGraph(vault, "SELECT id, file_ref FROM docs WHERE id LIKE 'notes/%'");
+    const result = await sqliteReader.queryGraph(vault, "SELECT id, file_ref FROM docs WHERE id LIKE 'notes/%'");
     expect(result.columns).toEqual(["id", "file_ref"]);
     expect(result.rows).toContainEqual(["notes/2026-06-08-file-ref.md", "/mnt/data/drift.pdf"]);
 

@@ -59,21 +59,21 @@ describe("sqlite-reader", () => {
 
   test("queryGraph: DROP TABLE is rejected with INVALID_SQL", async () => {
     const vaultRoot = await makeTempDb();
-    expect(() => queryGraph(vaultRoot, "DROP TABLE docs")).toThrow(
+    await expect(queryGraph(vaultRoot, "DROP TABLE docs")).rejects.toMatchObject(
       expect.objectContaining({ error: "INVALID_SQL" })
     );
   });
 
   test("queryGraph: CTE with DELETE is rejected with INVALID_SQL", async () => {
     const vaultRoot = await makeTempDb();
-    expect(() =>
+    await expect(
       queryGraph(vaultRoot, "WITH x AS (DELETE FROM docs RETURNING *) SELECT * FROM x")
-    ).toThrow(expect.objectContaining({ error: "INVALID_SQL" }));
+    ).rejects.toMatchObject(expect.objectContaining({ error: "INVALID_SQL" }));
   });
 
   test("queryGraph: valid SELECT returns results", async () => {
     const vaultRoot = await makeTempDb();
-    const result = queryGraph(vaultRoot, "SELECT id, title FROM docs LIMIT 10");
+    const result = await queryGraph(vaultRoot, "SELECT id, title FROM docs LIMIT 10");
     expect(result.columns).toEqual(["id", "title"]);
     expect(result.rows.length).toBeGreaterThan(0);
     expect(result.rows[0][1]).toBe("Test Note");
