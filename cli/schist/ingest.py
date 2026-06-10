@@ -92,16 +92,18 @@ def _authors_json(value) -> str | None:
     return None
 
 
-def _first_verification_source(value) -> str | None:
+def _verification_sources_json(value) -> str | None:
+    sources: list[str] = []
     if isinstance(value, list):
         for item in value:
             if isinstance(item, str) and item:
-                return item
+                sources.append(item)
             if isinstance(item, dict) and item:
-                key, val = next(iter(item.items()))
-                return f'{key}:{val}' if val is not None else str(key)
+                for key, val in item.items():
+                    sources.append(f'{key}:{val}' if val is not None else str(key))
+        return json.dumps(sources) if sources else None
     if isinstance(value, str) and value:
-        return value
+        return json.dumps([value])
     return None
 
 
@@ -117,7 +119,7 @@ def paper_metadata_from_frontmatter(meta: dict, rel: Path) -> tuple | None:
         verification = {}
     verified_date = _string_or_none(verification.get('verified_on'))
     verified_by = _string_or_none(verification.get('verified_by'))
-    verification_source = _first_verification_source(verification.get('verified_against'))
+    verification_sources = _verification_sources_json(verification.get('verified_against'))
     verified = 1 if verified_date else 0
 
     return (
@@ -132,7 +134,7 @@ def paper_metadata_from_frontmatter(meta: dict, rel: Path) -> tuple | None:
         verified,
         verified_by,
         verified_date,
-        verification_source,
+        verification_sources,
         _string_or_none(meta.get('url')),
     )
 
@@ -258,7 +260,7 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
                 INSERT INTO paper_metadata (
                     doc_id, authors, year, venue, paper_type, doi, arxiv_id,
                     pubmed_pmid, bibtex_key, verified, verified_by,
-                    verified_date, verification_source, url
+                    verified_date, verification_sources, url
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (doc_id, *paper_row),
