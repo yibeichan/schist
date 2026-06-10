@@ -181,6 +181,7 @@ def test_ingest_indexes_paper_metadata(tmp_path: Path) -> None:
         "  verified_by: codex\n"
         "  verified_against:\n"
         "    - crossref:10.1234/example\n"
+        "    - pubmed:12345678\n"
         "---\n"
         "\n"
         "Body.\n",
@@ -220,7 +221,10 @@ def test_ingest_indexes_paper_metadata(tmp_path: Path) -> None:
     assert row["verified"] == 1
     assert row["verified_by"] == "codex"
     assert row["verified_date"] == "2026-06-08"
-    assert row["verification_source"] == "crossref:10.1234/example"
+    assert json.loads(row["verification_sources"]) == [
+        "crossref:10.1234/example",
+        "pubmed:12345678",
+    ]
     assert row["url"] == "https://doi.org/10.1234/example"
     assert query == {"columns": ["title", "year"], "rows": [["Example Paper", 2024]]}
 

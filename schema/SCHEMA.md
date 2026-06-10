@@ -128,7 +128,9 @@ See `CONVENTIONS.md` for the full authoring guide and example template.
 
 Ingest copies citation-grade paper fields into the `paper_metadata` SQLite side
 table keyed by `docs.id`. This keeps generic document rows compact while making
-paper integrity queries straightforward:
+paper integrity queries straightforward. The `verification_sources` column
+stores `verification.verified_against` as a JSON array so multi-source
+verification records remain queryable after ingest.
 
 ```sql
 -- Unverified papers
@@ -148,6 +150,13 @@ SELECT d.title
 FROM docs d
 JOIN paper_metadata pm ON pm.doc_id = d.id
 WHERE pm.doi IS NULL;
+
+-- Papers verified against PubMed
+SELECT d.title
+FROM docs d
+JOIN paper_metadata pm ON pm.doc_id = d.id
+JOIN json_each(pm.verification_sources) src
+WHERE src.value LIKE 'pubmed:%';
 ```
 
 ## Connection Types

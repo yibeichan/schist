@@ -58,7 +58,7 @@ CREATE TABLE paper_metadata (
     verified            INTEGER DEFAULT 0,
     verified_by         TEXT,
     verified_date       TEXT,
-    verification_source TEXT,
+    verification_sources TEXT,              -- JSON array of verification sources
     url                 TEXT
 );
 
