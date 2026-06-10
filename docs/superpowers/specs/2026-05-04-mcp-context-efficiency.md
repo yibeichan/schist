@@ -325,10 +325,20 @@ SELECT * FROM (<caller_sql>) AS user_query LIMIT :limit OFFSET :offset
   `5 < limit`). A caller passing `SELECT * FROM docs ORDER BY date DESC`
   gets server-paginated results in date-descending order.
 - The existing `query_graph` guards (SELECT/WITH-only, no
-  INSERT/UPDATE/etc., enforced via `sqlite-reader.ts:208-211`) still
-  reject mutating statements before wrapping.
+  INSERT/UPDATE/etc.) still reject mutating statements before wrapping.
 - Caller's SQL with a trailing `;` or multi-statement input is
   rejected by `better-sqlite3.prepare()` as it is today — no change.
+- Execution runs in a worker with a wall-clock timeout
+  (`SCHIST_QUERY_GRAPH_TIMEOUT_MS`, default 5000 ms). If the worker does
+  not finish in time, the parent terminates it and returns `QUERY_TIMEOUT`.
+- Result assembly enforces a JSON byte budget
+  (`SCHIST_QUERY_GRAPH_BYTE_BUDGET`, default 10 MiB). If the page would
+  exceed the budget, the tool returns `QUERY_RESPONSE_TOO_LARGE` instead
+  of serializing an oversized response.
+- Trust model: `query_graph` is SELECT-only, but it is not a SQL sandbox.
+  Trusted callers can read any table in the vault SQLite database; access
+  control belongs at the MCP process boundary, not inside caller SQL.
+  Do not expose the MCP server to a network without an auth proxy.
 
 This approach removes the spec's prior "detect caller LIMIT and cap"
 requirement entirely. The subquery wrap is a single deterministic

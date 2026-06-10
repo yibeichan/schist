@@ -41,7 +41,11 @@ async function makeVault(n: number = 0): Promise<string> {
 
 let vaultRoot: string;
 const envSnapshot: Record<string, string | undefined> = {};
-const envKeys = ["SCHIST_AGENT_ID"] as const;
+const envKeys = [
+  "SCHIST_AGENT_ID",
+  "SCHIST_QUERY_GRAPH_BYTE_BUDGET",
+  "SCHIST_QUERY_GRAPH_TIMEOUT_MS",
+] as const;
 
 beforeEach(async () => {
   for (const k of envKeys) {
@@ -355,4 +359,43 @@ describe("query_graph tool — caller params bound under the wrap", () => {
     expect(r.rows[0][0]).toBe("notes/0002.md");
     expect(r.rows[0][1]).toBe("Note 0002");
   });
+});
+
+// ── resource hardening ─────────────────────────────────────────────────────
+
+describe("query_graph tool — resource hardening", () => {
+  it("rejects responses that exceed the configured byte budget", async () => {
+    vaultRoot = await makeVault(1);
+    process.env.SCHIST_QUERY_GRAPH_BYTE_BUDGET = "1024";
+
+    const r = await query_graph(vaultRoot, {
+      sql: "SELECT randomblob(2048) AS payload FROM docs LIMIT 1",
+    });
+
+    expect(r).toMatchObject({
+      error: "QUERY_RESPONSE_TOO_LARGE",
+      message: expect.stringContaining("byte budget"),
+    });
+  });
+
+  it("interrupts CPU-heavy queries at the configured timeout", async () => {
+    vaultRoot = await makeVault(1);
+    process.env.SCHIST_QUERY_GRAPH_TIMEOUT_MS = "200";
+
+    const r = await query_graph(vaultRoot, {
+      sql: `
+        WITH RECURSIVE n(x) AS (
+          SELECT 1
+          UNION ALL
+          SELECT x + 1 FROM n
+        )
+        SELECT x FROM n LIMIT 1 OFFSET 100000000
+      `,
+    });
+
+    expect(r).toMatchObject({
+      error: "QUERY_TIMEOUT",
+      message: expect.stringContaining("timeout"),
+    });
+  }, 10_000);
 });
