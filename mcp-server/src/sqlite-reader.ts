@@ -96,6 +96,74 @@ function positiveIntEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function maskSqlLiteralsAndComments(sql: string): string {
+  const chars = [...sql];
+  let i = 0;
+  let state: "normal" | "single" | "double" | "line_comment" | "block_comment" = "normal";
+
+  while (i < chars.length) {
+    const ch = chars[i];
+    const next = chars[i + 1] ?? "";
+
+    if (state === "normal") {
+      if (ch === "'") {
+        state = "single";
+      } else if (ch === "\"") {
+        state = "double";
+      } else if (ch === "-" && next === "-") {
+        chars[i] = " ";
+        chars[i + 1] = " ";
+        i += 1;
+        state = "line_comment";
+      } else if (ch === "/" && next === "*") {
+        chars[i] = " ";
+        chars[i + 1] = " ";
+        i += 1;
+        state = "block_comment";
+      }
+    } else if (state === "single") {
+      if (ch === "'" && next === "'") {
+        chars[i] = " ";
+        chars[i + 1] = " ";
+        i += 1;
+      } else if (ch === "'") {
+        state = "normal";
+      } else {
+        chars[i] = " ";
+      }
+    } else if (state === "double") {
+      if (ch === "\"" && next === "\"") {
+        chars[i] = " ";
+        chars[i + 1] = " ";
+        i += 1;
+      } else if (ch === "\"") {
+        state = "normal";
+      } else {
+        chars[i] = " ";
+      }
+    } else if (state === "line_comment") {
+      if (ch === "\n") {
+        state = "normal";
+      } else {
+        chars[i] = " ";
+      }
+    } else if (state === "block_comment") {
+      if (ch === "*" && next === "/") {
+        chars[i] = " ";
+        chars[i + 1] = " ";
+        i += 1;
+        state = "normal";
+      } else {
+        chars[i] = " ";
+      }
+    }
+
+    i += 1;
+  }
+
+  return chars.join("");
+}
+
 /** Test-only — clears the per-process verified-vaults cache so drift detection re-fires. */
 export function resetSchemaCacheForTesting(): void {
   verifiedVaults.clear();
@@ -194,7 +262,12 @@ function runIngestSync(vaultRoot: string): void {
 function openDb(vaultRoot: string, opts?: { readonly?: boolean }): Database.Database {
   ensureSchemaCurrent(vaultRoot);
   const dbPath = path.join(vaultRoot, ".schist", "schist.db");
-  return new Database(dbPath, { readonly: opts?.readonly ?? true });
+  const readonly = opts?.readonly ?? true;
+  const db = new Database(dbPath, { readonly });
+  if (!readonly) {
+    db.pragma("foreign_keys = ON");
+  }
+  return db;
 }
 
 export function searchNotes(
@@ -516,9 +589,10 @@ export async function queryGraph(
   // common ergonomic affordance and remove it. Multi-statement input is still
   // rejected by `better-sqlite3.prepare()`.
   const trimmed = sql.trim().replace(/;+\s*$/, "");
+  const guardSql = maskSqlLiteralsAndComments(trimmed);
   if (
-    !trimmed.match(/^(SELECT|WITH)\b/i) ||
-    trimmed.match(/\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE)\b/i)
+    !guardSql.match(/^(SELECT|WITH)\b/i) ||
+    guardSql.match(/\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE)\b/i)
   ) {
     // Return a ToolError result rather than throwing a plain object.
     // Throwing non-Error objects loses stack traces and breaks instanceof checks
@@ -574,7 +648,7 @@ export function getContext(
     }
 
     const recent = db
-      .prepare("SELECT id, title, date, status FROM docs ORDER BY updated_at DESC LIMIT 10")
+      .prepare("SELECT id, title, date, status FROM docs ORDER BY date DESC, id ASC LIMIT 10")
       .all() as Record<string, unknown>[];
 
     const hotConcepts = db

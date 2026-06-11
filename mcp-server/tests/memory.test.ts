@@ -381,12 +381,21 @@ describe("addConceptAlias", () => {
     vaultDir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-alias-test-"));
     const schistDir = path.join(vaultDir, ".schist");
     await fs.mkdir(schistDir, { recursive: true });
-    // Create a minimal schist.db with concept_aliases table
+    // Create a minimal schist.db with concept_aliases table.
     const db = new Database(path.join(schistDir, "schist.db"));
     db.exec(`
+      CREATE TABLE concepts (
+        slug TEXT PRIMARY KEY,
+        name TEXT NOT NULL
+      );
+
+      INSERT INTO concepts (slug, name) VALUES
+        ('ml', 'ML'),
+        ('machine-learning', 'Machine Learning');
+
       CREATE TABLE IF NOT EXISTS concept_aliases (
-        duplicate_slug  TEXT NOT NULL,
-        canonical_slug  TEXT NOT NULL,
+        duplicate_slug  TEXT NOT NULL REFERENCES concepts(slug),
+        canonical_slug  TEXT NOT NULL REFERENCES concepts(slug),
         reason          TEXT,
         created_by      TEXT NOT NULL,
         created_at      TEXT NOT NULL DEFAULT (datetime('now')),
@@ -422,5 +431,15 @@ describe("addConceptAlias", () => {
     expect(() =>
       addConceptAlias(vaultDir, "ml", "machine-learning", "test", "sansan")
     ).toThrow();
+  });
+
+  it("throws when either concept slug does not exist", () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    expect(() =>
+      addConceptAlias(vaultDir, "dl", "machine-learning", "test", "sansan")
+    ).toThrow(/FOREIGN KEY constraint failed/);
+    expect(() =>
+      addConceptAlias(vaultDir, "ml", "deep-learning", "test", "sansan")
+    ).toThrow(/FOREIGN KEY constraint failed/);
   });
 });

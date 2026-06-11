@@ -59,12 +59,13 @@ async function makeVault(opts?: { docTagsRow?: string }): Promise<string> {
   // Seed 3 docs (with tags), 2 concepts, 2 edges so all three depth tiers
   // return non-trivial shapes.
   const insertDoc = db.prepare(
-    `INSERT INTO docs (id, title, body, tags) VALUES (?, ?, ?, ?)`,
+    `INSERT INTO docs (id, title, date, body, tags, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
   );
   const tags = opts?.docTagsRow ?? JSON.stringify(["alpha", "beta"]);
-  insertDoc.run("notes/d1.md", "Doc 1", "body 1", tags);
-  insertDoc.run("notes/d2.md", "Doc 2", "body 2", tags);
-  insertDoc.run("notes/d3.md", "Doc 3", "body 3", tags);
+  const tiedUpdatedAt = "2026-01-10 00:00:00";
+  insertDoc.run("notes/d1.md", "Doc 1", "2026-01-01", "body 1", tags, tiedUpdatedAt);
+  insertDoc.run("notes/d2.md", "Doc 2", "2026-01-03", "body 2", tags, tiedUpdatedAt);
+  insertDoc.run("notes/d3.md", "Doc 3", "2026-01-02", "body 3", tags, tiedUpdatedAt);
   db.prepare(`INSERT INTO concepts (slug, title) VALUES (?, ?)`).run("c-one", "C One");
   db.prepare(`INSERT INTO concepts (slug, title) VALUES (?, ?)`).run("c-two", "C Two");
   db.prepare(`INSERT INTO edges (source, target, type) VALUES (?, ?, ?)`).run(
@@ -152,6 +153,19 @@ describe("get_context tool — depth=full soft downgrade", () => {
     // No logVerbose audit line on downgrade.
     const audit = stderrSpy.calls.find(c => c.startsWith("[verbose] get_context"));
     expect(audit).toBeUndefined();
+  });
+});
+
+describe("get_context tool — recent docs ordering", () => {
+  it("orders recent docs by frontmatter date when updated_at ties", async () => {
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    expect(r).not.toHaveProperty("error");
+    if ("error" in r) throw new Error("unexpected error");
+    expect(r.recent?.map((doc) => doc.id)).toEqual([
+      "notes/d2.md",
+      "notes/d3.md",
+      "notes/d1.md",
+    ]);
   });
 });
 
