@@ -736,14 +736,25 @@ function openMemoryDb(): Database.Database {
   return db;
 }
 
-/** Validate agent_state key prefix (Ninjia fix) */
+function getTeamStateOwner(): string | null {
+  const value = process.env.SCHIST_TEAM_OWNER?.trim();
+  return value || null;
+}
+
+/** Validate agent_state key namespace. */
 function assertKeyPrefix(key: string, owner: string): void {
   const keyPrefix = key.split(".")[0];
   if (keyPrefix !== owner && keyPrefix !== "team") {
     throw Object.assign(new Error(`agent_state: key '${key}' prefix must match owner '${owner}'`), { error: "VALIDATION_ERROR" });
   }
-  if (keyPrefix === "team" && owner !== "eleven") {
-    throw Object.assign(new Error("agent_state: team.* keys require owner=eleven"), { error: "VALIDATION_ERROR" });
+  if (keyPrefix === "team") {
+    const teamOwner = getTeamStateOwner();
+    if (!teamOwner) {
+      throw Object.assign(new Error("agent_state: team.* keys require SCHIST_TEAM_OWNER to be configured"), { error: "VALIDATION_ERROR" });
+    }
+    if (owner !== teamOwner) {
+      throw Object.assign(new Error("agent_state: team.* keys require owner to match SCHIST_TEAM_OWNER"), { error: "VALIDATION_ERROR" });
+    }
   }
 }
 

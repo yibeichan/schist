@@ -14,6 +14,7 @@
  *   SCHIST_MEMORY_DB — path to agent-state.db (default: ~/.openclaw/memory/agent-state.db)
  *   SCHIST_AGENT_ID       — agent identity for write validation (single-agent mode)
  *   SCHIST_ALLOWED_AGENTS — comma-separated allowlist (multi-agent shared deployments)
+ *   SCHIST_TEAM_OWNER     — owner allowed to write team.* state keys
  */
 
 import * as sqliteReader from "../sqlite-reader.js";
@@ -26,7 +27,7 @@ COMMANDS
 
   add-memory --agent <id> --type <type> [options] "<content>"
     Add a memory entry.
-    --agent  required  agent id (e.g. sansan, eleven, ninjia)
+    --agent  required  agent id (e.g. agent-a, coordinator)
     --type   required  entry_type: decision|lesson|blocker|completion|observation
     --date   optional  ISO date (default: today)
     --tags   optional  comma-separated tags
@@ -42,7 +43,7 @@ COMMANDS
     --limit   optional  max results (default: 20)
 
   state get <key>
-    Get an agent_state value by key (e.g. sansan.current_pr)
+    Get an agent_state value by key (e.g. agent-a.current_pr)
 
   state set <key> "<value>" --agent <id> [--ttl N]
     Set an agent_state key. value is stored as JSON.
@@ -53,6 +54,7 @@ ENVIRONMENT
   SCHIST_MEMORY_DB   path to SQLite database (default: ~/.openclaw/memory/agent-state.db)
   SCHIST_AGENT_ID    agent identity — enforced on writes (single-agent mode)
   SCHIST_ALLOWED_AGENTS  comma-separated allowlist — overrides SCHIST_AGENT_ID (multi-agent shared deployments)
+  SCHIST_TEAM_OWNER  owner allowed to write team.* state keys
 `);
   process.exit(1);
 }

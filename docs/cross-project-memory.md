@@ -82,8 +82,8 @@ The memory subsystem exposes six MCP tools. All tools are listed by
   Optional: `date`, `tags` (string array), `related_doc`, `source_ref`,
   `confidence` (`low | medium | high`).
 - `set_agent_state` — upsert a keyed state value with optional `ttl_hours`.
-  Key prefix must match `owner` (e.g. `sansan.*`); the `team.*` prefix
-  requires `owner=eleven`.
+  Key prefix must match `owner` (for example, `agent-a.*`). The `team.*`
+  prefix requires `owner` to match `SCHIST_TEAM_OWNER`.
 - `delete_agent_state` — remove a keyed state value.
 
 The `owner` field on write is enforced against the configured agent
@@ -120,6 +120,18 @@ SCHIST_ALLOWED_AGENTS=eleven,octopus,sansan,ninjia,atwood,alpha
 Each write supplies its own `owner`; the call succeeds iff `owner` is in
 the allowlist. Per-entry attribution is preserved (every row keeps the
 calling agent's id in the `owner` column).
+
+### Team state: `SCHIST_TEAM_OWNER`
+
+The shared `team.*` agent-state namespace is disabled unless a coordinator
+owner is configured:
+
+```bash
+SCHIST_TEAM_OWNER=coordinator
+```
+
+Only that owner can write or delete `team.*` keys. The same owner must also
+be valid under `SCHIST_AGENT_ID` or `SCHIST_ALLOWED_AGENTS`.
 
 ### Resolution order
 
