@@ -213,6 +213,30 @@ class TestInitSpoke:
         assert "disk full" in err  # original error preserved
         assert "Manual fix: rm -rf" in err  # cleanup-failure hint
 
+    def test_final_install_race_cleans_staging(self, tmp_path, monkeypatch, capsys):
+        """If the target becomes non-empty after the pre-check, init_spoke
+        should clean staging and report a user-facing install error."""
+        from schist import sync as sync_mod
+
+        dest = tmp_path / "spoke"
+
+        def fake_build(staging, hub, scope, identity):
+            staging.mkdir(parents=True)
+            (staging / ".git" / "info").mkdir(parents=True)
+            dest.mkdir()
+            (dest / "intruder").write_text("raced\n")
+
+        monkeypatch.setattr(sync_mod, "_build_spoke_in_staging", fake_build)
+
+        args = MagicMock(hub="git@pi:vault.git", scope="research/x", identity="cluster")
+        with pytest.raises(SystemExit):
+            sync_mod.init_spoke(args, str(dest), str(tmp_path / "db.sqlite"))
+
+        err = capsys.readouterr().err
+        assert "failed to install vault" in err
+        assert not list(tmp_path.glob(".spoke.init-*"))
+        assert (dest / "intruder").read_text() == "raced\n"
+
     @patch("schist.sync.git_ops.clone_shallow", return_value=(True, ""))
     @patch("schist.sync.git_ops.setup_sparse_checkout", return_value=(True, ""))
     @patch("schist.sync._rebuild_index")
