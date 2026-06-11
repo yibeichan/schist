@@ -262,7 +262,12 @@ function runIngestSync(vaultRoot: string): void {
 function openDb(vaultRoot: string, opts?: { readonly?: boolean }): Database.Database {
   ensureSchemaCurrent(vaultRoot);
   const dbPath = path.join(vaultRoot, ".schist", "schist.db");
-  return new Database(dbPath, { readonly: opts?.readonly ?? true });
+  const readonly = opts?.readonly ?? true;
+  const db = new Database(dbPath, { readonly });
+  if (!readonly) {
+    db.pragma("foreign_keys = ON");
+  }
+  return db;
 }
 
 export function searchNotes(
