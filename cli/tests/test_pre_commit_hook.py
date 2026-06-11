@@ -87,6 +87,21 @@ def test_real_secrets_blocked(vault: Path, content: str) -> None:
     assert "Potential secret detected" in result.stdout + result.stderr
 
 
+def test_secret_in_filename_with_spaces_is_blocked(vault: Path) -> None:
+    """Whitespace in staged paths must not let files bypass secret scanning."""
+    result = _try_commit(
+        vault,
+        "research note with spaces.md",
+        "api_key = 'sk-redacted-but-quoted-value-here'\n",
+    )
+    assert result.returncode != 0, (
+        "Hook silently accepted a secret in a staged filename containing spaces"
+    )
+    output = result.stdout + result.stderr
+    assert "Potential secret detected" in output
+    assert "research note with spaces.md" in output
+
+
 def test_pre_commit_hook_carries_version_marker() -> None:
     """Doctor's freshness check parses this marker — it must be present."""
     assert f"# schist-hook-version: {HOOK_VERSION}" in PRE_COMMIT_HOOK
@@ -104,7 +119,7 @@ def test_hook_version_is_an_int() -> None:
     """`schist doctor` compares HOOK_VERSION as a token string but the constant
     should be an int so bumps are unambiguous."""
     assert isinstance(HOOK_VERSION, int)
-    assert HOOK_VERSION >= 2  # was 1 (unversioned) before issue #103
+    assert HOOK_VERSION >= 3  # was 2 before issue #202 fixed path splitting
 
 
 class TestHooksReinstall:

@@ -310,6 +310,29 @@ class TestInitStandalone:
         init_standalone(_args(path=str(target)))
         assert (target / "vault.yaml").is_file()
 
+    def test_final_install_race_cleans_staging(self, tmp_path, monkeypatch, capsys):
+        """If target becomes non-empty after the pre-check, report cleanly and
+        remove the completed staging tree instead of leaving retry debris."""
+        from schist import sync as sync_mod
+
+        target = tmp_path / "v"
+
+        def fake_build(staging, vault_data, name):
+            staging.mkdir(parents=True)
+            (staging / "vault.yaml").write_text("name: staged\n")
+            target.mkdir()
+            (target / "intruder").write_text("raced\n")
+
+        monkeypatch.setattr(sync_mod, "_build_standalone_in_staging", fake_build)
+
+        with pytest.raises(SystemExit):
+            sync_mod.init_standalone(_args(path=str(target)))
+
+        err = capsys.readouterr().err
+        assert "failed to install vault" in err
+        assert not list(tmp_path.glob(".v.init-*"))
+        assert (target / "intruder").read_text() == "raced\n"
+
     def test_post_commit_constant_matches_disk(self):
         """Drift guard — in-memory POST_COMMIT_HOOK must equal the on-disk copy."""
         from schist.sync import POST_COMMIT_HOOK

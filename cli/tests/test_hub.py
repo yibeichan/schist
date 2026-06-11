@@ -146,6 +146,30 @@ class TestInitHub:
         leftover = list(tmp_path.glob(".hub.git.init-*"))
         assert not leftover, f"staging dir not cleaned up: {leftover}"
 
+    def test_final_install_race_cleans_staging(self, tmp_path, monkeypatch, capsys):
+        """If hub_path becomes non-empty after the pre-check, init_hub should
+        clean staging and report a user-facing install error."""
+        from schist import sync as sync_mod
+
+        hub = tmp_path / "hub.git"
+
+        def fake_build(staging, hub_path, vault_data, participants, name):
+            staging.mkdir(parents=True)
+            (staging / "HEAD").write_text("ref: refs/heads/main\n")
+            hub.mkdir()
+            (hub / "intruder").write_text("raced\n")
+
+        monkeypatch.setattr(sync_mod, "_build_hub_in_staging", fake_build)
+
+        args = SimpleNamespace(name="vault", participant=["alpha"])
+        with pytest.raises(SystemExit):
+            sync_mod.init_hub(args, str(hub))
+
+        err = capsys.readouterr().err
+        assert "failed to install vault" in err
+        assert not list(tmp_path.glob(".hub.git.init-*"))
+        assert (hub / "intruder").read_text() == "raced\n"
+
     def test_hub_push_then_rejects_out_of_scope(self, tmp_path):
         """After init_hub, a spoke push to a dir outside the content-axis write list is rejected.
 

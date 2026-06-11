@@ -86,6 +86,35 @@ def test_validate_sql_still_rejects_stacked_write_statements(capsys) -> None:
     assert "DELETE statements are not allowed" in capsys.readouterr().err
 
 
+def test_raw_query_allows_concept_aliases_table() -> None:
+    conn = _connect()
+    conn.execute("""
+        CREATE TABLE concept_aliases (
+            duplicate_slug TEXT NOT NULL,
+            canonical_slug TEXT NOT NULL,
+            reason TEXT,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (duplicate_slug, canonical_slug)
+        )
+    """)
+    conn.execute(
+        "INSERT INTO concept_aliases "
+        "(duplicate_slug, canonical_slug, reason, created_by) "
+        "VALUES ('ml', 'machine-learning', 'abbreviation', 'agent-a')"
+    )
+
+    result = raw_query(
+        conn,
+        "SELECT duplicate_slug, canonical_slug FROM concept_aliases",
+    )
+
+    assert result == {
+        "columns": ["duplicate_slug", "canonical_slug"],
+        "rows": [["ml", "machine-learning"]],
+    }
+
+
 def test_fts_search_sanitizes_special_syntax_without_traceback() -> None:
     conn = _connect()
     conn.execute("""
