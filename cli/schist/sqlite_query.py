@@ -6,7 +6,8 @@ import sqlite3
 import sys
 
 
-ALLOWED_TABLES = {'docs', 'concepts', 'edges', 'docs_fts', 'paper_metadata'}
+# Keep in sync with the read/queryable tables defined in schema.sql.
+ALLOWED_TABLES = {'docs', 'concepts', 'edges', 'docs_fts', 'paper_metadata', 'concept_aliases'}
 # Keep in sync with mcp-server/src/sqlite-reader.ts REQUIRED_TABLES.
 REQUIRED_TABLES = {'docs', 'paper_metadata'}
 

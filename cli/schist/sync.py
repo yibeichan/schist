@@ -135,6 +135,26 @@ def _install_local_hooks(vault_path) -> None:
     _atomic_write_hook(hooks_dir / "pre-commit", PRE_COMMIT_HOOK)
 
 
+def _install_staging_tree(staging: Path, target: Path, display_path: str) -> None:
+    """Atomically install a completed staging tree, cleaning staging on failure."""
+    try:
+        if target.exists():
+            target.rmdir()
+        os.rename(staging, target)
+    except OSError as e:
+        print(f"Error: failed to install vault at '{display_path}': {e}", file=sys.stderr)
+        try:
+            if staging.exists():
+                shutil.rmtree(staging)
+        except OSError as cleanup_err:
+            print(
+                f"Warning: could not clean up staging dir {staging}: {cleanup_err}\n"
+                f"  Manual fix: rm -rf {staging}",
+                file=sys.stderr,
+            )
+        sys.exit(1)
+
+
 _HOOK_VERSION_LINE = re.compile(r"^# schist-hook-version:\s*(\S+)", re.MULTILINE)
 
 
@@ -237,9 +257,7 @@ def init_spoke(args, vault_path: str, db_path: str) -> None:
         sys.exit(1)
 
     # Atomic rename: either target points at a complete spoke, or nothing.
-    if target.exists():
-        target.rmdir()
-    os.rename(staging, target)
+    _install_staging_tree(staging, target, vault_path)
 
     # Rebuild SQLite index against the final path (best-effort post-rename).
     # If this step fails the spoke is still usable; user can re-run rebuild.
@@ -614,11 +632,7 @@ def init_hub(args, hub_path: str) -> None:
 
     # Atomic rename: either hub_path points at a complete bare repo, or it
     # doesn't exist at all. No half-initialized intermediate state.
-    if hub.exists():
-        # The pre-check above guarded against existing non-empty; an empty
-        # dir is OK to remove before rename.
-        hub.rmdir()
-    os.rename(staging, hub)
+    _install_staging_tree(staging, hub, hub_path)
 
     print(f"Hub initialized at {hub_path}")
     print(f"  participants: {', '.join(participants)}")
@@ -814,9 +828,7 @@ def init_standalone(args) -> None:
 
     # Atomic rename: either target points at a complete vault, or it doesn't
     # exist at all.
-    if target.exists():
-        target.rmdir()
-    os.rename(staging, target)
+    _install_staging_tree(staging, target, path_arg)
 
     print(f"Vault initialized at {target}")
     print()
