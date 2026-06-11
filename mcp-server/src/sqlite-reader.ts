@@ -643,7 +643,7 @@ export function getContext(
     }
 
     const recent = db
-      .prepare("SELECT id, title, date, status FROM docs ORDER BY updated_at DESC LIMIT 10")
+      .prepare("SELECT id, title, date, status FROM docs ORDER BY date DESC, id ASC LIMIT 10")
       .all() as Record<string, unknown>[];
 
     const hotConcepts = db
