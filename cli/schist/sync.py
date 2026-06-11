@@ -46,7 +46,7 @@ sys.exit(main())
 
 POST_COMMIT_HOOK = r"""#!/bin/sh
 # schist post-commit hook — re-ingest vault into SQLite after every commit
-# schist-hook-version: 2
+# schist-hook-version: 3
 
 VAULT_ROOT=$(git rev-parse --show-toplevel)
 DB_PATH="$VAULT_ROOT/.schist/schist.db"
@@ -74,11 +74,11 @@ python3 "$INGEST" --vault "$VAULT_ROOT" --db "$DB_PATH"
 # `# schist-hook-version: N` line lives inside each hook script body. A user
 # who has intentionally customized their hook can replace the version line
 # with `# schist-hook-version: pinned` to silence the staleness warning.
-HOOK_VERSION = 2
+HOOK_VERSION = 3
 
 PRE_COMMIT_HOOK = r"""#!/bin/sh
 # schist pre-commit hook — reject staged files containing secrets
-# schist-hook-version: 2
+# schist-hook-version: 3
 
 # Patterns intentionally require a left boundary on token prefixes so substrings
 # like "task-..." inside a filename don't trigger on "sk-...", and require a
@@ -86,12 +86,15 @@ PRE_COMMIT_HOOK = r"""#!/bin/sh
 # doesn't trip the guard. See issue #103 for the false-positive cases.
 PATTERNS="(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}|(^|[^A-Za-z0-9])ghp_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9])ghs_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9])AKIA[A-Z0-9]{16}|-----BEGIN [A-Z ]+PRIVATE KEY-----|password\s*=\s*[\"'][^\"' ]+[\"']|api_key\s*=\s*[\"'][^\"' ]+[\"']"
 
-STAGED_FILES=$(git diff --cached --name-only)
-if [ -z "$STAGED_FILES" ]; then
+STAGED_FILES=$(mktemp "${TMPDIR:-/tmp}/schist-pre-commit.XXXXXX") || exit 1
+trap 'rm -f "$STAGED_FILES"' EXIT HUP INT TERM
+
+git diff --cached --name-only -z > "$STAGED_FILES"
+if [ ! -s "$STAGED_FILES" ]; then
     exit 0
 fi
 
-MATCH=$(echo "$STAGED_FILES" | xargs grep -lE "$PATTERNS" 2>/dev/null)
+MATCH=$(xargs -0 grep -lE "$PATTERNS" < "$STAGED_FILES" 2>/dev/null)
 if [ -n "$MATCH" ]; then
     echo "ERROR: Potential secret detected in staged files:"
     echo "$MATCH" | sed 's/^/  /'
@@ -130,6 +133,26 @@ def _install_local_hooks(vault_path) -> None:
     hooks_dir.mkdir(parents=True, exist_ok=True)
     _atomic_write_hook(hooks_dir / "post-commit", POST_COMMIT_HOOK)
     _atomic_write_hook(hooks_dir / "pre-commit", PRE_COMMIT_HOOK)
+
+
+def _install_staging_tree(staging: Path, target: Path, display_path: str) -> None:
+    """Atomically install a completed staging tree, cleaning staging on failure."""
+    try:
+        if target.exists():
+            target.rmdir()
+        os.rename(staging, target)
+    except OSError as e:
+        print(f"Error: failed to install vault at '{display_path}': {e}", file=sys.stderr)
+        try:
+            if staging.exists():
+                shutil.rmtree(staging)
+        except OSError as cleanup_err:
+            print(
+                f"Warning: could not clean up staging dir {staging}: {cleanup_err}\n"
+                f"  Manual fix: rm -rf {staging}",
+                file=sys.stderr,
+            )
+        sys.exit(1)
 
 
 _HOOK_VERSION_LINE = re.compile(r"^# schist-hook-version:\s*(\S+)", re.MULTILINE)
@@ -234,9 +257,7 @@ def init_spoke(args, vault_path: str, db_path: str) -> None:
         sys.exit(1)
 
     # Atomic rename: either target points at a complete spoke, or nothing.
-    if target.exists():
-        target.rmdir()
-    os.rename(staging, target)
+    _install_staging_tree(staging, target, vault_path)
 
     # Rebuild SQLite index against the final path (best-effort post-rename).
     # If this step fails the spoke is still usable; user can re-run rebuild.
@@ -611,11 +632,7 @@ def init_hub(args, hub_path: str) -> None:
 
     # Atomic rename: either hub_path points at a complete bare repo, or it
     # doesn't exist at all. No half-initialized intermediate state.
-    if hub.exists():
-        # The pre-check above guarded against existing non-empty; an empty
-        # dir is OK to remove before rename.
-        hub.rmdir()
-    os.rename(staging, hub)
+    _install_staging_tree(staging, hub, hub_path)
 
     print(f"Hub initialized at {hub_path}")
     print(f"  participants: {', '.join(participants)}")
@@ -811,9 +828,7 @@ def init_standalone(args) -> None:
 
     # Atomic rename: either target points at a complete vault, or it doesn't
     # exist at all.
-    if target.exists():
-        target.rmdir()
-    os.rename(staging, target)
+    _install_staging_tree(staging, target, path_arg)
 
     print(f"Vault initialized at {target}")
     print()
