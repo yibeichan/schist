@@ -103,7 +103,7 @@ export function makeMemoryWriteTools(_config: VaultConfig) {
     },
     {
       name: "set_agent_state",
-      description: "Set a keyed agent state value. Key prefix must match owner (e.g. sansan.*). team.* requires owner=eleven.",
+      description: "Set a keyed agent state value. Key prefix must match owner; team.* requires owner to match SCHIST_TEAM_OWNER.",
       inputSchema: {
         type: "object" as const,
         properties: {

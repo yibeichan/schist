@@ -12,11 +12,13 @@ beforeEach(async () => {
   process.env.SCHIST_MEMORY_DB = path.join(tempDir, "test-memory.db");
   // Clear agent ID — individual tests set it as needed
   delete process.env.SCHIST_AGENT_ID;
+  delete process.env.SCHIST_TEAM_OWNER;
 });
 
 afterEach(async () => {
   delete process.env.SCHIST_MEMORY_DB;
   delete process.env.SCHIST_AGENT_ID;
+  delete process.env.SCHIST_TEAM_OWNER;
   await fs.rm(tempDir, { recursive: true, force: true });
 });
 
@@ -233,7 +235,7 @@ describe("searchMemory", () => {
 });
 
 // ---------------------------------------------------------------------------
-// set_agent_state — key prefix enforcement (Ninjia fix)
+// set_agent_state — key prefix enforcement
 // ---------------------------------------------------------------------------
 
 describe("setAgentState", () => {
@@ -248,14 +250,22 @@ describe("setAgentState", () => {
     expect(() => setAgentState("ninjia.current_task", "review", "sansan")).toThrow();
   });
 
-  it("allows team.* for owner=eleven", () => {
-    process.env.SCHIST_AGENT_ID = "eleven";
-    const result = setAgentState("team.active_blockers", ["PR #266"], "eleven");
+  it("allows team.* for configured team owner", () => {
+    process.env.SCHIST_AGENT_ID = "orchestrator";
+    process.env.SCHIST_TEAM_OWNER = "orchestrator";
+    const result = setAgentState("team.active_blockers", ["PR #266"], "orchestrator");
     expect(result.key).toBe("team.active_blockers");
   });
 
-  it("rejects team.* for non-eleven owner", () => {
+  it("rejects team.* when no team owner is configured", () => {
+    process.env.SCHIST_AGENT_ID = "orchestrator";
+    expect(() => setAgentState("team.active_blockers", [], "orchestrator"))
+      .toThrow(/SCHIST_TEAM_OWNER/);
+  });
+
+  it("rejects team.* for non-team owner", () => {
     process.env.SCHIST_AGENT_ID = "sansan";
+    process.env.SCHIST_TEAM_OWNER = "orchestrator";
     expect(() => setAgentState("team.active_blockers", [], "sansan")).toThrow();
   });
 
@@ -281,7 +291,7 @@ describe("setAgentState", () => {
     // sansan tries to overwrite with a key that has ninjia prefix.
     // Since prefix check fires first for sansan->ninjia prefix, we need a
     // scenario where prefix passes but owner differs.
-    // Use team.* key: eleven sets it, then another eleven-impersonating agent
+    // Use team.* key: orchestrator sets it, then another orchestrator-impersonating agent
     // can't hijack. Actually the simplest: ninjia sets ninjia.x, then
     // another caller claiming to be ninjia but actually being someone else
     // via raw DB manipulation. But with assertOwner, the env var must match.
@@ -291,22 +301,23 @@ describe("setAgentState", () => {
     // someone calls setAgentState with owner matching the new SCHIST_AGENT_ID
     // and a key that already exists with a different owner.
     //
-    // Simplest: use team.* keys — eleven creates team.x, then we change
-    // owner in DB to simulate another agent, and eleven tries to overwrite.
+    // Simplest: use team.* keys — orchestrator creates team.x, then we change
+    // owner in DB to simulate another agent, and orchestrator tries to overwrite.
     // Actually even simpler: directly test the ownership check.
 
-    // eleven sets team.shared
-    setStateAs("eleven", "team.shared", "eleven_data");
+    // orchestrator sets team.shared
+    process.env.SCHIST_TEAM_OWNER = "orchestrator";
+    setStateAs("orchestrator", "team.shared", "orchestrator_data");
 
     // Manually change the owner in DB to simulate a different agent owning it
     const db = new Database(process.env.SCHIST_MEMORY_DB!);
     db.prepare("UPDATE agent_state SET owner = 'ninjia' WHERE key = 'team.shared'").run();
     db.close();
 
-    // Now eleven tries to overwrite — should fail with OWNERSHIP_ERROR
-    process.env.SCHIST_AGENT_ID = "eleven";
+    // Now orchestrator tries to overwrite — should fail with OWNERSHIP_ERROR
+    process.env.SCHIST_AGENT_ID = "orchestrator";
     try {
-      setAgentState("team.shared", "hijack", "eleven");
+      setAgentState("team.shared", "hijack", "orchestrator");
       fail("Expected error to be thrown");
     } catch (e: unknown) {
       expect(e).toBeInstanceOf(Error);
