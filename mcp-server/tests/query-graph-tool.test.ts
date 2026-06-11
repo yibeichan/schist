@@ -100,6 +100,34 @@ describe("query_graph tool — SQL guards still in force", () => {
     expect(r).toMatchObject({ error: expect.any(String) });
     expect("error" in r ? r.error : "").not.toBe("");
   });
+
+  it("allows SQLite REPLACE() string function in SELECT queries", async () => {
+    vaultRoot = await makeVault(1);
+    const r = await query_graph(vaultRoot, {
+      sql: "SELECT REPLACE(title, 'Note', 'Doc') AS renamed FROM docs",
+    });
+    if (!("rows" in r)) throw new Error(`expected rows: ${JSON.stringify(r)}`);
+    expect(r.columns).toEqual(["renamed"]);
+    expect(r.rows[0][0]).toBe("Doc 0000");
+  });
+
+  it("allows blocked keywords inside string literals", async () => {
+    vaultRoot = await makeVault(1);
+    const r = await query_graph(vaultRoot, {
+      sql: "SELECT id FROM docs WHERE title <> 'DROP TABLE test' AND 'CREATE' = 'CREATE'",
+    });
+    if (!("rows" in r)) throw new Error(`expected rows: ${JSON.stringify(r)}`);
+    expect(r.rows.length).toBe(1);
+  });
+
+  it("allows blocked keywords inside SQL comments", async () => {
+    vaultRoot = await makeVault(1);
+    const r = await query_graph(vaultRoot, {
+      sql: "SELECT id FROM docs /* DROP */ WHERE title <> 'missing' -- CREATE\nORDER BY id",
+    });
+    if (!("rows" in r)) throw new Error(`expected rows: ${JSON.stringify(r)}`);
+    expect(r.rows.length).toBe(1);
+  });
 });
 
 // ── cursor decoding ────────────────────────────────────────────────────────
