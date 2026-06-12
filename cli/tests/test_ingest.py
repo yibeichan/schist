@@ -178,6 +178,58 @@ def test_ingest_preserves_missing_status_as_null(tmp_path: Path) -> None:
     assert row == (None,)
 
 
+def test_ingest_prunes_concept_aliases_for_missing_concepts(tmp_path: Path) -> None:
+    """Aliases survive rebuild only while both referenced concepts still exist."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    concepts_dir = vault / "concepts"
+    concepts_dir.mkdir()
+    for slug in ("dupe", "stale", "canonical"):
+        (concepts_dir / f"{slug}.md").write_text(
+            f"---\nconcept: {slug}\ntitle: {slug.title()}\n---\n\n{slug}\n",
+            encoding="utf-8",
+        )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+    conn = sqlite3.connect(db)
+    try:
+        conn.executemany(
+            """
+            INSERT INTO concept_aliases
+              (duplicate_slug, canonical_slug, reason, created_by)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                ("dupe", "canonical", "valid alias", "tester"),
+                ("stale", "canonical", "will become dangling", "tester"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    (concepts_dir / "stale.md").unlink()
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute(
+            """
+            SELECT duplicate_slug, canonical_slug, reason
+            FROM concept_aliases
+            ORDER BY duplicate_slug
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [("dupe", "canonical", "valid alias")]
+
+
 def test_ingest_indexes_paper_metadata(tmp_path: Path) -> None:
     """Citation-grade paper frontmatter populates the paper_metadata side table."""
     from schist.ingest import ingest

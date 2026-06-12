@@ -761,6 +761,15 @@ class TestRebuildIndexSideTablePreservation:
         from schist.sync import _rebuild_index
 
         vault, db_path = _init_vault_with_schema(tmp_path)
+        concepts = Path(vault) / "concepts"
+        concepts.mkdir(exist_ok=True)
+        (concepts / "backprop.md").write_text(
+            "---\nconcept: backprop\ntitle: Backprop\n---\n\nShort form.\n"
+        )
+        (concepts / "backpropagation.md").write_text(
+            "---\nconcept: backpropagation\ntitle: Backpropagation\n---\n\nCanonical.\n"
+        )
+        _rebuild_index(vault, db_path)
 
         # Insert a concept_alias row into the existing DB
         conn = sqlite3.connect(db_path)
