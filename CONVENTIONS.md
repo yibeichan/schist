@@ -3,6 +3,19 @@
 This document describes recommended authoring patterns on top of the canonical
 vault schema in `schema/SCHEMA.md`.
 
+## External Briefs And Issue Filing
+
+When an agent notices a schist gap or needs to file an external report, use the
+MCP `compose_brief` tool to pack vault context first. The tool is a read-only
+composer: it searches indexed notes, follows nearby graph edges, includes
+optional pinned refs, and can list recent git-added paths. It returns markdown
+plus suggested tags and cross-references.
+
+After reviewing and editing the generated markdown, file it with the appropriate
+external tool (`gh`, Linear, Jira, a lab notebook, or similar). Do not use
+schist as the filing client for those systems; schist's role is to supply
+vault-grounded context.
+
 ## Paper Notes: Citation-Grade Frontmatter
 
 Use citation-grade paper notes when a `papers/` entry should act as an

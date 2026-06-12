@@ -174,6 +174,7 @@ This gives the agent a snapshot of graph stats, recent notes, and hot concepts.
 | `add_connection` | Add a typed edge between two nodes |
 | `list_concepts` | List all concept nodes |
 | `query_graph` | Run read-only SQL against the graph database |
+| `compose_brief` | Compose a context-rich markdown brief for external filing |
 | `get_context` | Dump graph context for agent session init |
 | `search_memory` | Search cross-project agent memory |
 | `add_memory` | Add a memory entry (decision, lesson, blocker, etc.) |

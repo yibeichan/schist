@@ -110,6 +110,21 @@ export interface SyncRetryResponse {
   awaited_in_flight?: boolean;
 }
 
+export interface ComposeBriefResponse {
+  markdown: string;
+  suggested_tags: string[];
+  cross_refs: string[];
+  related_notes: Array<{
+    id: string;
+    title: string;
+    reason: string;
+  }>;
+  recent_paths: Array<{
+    path: string;
+    commit: string;
+  }>;
+}
+
 export interface VaultConfig {
   name: string;
   path: string;
