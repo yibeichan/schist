@@ -102,6 +102,26 @@ def test_secret_in_filename_with_spaces_is_blocked(vault: Path) -> None:
     assert "research note with spaces.md" in output
 
 
+def test_staged_secret_blocked_after_worktree_cleanup(vault: Path) -> None:
+    """The hook must inspect the staged blob, not the working-tree file."""
+    note = vault / "secret.md"
+    note.write_text("api_key = 'sk-redacted-but-quoted-value-here'\n")
+    subprocess.run(["git", "add", "secret.md"], cwd=vault, check=True)
+
+    note.write_text("clean working-tree copy\n")
+    result = subprocess.run(
+        ["git", "commit", "-m", "test"],
+        cwd=vault, capture_output=True, text=True,
+    )
+
+    assert result.returncode != 0, (
+        "Hook silently accepted a secret that remained in the staged blob"
+    )
+    output = result.stdout + result.stderr
+    assert "Potential secret detected" in output
+    assert "secret.md" in output
+
+
 def test_pre_commit_hook_carries_version_marker() -> None:
     """Doctor's freshness check parses this marker — it must be present."""
     assert f"# schist-hook-version: {HOOK_VERSION}" in PRE_COMMIT_HOOK
