@@ -27,6 +27,7 @@ import {
 } from "./tools.js";
 import type { VaultConfig } from "./types.js";
 import { listAllTools, REMOVED_TOOLS } from "./tool-registry.js";
+import { SERVER_INSTRUCTIONS } from "./server-instructions.js";
 
 function resolveVaultPath(): string {
   const envVault = process.env.SCHIST_VAULT_PATH;
@@ -82,7 +83,10 @@ async function main() {
 
   const server = new Server(
     { name: "schist", version: "0.1.0" },
-    { capabilities: { tools: {} } }
+    {
+      capabilities: { tools: {} },
+      instructions: SERVER_INSTRUCTIONS,
+    }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
