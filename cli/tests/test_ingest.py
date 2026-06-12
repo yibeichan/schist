@@ -153,6 +153,31 @@ def test_ingest_indexes_file_ref_frontmatter(tmp_path: Path) -> None:
     assert row == ("File Ref", "/mnt/data/papers/example.pdf")
 
 
+def test_ingest_preserves_missing_status_as_null(tmp_path: Path) -> None:
+    """Missing status frontmatter means undeclared, not draft."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-06-12-no-status.md",
+        "---\ntitle: No Status\ndate: 2026-06-12\n---\n\nBody.\n",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute("SELECT status FROM docs WHERE title = 'No Status'").fetchone()
+    finally:
+        conn.close()
+
+    assert row == (None,)
+
+
 def test_ingest_indexes_paper_metadata(tmp_path: Path) -> None:
     """Citation-grade paper frontmatter populates the paper_metadata side table."""
     from schist.ingest import ingest
