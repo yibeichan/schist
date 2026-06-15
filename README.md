@@ -50,6 +50,7 @@ schist --vault ~/vaults/my-project init --print-mcp-config --identity local
 ```
 
 Your agent now has `search_notes`, `create_note`, `get_context`, and more — persistent knowledge across every session.
+The MCP server also advertises usage instructions to compatible clients, telling agents to prefer the indexed schist tools (`search_notes`, `search_memory`, `query_graph`, `get_context`) over filesystem grep/find for vault content and to persist new knowledge through `create_note` or `add_memory`.
 
 ## What It Looks Like
 
