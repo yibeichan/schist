@@ -799,6 +799,52 @@ class TestRebuildIndexSideTablePreservation:
 
         assert rows == [("backprop", "backpropagation", "short form", "tester")]
 
+    def test_stale_concept_alias_pruned_on_rebuild(self, tmp_path):
+        """A dangling concept_alias (endpoint not in the rebuilt concepts
+        table) must NOT survive a rebuild — the rebuild/spoke-pull path must
+        prune it just like the in-place ingest commit path. Regression for
+        issue #213."""
+        import sqlite3
+        from schist.sync import _rebuild_index
+
+        vault, db_path = _init_vault_with_schema(tmp_path)
+        concepts = Path(vault) / "concepts"
+        concepts.mkdir(exist_ok=True)
+        # Only ONE endpoint exists as a concept; the alias below references a
+        # canonical_slug ("backpropagation") that has no concept file, so it is
+        # a dangling-FK row once the concepts table is rebuilt.
+        (concepts / "backprop.md").write_text(
+            "---\nconcept: backprop\ntitle: Backprop\n---\n\nShort form.\n"
+        )
+        _rebuild_index(vault, db_path)
+
+        # Insert a dangling alias directly (bypasses ingest's prune)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO concept_aliases "
+                "(duplicate_slug, canonical_slug, reason, created_by) "
+                "VALUES (?, ?, ?, ?)",
+                ("backprop", "backpropagation", "dangling", "tester"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Rebuild (simulates spoke pull) — the dangling row must be pruned,
+        # not copied forward.
+        _rebuild_index(vault, db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM concept_aliases"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+        assert count == 0, "dangling alias survived rebuild — #213 regression"
+
     def test_rebuild_ok_with_no_prior_db(self, tmp_path):
         """First rebuild (no backup) should succeed with no side-table data."""
         import sqlite3
