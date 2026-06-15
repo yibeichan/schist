@@ -93,6 +93,8 @@ The static viewer renders a D3.js force graph of your knowledge:
 | **Offline** | Fully | Mostly | No | Yes |
 | **Vendor lock-in** | None (it's files) | Vault format | Proprietary | None |
 
+For a deeper positioning guide, see [schist vs alternatives](./docs/comparison.md).
+
 ## Multi-Machine (Hub & Spokes)
 
 A single laptop works. The real power comes when multiple machines share one knowledge graph — Claude on your laptop, an agent on an HPC cluster, a Raspberry Pi running ops, all writing into the same vault.
