@@ -249,7 +249,7 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
             date_val = str(date_val)
         conn.execute(
             'INSERT INTO docs (id, title, date, status, tags, concepts, body, scope, source, confidence, file_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (doc_id, title, date_val, meta.get('status', 'draft'), tags_json, concepts_json, body, scope, source, confidence, file_ref),
+            (doc_id, title, date_val, meta.get('status'), tags_json, concepts_json, body, scope, source, confidence, file_ref),
         )
         doc_count += 1
 
