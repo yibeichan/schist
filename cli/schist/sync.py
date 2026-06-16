@@ -1119,6 +1119,25 @@ def _preserve_side_tables(backup: Path, new_db: Path) -> None:
             except sqlite3.OperationalError as e:
                 if "no such table" not in str(e).lower():
                     raise
+        # Prune aliases whose endpoints no longer exist in the freshly
+        # rebuilt concepts table. The backup may carry dangling rows (e.g.
+        # written before #198 FK enforcement, or orphaned when a concept was
+        # later deleted); copying them forward unchanged would reintroduce the
+        # dangling-FK rows that ingest.py prunes on the in-place commit path.
+        # Mirror that DELETE here so the rebuild / spoke-pull path converges to
+        # the same state and existing corruption is backfilled, not propagated.
+        # See issue #213.
+        try:
+            conn.execute(
+                """
+                DELETE FROM concept_aliases
+                WHERE duplicate_slug NOT IN (SELECT slug FROM concepts)
+                   OR canonical_slug NOT IN (SELECT slug FROM concepts)
+                """
+            )
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e).lower():
+                raise
         conn.commit()
     finally:
         conn.close()

@@ -306,6 +306,13 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
             except sqlite3.IntegrityError:
                 pass
 
+    conn.execute(
+        """
+        DELETE FROM concept_aliases
+        WHERE duplicate_slug NOT IN (SELECT slug FROM concepts)
+           OR canonical_slug NOT IN (SELECT slug FROM concepts)
+        """
+    )
     conn.commit()
     print(f'Ingested: {doc_count} docs, {concept_count} concepts, {edge_count} edges')
 
