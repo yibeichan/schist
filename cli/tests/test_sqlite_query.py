@@ -43,6 +43,7 @@ def test_get_db_keeps_current_db_when_required_tables_exist(tmp_path: Path) -> N
     conn = sqlite3.connect(db_path)
     conn.execute("CREATE TABLE docs (id TEXT PRIMARY KEY)")
     conn.execute("CREATE TABLE paper_metadata (doc_id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE concept_aliases (duplicate_slug TEXT PRIMARY KEY)")
     conn.commit()
     conn.close()
 
@@ -51,6 +52,27 @@ def test_get_db_keeps_current_db_when_required_tables_exist(tmp_path: Path) -> N
         db.close()
 
     run_ingest.assert_not_called()
+
+
+def test_get_db_reingests_when_concept_aliases_missing(tmp_path: Path) -> None:
+    """Vaults upgraded past paper_metadata but before concept_aliases must
+    self-heal rather than fail later in add_concept_alias. See #224."""
+    vault = tmp_path / "vault"
+    db_path = vault / ".schist" / "schist.db"
+    db_path.parent.mkdir(parents=True)
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE docs (id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE paper_metadata (doc_id TEXT PRIMARY KEY)")
+    # concept_aliases intentionally absent
+    conn.commit()
+    conn.close()
+
+    with patch("schist.sqlite_query._run_ingest") as run_ingest:
+        db = get_db(str(vault), str(db_path))
+        db.close()
+
+    run_ingest.assert_called_once_with(str(vault), str(db_path))
 
 
 def test_validate_sql_allows_blocked_keywords_inside_string_literals() -> None:
@@ -173,3 +195,100 @@ def test_fts_search_matches_mcp_literal_operator_behavior() -> None:
     )
 
     assert fts_search(conn, "foo OR bar") == []
+
+
+def _docs_concepts_conn() -> sqlite3.Connection:
+    conn = _connect()
+    conn.execute("CREATE TABLE docs (id TEXT PRIMARY KEY, title TEXT)")
+    conn.execute("CREATE TABLE concepts (slug TEXT PRIMARY KEY, title TEXT)")
+    conn.execute("CREATE TABLE edges (id INTEGER PRIMARY KEY, target TEXT)")
+    return conn
+
+
+def test_raw_query_accepts_simple_cte() -> None:
+    """A WITH (CTE) query is read-only and must validate. See #223."""
+    conn = _docs_concepts_conn()
+    conn.execute("INSERT INTO concepts (slug, title) VALUES ('a', 'Alpha')")
+
+    result = raw_query(
+        conn,
+        "WITH ranked AS (SELECT slug, title FROM concepts) "
+        "SELECT title FROM ranked ORDER BY slug",
+    )
+
+    assert result == {"columns": ["title"], "rows": [["Alpha"]]}
+
+
+def test_raw_query_accepts_multiple_ctes() -> None:
+    conn = _docs_concepts_conn()
+    conn.execute("INSERT INTO concepts (slug, title) VALUES ('a', 'Alpha')")
+    conn.execute("INSERT INTO edges (id, target) VALUES (1, 'a')")
+
+    result = raw_query(
+        conn,
+        "WITH c AS (SELECT slug, title FROM concepts), "
+        "m AS (SELECT target AS slug, COUNT(*) AS n FROM edges GROUP BY target) "
+        "SELECT c.title, m.n FROM c JOIN m ON m.slug = c.slug",
+    )
+
+    assert result == {"columns": ["title", "n"], "rows": [["Alpha", 1]]}
+
+
+def test_raw_query_cte_referencing_disallowed_table_still_rejected(capsys) -> None:
+    """CTE syntax must not become an escape hatch around ALLOWED_TABLES."""
+    conn = _docs_concepts_conn()
+
+    with pytest.raises(SystemExit):
+        raw_query(
+            conn,
+            "WITH x AS (SELECT name FROM sqlite_master) SELECT * FROM x",
+        )
+
+    assert 'table "sqlite_master" is not allowed' in capsys.readouterr().err
+
+
+def test_raw_query_rejects_backtick_quoted_table() -> None:
+    """Backtick-quoted identifiers must not bypass ALLOWED_TABLES. See #228."""
+    conn = _docs_concepts_conn()
+
+    with pytest.raises(SystemExit):
+        raw_query(conn, "SELECT name FROM `sqlite_master`")
+
+
+def test_raw_query_rejects_bracket_quoted_table() -> None:
+    """Bracket-quoted identifiers must not bypass ALLOWED_TABLES either."""
+    conn = _docs_concepts_conn()
+
+    with pytest.raises(SystemExit):
+        raw_query(conn, "SELECT name FROM [sqlite_master]")
+
+
+def test_fts_search_tag_underscore_is_not_a_wildcard() -> None:
+    """A `_` in a tag filter must match literally, not as a wildcard. See #225."""
+    conn = _connect()
+    conn.execute("""
+        CREATE TABLE docs (
+            id TEXT PRIMARY KEY, title TEXT, date TEXT,
+            status TEXT, tags TEXT, body TEXT
+        )
+    """)
+    conn.execute("CREATE VIRTUAL TABLE docs_fts USING fts5(title, body, tags, scope UNINDEXED)")
+    # Note A: snake_case tag; Note B: differs only at the underscore position.
+    conn.execute(
+        "INSERT INTO docs (rowid, id, title, date, status, tags, body) "
+        "VALUES (1, 'notes/a.md', 'A', '2026-06-15', 'draft', '[\"machine_learning\"]', 'ml text')"
+    )
+    conn.execute(
+        "INSERT INTO docs (rowid, id, title, date, status, tags, body) "
+        "VALUES (2, 'notes/b.md', 'B', '2026-06-15', 'draft', '[\"machine-learning\"]', 'ml text')"
+    )
+    for rowid, tags in ((1, '["machine_learning"]'), (2, '["machine-learning"]')):
+        conn.execute(
+            "INSERT INTO docs_fts (rowid, title, body, tags, scope) "
+            "VALUES (?, 'x', 'ml text', ?, 'global')",
+            (rowid, tags),
+        )
+
+    rows = fts_search(conn, "ml", tags=["machine_learning"])
+
+    assert [row["id"] for row in rows] == ["notes/a.md"]

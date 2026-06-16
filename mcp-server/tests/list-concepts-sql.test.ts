@@ -96,6 +96,16 @@ describe("listConcepts — cursor pagination", () => {
     expect(slugs).toContain("beta");
   });
 
+  // #225: search term with `_` must match titles literally, not as a wildcard
+  it("search escapes LIKE wildcards: `_` does not match a sibling title", async () => {
+    const vault = await makeConceptVault([
+      { slug: "dl-snake", title: "deep_learning" },
+      { slug: "dl-kebab", title: "deep-learning" },
+    ]);
+    const results = listConcepts(vault, { search: "deep_learning" });
+    expect(results.map((r) => r.slug)).toEqual(["dl-snake"]);
+  });
+
   // Case 2: offset N pagination — union of two pages = full set, no overlap
   it("offset pagination: two pages cover all 10 concepts without overlap", async () => {
     const concepts = Array.from({ length: 10 }, (_, i) => ({

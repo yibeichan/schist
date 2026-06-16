@@ -80,7 +80,11 @@ const REQUIRED_DOCS_COLUMNS: ReadonlySet<string> = new Set([
   "id", "title", "date", "status", "tags", "concepts",
   "body", "scope", "source", "confidence", "file_ref",
 ]);
-const REQUIRED_TABLES: ReadonlySet<string> = new Set(["paper_metadata"]);
+// Keep in sync with cli/schist/sqlite_query.py REQUIRED_TABLES. concept_aliases
+// is included so vaults upgraded from a pre-concept_aliases schema (which still
+// have docs + paper_metadata, so the drift check would otherwise pass) trigger
+// an ingest rebuild before add_concept_alias hits "no such table". See #224.
+const REQUIRED_TABLES: ReadonlySet<string> = new Set(["paper_metadata", "concept_aliases"]);
 
 const verifiedVaults = new Set<string>();
 const requireForWorker = createRequire(import.meta.url);
@@ -94,6 +98,16 @@ function positiveIntEnv(name: string, fallback: number): number {
   if (raw === undefined || raw.trim() === "") return fallback;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+// Escape SQL LIKE wildcards so caller-supplied values match literally. The
+// returned string is meant to be embedded in a LIKE pattern used with an
+// `ESCAPE '\'` clause; backslash itself is escaped first. Without this, a `_`
+// or `%` in a tag/scope/search term acts as a wildcard and produces
+// false-positive matches (e.g. tag "machine_learning" matching
+// "machine-learning"). See #225 / #229.
+function escapeLike(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 }
 
 function maskSqlLiteralsAndComments(sql: string): string {
@@ -295,8 +309,8 @@ export function searchNotes(
 
     if (opts?.tags && opts.tags.length > 0) {
       for (const tag of opts.tags) {
-        sql += ` AND docs.tags LIKE ?`;
-        params.push(`%"${tag}"%`);
+        sql += ` AND docs.tags LIKE ? ESCAPE '\\'`;
+        params.push(`%"${escapeLike(tag)}"%`);
       }
     }
 
@@ -323,8 +337,12 @@ export function searchNotes(
         const agentName =
           opts.owner ?? process.env.SCHIST_AGENT_NAME ?? process.env.SCHIST_AGENT_ID;
         const callingScope = scopeMap.get(agentName ?? "") ?? "global";
-        sql += ` AND (docs.scope = 'global' OR docs.scope = ? OR docs.scope LIKE ? || '/%')`;
-        params.push(callingScope, callingScope);
+        // The LIKE branch matches sub-scopes (`callingScope/...`); escape the
+        // value so a `_`/`%` in the scope name can't act as a wildcard and pull
+        // in a sibling scope (e.g. "my_project" matching "my-project"). The two
+        // `= ?` comparisons are exact equality and need no escaping. See #229.
+        sql += ` AND (docs.scope = 'global' OR docs.scope = ? OR docs.scope LIKE ? || '/%' ESCAPE '\\')`;
+        params.push(callingScope, escapeLike(callingScope));
         orderClauses.push(`CASE WHEN docs.scope = ? THEN 0 ELSE 1 END`);
         params.push(callingScope);
       } else {
@@ -415,14 +433,15 @@ export function listConcepts(
     const where: string[] = [];
 
     if (opts?.search) {
-      where.push(`(c.title LIKE ? OR c.description LIKE ?)`);
-      params.push(`%${opts.search}%`, `%${opts.search}%`);
+      where.push(`(c.title LIKE ? ESCAPE '\\' OR c.description LIKE ? ESCAPE '\\')`);
+      const escaped = `%${escapeLike(opts.search)}%`;
+      params.push(escaped, escaped);
     }
 
     if (opts?.tags && opts.tags.length > 0) {
       for (const tag of opts.tags) {
-        where.push(`c.tags LIKE ?`);
-        params.push(`%"${tag}"%`);
+        where.push(`c.tags LIKE ? ESCAPE '\\'`);
+        params.push(`%"${escapeLike(tag)}"%`);
       }
     }
 
@@ -589,7 +608,12 @@ export async function queryGraph(
   // common ergonomic affordance and remove it. Multi-statement input is still
   // rejected by `better-sqlite3.prepare()`.
   const trimmed = sql.trim().replace(/;+\s*$/, "");
-  const guardSql = maskSqlLiteralsAndComments(trimmed);
+  // trimStart() after masking: a leading SQL comment (e.g. an LLM's reasoning
+  // `-- ...` line) is blanked to spaces by the masker, which would otherwise
+  // push the SELECT/WITH keyword off the `^` anchor and get the query wrongly
+  // rejected as non-SELECT. The blocked-keyword scan below is unanchored, so
+  // trimming doesn't affect it. See #222.
+  const guardSql = maskSqlLiteralsAndComments(trimmed).trimStart();
   if (
     !guardSql.match(/^(SELECT|WITH)\b/i) ||
     guardSql.match(/\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE)\b/i)

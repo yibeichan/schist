@@ -9,7 +9,10 @@ import sys
 # Keep in sync with the read/queryable tables defined in schema.sql.
 ALLOWED_TABLES = {'docs', 'concepts', 'edges', 'docs_fts', 'paper_metadata', 'concept_aliases'}
 # Keep in sync with mcp-server/src/sqlite-reader.ts REQUIRED_TABLES.
-REQUIRED_TABLES = {'docs', 'paper_metadata'}
+# concept_aliases is included so vaults upgraded from a pre-concept_aliases
+# schema (which still have docs + paper_metadata) re-trigger ingest instead of
+# failing later with "no such table: concept_aliases". See #224.
+REQUIRED_TABLES = {'docs', 'paper_metadata', 'concept_aliases'}
 
 
 def get_db(vault_path: str, db_path: str | None = None) -> sqlite3.Connection:
@@ -87,8 +90,8 @@ def fts_search(db: sqlite3.Connection, query: str, limit: int = 20,
 
     if tags:
         for tag in tags:
-            sql += " AND d.tags LIKE ?"
-            params.append(f'%"{tag}"%')
+            sql += " AND d.tags LIKE ? ESCAPE '\\'"
+            params.append(f'%"{_escape_like(tag)}"%')
 
     sql += ' ORDER BY rank LIMIT ?'
     params.append(limit)
@@ -101,6 +104,16 @@ def _sanitize_fts_query(query: str) -> str:
     """Quote each token so FTS5 treats user input as literal search text."""
     tokens = query.split()
     return " ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
+
+
+def _escape_like(value: str) -> str:
+    """Escape SQL LIKE wildcards so a caller value matches literally.
+
+    Intended for embedding in a LIKE pattern used with `ESCAPE '\\'`; the
+    backslash is escaped first. Without this, a `_`/`%` in a tag name acts as a
+    wildcard and produces false-positive matches. See #225.
+    """
+    return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
 
 
 def raw_query(db: sqlite3.Connection, sql: str, params: tuple = ()) -> dict:
@@ -174,7 +187,9 @@ def _validate_sql(sql: str):
     cleaned = _mask_sql_literals_and_comments(sql)
     cleaned = cleaned.strip()
 
-    if not re.match(r'SELECT\b', cleaned, re.IGNORECASE):
+    # Accept WITH (CTEs) as well as SELECT — both are read-only and the MCP
+    # query_graph guard already allows them. See #223.
+    if not re.match(r'(SELECT|WITH)\b', cleaned, re.IGNORECASE):
         print('Error: only SELECT queries are allowed', file=sys.stderr)
         sys.exit(1)
 
@@ -185,9 +200,23 @@ def _validate_sql(sql: str):
             print(f'Error: {keyword} statements are not allowed', file=sys.stderr)
             sys.exit(1)
 
-    # Validate table references — find word after FROM/JOIN
-    table_refs = re.findall(r'\b(?:FROM|JOIN)\s+(\w+)', cleaned, re.IGNORECASE)
-    for table in table_refs:
-        if table.lower() not in ALLOWED_TABLES:
-            print(f'Error: table "{table}" is not allowed (allowed: {", ".join(sorted(ALLOWED_TABLES))})', file=sys.stderr)
-            sys.exit(1)
+    # CTE alias names are virtual tables defined by `WITH name AS (...)`; a
+    # reference like `FROM name` must not be checked against ALLOWED_TABLES.
+    # See #223.
+    cte_names = {m.lower() for m in re.findall(r'\b(\w+)\s+AS\s*\(', cleaned, re.IGNORECASE)}
+
+    # Validate table references — capture the identifier after FROM/JOIN whether
+    # bare, `backtick`-quoted, or [bracket]-quoted. `\w+` alone misses the quoted
+    # forms (the quote chars aren't word characters), silently skipping the
+    # allow-list check and letting e.g. `FROM \`sqlite_master\`` through. See #228.
+    table_refs = re.findall(
+        r'\b(?:FROM|JOIN)\s+(?:`([^`]+)`|\[([^\]]+)\]|(\w+))',
+        cleaned,
+        re.IGNORECASE,
+    )
+    for backtick, bracket, bare in table_refs:
+        table = backtick or bracket or bare
+        if table.lower() in ALLOWED_TABLES or table.lower() in cte_names:
+            continue
+        print(f'Error: table "{table}" is not allowed (allowed: {", ".join(sorted(ALLOWED_TABLES))})', file=sys.stderr)
+        sys.exit(1)
