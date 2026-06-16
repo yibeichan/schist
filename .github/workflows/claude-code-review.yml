@@ -12,11 +12,11 @@ on:
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+    # Skip Dependabot PRs: their runs execute with a restricted token and have
+    # no access to repo secrets, so CLAUDE_CODE_OAUTH_TOKEN is empty and the
+    # action fails on the installation-token exchange. Dependency bumps are
+    # handled by the dependabot-auto-merge workflow instead.
+    if: github.actor != 'dependabot[bot]'
 
     runs-on: ubuntu-latest
     permissions:

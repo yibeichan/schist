@@ -21,15 +21,11 @@ jobs:
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
 
-      - name: Approve PR
-        if: |
-          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
-          steps.metadata.outputs.update-type == 'version-update:semver-minor'
-        run: gh pr review --approve "$PR_URL"
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+      # No "Approve PR" step: GitHub blocks the Actions bot from approving PRs
+      # (addPullRequestReview → "GitHub Actions is not permitted to approve
+      # pull requests"), and main enforces no required reviews — only status
+      # checks — so an approval is unnecessary. `--auto` merges once the
+      # required checks pass.
       - name: Enable auto-merge (squash)
         if: |
           steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
