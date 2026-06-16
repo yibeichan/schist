@@ -8,7 +8,7 @@ import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote } from "./git-writer.js";
 import { buildNote, buildConnectionLine } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
-import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse } from "./types.js";
+import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse, ComposeBriefResponse, Note, SearchResult } from "./types.js";
 import { loadVaultAcl, canWrite, deriveScope, resolveAclIdentity } from "./vault-acl.js";
 import {
   canonicalizeQueryHash,
@@ -633,6 +633,94 @@ function outcomeMessage(outcome: SyncCommandOutcome): string {
   if (outcome.timedOut) return "command timed out";
   if (outcome.signal) return `command killed by signal ${outcome.signal}`;
   return `command exited with code ${outcome.code ?? "unknown"}`;
+}
+
+function ensureStringArray(value: unknown, field: string): string[] | ToolError {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    return { error: "VALIDATION_ERROR", message: `${field} must be an array of strings` };
+  }
+  return value;
+}
+
+function oneLine(text: string, cap = 180): string {
+  const cleaned = text
+    .replace(/^---[\s\S]*?---\s*/m, "")
+    .replace(/[#>*_`[\]()-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "";
+  return cleaned.length > cap ? cleaned.slice(0, cap - 1).trimEnd() + "…" : cleaned;
+}
+
+function matchesScopePath(id: string, scope: string[]): boolean {
+  if (scope.length === 0) return true;
+  return scope.some((prefix) => id === prefix || id.startsWith(`${prefix.replace(/\/$/, "")}/`));
+}
+
+function addTags(acc: Map<string, number>, tags: unknown): void {
+  let parsed: unknown;
+  try {
+    parsed = typeof tags === "string" ? JSON.parse(tags) : tags;
+  } catch {
+    return;
+  }
+  if (!Array.isArray(parsed)) return;
+  for (const tag of parsed) {
+    if (typeof tag === "string" && tag.trim()) {
+      acc.set(tag, (acc.get(tag) ?? 0) + 1);
+    }
+  }
+}
+
+type BriefNote = ComposeBriefResponse["related_notes"][number] & {
+  tags: string[];
+  annotation: string;
+};
+
+function briefNoteFromSearch(note: SearchResult, reason: string): BriefNote {
+  return {
+    id: note.id,
+    title: note.title,
+    reason,
+    tags: note.tags,
+    annotation: oneLine(note.snippet) || note.title,
+  };
+}
+
+function briefNoteFromNote(note: Note, reason: string): BriefNote {
+  return {
+    id: note.id,
+    title: note.title,
+    reason,
+    tags: note.tags,
+    annotation: oneLine(note.body) || note.title,
+  };
+}
+
+async function recentAddedPaths(vaultRoot: string, scope: string[]): Promise<Array<{ path: string; commit: string }>> {
+  const outcome = await runGit(vaultRoot, [
+    "log",
+    "--since=24 hours ago",
+    "--diff-filter=A",
+    "--name-only",
+    "--pretty=format:commit:%h",
+  ], 2_000);
+  if (!outcome.ok || !outcome.stdout) return [];
+
+  const rows: Array<{ path: string; commit: string }> = [];
+  let commit = "";
+  for (const raw of outcome.stdout.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.startsWith("commit:")) {
+      commit = line.slice("commit:".length);
+      continue;
+    }
+    if (matchesScopePath(line, scope)) rows.push({ path: line, commit });
+    if (rows.length >= 8) break;
+  }
+  return rows;
 }
 
 function isAclRejection(outcome: SyncCommandOutcome): boolean {
@@ -1393,6 +1481,139 @@ export async function query_graph(
   };
   if (cursor !== undefined) response.cursor = cursor;
   return response;
+}
+
+/**
+ * compose_brief is a read-only context packer for external filing workflows.
+ * It does not create GitHub/Jira/etc. issues; it returns markdown plus metadata
+ * for the caller to edit and file with their preferred tool.
+ */
+export async function compose_brief(
+  vaultRoot: string,
+  args: {
+    topic: string;
+    scope?: string[];
+    related_notes?: string[];
+    related_external?: string[];
+    session_paths?: boolean;
+  }
+): Promise<ComposeBriefResponse | ToolError> {
+  if (typeof args.topic !== "string" || args.topic.trim().length === 0) {
+    return { error: "VALIDATION_ERROR", message: "topic is required" };
+  }
+  if (args.session_paths !== undefined && typeof args.session_paths !== "boolean") {
+    return { error: "VALIDATION_ERROR", message: "session_paths must be a boolean" };
+  }
+
+  const scope = ensureStringArray(args.scope, "scope");
+  if (!Array.isArray(scope)) return scope;
+  const pinned = ensureStringArray(args.related_notes, "related_notes");
+  if (!Array.isArray(pinned)) return pinned;
+  const relatedExternal = ensureStringArray(args.related_external, "related_external");
+  if (!Array.isArray(relatedExternal)) return relatedExternal;
+
+  const byId = new Map<string, BriefNote>();
+  const tagCounts = new Map<string, number>();
+
+  try {
+    const searchRows = sqliteReader.searchNotes(vaultRoot, args.topic, { limit: 12 });
+    for (const row of searchRows) {
+      if (!matchesScopePath(row.id, scope)) continue;
+      if (!byId.has(row.id)) byId.set(row.id, briefNoteFromSearch(row, "topic search"));
+      addTags(tagCounts, row.tags);
+      if (byId.size >= 5) break;
+    }
+
+    for (const id of pinned) {
+      if (!matchesScopePath(id, scope)) continue;
+      const note = sqliteReader.getNote(vaultRoot, id);
+      if (!note) continue;
+      byId.set(id, briefNoteFromNote(note, "pinned"));
+      addTags(tagCounts, note.tags);
+    }
+
+    const seedIds = [...byId.keys()];
+    if (seedIds.length > 0) {
+      const placeholders = seedIds.map(() => "?").join(", ");
+      const graph = await sqliteReader.queryGraph(
+        vaultRoot,
+        `
+          SELECT e.source, e.target, e.type, d.id, d.title, d.tags, d.body
+          FROM edges e
+          JOIN docs d
+            ON d.id = CASE WHEN e.source IN (${placeholders}) THEN e.target ELSE e.source END
+          WHERE e.source IN (${placeholders}) OR e.target IN (${placeholders})
+          ORDER BY d.date DESC, d.id ASC
+        `,
+        [...seedIds, ...seedIds, ...seedIds],
+        { limit: 10 },
+      );
+      const idx = Object.fromEntries(graph.columns.map((col, i) => [col, i]));
+      for (const row of graph.rows) {
+        const id = row[idx.id] as string;
+        if (!id || byId.has(id) || !matchesScopePath(id, scope)) continue;
+        const title = (row[idx.title] as string) || id;
+        const body = (row[idx.body] as string) || "";
+        const edgeType = (row[idx.type] as string) || "related";
+        byId.set(id, {
+          id,
+          title,
+          reason: `graph ${edgeType}`,
+          tags: typeof row[idx.tags] === "string" ? JSON.parse(row[idx.tags] as string) : [],
+          annotation: oneLine(body) || title,
+        });
+        addTags(tagCounts, row[idx.tags]);
+      }
+    }
+  } catch (e: unknown) {
+    return normalizeError(e, "INGEST_ERROR");
+  }
+
+  const relatedNotes = [...byId.values()].slice(0, 10);
+  const recent = args.session_paths === false ? [] : await recentAddedPaths(vaultRoot, scope);
+  const suggestedTags = [...tagCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 8)
+    .map(([tag]) => tag);
+  const crossRefs = [...new Set([...relatedExternal, ...relatedNotes.map((note) => note.id)])];
+
+  const noteLines = relatedNotes.length > 0
+    ? relatedNotes.map((note) => `- \`${note.id}\` — ${note.title}: ${note.annotation} (${note.reason})`)
+    : ["- None found."];
+  const pathLines = recent.length > 0
+    ? recent.map((entry) => `- Added: \`${entry.path}\` @ \`${entry.commit || "unknown"}\``)
+    : ["- None found in recent local git history."];
+  const refLines = crossRefs.length > 0
+    ? crossRefs.map((ref) => `- ${ref}`)
+    : ["- None identified."];
+
+  const markdown = [
+    "## Summary",
+    args.topic.trim(),
+    "",
+    "## Related vault notes",
+    ...noteLines,
+    "",
+    "## Recent session context",
+    ...pathLines,
+    "",
+    "## Suggested cross-references",
+    ...refLines,
+    "",
+    "## Acceptance criteria",
+    "- [ ] Fill in the concrete acceptance criteria before filing.",
+    "",
+    "## Repro / evidence",
+    "- Fill in commands, paths, logs, or screenshots before filing.",
+  ].join("\n");
+
+  return {
+    markdown,
+    suggested_tags: suggestedTags,
+    cross_refs: crossRefs,
+    related_notes: relatedNotes.map(({ id, title, reason }) => ({ id, title, reason })),
+    recent_paths: recent,
+  };
 }
 
 /**

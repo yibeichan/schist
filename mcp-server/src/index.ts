@@ -16,6 +16,7 @@ import {
   get_context,
   sync_status,
   sync_retry,
+  compose_brief,
   loadVaultConfig,
   // Memory V2
   add_memory,
@@ -118,6 +119,9 @@ async function main() {
           break;
         case "query_graph":
           result = await query_graph(vaultRoot, toolArgs as Parameters<typeof query_graph>[1]);
+          break;
+        case "compose_brief":
+          result = await compose_brief(vaultRoot, toolArgs as Parameters<typeof compose_brief>[1]);
           break;
         case "get_context":
           result = await get_context(vaultRoot, toolArgs as Parameters<typeof get_context>[1]);

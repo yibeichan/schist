@@ -250,6 +250,36 @@ export function makeWriteTools(config: VaultConfig) {
         required: ["sql"],
       },
     },
+    {
+      name: "compose_brief",
+      description: "Compose a context-rich markdown brief from indexed vault notes, graph neighbors, optional pinned refs, and recent git-added paths. Read-only: does not file issues, call external APIs, or write files.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          topic: { type: "string", description: "Free-text description of what the brief is about." },
+          scope: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional path-prefix filter, such as ['concepts', 'ops', 'decisions'].",
+          },
+          related_notes: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional explicit note ids to pin into the brief.",
+          },
+          related_external: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional external cross-references, such as GitHub issue ids.",
+          },
+          session_paths: {
+            type: "boolean",
+            description: "When true, include files added in recent local git history. Defaults to true.",
+          },
+        },
+        required: ["topic"],
+      },
+    },
   ];
 }
 
