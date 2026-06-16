@@ -10,7 +10,7 @@ export interface Note {
   id: string;
   title: string;
   date: string;
-  status: string;
+  status: string | null;
   tags: string[];
   concepts: string[];
   body: string;
@@ -33,7 +33,7 @@ export interface SearchResult {
   id: string;
   title: string;
   date: string;
-  status: string;
+  status: string | null;
   tags: string[];
   snippet: string;
   scope?: string;

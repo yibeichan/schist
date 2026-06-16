@@ -325,6 +325,31 @@ describe("setAgentState", () => {
       expect((e as Record<string, unknown>).error).toBe("OWNERSHIP_ERROR");
     }
   });
+
+  it("does not overwrite a row inserted between ownership check and upsert", () => {
+    getAgentState("team.shared"); // initialize schema
+    const db = new Database(process.env.SCHIST_MEMORY_DB!);
+    db.exec(`
+      CREATE TRIGGER simulate_concurrent_owner
+      BEFORE INSERT ON agent_state
+      WHEN NEW.key = 'team.shared' AND NEW.owner = 'orchestrator'
+      BEGIN
+        INSERT INTO agent_state (key, value, owner)
+        VALUES (NEW.key, '"ninjia_data"', 'ninjia');
+      END;
+    `);
+    db.close();
+
+    process.env.SCHIST_TEAM_OWNER = "orchestrator";
+    process.env.SCHIST_AGENT_ID = "orchestrator";
+    expect(() => setAgentState("team.shared", "hijack", "orchestrator"))
+      .toThrow(/owned by another agent/);
+
+    const entry = getAgentState("team.shared");
+    expect(entry).not.toBeNull();
+    expect(entry!.owner).toBe("ninjia");
+    expect(entry!.value).toBe("ninjia_data");
+  });
 });
 
 // ---------------------------------------------------------------------------

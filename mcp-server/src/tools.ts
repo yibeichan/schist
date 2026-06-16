@@ -1033,7 +1033,7 @@ export async function get_note(
       id: args.id,
       title: (meta.title as string) ?? "",
       date: (meta.date as string) ?? "",
-      status: (meta.status as string) ?? "draft",
+      status: (meta.status as string | null) ?? null,
       tags: Array.isArray(meta.tags) ? meta.tags : [],
       concepts: Array.isArray(meta.concepts) ? meta.concepts : [],
       body,

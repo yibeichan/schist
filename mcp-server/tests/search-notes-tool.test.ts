@@ -260,6 +260,34 @@ describe("search_notes tool — pagination + cursor issuance", () => {
   });
 });
 
+describe("search_notes tool — status null semantics", () => {
+  it("returns null for undeclared status and excludes it from status filters", async () => {
+    const db = new Database(path.join(vaultRoot, ".schist", "schist.db"));
+    try {
+      db.prepare(
+        `INSERT INTO docs (id, title, body, scope, status) VALUES (?, ?, ?, 'global', ?)`,
+      ).run("notes/null-status.md", "Null Status", "haystack undeclared", null);
+      db.prepare(
+        `INSERT INTO docs (id, title, body, scope, status) VALUES (?, ?, ?, 'global', ?)`,
+      ).run("notes/draft-status.md", "Draft Status", "haystack declared", "draft");
+    } finally {
+      db.close();
+    }
+
+    const unfiltered = await search_notes(vaultRoot, { query: "haystack", limit: 10 }) as {
+      results: Array<{ id: string; status: string | null }>;
+    };
+    const byId = new Map(unfiltered.results.map((r) => [r.id, r.status]));
+    expect(byId.get("notes/null-status.md")).toBeNull();
+    expect(byId.get("notes/draft-status.md")).toBe("draft");
+
+    const filtered = await search_notes(vaultRoot, { query: "haystack", status: "draft", limit: 10 }) as {
+      results: Array<{ id: string }>;
+    };
+    expect(filtered.results.map((r) => r.id)).toEqual(["notes/draft-status.md"]);
+  });
+});
+
 // ── tiebreaker stability ───────────────────────────────────────────────────
 
 // ── scope=inherit interaction with cursor pipeline ─────────────────────────

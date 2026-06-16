@@ -347,7 +347,7 @@ export function searchNotes(
         id: row.id as string,
         title: row.title as string,
         date: (row.date as string) ?? "",
-        status: (row.status as string) ?? "draft",
+        status: (row.status as string | null) ?? null,
         tags: row.tags ? JSON.parse(row.tags as string) : [],
         snippet: (row.snippet as string) ?? "",
         scope: (row.scope as string) ?? undefined,
@@ -373,7 +373,7 @@ export function getNote(vaultRoot: string, id: string): Note | null {
       id: row.id as string,
       title: row.title as string,
       date: (row.date as string) ?? "",
-      status: (row.status as string) ?? "draft",
+      status: (row.status as string | null) ?? null,
       tags: row.tags ? JSON.parse(row.tags as string) : [],
       concepts: row.concepts ? JSON.parse(row.concepts as string) : [],
       body,
@@ -886,18 +886,21 @@ export function setAgentState(key: string, value: unknown, owner: string, ttl_ho
   assertKeyPrefix(key, owner);
   const db = openMemoryDb();
   try {
-    // H4 fix: prevent silent ownership hijack — check existing key owner before upsert
-    const existing = db.prepare("SELECT owner FROM agent_state WHERE key = ?").get(key) as { owner: string } | undefined;
-    if (existing && existing.owner !== owner) {
-      throw Object.assign(new Error("Cannot overwrite state key owned by another agent"), { error: "OWNERSHIP_ERROR" });
-    }
-    db.prepare(`
+    const row = db.prepare(`
       INSERT INTO agent_state (key, value, owner, ttl_hours)
       VALUES (?, ?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET value=excluded.value,
         ttl_hours=excluded.ttl_hours, updated_at=datetime('now')
-    `).run(key, JSON.stringify(value), owner, ttl_hours ?? null);
-    const row = db.prepare("SELECT updated_at FROM agent_state WHERE key = ?").get(key) as { updated_at: string };
+      WHERE agent_state.owner = excluded.owner
+      RETURNING updated_at
+    `).get(key, JSON.stringify(value), owner, ttl_hours ?? null) as { updated_at: string } | undefined;
+    if (!row) {
+      const existing = db.prepare("SELECT owner FROM agent_state WHERE key = ?").get(key) as { owner: string } | undefined;
+      if (existing && existing.owner !== owner) {
+        throw Object.assign(new Error("Cannot overwrite state key owned by another agent"), { error: "OWNERSHIP_ERROR" });
+      }
+      throw new Error("Failed to set agent state");
+    }
     return { key, updated_at: row.updated_at };
   } finally {
     db.close();
