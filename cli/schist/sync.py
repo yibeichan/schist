@@ -46,7 +46,7 @@ sys.exit(main())
 
 POST_COMMIT_HOOK = r"""#!/bin/sh
 # schist post-commit hook — re-ingest vault into SQLite after every commit
-# schist-hook-version: 3
+# schist-hook-version: 4
 
 VAULT_ROOT=$(git rev-parse --show-toplevel)
 DB_PATH="$VAULT_ROOT/.schist/schist.db"
@@ -74,11 +74,11 @@ python3 "$INGEST" --vault "$VAULT_ROOT" --db "$DB_PATH"
 # `# schist-hook-version: N` line lives inside each hook script body. A user
 # who has intentionally customized their hook can replace the version line
 # with `# schist-hook-version: pinned` to silence the staleness warning.
-HOOK_VERSION = 3
+HOOK_VERSION = 4
 
 PRE_COMMIT_HOOK = r"""#!/bin/sh
 # schist pre-commit hook — reject staged files containing secrets
-# schist-hook-version: 3
+# schist-hook-version: 4
 
 # Patterns intentionally require a left boundary on token prefixes so substrings
 # like "task-..." inside a filename don't trigger on "sk-...", and require a
@@ -89,12 +89,12 @@ PATTERNS="(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}|(^|[^A-Za-z0-9])ghp_[A-Za-z0-9]{
 STAGED_FILES=$(mktemp "${TMPDIR:-/tmp}/schist-pre-commit.XXXXXX") || exit 1
 trap 'rm -f "$STAGED_FILES"' EXIT HUP INT TERM
 
-git diff --cached --name-only -z > "$STAGED_FILES"
+git diff --cached --name-only -z --diff-filter=ACMR > "$STAGED_FILES"
 if [ ! -s "$STAGED_FILES" ]; then
     exit 0
 fi
 
-MATCH=$(xargs -0 grep -lE "$PATTERNS" < "$STAGED_FILES" 2>/dev/null)
+MATCH=$(xargs -0 -I {} sh -c 'git show ":$1" 2>/dev/null | grep -qE "$2" && printf "%s\n" "$1"' sh {} "$PATTERNS" < "$STAGED_FILES")
 if [ -n "$MATCH" ]; then
     echo "ERROR: Potential secret detected in staged files:"
     echo "$MATCH" | sed 's/^/  /'
