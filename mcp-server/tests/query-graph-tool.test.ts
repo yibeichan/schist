@@ -348,6 +348,35 @@ describe("query_graph tool — subquery wrap is structurally safe against commen
     if (!("rows" in r)) throw new Error("expected rows");
     expect(r.rows.length).toBe(5);
   });
+
+  it("leading `--` line comment must not be falsely rejected (#222)", async () => {
+    vaultRoot = await makeVault(5);
+    // LLMs routinely prefix a reasoning comment before the SELECT; the masker
+    // blanks it to spaces, so without trimStart the ^SELECT anchor fails.
+    const r = await query_graph(vaultRoot, {
+      sql: "-- most-connected concepts\nSELECT id, title FROM docs",
+    });
+    if (!("rows" in r)) throw new Error(`expected rows, got ${JSON.stringify(r)}`);
+    expect(r.rows.length).toBe(5);
+  });
+
+  it("leading `/* ... */` block comment must not be falsely rejected (#222)", async () => {
+    vaultRoot = await makeVault(5);
+    const r = await query_graph(vaultRoot, {
+      sql: "/* describe the query */ SELECT id, title FROM docs",
+    });
+    if (!("rows" in r)) throw new Error(`expected rows, got ${JSON.stringify(r)}`);
+    expect(r.rows.length).toBe(5);
+  });
+
+  it("leading comment before WITH (CTE) must not be falsely rejected (#222)", async () => {
+    vaultRoot = await makeVault(5);
+    const r = await query_graph(vaultRoot, {
+      sql: "-- rank notes\nWITH r AS (SELECT id, title FROM docs) SELECT * FROM r",
+    });
+    if (!("rows" in r)) throw new Error(`expected rows, got ${JSON.stringify(r)}`);
+    expect(r.rows.length).toBe(5);
+  });
 });
 
 // ── pagination math: caller LIMIT > effectiveLimit ─────────────────────────

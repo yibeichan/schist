@@ -416,3 +416,80 @@ describe("search_notes tool — id-ASC tiebreaker stability", () => {
     expect(seen.size).toBe(10);
   });
 });
+
+// ── LIKE wildcard escaping in tag and scope filters ────────────────────────
+
+describe("search_notes tool — LIKE wildcards are escaped (#225 / #229)", () => {
+  it("tag filter with `_` matches literally, not as a wildcard (#225)", async () => {
+    // Two notes whose tags differ only at the underscore position. Filtering on
+    // the snake_case tag must NOT pull in the kebab-case note.
+    const db = new Database(path.join(vaultRoot, ".schist", "schist.db"));
+    try {
+      const stmt = db.prepare(
+        `INSERT INTO docs (id, title, body, tags, scope) VALUES (?, ?, 'haystack body', ?, 'global')`,
+      );
+      stmt.run("notes/snake.md", "Snake", '["machine_learning"]');
+      stmt.run("notes/kebab.md", "Kebab", '["machine-learning"]');
+    } finally {
+      db.close();
+    }
+
+    const r = await search_notes(vaultRoot, {
+      query: "haystack",
+      tags: ["machine_learning"],
+    });
+    if (!("results" in r)) throw new Error(`unexpected error: ${JSON.stringify(r)}`);
+    expect(r.results.map((row) => row.id)).toEqual(["notes/snake.md"]);
+  });
+
+  it("scope=inherit sub-scope match escapes `_` so a sibling scope can't leak (#229)", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-sn-scopeesc-test-"));
+    try {
+      const dbDir = path.join(dir, ".schist");
+      await fs.mkdir(dbDir, { recursive: true });
+      const db = new Database(path.join(dbDir, "schist.db"));
+      db.exec(`
+        CREATE TABLE docs (
+          id TEXT PRIMARY KEY, title TEXT NOT NULL, date TEXT,
+          status TEXT DEFAULT 'draft', tags TEXT, concepts TEXT,
+          body TEXT NOT NULL DEFAULT '', scope TEXT DEFAULT 'global',
+          source TEXT, confidence TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE VIRTUAL TABLE docs_fts USING fts5(
+          title, body, tags, scope UNINDEXED,
+          content='docs', content_rowid='rowid'
+        );
+        CREATE TRIGGER docs_ai AFTER INSERT ON docs BEGIN
+          INSERT INTO docs_fts(rowid, title, body, tags, scope)
+          VALUES (new.rowid, new.title, new.body, new.tags, new.scope);
+        END;
+      `);
+      const stmt = db.prepare(
+        `INSERT INTO docs (id, title, body, scope) VALUES (?, ?, 'haystack body', ?)`,
+      );
+      // callingScope is "my_project"; the sub-scope note must match, the
+      // sibling "my-project/..." must NOT (it only matches if `_` is a wildcard).
+      stmt.run("notes/own.md", "Own", "my_project/sub");
+      stmt.run("notes/sibling.md", "Sibling", "my-project/sub");
+      db.close();
+
+      await fs.writeFile(
+        path.join(dir, "vault.yaml"),
+        "name: esc-test\nparticipants:\n  - { name: myagent, default_scope: my_project }\n",
+      );
+
+      const r = await search_notes(dir, {
+        query: "haystack",
+        scope: "inherit",
+        owner: "myagent",
+      });
+      if (!("results" in r)) throw new Error(`unexpected error: ${JSON.stringify(r)}`);
+      const ids = r.results.map((row) => row.id).sort();
+      expect(ids).toEqual(["notes/own.md"]);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
