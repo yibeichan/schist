@@ -30,10 +30,13 @@ async function makeVault(n: number = 0): Promise<string> {
   `);
   if (n > 0) {
     const stmt = db.prepare(`INSERT INTO docs (id, title, date) VALUES (?, ?, ?)`);
-    for (let i = 0; i < n; i++) {
-      const idx = String(i).padStart(4, "0");
-      stmt.run(`notes/${idx}.md`, `Note ${idx}`, `2026-05-${(i % 28) + 1}`);
-    }
+    const seedDocs = db.transaction((count: number) => {
+      for (let i = 0; i < count; i++) {
+        const idx = String(i).padStart(4, "0");
+        stmt.run(`notes/${idx}.md`, `Note ${idx}`, `2026-05-${(i % 28) + 1}`);
+      }
+    });
+    seedDocs(n);
   }
   db.close();
   return dir;
