@@ -644,8 +644,12 @@ function ensureStringArray(value: unknown, field: string): string[] | ToolError 
 }
 
 function oneLine(text: string, cap = 180): string {
+  // No frontmatter strip here: bodies stored in SQLite are already
+  // frontmatter-free (Python ingest stores post.content), and FTS snippets
+  // never carry a YAML block. A `/m`-flagged `^---...---` strip would instead
+  // match Markdown horizontal rules in the body and silently delete content
+  // between them (see #230).
   const cleaned = text
-    .replace(/^---[\s\S]*?---\s*/m, "")
     .replace(/[#>*_`[\]()-]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -1516,7 +1520,13 @@ export async function compose_brief(
   const tagCounts = new Map<string, number>();
 
   try {
-    const searchRows = sqliteReader.searchNotes(vaultRoot, args.topic, { limit: 12 });
+    // searchNotes ranks globally; scope is applied in-memory below via
+    // matchesScopePath (a path-prefix test, not the exact docs.scope column
+    // searchNotes filters on). When a scope is requested, over-fetch so the
+    // top window isn't fully consumed by higher-ranked out-of-scope notes,
+    // which would otherwise leave the brief with zero topic matches (see #232).
+    const searchLimit = scope.length > 0 ? Math.min(60, 12 * (scope.length + 4)) : 12;
+    const searchRows = sqliteReader.searchNotes(vaultRoot, args.topic, { limit: searchLimit });
     for (const row of searchRows) {
       if (!matchesScopePath(row.id, scope)) continue;
       if (!byId.has(row.id)) byId.set(row.id, briefNoteFromSearch(row, "topic search"));
@@ -1532,7 +1542,16 @@ export async function compose_brief(
       addTags(tagCounts, note.tags);
     }
 
-    const seedIds = [...byId.keys()];
+    // Cap the graph-expansion seeds. queryGraph binds the seed list three
+    // times plus its own LIMIT/OFFSET (3 × seeds + 2 parameters); past ~332
+    // seeds that exceeds SQLite's default 999-variable limit and surfaces as
+    // an opaque INGEST_ERROR ("too many SQL variables"). A large related_notes
+    // list (each added to byId above) is the usual trigger. Bounding the seeds
+    // here loses nothing: the final brief is sliced to 10 notes regardless, and
+    // pinned notes already sit in byId whether or not they seed graph lookups
+    // (see #231).
+    const MAX_GRAPH_SEEDS = 200;
+    const seedIds = [...byId.keys()].slice(0, MAX_GRAPH_SEEDS);
     if (seedIds.length > 0) {
       const placeholders = seedIds.map(() => "?").join(", ");
       const graph = await sqliteReader.queryGraph(
