@@ -627,6 +627,24 @@ async function runGit(vaultRoot: string, args: string[], timeoutMs = SYNC_STATUS
   return runCommand("git", args, { cwd: vaultRoot, timeoutMs, env: process.env, capture: true });
 }
 
+/**
+ * The vault's current "ingest generation" — the HEAD commit SHA (#90). schist's
+ * post-commit hook drops + rebuilds the vault DB on every commit, so a change in
+ * HEAD is exactly the event that can reorder OFFSET-paginated rows. Vault-DB
+ * cursor handlers stamp this into the cursor on issue and pass it on decode;
+ * decodeCursor returns CURSOR_STALE when it has moved.
+ *
+ * Failure (no commits yet, git error) returns a stable sentinel. Both issue and
+ * decode resolve the same sentinel, so an empty repo never produces a false
+ * CURSOR_STALE; a transient git failure between pages conservatively reads as
+ * stale (caller restarts) rather than silently serving a possibly-shifted page.
+ */
+async function vaultGeneration(vaultRoot: string): Promise<string> {
+  const head = await runGit(vaultRoot, ["rev-parse", "HEAD"], SYNC_STATUS_TIMEOUT_MS);
+  const sha = head.ok ? (head.stdout ?? "").trim() : "";
+  return sha || "no-head";
+}
+
 function outcomeMessage(outcome: SyncCommandOutcome): string {
   const output = [outcome.stderr, outcome.stdout, outcome.error].filter(Boolean).join("\n").trim();
   if (output) return output;
@@ -929,10 +947,14 @@ export async function search_notes(
   // to queryHash" — current call's computed queryHash MUST equal the cursor's
   // encoded queryHash. Mismatch → CURSOR_QUERY_MISMATCH (distinct from
   // CURSOR_INVALID_SIGNATURE, which is HMAC-fail = secret rotated on restart).
+  // Ingest generation for cursor staleness (#90): a commit between pages
+  // rebuilds the vault DB and reorders OFFSET rows. Resolve once for both
+  // decode (reject a cursor from an older generation) and issue.
+  const generation = await vaultGeneration(vaultRoot);
   let offset = 0;
   let consumingCursor = false;
   if (typeof args.cursor === "string" && args.cursor.length > 0) {
-    const d = decodeCursor(args.cursor, TOOL_NAME);
+    const d = decodeCursor(args.cursor, TOOL_NAME, generation);
     if (!d.ok) return d.error;
     if (d.queryHash !== queryHash) {
       return {
@@ -1000,6 +1022,7 @@ export async function search_notes(
       tool: TOOL_NAME,
       queryHash,
       offset: offset + effectiveLimit,
+      generation,
     });
   }
 
@@ -1326,10 +1349,12 @@ export async function list_concepts(
   if (!ch.ok) return ch.error;
   const queryHash = ch.queryHash;
 
+  // Ingest generation for cursor staleness (#90); see search_notes.
+  const generation = await vaultGeneration(vaultRoot);
   let offset = 0;
   let consumingCursor = false;
   if (typeof args.cursor === "string" && args.cursor.length > 0) {
-    const d = decodeCursor(args.cursor, TOOL_NAME);
+    const d = decodeCursor(args.cursor, TOOL_NAME, generation);
     if (!d.ok) return d.error;
     if (d.queryHash !== queryHash) {
       return {
@@ -1376,6 +1401,7 @@ export async function list_concepts(
       tool: TOOL_NAME,
       queryHash,
       offset: offset + effectiveLimit,
+      generation,
     });
   }
 
@@ -1418,10 +1444,12 @@ export async function query_graph(
   const queryHash = ch.queryHash;
 
   // Step 2: Cursor decoding + queryHash binding check.
+  // Ingest generation for cursor staleness (#90); see search_notes.
+  const generation = await vaultGeneration(vaultRoot);
   let offset = 0;
   let consumingCursor = false;
   if (typeof args.cursor === "string" && args.cursor.length > 0) {
-    const d = decodeCursor(args.cursor, TOOL_NAME);
+    const d = decodeCursor(args.cursor, TOOL_NAME, generation);
     if (!d.ok) return d.error;
     if (d.queryHash !== queryHash) {
       return {
@@ -1475,6 +1503,7 @@ export async function query_graph(
       tool: TOOL_NAME,
       queryHash,
       offset: offset + effectiveLimit,
+      generation,
     });
   }
 

@@ -168,7 +168,8 @@ export type CursorErrorCode =
   | "CURSOR_EXPIRED"
   | "CURSOR_INVALID_SIGNATURE"
   | "CURSOR_QUERY_MISMATCH"
-  | "CURSOR_WRONG_TOOL";
+  | "CURSOR_WRONG_TOOL"
+  | "CURSOR_STALE";
 
 export interface CursorError {
   error: CursorErrorCode;
@@ -185,6 +186,13 @@ export interface IssueCursorInput {
   tool: string;
   queryHash: string;
   offset: number;
+  /**
+   * Opaque "ingest generation" marker for vault-DB tools (#90). When set, the
+   * cursor records the state the vault DB was in when this page was produced;
+   * decodeCursor returns CURSOR_STALE if the vault has since been rebuilt.
+   * Omit for tools whose backing table ingest never rebuilds (search_memory).
+   */
+  generation?: string;
 }
 
 interface CursorPayload {
@@ -193,6 +201,8 @@ interface CursorPayload {
   offset: number;
   issuedAt: number;
   ttlSeconds: number;
+  // Present only on vault-DB cursors (#90); absent on rebuild-stable tools.
+  generation?: string;
 }
 
 export function issueCursor(input: IssueCursorInput): string {
@@ -203,6 +213,9 @@ export function issueCursor(input: IssueCursorInput): string {
     issuedAt: Math.floor(Date.now() / 1000),
     ttlSeconds: CURSOR_TTL_SECONDS,
   };
+  // Only attach generation when supplied, so rebuild-stable tools keep their
+  // existing cursor shape and never trip the staleness check.
+  if (input.generation !== undefined) payload.generation = input.generation;
   const payloadJson = JSON.stringify(payload);
   const payloadB64 = Buffer.from(payloadJson, "utf-8").toString("base64url");
   const sigB64 = crypto.createHmac("sha256", HMAC_SECRET).update(payloadB64).digest("base64url");
@@ -215,7 +228,11 @@ export type DecodeCursorResult =
   | { ok: true; offset: number; queryHash: string }
   | { ok: false; error: CursorError };
 
-export function decodeCursor(token: string, expectedTool: string): DecodeCursorResult {
+export function decodeCursor(
+  token: string,
+  expectedTool: string,
+  expectedGeneration?: string,
+): DecodeCursorResult {
   // Pre-decode length cap (#109). A well-formed cursor is ~250 chars; cap
   // at CURSOR_MAX_LENGTH so a malicious 100 MB cursor can't force a base64
   // decode + JSON parse before HMAC verification rejects it.
@@ -269,7 +286,8 @@ export function decodeCursor(token: string, expectedTool: string): DecodeCursorR
     typeof payload.queryHash !== "string" ||
     typeof payload.offset !== "number" ||
     typeof payload.issuedAt !== "number" ||
-    typeof payload.ttlSeconds !== "number"
+    typeof payload.ttlSeconds !== "number" ||
+    (payload.generation !== undefined && typeof payload.generation !== "string")
   ) {
     return invalidSignature("cursor payload schema invalid");
   }
@@ -297,6 +315,26 @@ export function decodeCursor(token: string, expectedTool: string): DecodeCursorR
       error: {
         error: "CURSOR_EXPIRED",
         message: `cursor expired (issued ${nowSec - payload.issuedAt}s ago, TTL ${payload.ttlSeconds}s)`,
+      },
+    };
+  }
+
+  // Ingest-generation check (#90). Vault-DB cursors carry the generation the
+  // backing tables were in when the page was produced. schist's post-commit
+  // hook drops + rebuilds those tables on every commit, which reorders rows
+  // (bm25/edgeCount recompute) relative to the encoded OFFSET — silently
+  // skipping or duplicating rows across page boundaries. If the vault has been
+  // rebuilt since the cursor was issued, refuse with CURSOR_STALE so the caller
+  // restarts from page 1 instead of consuming a corrupted page. Cursors without
+  // a generation (rebuild-stable tools like search_memory) skip this check.
+  if (payload.generation !== undefined && payload.generation !== expectedGeneration) {
+    return {
+      ok: false,
+      error: {
+        error: "CURSOR_STALE",
+        message:
+          "vault changed mid-pagination (a commit rebuilt the index since this cursor was issued); " +
+          "page ordering is no longer stable — restart pagination from page 1",
       },
     };
   }
