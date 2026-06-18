@@ -282,24 +282,35 @@ encoded `offset`:
 
 Mitigations baked into the protocol:
 
+- **Rebuild detection (#90):** vault-DB cursors stamp the vault's "ingest
+  generation" (the HEAD commit SHA) into the cursor payload. On the next page
+  the handler re-resolves the generation and `decodeCursor` returns
+  `CURSOR_STALE` if it has moved — i.e. any commit (which is exactly what
+  triggers a rebuild) between pages turns a *silent* skip/duplicate into an
+  *explicit, restartable* error. `search_memory` cursors carry no generation
+  (its table is never rebuilt) and so never go stale on an unrelated commit.
 - Cursor TTL is 300 s, bounding the corruption window.
 - Single-agent pagination typically completes in seconds.
 - The `bm25(...) + id ASC` tiebreaker keeps ordering deterministic
   *within* a single ingest snapshot — the issue is strictly cross-snapshot.
 
-Not mitigated in this rollout:
+Deliberately *not* done (and why):
 
 - A keyset cursor (`id > last_id` instead of `OFFSET n`) would be
-  rebuild-stable for tools whose primary ORDER BY is `id`-monotonic.
-  It does NOT trivially compose with `bm25` ranking — page boundaries
-  computed on stale bm25 scores would still misorder against new rows.
-  Tracked as a follow-up issue, out of scope for the current rollout.
+  rebuild-stable for tools whose primary ORDER BY is `id`-monotonic, but it
+  does NOT compose with the relevance/rank orderings these tools actually use
+  (`bm25(docs_fts)` for search_notes, `edgeCount DESC` for list_concepts,
+  caller-defined for query_graph) — all of which recompute on rebuild. Adopting
+  keyset would mean abandoning relevance ranking across pages. Rebuild detection
+  (above) keeps the ranking intact and instead converts the unsafe case into a
+  clear signal, which is the better trade for these tools.
 
 Callers should treat cursor pagination as snapshot-at-best-effort —
 adequate for reading the current state of the vault, not for building
-total-ordered exports across long pagination sessions. Long-pagination
-exporters should run `query_graph` with a caller-specified LIMIT large
-enough to one-shot the result, or use the CLI / direct SQLite path.
+total-ordered exports across long pagination sessions. On `CURSOR_STALE`,
+restart from page 1. Long-pagination exporters should run `query_graph` with a
+caller-specified LIMIT large enough to one-shot the result, or use the CLI /
+direct SQLite path.
 
 This limitation is shared by every vault-DB cursor tool — call it out
 once here so future PRs (5–7) can reference this section without

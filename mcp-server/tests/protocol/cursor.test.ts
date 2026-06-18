@@ -211,6 +211,44 @@ describe("issueCursor + decodeCursor round-trip", () => {
   });
 });
 
+describe("decodeCursor — ingest generation / staleness (#90)", () => {
+  beforeEach(() => resetForTesting());
+
+  it("accepts a generation-stamped cursor when the generation is unchanged", () => {
+    const token = issueCursor({ tool: "search_notes", queryHash: "h", offset: 20, generation: "sha-aaa" });
+    const r = decodeCursor(token, "search_notes", "sha-aaa");
+    expect(r).toEqual({ ok: true, offset: 20, queryHash: "h" });
+  });
+
+  it("returns CURSOR_STALE when the vault generation has moved (commit rebuilt the index)", () => {
+    const token = issueCursor({ tool: "search_notes", queryHash: "h", offset: 20, generation: "sha-aaa" });
+    const r = decodeCursor(token, "search_notes", "sha-bbb");
+    expect(r).toEqual({
+      ok: false,
+      error: { error: "CURSOR_STALE", message: expect.any(String) },
+    });
+  });
+
+  it("treats a generation-stamped cursor as stale when no expected generation is supplied", () => {
+    // A vault handler must always pass the current generation; a missing one
+    // means we cannot prove the index is unchanged, so refuse rather than
+    // serve a possibly-shifted page.
+    const token = issueCursor({ tool: "search_notes", queryHash: "h", offset: 20, generation: "sha-aaa" });
+    const r = decodeCursor(token, "search_notes");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.error).toBe("CURSOR_STALE");
+  });
+
+  it("skips the staleness check for cursors issued without a generation (rebuild-stable tools)", () => {
+    // search_memory cursors carry no generation; an unrelated vault commit
+    // (different expectedGeneration) must not invalidate them.
+    const token = issueCursor({ tool: "search_memory", queryHash: "h", offset: 50 });
+    expect(decodeCursor(token, "search_memory", "sha-aaa")).toEqual({ ok: true, offset: 50, queryHash: "h" });
+    expect(decodeCursor(token, "search_memory", "sha-bbb")).toEqual({ ok: true, offset: 50, queryHash: "h" });
+    expect(decodeCursor(token, "search_memory")).toEqual({ ok: true, offset: 50, queryHash: "h" });
+  });
+});
+
 describe("decodeCursor — error paths", () => {
   beforeEach(() => resetForTesting());
 

@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from "@jest/globals";
 import * as os from "os";
 import * as path from "path";
 import * as fs from "fs/promises";
+import { execFileSync } from "child_process";
 import Database from "better-sqlite3";
 import { search_notes } from "../src/tools.js";
 import { resetCursorForTesting, issueCursor } from "../src/protocol/index.js";
@@ -257,6 +258,48 @@ describe("search_notes tool — pagination + cursor issuance", () => {
     if (!("results" in r)) throw new Error("expected results");
     expect(r.results).toEqual([]);
     expect(r.cursor).toBeUndefined();
+  });
+});
+
+// ── concurrent-ingest staleness (#90) ──────────────────────────────────────
+
+describe("search_notes tool — cursor staleness on rebuild (#90)", () => {
+  function gitInitCommit(dir: string, message: string): void {
+    execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "Test User"], { cwd: dir });
+    execFileSync("git", ["commit", "--allow-empty", "-m", message], { cwd: dir, stdio: "ignore" });
+  }
+
+  it("rejects a cursor with CURSOR_STALE when a commit lands between pages", async () => {
+    await seed(vaultRoot, 10);
+    gitInitCommit(vaultRoot, "initial");
+
+    const r1 = await search_notes(vaultRoot, { query: "haystack", limit: 3 });
+    if (!("results" in r1) || !r1.cursor) throw new Error("expected page-1 cursor");
+
+    // A commit rebuilds the vault index (HEAD moves), reordering OFFSET rows.
+    execFileSync("git", ["commit", "--allow-empty", "-m", "concurrent ingest"], {
+      cwd: vaultRoot,
+      stdio: "ignore",
+    });
+
+    const r2 = await search_notes(vaultRoot, { query: "haystack", limit: 3, cursor: r1.cursor });
+    expect(r2).toMatchObject({ error: "CURSOR_STALE" });
+  });
+
+  it("accepts the cursor when HEAD is unchanged between pages", async () => {
+    await seed(vaultRoot, 10);
+    gitInitCommit(vaultRoot, "initial");
+
+    const r1 = await search_notes(vaultRoot, { query: "haystack", limit: 3 });
+    if (!("results" in r1) || !r1.cursor) throw new Error("expected page-1 cursor");
+
+    const r2 = await search_notes(vaultRoot, { query: "haystack", limit: 3, cursor: r1.cursor });
+    if (!("results" in r2)) throw new Error(`expected results, got ${JSON.stringify(r2)}`);
+    expect(r2.results.length).toBe(3);
+    const ids1 = new Set(r1.results.map((e) => e.id));
+    for (const e of r2.results) expect(ids1.has(e.id)).toBe(false);
   });
 });
 
