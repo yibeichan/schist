@@ -197,3 +197,90 @@ export async function appendToNote(
     }
   );
 }
+
+/**
+ * Replace an existing note's content. Identical to writeNote except for the
+ * commit verb ("update" vs "write") so `git log --oneline` distinguishes a
+ * curation edit from an initial create. The dedup path in withWriteLock makes
+ * a no-op update (content unchanged) return `committed: false` rather than
+ * churning the history. Issue #119.
+ */
+export async function updateNote(
+  vaultRoot: string,
+  relPath: string,
+  content: string,
+  commitTitle?: string,
+  owner?: string
+): Promise<WriteResult> {
+  assertPathSafe(vaultRoot, relPath);
+  const rawTitle = commitTitle && commitTitle.trim().length > 0 ? commitTitle : relPath;
+  const title = sanitizeCommitTitle(rawTitle);
+  return withWriteLock(
+    vaultRoot,
+    relPath,
+    `feat(schist): update ${title} — ${attribution(owner)}`,
+    async (absPath) => {
+      await fs.writeFile(absPath, content, "utf-8");
+    }
+  );
+}
+
+/**
+ * Delete a note via `git rm`, optionally repairing notes that linked to it in
+ * the SAME commit (the cascade path — see delete_note in tools.ts). Issue #119.
+ *
+ * `repairs` are pre-computed (caller stripped the dangling `## Connections`
+ * lines). Order matters: `git rm` runs FIRST (it's the operation most likely
+ * to fail — e.g. target untracked on the write branch), then the repairs are
+ * written + staged, then a single commit lands the deletion and edge cleanup
+ * atomically. On ANY failure we `git reset --hard HEAD` before rethrowing,
+ * because a later unrelated write commits ALL staged paths (withWriteLock's
+ * `git commit` has no pathspec) — leftover staged repairs would otherwise leak
+ * into the next commit. We do NOT reuse withWriteLock: it stages exactly one
+ * path and short-circuits on an empty diff, neither of which fits a multi-file
+ * delete. `git rm` of a tracked file always produces a staged change.
+ */
+export async function deleteNote(
+  vaultRoot: string,
+  relPath: string,
+  noteTitle: string,
+  owner?: string,
+  repairs: Array<{ relPath: string; content: string }> = []
+): Promise<WriteResult> {
+  assertPathSafe(vaultRoot, relPath);
+  for (const r of repairs) assertPathSafe(vaultRoot, r.relPath);
+  const title = sanitizeCommitTitle(noteTitle && noteTitle.trim().length > 0 ? noteTitle : relPath);
+  const release = await writeMutex.acquire();
+  try {
+    const branch = await getWriteBranch(vaultRoot);
+    await ensureBranch(vaultRoot, branch);
+    await git(vaultRoot, ["checkout", branch]);
+
+    try {
+      await git(vaultRoot, ["rm", "--quiet", "--", relPath]);
+
+      for (const r of repairs) {
+        const absPath = path.resolve(vaultRoot, r.relPath);
+        await fs.writeFile(absPath, r.content, "utf-8");
+        await git(vaultRoot, ["add", "--", r.relPath]);
+      }
+
+      // NEVER --no-verify — hard coded out (mirrors withWriteLock).
+      await git(vaultRoot, ["commit", "-m", `feat(schist): delete ${title} — ${attribution(owner)}`]);
+      const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
+      return { path: relPath, commitSha: sha, committed: true };
+    } catch (e) {
+      // Roll back partial staging/working-tree edits so a failed delete can't
+      // leak into the next write's commit. Best-effort — the original error is
+      // what the caller needs to see.
+      try {
+        await git(vaultRoot, ["reset", "--hard", "HEAD"]);
+      } catch {
+        /* nothing more we can do */
+      }
+      throw e;
+    }
+  } finally {
+    release();
+  }
+}

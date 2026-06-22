@@ -6,7 +6,8 @@ import { fileURLToPath } from "url";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { load as yamlLoadSync } from "js-yaml";
-import { loadVaultConfig, create_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, DEFAULT_DIRECTORIES_FALLBACK } from "../src/tools.js";
+import { loadVaultConfig, create_note, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, DEFAULT_DIRECTORIES_FALLBACK } from "../src/tools.js";
+import Database from "better-sqlite3";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -126,6 +127,38 @@ async function makeTempVaultWithAcl(
   await execFile("git", ["add", "schist.yaml", "vault.yaml"], { cwd: vault });
   await execFile("git", ["commit", "-m", "add vault.yaml + extended schist.yaml"], { cwd: vault });
   return vault;
+}
+
+// Build a schist.db with enough schema to satisfy the reader's drift check
+// (docs with all REQUIRED_DOCS_COLUMNS, plus paper_metadata + concept_aliases
+// tables) and seed `edges` rows so delete_note's inbound-edge query has data.
+// Mirrors cli/schist/schema.sql; the reader only needs these tables present.
+async function seedEdgesDb(vault: string, edges: Array<{ source: string; target: string; type: string }>): Promise<void> {
+  const dbDir = path.join(vault, ".schist");
+  await fs.mkdir(dbDir, { recursive: true });
+  const db = new Database(path.join(dbDir, "schist.db"));
+  db.exec(`
+    CREATE TABLE docs (
+      id TEXT PRIMARY KEY, title TEXT NOT NULL, date TEXT, status TEXT,
+      tags TEXT, concepts TEXT, body TEXT NOT NULL, scope TEXT,
+      source TEXT, confidence TEXT, file_ref TEXT
+    );
+    CREATE TABLE concepts (slug TEXT PRIMARY KEY, title TEXT NOT NULL);
+    CREATE TABLE edges (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL,
+      target TEXT NOT NULL, type TEXT NOT NULL, context TEXT,
+      UNIQUE(source, target, type)
+    );
+    CREATE TABLE paper_metadata (doc_id TEXT PRIMARY KEY);
+    CREATE TABLE concept_aliases (
+      duplicate_slug TEXT NOT NULL, canonical_slug TEXT NOT NULL,
+      reason TEXT, created_by TEXT NOT NULL,
+      PRIMARY KEY (duplicate_slug, canonical_slug)
+    );
+  `);
+  const ins = db.prepare("INSERT INTO edges (source, target, type) VALUES (?, ?, ?)");
+  for (const e of edges) ins.run(e.source, e.target, e.type);
+  db.close();
 }
 
 // ---------------------------------------------------------------------------
@@ -1608,5 +1641,418 @@ access:
       delete process.env.SCHIST_IDENTITY;
       process.env.SCHIST_AGENT_ID = TEST_AGENT;
     }
+  }, 30000);
+});
+
+
+// ---------------------------------------------------------------------------
+// update_note (#119)
+// ---------------------------------------------------------------------------
+
+describe("update_note", () => {
+  async function vaultWithNote(extra?: Partial<Parameters<typeof create_note>[1]>): Promise<{ vault: string; config: Awaited<ReturnType<typeof loadVaultConfig>>; id: string }> {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const created = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Editable", body: "original body", directory: "notes", ...extra },
+      config,
+    ) as { id: string };
+    return { vault, config, id: created.id };
+  }
+
+  it("replaces the body and dedups a no-op update", async () => {
+    const { vault, config, id } = await vaultWithNote();
+    const updated = await update_note(vault, { owner: TEST_AGENT, id, body: "rewritten body" }, config) as {
+      updated: boolean;
+    };
+    expect(updated.updated).toBe(true);
+
+    const content = await fs.readFile(path.join(vault, id), "utf-8");
+    expect(content).toContain("rewritten body");
+    expect(content).not.toContain("original body");
+
+    const again = await update_note(vault, { owner: TEST_AGENT, id, body: "rewritten body" }, config) as {
+      updated: boolean;
+    };
+    expect(again.updated).toBe(false);
+  }, 30000);
+
+  it("patches frontmatter without touching the body or its connections", async () => {
+    const { vault, config, id } = await vaultWithNote({
+      status: "draft", connections: [{ target: "notes/other.md", type: "extends" }],
+    });
+    const res = await update_note(vault, {
+      owner: TEST_AGENT, id, frontmatter_patch: { status: "final", tags: ["curated"] },
+    }, config) as { updated: boolean };
+    expect(res.updated).toBe(true);
+
+    const content = await fs.readFile(path.join(vault, id), "utf-8");
+    expect(content).toContain("status: final");
+    expect(content).toContain("original body");
+    expect(content).toContain("extends: notes/other.md");
+  }, 30000);
+
+  it("deletes a frontmatter key when the patch value is null", async () => {
+    const { vault, config, id } = await vaultWithNote({ confidence: "high" });
+    expect(await fs.readFile(path.join(vault, id), "utf-8")).toContain("confidence: high");
+    await update_note(vault, { owner: TEST_AGENT, id, frontmatter_patch: { confidence: null } }, config);
+    expect(await fs.readFile(path.join(vault, id), "utf-8")).not.toContain("confidence:");
+  }, 30000);
+
+  it("requires at least one of body/frontmatter_patch", async () => {
+    const { vault, config, id } = await vaultWithNote();
+    const res = await update_note(vault, { owner: TEST_AGENT, id }, config) as { error: string };
+    expect(res.error).toBe("VALIDATION_ERROR");
+  }, 30000);
+
+  it("rejects an invalid confidence patch", async () => {
+    const { vault, config, id } = await vaultWithNote();
+    const res = await update_note(vault, {
+      owner: TEST_AGENT, id, frontmatter_patch: { confidence: "certain" },
+    }, config) as { error: string };
+    expect(res.error).toBe("VALIDATION_ERROR");
+  }, 30000);
+
+  it("rejects a non-allowlisted frontmatter key (scope-spoof guard)", async () => {
+    const { vault, config, id } = await vaultWithNote();
+    const res = await update_note(vault, {
+      owner: TEST_AGENT, id, frontmatter_patch: { scope: "global" },
+    }, config) as { error: string; message: string };
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toMatch(/scope/);
+    // Note untouched — rejection happens before any write.
+    expect(await fs.readFile(path.join(vault, id), "utf-8")).not.toContain("scope:");
+  }, 30000);
+
+  it("rejects wrong-typed tags patch", async () => {
+    const { vault, config, id } = await vaultWithNote();
+    const res = await update_note(vault, {
+      owner: TEST_AGENT, id, frontmatter_patch: { tags: "not-an-array" },
+    }, config) as { error: string };
+    expect(res.error).toBe("VALIDATION_ERROR");
+  }, 30000);
+
+  it("rejects a non-.md id and a .git/.schist id", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    for (const id of ["notes/x.txt", ".git/hooks/post-commit", ".schist/schist.db", "notes/../.git/config"]) {
+      const res = await update_note(vault, { owner: TEST_AGENT, id, body: "x" }, config) as { error: string };
+      expect(["VALIDATION_ERROR", "PATH_TRAVERSAL"]).toContain(res.error);
+    }
+  }, 30000);
+
+  it("rejects an id outside configured directories", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const res = await update_note(vault, { owner: TEST_AGENT, id: "secrets/x.md", body: "x" }, config) as {
+      error: string;
+    };
+    expect(res.error).toBe("VALIDATION_ERROR");
+  }, 30000);
+
+  it("returns NOT_FOUND for a missing (but valid) note id", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const res = await update_note(vault, { owner: TEST_AGENT, id: "notes/nope.md", body: "x" }, config) as {
+      error: string;
+    };
+    expect(res.error).toBe("NOT_FOUND");
+  }, 30000);
+
+  it("rejects path traversal", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const res = await update_note(vault, { owner: TEST_AGENT, id: "../escape.md", body: "x" }, config) as {
+      error: string;
+    };
+    expect(res.error).toBe("VALIDATION_ERROR"); // id-validation catches '..' before the path check
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
+// delete_note (#119)
+// ---------------------------------------------------------------------------
+
+describe("delete_note", () => {
+  // create_note fires a background `schist-ingest` (triggerIngestion) that
+  // rebuilds .schist/schist.db. These tests hand-seed the edges table, so we
+  // pin the ingest binary to a no-op — otherwise the async rebuild races the
+  // seeded DB and inboundEdges intermittently reads an empty/half-built index.
+  let savedIngestBin: string | undefined;
+  beforeAll(() => {
+    savedIngestBin = process.env.SCHIST_INGEST_BIN;
+    process.env.SCHIST_INGEST_BIN = "/usr/bin/true";
+  });
+  afterAll(() => {
+    if (savedIngestBin === undefined) delete process.env.SCHIST_INGEST_BIN;
+    else process.env.SCHIST_INGEST_BIN = savedIngestBin;
+  });
+
+  it("deletes a note when the index reports no inbound edges", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const created = await create_note(
+      vault, { owner: TEST_AGENT, title: "Doomed", body: "b", directory: "notes" }, config,
+    ) as { id: string };
+    await seedEdgesDb(vault, []); // DB present, no edges targeting this note
+
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: created.id }, config) as {
+      deleted: boolean; repaired: string[]; indexWarning?: string;
+    };
+    expect(res.deleted).toBe(true);
+    expect(res.repaired).toEqual([]);
+    expect(res.indexWarning).toBeUndefined();
+    await expect(fs.access(path.join(vault, created.id))).rejects.toThrow();
+  }, 30000);
+
+  it("refuses to delete a note with inbound edges unless cascade is set", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const target = await create_note(
+      vault, { owner: TEST_AGENT, title: "Target", body: "b", directory: "notes" }, config,
+    ) as { id: string };
+    const linker = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Linker", body: "b", directory: "notes", connections: [{ target: target.id, type: "extends" }] },
+      config,
+    ) as { id: string };
+    await seedEdgesDb(vault, [{ source: linker.id, target: target.id, type: "extends" }]);
+
+    const refused = await delete_note(vault, { owner: TEST_AGENT, id: target.id }, config) as {
+      error: string; inbound_edges: Array<{ source: string }>;
+    };
+    expect(refused.error).toBe("INBOUND_EDGES");
+    expect(refused.inbound_edges.map((e) => e.source)).toContain(linker.id);
+    await expect(fs.access(path.join(vault, target.id))).resolves.toBeUndefined();
+  }, 30000);
+
+  it("cascade deletes and strips the dangling connection line from linking notes", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const target = await create_note(
+      vault, { owner: TEST_AGENT, title: "Target2", body: "b", directory: "notes" }, config,
+    ) as { id: string };
+    const linker = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Linker2", body: "b", directory: "notes", connections: [{ target: target.id, type: "extends" }] },
+      config,
+    ) as { id: string };
+    await seedEdgesDb(vault, [{ source: linker.id, target: target.id, type: "extends" }]);
+    expect(await fs.readFile(path.join(vault, linker.id), "utf-8")).toContain(`extends: ${target.id}`);
+
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: target.id, cascade: true }, config) as {
+      deleted: boolean; repaired: string[];
+    };
+    expect(res.deleted).toBe(true);
+    expect(res.repaired).toContain(linker.id);
+    await expect(fs.access(path.join(vault, target.id))).rejects.toThrow();
+    expect(await fs.readFile(path.join(vault, linker.id), "utf-8")).not.toContain(`extends: ${target.id}`);
+  }, 30000);
+
+  it("cascade strips a bare-slug connection to a concept note (#7)", async () => {
+    const vault = await makeTempVault();
+    // Default fixture allows only notes/papers; add `concepts` so create_note
+    // and the id-validation accept a concepts/ path.
+    await fs.writeFile(
+      path.join(vault, "schist.yaml"),
+      "name: Test Vault\nwrite_branch: drafts\ndirectories:\n  - notes\n  - papers\n  - concepts\nstatuses:\n  - draft\n  - final\nconnection_types:\n  - extends\n  - supports\n",
+    );
+    await execFile("git", ["add", "schist.yaml"], { cwd: vault });
+    await execFile("git", ["commit", "-m", "add concepts dir"], { cwd: vault });
+    const config = await loadVaultConfig(vault);
+    // Concept note + a linker referencing it by the BARE slug, not the path.
+    const concept = await create_note(
+      vault, { owner: TEST_AGENT, title: "Backprop", body: "b", directory: "concepts" }, config,
+    ) as { id: string };
+    const slug = concept.id.replace(/^concepts\//, "").replace(/\.md$/, "");
+    const linker = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Linker3", body: "b", directory: "notes", connections: [{ target: slug, type: "extends" }] },
+      config,
+    ) as { id: string };
+    // Edge stored with the bare-slug target, as ingest would for a concept ref.
+    await seedEdgesDb(vault, [{ source: linker.id, target: slug, type: "extends" }]);
+
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: concept.id, cascade: true }, config) as {
+      deleted: boolean; repaired: string[];
+    };
+    expect(res.deleted).toBe(true);
+    expect(res.repaired).toContain(linker.id);
+    expect(await fs.readFile(path.join(vault, linker.id), "utf-8")).not.toContain(`extends: ${slug}`);
+  }, 30000);
+
+  it("proceeds with an indexWarning when no graph index exists", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const created = await create_note(
+      vault, { owner: TEST_AGENT, title: "NoIndex", body: "b", directory: "notes" }, config,
+    ) as { id: string };
+
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: created.id }, config) as {
+      deleted: boolean; indexWarning?: string;
+    };
+    expect(res.deleted).toBe(true);
+    expect(res.indexWarning).toMatch(/index could not be read/);
+    await expect(fs.access(path.join(vault, created.id))).rejects.toThrow();
+  }, 30000);
+
+  it("rejects a .git/.schist/non-.md id", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    for (const id of [".git/hooks/post-commit", ".schist/schist.db", "notes/x.txt"]) {
+      const res = await delete_note(vault, { owner: TEST_AGENT, id }, config) as { error: string };
+      expect(["VALIDATION_ERROR", "PATH_TRAVERSAL"]).toContain(res.error);
+    }
+  }, 30000);
+
+  it("returns NOT_FOUND for a missing (but valid) note id", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: "notes/ghost.md" }, config) as { error: string };
+    expect(res.error).toBe("NOT_FOUND");
+  }, 30000);
+
+  it("rejects path traversal", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: "../escape.md" }, config) as { error: string };
+    expect(res.error).toBe("VALIDATION_ERROR"); // id-validation catches '..' before the path check
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
+// delete_note / update_note — ACL + sync-dirty enforcement (#119)
+// ---------------------------------------------------------------------------
+
+describe("delete_note / update_note ACL + sync-dirty enforcement (#119)", () => {
+  let savedIdentity: string | undefined;
+  let savedGlUser: string | undefined;
+  let savedIngestBin: string | undefined;
+  beforeAll(() => {
+    savedIdentity = process.env.SCHIST_IDENTITY;
+    savedGlUser = process.env.GL_USER;
+    savedIngestBin = process.env.SCHIST_INGEST_BIN;
+    delete process.env.SCHIST_IDENTITY;
+    delete process.env.GL_USER;
+    // Pin ingest to a no-op so the cascade test's seeded edges aren't wiped by
+    // create_note's background rebuild (see delete_note describe for context).
+    process.env.SCHIST_INGEST_BIN = "/usr/bin/true";
+  });
+  afterAll(() => {
+    if (savedIdentity === undefined) delete process.env.SCHIST_IDENTITY;
+    else process.env.SCHIST_IDENTITY = savedIdentity;
+    if (savedGlUser === undefined) delete process.env.GL_USER;
+    else process.env.GL_USER = savedGlUser;
+    if (savedIngestBin === undefined) delete process.env.SCHIST_INGEST_BIN;
+    else process.env.SCHIST_INGEST_BIN = savedIngestBin;
+  });
+
+  // Note created in 'papers' while granted, then papers revoked to 'notes'-only.
+  async function noteThenRevokePapers(): Promise<{ vault: string; config: Awaited<ReturnType<typeof loadVaultConfig>>; notePath: string }> {
+    const vault = await makeTempVaultWithAcl(TEST_AGENT, ["notes", "papers"]);
+    const config = await loadVaultConfig(vault);
+    const created = await create_note(
+      vault, { owner: TEST_AGENT, title: "Target", body: "x", directory: "papers" }, config,
+    ) as { path: string };
+    const tighterYaml =
+      `vault_version: 1
+name: test-acl-vault
+scope_convention: flat
+participants:
+  - name: ${TEST_AGENT}
+    type: spoke
+    default_scope: global
+access:
+  ${TEST_AGENT}:
+    read: ["*"]
+    write: [notes]
+`;
+    await fs.writeFile(path.join(vault, "vault.yaml"), tighterYaml, "utf-8");
+    await execFile("git", ["add", "vault.yaml"], { cwd: vault });
+    await execFile("git", ["commit", "-m", "revoke papers"], { cwd: vault });
+    return { vault, config, notePath: created.path };
+  }
+
+  it("delete_note in an ungranted directory returns ACL_DENIED", async () => {
+    const { vault, config, notePath } = await noteThenRevokePapers();
+    const result = await delete_note(vault, { owner: TEST_AGENT, id: notePath }, config) as {
+      error: string; message: string;
+    };
+    expect(result.error).toBe("ACL_DENIED");
+    expect(result.message).toMatch(/papers/);
+    await expect(fs.access(path.join(vault, notePath))).resolves.toBeUndefined();
+  }, 30000);
+
+  it("update_note in an ungranted directory returns ACL_DENIED", async () => {
+    const { vault, config, notePath } = await noteThenRevokePapers();
+    const before = await fs.readFile(path.join(vault, notePath), "utf-8");
+    const result = await update_note(vault, { owner: TEST_AGENT, id: notePath, body: "tampered" }, config) as {
+      error: string; message: string;
+    };
+    expect(result.error).toBe("ACL_DENIED");
+    expect(result.message).toMatch(/papers/);
+    expect(await fs.readFile(path.join(vault, notePath), "utf-8")).toBe(before);
+  }, 30000);
+
+  it("cascade refuses when a linking note is outside the caller's write scope (#5)", async () => {
+    // Grant notes+papers; target in notes (deletable), linker in papers. Then
+    // revoke papers. Deleting the target with cascade would have to edit the
+    // papers linker — which the caller can no longer write. Must refuse.
+    const vault = await makeTempVaultWithAcl(TEST_AGENT, ["notes", "papers"]);
+    const config = await loadVaultConfig(vault);
+    const target = await create_note(
+      vault, { owner: TEST_AGENT, title: "Target", body: "b", directory: "notes" }, config,
+    ) as { id: string };
+    const linker = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Linker", body: "b", directory: "papers", connections: [{ target: target.id, type: "extends" }] },
+      config,
+    ) as { id: string };
+    await seedEdgesDb(vault, [{ source: linker.id, target: target.id, type: "extends" }]);
+
+    const tighterYaml =
+      `vault_version: 1
+name: test-acl-vault
+scope_convention: flat
+participants:
+  - name: ${TEST_AGENT}
+    type: spoke
+    default_scope: global
+access:
+  ${TEST_AGENT}:
+    read: ["*"]
+    write: [notes]
+`;
+    await fs.writeFile(path.join(vault, "vault.yaml"), tighterYaml, "utf-8");
+    await execFile("git", ["add", "vault.yaml"], { cwd: vault });
+    await execFile("git", ["commit", "-m", "revoke papers"], { cwd: vault });
+
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: target.id, cascade: true }, config) as {
+      error: string; message: string;
+    };
+    expect(res.error).toBe("ACL_DENIED");
+    expect(res.message).toMatch(/papers/);
+    // Both notes untouched.
+    await expect(fs.access(path.join(vault, target.id))).resolves.toBeUndefined();
+    expect(await fs.readFile(path.join(vault, linker.id), "utf-8")).toContain(`extends: ${target.id}`);
+  }, 30000);
+
+  it("delete_note returns SYNC_DIRTY when the sentinel exists (spoke)", async () => {
+    const vault = await makeTempSpokeVault();
+    const config = await loadVaultConfig(vault);
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(path.join(vault, ".schist", "last-sync-error"), "2026-05-22T23:06:22.980Z push exited with code 1\n");
+    const result = await delete_note(vault, { owner: TEST_AGENT, id: "notes/anything.md" }, config) as { error: string };
+    expect(result.error).toBe("SYNC_DIRTY");
+  }, 30000);
+
+  it("update_note returns SYNC_DIRTY when the sentinel exists (spoke)", async () => {
+    const vault = await makeTempSpokeVault();
+    const config = await loadVaultConfig(vault);
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(path.join(vault, ".schist", "last-sync-error"), "2026-05-22T23:06:22.980Z push exited with code 1\n");
+    const result = await update_note(vault, { owner: TEST_AGENT, id: "notes/anything.md", body: "x" }, config) as { error: string };
+    expect(result.error).toBe("SYNC_DIRTY");
   }, 30000);
 });
