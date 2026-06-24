@@ -1693,6 +1693,25 @@ describe("update_note", () => {
     expect(content).toContain("extends: notes/other.md");
   }, 30000);
 
+  it("keeps an unquoted date as a date across a body-only update (no ISO-timestamp churn)", async () => {
+    const { vault, config, id } = await vaultWithNote();
+    // Simulate a hand-authored/imported note whose `date:` is an UNQUOTED YAML
+    // scalar — gray-matter parses those into a JS Date and would re-emit a full
+    // ISO timestamp on round-trip (create_note itself quotes the date, so its
+    // own notes are unaffected). The coercion in update_note must prevent churn.
+    await fs.writeFile(
+      path.join(vault, id),
+      "---\ntitle: Hand Edited\ndate: 2026-06-18\nstatus: draft\n---\n\noriginal body\n",
+      "utf-8",
+    );
+    await update_note(vault, { owner: TEST_AGENT, id, body: "edited" }, config);
+
+    const after = await fs.readFile(path.join(vault, id), "utf-8");
+    expect(after).toMatch(/^date:\s*'?2026-06-18'?\s*$/m); // still the same day, date-only
+    expect(after).not.toMatch(/date:.*T\d{2}:\d{2}:\d{2}/);  // never reformatted to a timestamp
+    expect(after).toContain("edited");
+  }, 30000);
+
   it("deletes a frontmatter key when the patch value is null", async () => {
     const { vault, config, id } = await vaultWithNote({ confidence: "high" });
     expect(await fs.readFile(path.join(vault, id), "utf-8")).toContain("confidence: high");
@@ -1767,6 +1786,40 @@ describe("update_note", () => {
       error: string;
     };
     expect(res.error).toBe("VALIDATION_ERROR"); // id-validation catches '..' before the path check
+  }, 30000);
+
+  it("refuses to write through a symlink that exists only on the write branch (branch skew, #119)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const baseBranch = (await execFile("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: vault })).stdout.trim();
+
+    // A file OUTSIDE the vault that the symlink will target — must stay intact.
+    const outside = path.join(path.dirname(vault), `outside-${path.basename(vault)}.txt`);
+    await fs.writeFile(outside, "SECRET", "utf-8");
+
+    // Write branch (drafts): notes/x.md is a SYMLINK pointing outside the vault.
+    await execFile("git", ["checkout", "-b", "drafts"], { cwd: vault });
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.symlink(outside, path.join(vault, "notes", "x.md"));
+    await execFile("git", ["add", "-A"], { cwd: vault });
+    await execFile("git", ["commit", "-m", "symlink on write branch"], { cwd: vault });
+
+    // Base branch (where the working tree sits when update_note is called):
+    // notes/x.md is a NORMAL file, so the handler's pre-checkout symlink check
+    // passes. Only the in-lock guard (after `git checkout drafts`) can catch it.
+    await execFile("git", ["checkout", baseBranch], { cwd: vault });
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, "notes", "x.md"), "---\ntitle: X\ndate: '2026-06-18'\n---\n\nsafe\n", "utf-8");
+    await execFile("git", ["add", "-A"], { cwd: vault });
+    await execFile("git", ["commit", "-m", "regular file on base branch"], { cwd: vault });
+
+    const res = await update_note(vault, { owner: TEST_AGENT, id: "notes/x.md", body: "pwned" }, config) as {
+      error?: string;
+    };
+    expect(res.error).toBe("PATH_TRAVERSAL");
+    expect(await fs.readFile(outside, "utf-8")).toBe("SECRET"); // never written through
+
+    await fs.rm(outside, { force: true });
   }, 30000);
 });
 
@@ -1880,6 +1933,70 @@ describe("delete_note", () => {
     expect(res.deleted).toBe(true);
     expect(res.repaired).toContain(linker.id);
     expect(await fs.readFile(path.join(vault, linker.id), "utf-8")).not.toContain(`extends: ${slug}`);
+  }, 30000);
+
+  it("cascade strips a concepts: frontmatter reference, not just body lines (#119)", async () => {
+    const vault = await makeTempVault();
+    await fs.writeFile(
+      path.join(vault, "schist.yaml"),
+      "name: Test Vault\nwrite_branch: drafts\ndirectories:\n  - notes\n  - papers\n  - concepts\nstatuses:\n  - draft\n  - final\nconnection_types:\n  - extends\n  - supports\n",
+    );
+    await execFile("git", ["add", "schist.yaml"], { cwd: vault });
+    await execFile("git", ["commit", "-m", "add concepts dir"], { cwd: vault });
+    const config = await loadVaultConfig(vault);
+    const concept = await create_note(
+      vault, { owner: TEST_AGENT, title: "Backprop", body: "b", directory: "concepts" }, config,
+    ) as { id: string };
+    const slug = concept.id.replace(/^concepts\//, "").replace(/\.md$/, "");
+    // Linker references the concept ONLY via `concepts:` frontmatter — no
+    // `## Connections` line. ingest derives a `references` edge from this.
+    const linker = await create_note(
+      vault, { owner: TEST_AGENT, title: "Linker4", body: "b", directory: "notes", concepts: [slug] }, config,
+    ) as { id: string };
+    expect(await fs.readFile(path.join(vault, linker.id), "utf-8")).toContain(slug);
+    await seedEdgesDb(vault, [{ source: linker.id, target: slug, type: "references" }]);
+
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: concept.id, cascade: true }, config) as {
+      deleted: boolean; repaired: string[];
+    };
+    expect(res.deleted).toBe(true);
+    expect(res.repaired).toContain(linker.id);
+    // The frontmatter reference is gone, so the next ingest won't resurrect the
+    // concept as a placeholder + dangling edge.
+    const after = await fs.readFile(path.join(vault, linker.id), "utf-8");
+    expect(after).toContain("concepts: []");
+    expect(after).not.toMatch(new RegExp(`- ${slug}\\b`));
+  }, 30000);
+
+  it("a failed delete rolls back only its own paths, preserving unrelated uncommitted edits (#119)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const target = await create_note(
+      vault, { owner: TEST_AGENT, title: "Doomed", body: "b", directory: "notes" }, config,
+    ) as { id: string };
+    const bystander = await create_note(
+      vault, { owner: TEST_AGENT, title: "Bystander", body: "b", directory: "notes" }, config,
+    ) as { id: string };
+    await seedEdgesDb(vault, []); // no inbound edges → simple delete path
+
+    // Dirty an unrelated tracked note WITHOUT staging/committing it.
+    const bystanderPath = path.join(vault, bystander.id);
+    const original = await fs.readFile(bystanderPath, "utf-8");
+    await fs.writeFile(bystanderPath, original + "\nUNCOMMITTED LOCAL EDIT\n", "utf-8");
+
+    // Force the delete's commit to fail so the rollback path runs.
+    const hookDir = path.join(vault, ".git", "hooks");
+    await fs.mkdir(hookDir, { recursive: true });
+    await fs.writeFile(path.join(hookDir, "pre-commit"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: target.id }, config) as { error?: string };
+    expect(res.error).toBeDefined(); // commit rejected by the hook
+
+    // Target restored (its `git rm` was rolled back)...
+    await expect(fs.access(path.join(vault, target.id))).resolves.toBeUndefined();
+    // ...and the UNRELATED uncommitted edit survives. A `git reset --hard HEAD`
+    // rollback (the old behavior) would have wiped it.
+    expect(await fs.readFile(bystanderPath, "utf-8")).toContain("UNCOMMITTED LOCAL EDIT");
   }, 30000);
 
   it("proceeds with an indexWarning when no graph index exists", async () => {

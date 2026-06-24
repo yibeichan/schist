@@ -56,6 +56,40 @@ function assertPathSafe(vaultRoot: string, relPath: string): void {
   }
 }
 
+/**
+ * Symlink-aware containment guard, run INSIDE the write lock AFTER the write
+ * branch is checked out — the only point where the on-disk bytes at `relPath`
+ * match what we're about to write to. A lexical / pre-checkout realpath check
+ * (e.g. tools.ts:resolvesInsideVault) can be defeated by branch skew: a regular
+ * file on the current branch, a symlink at the same path on the write branch.
+ *
+ * Guards two escape shapes that a plain `realpath(file)` would miss:
+ *  - a symlinked ANCESTOR dir pointing outside the vault (caught via the parent
+ *    realpath), and
+ *  - the note path itself being a symlink — including one whose target does not
+ *    yet exist, which `fs.writeFile` would happily CREATE outside the vault
+ *    (caught via lstat, before any read/write follows the link).
+ * The vault root may itself be a symlink (env vars often point at one), so both
+ * sides are realpath-resolved. New-file writes (lstat ENOENT) are allowed. #119.
+ */
+async function assertResolvesInside(vaultRoot: string, relPath: string): Promise<void> {
+  const realRoot = await fs.realpath(vaultRoot);
+  const absPath = path.resolve(vaultRoot, relPath);
+  const realParent = await fs.realpath(path.dirname(absPath));
+  if (realParent !== realRoot && !realParent.startsWith(realRoot + path.sep)) {
+    throw { error: "PATH_TRAVERSAL", message: "Write path resolves outside vault root (symlinked dir?)" };
+  }
+  try {
+    const st = await fs.lstat(absPath);
+    if (st.isSymbolicLink()) {
+      throw { error: "PATH_TRAVERSAL", message: "Note path is a symlink; refusing to write through it" };
+    }
+  } catch (e) {
+    // Rethrow our own ToolError; ENOENT just means a brand-new file — allowed.
+    if (e !== null && typeof e === "object" && "error" in e) throw e;
+  }
+}
+
 export type WriteResult = {
   path: string;
   /**
@@ -208,9 +242,9 @@ export async function appendToNote(
 export async function updateNote(
   vaultRoot: string,
   relPath: string,
-  content: string,
-  commitTitle?: string,
-  owner?: string
+  commitTitle: string | undefined,
+  owner: string | undefined,
+  transform: (current: string) => string
 ): Promise<WriteResult> {
   assertPathSafe(vaultRoot, relPath);
   const rawTitle = commitTitle && commitTitle.trim().length > 0 ? commitTitle : relPath;
@@ -220,7 +254,22 @@ export async function updateNote(
     relPath,
     `feat(schist): update ${title} — ${attribution(owner)}`,
     async (absPath) => {
-      await fs.writeFile(absPath, content, "utf-8");
+      // Authoritative symlink/containment guard, post-checkout (see
+      // assertResolvesInside) — the handler's pre-checkout check can be skipped
+      // by branch skew. Runs before any read/write follows the path.
+      await assertResolvesInside(vaultRoot, relPath);
+      // Re-read the note INSIDE the write lock (after checkout) and build the
+      // new content from the fresh on-disk state. If the note vanished since the
+      // handler's pre-lock read — e.g. a concurrent delete_note committed in the
+      // window — abort with NOT_FOUND rather than resurrecting it from stale
+      // content. #119.
+      let current: string;
+      try {
+        current = await fs.readFile(absPath, "utf-8");
+      } catch {
+        throw { error: "NOT_FOUND", message: `Note not found: ${relPath}` };
+      }
+      await fs.writeFile(absPath, transform(current), "utf-8");
     }
   );
 }
@@ -233,7 +282,8 @@ export async function updateNote(
  * lines). Order matters: `git rm` runs FIRST (it's the operation most likely
  * to fail — e.g. target untracked on the write branch), then the repairs are
  * written + staged, then a single commit lands the deletion and edge cleanup
- * atomically. On ANY failure we `git reset --hard HEAD` before rethrowing,
+ * atomically. On ANY failure we roll back ONLY the paths this call touched
+ * (via `git restore`) before rethrowing,
  * because a later unrelated write commits ALL staged paths (withWriteLock's
  * `git commit` has no pathspec) — leftover staged repairs would otherwise leak
  * into the next commit. We do NOT reuse withWriteLock: it stages exactly one
@@ -260,6 +310,11 @@ export async function deleteNote(
       await git(vaultRoot, ["rm", "--quiet", "--", relPath]);
 
       for (const r of repairs) {
+        // Post-checkout symlink/containment guard before writing through the
+        // repair path (a write-branch symlink could redirect outside the vault;
+        // the `git rm` of the delete target above is safe — it removes the link
+        // rather than writing through it). #119.
+        await assertResolvesInside(vaultRoot, r.relPath);
         const absPath = path.resolve(vaultRoot, r.relPath);
         await fs.writeFile(absPath, r.content, "utf-8");
         await git(vaultRoot, ["add", "--", r.relPath]);
@@ -270,11 +325,16 @@ export async function deleteNote(
       const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
       return { path: relPath, commitSha: sha, committed: true };
     } catch (e) {
-      // Roll back partial staging/working-tree edits so a failed delete can't
-      // leak into the next write's commit. Best-effort — the original error is
-      // what the caller needs to see.
+      // Roll back ONLY the paths this delete touched (the removed note + any
+      // repaired linkers), NOT the whole tree. A `git reset --hard HEAD` here
+      // would also discard unrelated uncommitted edits elsewhere in the vault
+      // (human edits, pre-existing staged work) on any delete failure. `git
+      // restore --source=HEAD --staged --worktree` un-deletes / un-modifies
+      // exactly these paths. Best-effort — the original error is what the
+      // caller needs to see.
       try {
-        await git(vaultRoot, ["reset", "--hard", "HEAD"]);
+        const touched = [relPath, ...repairs.map((r) => r.relPath)];
+        await git(vaultRoot, ["restore", "--staged", "--worktree", "--source=HEAD", "--", ...touched]);
       } catch {
         /* nothing more we can do */
       }

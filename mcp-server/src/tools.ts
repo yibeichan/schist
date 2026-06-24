@@ -187,6 +187,26 @@ function validateFrontmatterPatch(patch: Record<string, unknown> | undefined): T
 }
 
 /**
+ * True when `relPath` resolves (after following symlinks) to a path inside the
+ * vault root. validateNoteId and the lexical path guards are string-only, so a
+ * tracked symlink inside a note directory could redirect a write outside the
+ * vault (arbitrary-file-write / RCE-on-next-commit). This compares real paths.
+ * The vault root itself may legitimately be a symlink (env vars often point at
+ * one), so both sides are realpath-resolved before comparison. Returns false on
+ * any resolution error — callers run this only after confirming the target
+ * exists, so a failure means the path is suspect. #119.
+ */
+async function resolvesInsideVault(vaultRoot: string, relPath: string): Promise<boolean> {
+  try {
+    const realRoot = await fs.realpath(vaultRoot);
+    const realTarget = await fs.realpath(path.join(vaultRoot, relPath));
+    return realTarget === realRoot || realTarget.startsWith(realRoot + path.sep);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Normalise any caught value into a plain ToolError object so that
  * JSON.stringify always produces { error, message } — Error.message is
  * non-enumerable and would otherwise be silently dropped.
@@ -1453,6 +1473,32 @@ function stripConnectionsTo(content: string, targets: string[]): { content: stri
 }
 
 /**
+ * Remove any of `targets` from a note's `concepts:` frontmatter list. Edges to
+ * a concept are created by ingest BOTH from `## Connections` lines AND from the
+ * bare slug in another note's `concepts:` frontmatter (ingest.py inserts a
+ * `references` edge per frontmatter concept). delete_note's cascade strips the
+ * body lines via stripConnectionsTo; without this, the frontmatter reference
+ * survives and the very next ingest recreates the deleted concept as a
+ * placeholder plus a dangling edge — so cascade-deleting a concept wouldn't
+ * stick. Returns the rewritten content and whether anything changed. #119.
+ */
+function stripConceptRefs(content: string, targets: string[]): { content: string; changed: boolean } {
+  const { metadata, body } = parseNote(content);
+  const concepts = metadata.concepts;
+  if (!Array.isArray(concepts)) return { content, changed: false };
+  const targetSet = new Set(targets);
+  const filtered = concepts.filter((c) => !targetSet.has(c));
+  if (filtered.length === concepts.length) return { content, changed: false };
+  const newMeta: Record<string, unknown> = { ...metadata, concepts: filtered };
+  // Same Date-coercion guard as update_note: don't let the round-trip rewrite
+  // an untouched `date:` into a full ISO timestamp.
+  for (const [key, value] of Object.entries(newMeta)) {
+    if (value instanceof Date) newMeta[key] = value.toISOString().split("T")[0];
+  }
+  return { content: buildNote(newMeta, body), changed: true };
+}
+
+/**
  * delete_note tool handler (#119). Removes a note via `git rm`.
  *
  * Inbound-edge safety: by default, refuses with INBOUND_EDGES if other notes
@@ -1487,6 +1533,13 @@ export async function delete_note(
       await fs.access(filePath);
     } catch {
       return { error: "NOT_FOUND", message: `Note not found: ${args.id}` } satisfies ToolError;
+    }
+
+    // Resolve symlinks (see resolvesInsideVault): a tracked symlink at args.id
+    // pointing outside the vault would otherwise let `git rm` operate out of
+    // tree. The lexical guard above is string-only. #119.
+    if (!(await resolvesInsideVault(vaultRoot, args.id))) {
+      return { error: "PATH_TRAVERSAL", message: "Note path resolves outside the vault (symlink?)" } satisfies ToolError;
     }
 
     // ACL — mirror create_note/add_connection. args.id is the vault-relative
@@ -1528,7 +1581,7 @@ export async function delete_note(
         "other notes were not detected or repaired.";
     }
 
-    if (inbound.length > 0 && !args.cascade) {
+    if (inbound.length > 0 && args.cascade !== true) {
       return {
         error: "INBOUND_EDGES",
         message:
@@ -1541,9 +1594,16 @@ export async function delete_note(
 
     // Cascade: strip dangling connection lines from each distinct linking note.
     const repairs: Array<{ relPath: string; content: string }> = [];
-    if (args.cascade && inbound.length > 0) {
+    if (args.cascade === true && inbound.length > 0) {
       const sources = [...new Set(inbound.map((e) => e.source))];
       for (const source of sources) {
+        // The source path comes from the graph index, which indexes EVERY *.md
+        // outside hidden dirs — not just configured note dirs. Re-validate it
+        // as a note id (and resolve symlinks) before we write to it, so a
+        // cascade can't mutate a non-note file or follow a symlink out of the
+        // vault. A source that fails validation is skipped, not repaired. #119.
+        if (validateNoteId(source, config) !== null) continue;
+        if (!(await resolvesInsideVault(vaultRoot, source))) continue;
         let content: string;
         try {
           content = await fs.readFile(path.join(vaultRoot, source), "utf-8");
@@ -1551,8 +1611,13 @@ export async function delete_note(
           // Source vanished since the index was built — nothing to repair.
           continue;
         }
-        const { content: stripped, removed } = stripConnectionsTo(content, refTokens);
-        if (removed > 0) repairs.push({ relPath: source, content: stripped });
+        // Strip both the body `## Connections` lines AND any matching
+        // `concepts:` frontmatter entry (ingest derives `references` edges from
+        // both; repairing only the body would let the next ingest resurrect a
+        // deleted concept — see stripConceptRefs).
+        const { content: bodyStripped, removed } = stripConnectionsTo(content, refTokens);
+        const { content: repaired, changed } = stripConceptRefs(bodyStripped, refTokens);
+        if (removed > 0 || changed) repairs.push({ relPath: source, content: repaired });
       }
 
       // Cascade repairs MUTATE other notes — they must each pass the caller's
@@ -1667,6 +1732,15 @@ export async function update_note(
       return { error: "NOT_FOUND", message: `Note not found: ${args.id}` } satisfies ToolError;
     }
 
+    // Resolve symlinks: validateNoteId + the lexical guard above are purely
+    // string-based, so a tracked symlink inside a note dir (e.g.
+    // notes/x.md -> ../.git/hooks/post-commit) would pass and the write would
+    // follow it out of the vault (arbitrary-file-write / RCE). Compare the
+    // real path against the real vault root. #119.
+    if (!(await resolvesInsideVault(vaultRoot, args.id))) {
+      return { error: "PATH_TRAVERSAL", message: "Note path resolves outside the vault (symlink?)" } satisfies ToolError;
+    }
+
     const acl = loadVaultAcl(vaultRoot);
     if (acl !== null) {
       const scope = deriveScope(args.id);
@@ -1682,27 +1756,38 @@ export async function update_note(
       }
     }
 
-    const { metadata, body } = parseNote(existing);
-    const newBody = args.body !== undefined ? args.body : body;
-
-    const newMeta: Record<string, unknown> = { ...metadata };
-    if (args.frontmatter_patch !== undefined) {
-      for (const [key, value] of Object.entries(args.frontmatter_patch)) {
-        if (value === null) delete newMeta[key];
-        else newMeta[key] = value;
+    // Build the new content from the note's FRESH on-disk state, read inside
+    // the write lock (see updateNote). Computing it here from `existing` (read
+    // before the lock) would let a concurrent delete + rewrite resurrect a
+    // just-deleted note with stale content. #119.
+    const transform = (current: string): string => {
+      const { metadata, body } = parseNote(current);
+      const mergedBody = args.body !== undefined ? args.body : body;
+      const mergedMeta: Record<string, unknown> = { ...metadata };
+      if (args.frontmatter_patch !== undefined) {
+        for (const [key, value] of Object.entries(args.frontmatter_patch)) {
+          if (value === null) delete mergedMeta[key];
+          else mergedMeta[key] = value;
+        }
       }
-    }
+      // gray-matter parses YAML timestamps into JS Dates; matter.stringify would
+      // re-emit them as full ISO datetimes, silently rewriting `date: 2026-06-18`
+      // to `2026-06-18T00:00:00.000Z` on EVERY edit (even a body-only one). ingest
+      // then stores the changed string, breaking date-equality queries. Coerce any
+      // Date back to the date-only string create_note writes. #119.
+      for (const [key, value] of Object.entries(mergedMeta)) {
+        if (value instanceof Date) mergedMeta[key] = value.toISOString().split("T")[0];
+      }
+      // No connections arg: mergedBody already carries its own `## Connections`
+      // section, so buildNote must not re-append one.
+      return buildNote(mergedMeta, mergedBody);
+    };
 
-    // No connections arg: newBody already carries its own `## Connections`
-    // section, so buildNote must not re-append one.
-    const noteContent = buildNote(newMeta, newBody);
-    const result = await updateNote(
-      vaultRoot,
-      args.id,
-      noteContent,
-      (newMeta.title as string) || args.id,
-      owner
-    );
+    // Commit subject only — derived from the pre-lock read. A retitle landing in
+    // the lock window would make the subject slightly stale, but the committed
+    // CONTENT is always built from the fresh in-lock read above.
+    const commitTitle = (parseNote(existing).metadata.title as string) || args.id;
+    const result = await updateNote(vaultRoot, args.id, commitTitle, owner, transform);
 
     triggerIngestion(vaultRoot);
     triggerSpokePush(vaultRoot);
