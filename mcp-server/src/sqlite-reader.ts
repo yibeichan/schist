@@ -406,6 +406,41 @@ export function getNote(vaultRoot: string, id: string): Note | null {
   }
 }
 
+/**
+ * Return notes that link TO any of `targets` (inbound edges), excluding the
+ * note itself (`selfId`). Used by delete_note (#119) to refuse-or-cascade when
+ * removing a note would leave dangling `## Connections` references elsewhere.
+ *
+ * `targets` is usually a single vault-relative path, but for a concept note it
+ * also includes the bare slug, because edges to concepts are stored either as
+ * `concepts/<slug>.md` or `<slug>` (see conceptEdgeJoinCondition below). A
+ * single-token query would miss the bare-slug form.
+ *
+ * Reads the SQLite graph index, which is rebuilt from markdown on every commit
+ * (ingest.py drops + repopulates `edges`). It can lag a just-written note until
+ * the post-commit ingest finishes; delete_note re-reads each source file from
+ * disk before stripping, so a stale row never causes a bad edit — at worst a
+ * missed one.
+ */
+export function inboundEdges(
+  vaultRoot: string,
+  targets: string[],
+  selfId: string
+): Array<{ source: string; type: string }> {
+  if (targets.length === 0) return [];
+  const db = openDb(vaultRoot);
+  try {
+    const placeholders = targets.map(() => "?").join(", ");
+    return db
+      .prepare(
+        `SELECT DISTINCT source, type FROM edges WHERE target IN (${placeholders}) AND source != ? ORDER BY source`
+      )
+      .all(...targets, selfId) as Array<{ source: string; type: string }>;
+  } finally {
+    db.close();
+  }
+}
+
 function conceptEdgeJoinCondition(edgeAlias: string, conceptAlias: string): string {
   return `(
     ${edgeAlias}.source = ${conceptAlias}.slug OR
