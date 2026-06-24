@@ -99,4 +99,49 @@ describe("markdown-parser", () => {
 
     expect(parsed.metadata.tags).toEqual(["#foo", "#bar"]);
   });
+
+  // Bare scalars with apostrophes on the same flow line as an unquoted hashtag
+  // must not desync quote tracking (an apostrophe mid-scalar is not a quote
+  // opener). ingest accepts these; parseNote must too. Regression for #260.
+  test("parseNote handles apostrophes in bare flow scalars alongside hashtags", () => {
+    const parsed = parseNote(
+      "---\n" +
+      "tags: [ it's, can't, #foo ]\n" +
+      "---\n\n" +
+      "Body\n"
+    );
+
+    expect(parsed.metadata.tags).toEqual(["it's", "can't", "#foo"]);
+  });
+
+  // Quoted scalars whose content ends in an escaped backslash (\\) or contains
+  // an escaped quote (\") must close at the right place so the trailing hashtag
+  // is still quoted. The naive single-char lookback got this wrong.
+  test("parseNote handles escaped backslashes and quotes in flow scalars", () => {
+    const parsed = parseNote(
+      "---\n" +
+      "tags: [ \"ends\\\\\", \"a\\\"b\", 'it''s', #foo ]\n" +
+      "---\n\n" +
+      "Body\n"
+    );
+
+    expect(parsed.metadata.tags).toEqual(["ends\\", "a\"b", "it's", "#foo"]);
+  });
+
+  // KNOWN, ACCEPTED DIVERGENCE from ingest (#260 follow-up): a bare `[` in a
+  // plain scalar with a trailing `# token` is not a flow sequence, so the
+  // hashtag stays at flowDepth 0 and YAML treats it as a comment (dropped).
+  // ingest's blind regex instead "rescues" it into the value — arguably the
+  // wrong behavior. Pinned here so the divergence stays visible if either
+  // parser changes.
+  test("parseNote drops a depth-0 trailing hashtag comment (documented divergence)", () => {
+    const parsed = parseNote(
+      "---\n" +
+      "title: read [book] about #life\n" +
+      "---\n\n" +
+      "Body\n"
+    );
+
+    expect(parsed.metadata.title).toBe("read [book] about");
+  });
 });
