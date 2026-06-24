@@ -5,8 +5,8 @@ import { fileURLToPath } from "url";
 import { spawn } from "child_process";
 import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
-import { writeNote } from "./git-writer.js";
-import { buildNote, buildConnectionLine } from "./markdown-parser.js";
+import { writeNote, updateNote, deleteNote } from "./git-writer.js";
+import { buildNote, buildConnectionLine, parseNote, CONNECTION_RE } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse, ComposeBriefResponse, Note, SearchResult } from "./types.js";
 import { loadVaultAcl, canWrite, deriveScope, resolveAclIdentity } from "./vault-acl.js";
@@ -108,6 +108,102 @@ function rawSlug(title: string): string {
 
 function today(): string {
   return new Date().toISOString().split("T")[0];
+}
+
+/**
+ * Validate a caller-supplied note id for the in-place edit tools (update_note,
+ * delete_note). Unlike create_note — which BUILDS the path from a validated
+ * `directory` + slug — these accept a full path, so the lexical vault-root
+ * check is not enough: `.git/hooks/post-commit`, `.git/config`, and `.schist/*`
+ * all resolve INSIDE the vault root. Writing there is arbitrary-file-write
+ * (the post-commit hook path is RCE-on-next-commit). Constrain to a `.md` file
+ * under a configured top-level directory, with no `..`, absolute path, or
+ * dot-prefixed segment. Returns a ToolError to surface, or null when valid.
+ */
+function validateNoteId(id: string, config: VaultConfig): ToolError | null {
+  if (typeof id !== "string" || id.length === 0) {
+    return { error: "VALIDATION_ERROR", message: "Note id is required" };
+  }
+  if (id.includes("..") || path.isAbsolute(id)) {
+    return { error: "VALIDATION_ERROR", message: "Invalid note id: must be a relative path without '..'" };
+  }
+  if (!id.endsWith(".md")) {
+    return { error: "VALIDATION_ERROR", message: "Invalid note id: must be a .md file" };
+  }
+  const segments = id.split("/");
+  if (segments.some((s) => s.startsWith("."))) {
+    return {
+      error: "VALIDATION_ERROR",
+      message: "Invalid note id: path segments must not start with '.' (rejects .git, .schist, dotfiles)",
+    };
+  }
+  if (!config.directories.includes(segments[0])) {
+    return {
+      error: "VALIDATION_ERROR",
+      message: `Note id must be under a configured directory. Allowed top-level: ${config.directories.join(", ")}`,
+    };
+  }
+  return null;
+}
+
+// Frontmatter keys update_note may patch. Deliberately excludes `scope` (would
+// let a path-authorized caller spoof graph read-visibility, since ingest
+// prefers frontmatter scope over the directory) and `source`/`source_agent`
+// (provenance must not be forgeable). Mirrors the fields create_note controls.
+const PATCHABLE_FRONTMATTER_KEYS = new Set([
+  "title", "date", "status", "tags", "concepts", "confidence", "file_ref",
+]);
+
+/**
+ * Validate update_note's frontmatter_patch against the allowlist + per-key
+ * types. A `null` value (delete-the-key) is always allowed. Rejects unknown
+ * keys (notably `scope`/`source`/`source_agent`) and wrong types that would
+ * either silently corrupt the note or, worse, be reinterpreted by ingest
+ * (e.g. tags must stay a string array). Returns a ToolError or null.
+ */
+function validateFrontmatterPatch(patch: Record<string, unknown> | undefined): ToolError | null {
+  if (patch === undefined) return null;
+  for (const [key, value] of Object.entries(patch)) {
+    if (!PATCHABLE_FRONTMATTER_KEYS.has(key)) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: `frontmatter_patch key '${key}' is not patchable. Allowed: ${[...PATCHABLE_FRONTMATTER_KEYS].join(", ")}.`,
+      };
+    }
+    if (value === null) continue; // null = delete the key
+    if (key === "tags" || key === "concepts") {
+      if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) {
+        return { error: "VALIDATION_ERROR", message: `frontmatter_patch.${key} must be an array of strings` };
+      }
+    } else if (key === "confidence") {
+      if (!["low", "medium", "high"].includes(value as string)) {
+        return { error: "VALIDATION_ERROR", message: `confidence must be one of: low, medium, high (got "${value}")` };
+      }
+    } else if (typeof value !== "string") {
+      return { error: "VALIDATION_ERROR", message: `frontmatter_patch.${key} must be a string` };
+    }
+  }
+  return null;
+}
+
+/**
+ * True when `relPath` resolves (after following symlinks) to a path inside the
+ * vault root. validateNoteId and the lexical path guards are string-only, so a
+ * tracked symlink inside a note directory could redirect a write outside the
+ * vault (arbitrary-file-write / RCE-on-next-commit). This compares real paths.
+ * The vault root itself may legitimately be a symlink (env vars often point at
+ * one), so both sides are realpath-resolved before comparison. Returns false on
+ * any resolution error — callers run this only after confirming the target
+ * exists, so a failure means the path is suspect. #119.
+ */
+async function resolvesInsideVault(vaultRoot: string, relPath: string): Promise<boolean> {
+  try {
+    const realRoot = await fs.realpath(vaultRoot);
+    const realTarget = await fs.realpath(path.join(vaultRoot, relPath));
+    return realTarget === realRoot || realTarget.startsWith(realRoot + path.sep);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1318,6 +1414,388 @@ export async function add_connection(
       source: args.source,
       target: args.target,
       type: args.type,
+      commitSha: result.commitSha,
+      ...(syncWarning !== undefined ? { syncWarning } : {}),
+    };
+  } catch (e: unknown) {
+    return normalizeError(e, "GIT_ERROR");
+  }
+}
+
+/**
+ * Tokens a `## Connections` line might use to reference the note `id`. Always
+ * the full vault path; for a concept note (`concepts/<slug>.md`) also the bare
+ * `<slug>`, because edges to concepts are stored either way (see
+ * sqlite-reader's conceptEdgeJoinCondition). Without this, deleting a concept
+ * note would miss inbound edges written as the bare slug.
+ */
+function noteRefTokens(id: string): string[] {
+  const tokens = new Set<string>([id]);
+  const m = id.match(/^concepts\/(.+)\.md$/);
+  if (m) tokens.add(m[1]);
+  return [...tokens];
+}
+
+/**
+ * Remove every `## Connections` line in `content` whose target matches any of
+ * `targets`. Returns the rewritten content and the count removed. Used by
+ * delete_note's cascade path to repair notes that linked to a deleted note.
+ * Matching mirrors markdown-parser's parseConnections (trim, CONNECTION_RE,
+ * group 2 = target) so the lines we strip are exactly the edges ingest produced.
+ */
+function stripConnectionsTo(content: string, targets: string[]): { content: string; removed: number } {
+  const targetSet = new Set(targets);
+  const out: string[] = [];
+  let inSection = false;
+  let removed = 0;
+  for (const line of content.split("\n")) {
+    const stripped = line.trim();
+    if (stripped.startsWith("## Connections")) {
+      inSection = true;
+      out.push(line);
+      continue;
+    }
+    if (inSection && stripped.startsWith("## ")) {
+      inSection = false;
+      out.push(line);
+      continue;
+    }
+    if (inSection) {
+      const m = stripped.match(CONNECTION_RE);
+      if (m && targetSet.has(m[2])) {
+        removed++;
+        continue;
+      }
+    }
+    out.push(line);
+  }
+  return { content: out.join("\n"), removed };
+}
+
+/**
+ * Remove any of `targets` from a note's `concepts:` frontmatter list. Edges to
+ * a concept are created by ingest BOTH from `## Connections` lines AND from the
+ * bare slug in another note's `concepts:` frontmatter (ingest.py inserts a
+ * `references` edge per frontmatter concept). delete_note's cascade strips the
+ * body lines via stripConnectionsTo; without this, the frontmatter reference
+ * survives and the very next ingest recreates the deleted concept as a
+ * placeholder plus a dangling edge — so cascade-deleting a concept wouldn't
+ * stick. Returns the rewritten content and whether anything changed. #119.
+ */
+function stripConceptRefs(content: string, targets: string[]): { content: string; changed: boolean } {
+  const { metadata, body } = parseNote(content);
+  const concepts = metadata.concepts;
+  if (!Array.isArray(concepts)) return { content, changed: false };
+  const targetSet = new Set(targets);
+  const filtered = concepts.filter((c) => !targetSet.has(c));
+  if (filtered.length === concepts.length) return { content, changed: false };
+  const newMeta: Record<string, unknown> = { ...metadata, concepts: filtered };
+  // Same Date-coercion guard as update_note: don't let the round-trip rewrite
+  // an untouched `date:` into a full ISO timestamp.
+  for (const [key, value] of Object.entries(newMeta)) {
+    if (value instanceof Date) newMeta[key] = value.toISOString().split("T")[0];
+  }
+  return { content: buildNote(newMeta, body), changed: true };
+}
+
+/**
+ * delete_note tool handler (#119). Removes a note via `git rm`.
+ *
+ * Inbound-edge safety: by default, refuses with INBOUND_EDGES if other notes
+ * link to this one (listing them so the caller can clean up first). Pass
+ * cascade=true to delete anyway AND strip the now-dangling `## Connections`
+ * lines from those linking notes in the same commit.
+ *
+ * Mirrors create_note/add_connection ordering: identity gate → sync-dirty gate
+ * → path-traversal guard → existence → ACL → mutate → trigger ingest + push.
+ */
+export async function delete_note(
+  vaultRoot: string,
+  args: { owner: string; id: string; cascade?: boolean },
+  config: VaultConfig
+): Promise<unknown> {
+  try {
+    const owner = validateOwner(args.owner);
+    const syncDirty = await blockWriteIfSyncDirty(vaultRoot);
+    if (syncDirty !== null) return syncDirty;
+
+    const idError = validateNoteId(args.id, config);
+    if (idError !== null) return idError;
+
+    const filePath = path.join(vaultRoot, args.id);
+    const absVaultRoot = path.resolve(vaultRoot);
+    const absFilePath = path.resolve(filePath);
+    if (!absFilePath.startsWith(absVaultRoot + path.sep)) {
+      return { error: "PATH_TRAVERSAL", message: "Note path is outside vault root" } satisfies ToolError;
+    }
+
+    try {
+      await fs.access(filePath);
+    } catch {
+      return { error: "NOT_FOUND", message: `Note not found: ${args.id}` } satisfies ToolError;
+    }
+
+    // Resolve symlinks (see resolvesInsideVault): a tracked symlink at args.id
+    // pointing outside the vault would otherwise let `git rm` operate out of
+    // tree. The lexical guard above is string-only. #119.
+    if (!(await resolvesInsideVault(vaultRoot, args.id))) {
+      return { error: "PATH_TRAVERSAL", message: "Note path resolves outside the vault (symlink?)" } satisfies ToolError;
+    }
+
+    // ACL — mirror create_note/add_connection. args.id is the vault-relative
+    // path; same scope derivation the hub's pre_receive uses.
+    const acl = loadVaultAcl(vaultRoot);
+    const aclIdentity = acl !== null ? resolveAclIdentity(owner) : "";
+    if (acl !== null) {
+      const scope = deriveScope(args.id);
+      if (!canWrite(acl, aclIdentity, scope)) {
+        return {
+          error: "ACL_DENIED",
+          message:
+            `Identity '${aclIdentity}' is not granted write access to scope ` +
+            `'${scope}' by vault.yaml. Hub push would reject this write. ` +
+            `Ask the hub admin to extend your write grant.`,
+        } satisfies ToolError;
+      }
+    }
+
+    // Inbound edges from the graph index. Surfaced for refusal, or repaired on
+    // cascade. The index can lag a freshly-written note (see inboundEdges doc);
+    // we re-read each source from disk below so a stale row is harmless.
+    //
+    // If the index can't be read at all (brand-new vault with no DB yet,
+    // corrupt index), we proceed rather than block: the delete is a `git rm`
+    // and fully recoverable from history, so the worst case is a dangling
+    // reference left in another note — surfaced via indexWarning so the caller
+    // can repair it. The ACL gate above (the real security boundary) is
+    // independent of the index.
+    const refTokens = noteRefTokens(args.id);
+    let inbound: Array<{ source: string; type: string }> = [];
+    let indexWarning: string | undefined;
+    try {
+      inbound = sqliteReader.inboundEdges(vaultRoot, refTokens, args.id);
+    } catch {
+      indexWarning =
+        "Inbound-edge check skipped: the graph index could not be read " +
+        "(run `schist ingest` to build it). Any references to this note in " +
+        "other notes were not detected or repaired.";
+    }
+
+    if (inbound.length > 0 && args.cascade !== true) {
+      return {
+        error: "INBOUND_EDGES",
+        message:
+          `Cannot delete '${args.id}': ${inbound.length} note(s) link to it. ` +
+          `Remove those connections first, or pass cascade=true to delete and ` +
+          `auto-strip the dangling references.`,
+        inbound_edges: inbound,
+      } satisfies ToolError & { inbound_edges: Array<{ source: string; type: string }> };
+    }
+
+    // Cascade: strip dangling connection lines from each distinct linking note.
+    const repairs: Array<{ relPath: string; content: string }> = [];
+    if (args.cascade === true && inbound.length > 0) {
+      const sources = [...new Set(inbound.map((e) => e.source))];
+      for (const source of sources) {
+        // The source path comes from the graph index, which indexes EVERY *.md
+        // outside hidden dirs — not just configured note dirs. Re-validate it
+        // as a note id (and resolve symlinks) before we write to it, so a
+        // cascade can't mutate a non-note file or follow a symlink out of the
+        // vault. A source that fails validation is skipped, not repaired. #119.
+        if (validateNoteId(source, config) !== null) continue;
+        if (!(await resolvesInsideVault(vaultRoot, source))) continue;
+        let content: string;
+        try {
+          content = await fs.readFile(path.join(vaultRoot, source), "utf-8");
+        } catch {
+          // Source vanished since the index was built — nothing to repair.
+          continue;
+        }
+        // Strip both the body `## Connections` lines AND any matching
+        // `concepts:` frontmatter entry (ingest derives `references` edges from
+        // both; repairing only the body would let the next ingest resurrect a
+        // deleted concept — see stripConceptRefs).
+        const { content: bodyStripped, removed } = stripConnectionsTo(content, refTokens);
+        const { content: repaired, changed } = stripConceptRefs(bodyStripped, refTokens);
+        if (removed > 0 || changed) repairs.push({ relPath: source, content: repaired });
+      }
+
+      // Cascade repairs MUTATE other notes — they must each pass the caller's
+      // write ACL, or a delete grant becomes a license to edit notes in
+      // scopes the caller can't write (which the hub pre-receive would then
+      // reject anyway). Refuse the whole cascade if any linker is out of scope.
+      if (acl !== null) {
+        const denied = repairs
+          .map((r) => r.relPath)
+          .filter((rel) => !canWrite(acl, aclIdentity, deriveScope(rel)));
+        if (denied.length > 0) {
+          return {
+            error: "ACL_DENIED",
+            message:
+              `Cascade would modify notes outside your write scope: ${denied.join(", ")}. ` +
+              `Clean up those connections yourself, or ask the hub admin to extend your grant.`,
+          } satisfies ToolError;
+        }
+      }
+    }
+
+    let title = args.id;
+    try {
+      title = (parseNote(await fs.readFile(filePath, "utf-8")).metadata.title as string) || args.id;
+    } catch {
+      // fall back to id for the commit subject
+    }
+
+    const result = await deleteNote(vaultRoot, args.id, title, owner, repairs);
+
+    triggerIngestion(vaultRoot);
+    triggerSpokePush(vaultRoot);
+
+    const syncWarning = await readSyncWarning(vaultRoot);
+    return {
+      id: args.id,
+      deleted: true,
+      commitSha: result.commitSha,
+      repaired: repairs.map((r) => r.relPath),
+      ...(indexWarning !== undefined ? { indexWarning } : {}),
+      ...(syncWarning !== undefined ? { syncWarning } : {}),
+    };
+  } catch (e: unknown) {
+    return normalizeError(e, "GIT_ERROR");
+  }
+}
+
+/**
+ * update_note tool handler (#119). Replaces a note's body and/or patches its
+ * frontmatter in place. At least one of `body` / `frontmatter_patch` is
+ * required.
+ *
+ * - `body`: replaces the markdown body verbatim (including any `## Connections`
+ *   section — the caller owns the full body when they pass it).
+ * - `frontmatter_patch`: shallow-merged into existing frontmatter. A `null`
+ *   value deletes that key. Does NOT rename the file even when `title` changes
+ *   (filename and title may diverge, same as create_note).
+ *
+ * Body is left untouched when only `frontmatter_patch` is given, so existing
+ * connections survive. The dedup path makes a no-op update return committed:
+ * false. Mirrors create_note ordering for the identity / sync / ACL gates.
+ */
+export async function update_note(
+  vaultRoot: string,
+  args: {
+    owner: string;
+    id: string;
+    body?: string;
+    frontmatter_patch?: Record<string, unknown>;
+  },
+  config: VaultConfig
+): Promise<unknown> {
+  try {
+    const owner = validateOwner(args.owner);
+    const syncDirty = await blockWriteIfSyncDirty(vaultRoot);
+    if (syncDirty !== null) return syncDirty;
+
+    if (args.body === undefined && args.frontmatter_patch === undefined) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: "update_note requires at least one of: body, frontmatter_patch",
+      } satisfies ToolError;
+    }
+    if (
+      args.frontmatter_patch !== undefined &&
+      (typeof args.frontmatter_patch !== "object" ||
+        args.frontmatter_patch === null ||
+        Array.isArray(args.frontmatter_patch))
+    ) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: "frontmatter_patch must be an object",
+      } satisfies ToolError;
+    }
+    const patchError = validateFrontmatterPatch(args.frontmatter_patch);
+    if (patchError !== null) return patchError;
+
+    const idError = validateNoteId(args.id, config);
+    if (idError !== null) return idError;
+
+    const filePath = path.join(vaultRoot, args.id);
+    const absVaultRoot = path.resolve(vaultRoot);
+    const absFilePath = path.resolve(filePath);
+    if (!absFilePath.startsWith(absVaultRoot + path.sep)) {
+      return { error: "PATH_TRAVERSAL", message: "Note path is outside vault root" } satisfies ToolError;
+    }
+
+    let existing: string;
+    try {
+      existing = await fs.readFile(filePath, "utf-8");
+    } catch {
+      return { error: "NOT_FOUND", message: `Note not found: ${args.id}` } satisfies ToolError;
+    }
+
+    // Resolve symlinks: validateNoteId + the lexical guard above are purely
+    // string-based, so a tracked symlink inside a note dir (e.g.
+    // notes/x.md -> ../.git/hooks/post-commit) would pass and the write would
+    // follow it out of the vault (arbitrary-file-write / RCE). Compare the
+    // real path against the real vault root. #119.
+    if (!(await resolvesInsideVault(vaultRoot, args.id))) {
+      return { error: "PATH_TRAVERSAL", message: "Note path resolves outside the vault (symlink?)" } satisfies ToolError;
+    }
+
+    const acl = loadVaultAcl(vaultRoot);
+    if (acl !== null) {
+      const scope = deriveScope(args.id);
+      const aclIdentity = resolveAclIdentity(owner);
+      if (!canWrite(acl, aclIdentity, scope)) {
+        return {
+          error: "ACL_DENIED",
+          message:
+            `Identity '${aclIdentity}' is not granted write access to scope ` +
+            `'${scope}' by vault.yaml. Hub push would reject this write. ` +
+            `Ask the hub admin to extend your write grant.`,
+        } satisfies ToolError;
+      }
+    }
+
+    // Build the new content from the note's FRESH on-disk state, read inside
+    // the write lock (see updateNote). Computing it here from `existing` (read
+    // before the lock) would let a concurrent delete + rewrite resurrect a
+    // just-deleted note with stale content. #119.
+    const transform = (current: string): string => {
+      const { metadata, body } = parseNote(current);
+      const mergedBody = args.body !== undefined ? args.body : body;
+      const mergedMeta: Record<string, unknown> = { ...metadata };
+      if (args.frontmatter_patch !== undefined) {
+        for (const [key, value] of Object.entries(args.frontmatter_patch)) {
+          if (value === null) delete mergedMeta[key];
+          else mergedMeta[key] = value;
+        }
+      }
+      // gray-matter parses YAML timestamps into JS Dates; matter.stringify would
+      // re-emit them as full ISO datetimes, silently rewriting `date: 2026-06-18`
+      // to `2026-06-18T00:00:00.000Z` on EVERY edit (even a body-only one). ingest
+      // then stores the changed string, breaking date-equality queries. Coerce any
+      // Date back to the date-only string create_note writes. #119.
+      for (const [key, value] of Object.entries(mergedMeta)) {
+        if (value instanceof Date) mergedMeta[key] = value.toISOString().split("T")[0];
+      }
+      // No connections arg: mergedBody already carries its own `## Connections`
+      // section, so buildNote must not re-append one.
+      return buildNote(mergedMeta, mergedBody);
+    };
+
+    // Commit subject only — derived from the pre-lock read. A retitle landing in
+    // the lock window would make the subject slightly stale, but the committed
+    // CONTENT is always built from the fresh in-lock read above.
+    const commitTitle = (parseNote(existing).metadata.title as string) || args.id;
+    const result = await updateNote(vaultRoot, args.id, commitTitle, owner, transform);
+
+    triggerIngestion(vaultRoot);
+    triggerSpokePush(vaultRoot);
+
+    const syncWarning = await readSyncWarning(vaultRoot);
+    return {
+      id: args.id,
+      updated: result.committed,
       commitSha: result.commitSha,
       ...(syncWarning !== undefined ? { syncWarning } : {}),
     };

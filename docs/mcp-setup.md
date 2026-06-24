@@ -43,7 +43,7 @@ Read tools:
 
 Write tools:
 
-- `create_note`, `add_connection`, `sync_retry` — vault/sync write
+- `create_note`, `update_note`, `delete_note`, `add_connection`, `sync_retry` — vault/sync write
 - `add_concept_alias` — vault DB side-table write
 - `add_memory`, `set_agent_state`, `delete_agent_state` — memory write
 
@@ -52,7 +52,8 @@ Write tools:
 incoming caller identity (`owner`, or `created_by` for `add_concept_alias`)
 against `SCHIST_AGENT_ID` / `SCHIST_ALLOWED_AGENTS`. A mismatched or missing
 identity produces `CONFIG_ERROR` or `VALIDATION_ERROR`.
-Markdown note writes (`create_note` and `add_connection`) are additionally
+Markdown note writes (`create_note`, `update_note`, `delete_note`, and
+`add_connection`) are additionally
 checked against `vault.yaml` write grants when that file is present and locally
 parseable, with the hub pre-receive hook as the authoritative enforcement point
 for git pushes. Reads are unrestricted: `vault.yaml` read grants are not

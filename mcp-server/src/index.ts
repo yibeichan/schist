@@ -10,6 +10,8 @@ import {
   search_notes,
   get_note,
   create_note,
+  update_note,
+  delete_note,
   add_connection,
   list_concepts,
   query_graph,
@@ -110,6 +112,12 @@ async function main() {
           break;
         case "create_note":
           result = await create_note(vaultRoot, toolArgs as Parameters<typeof create_note>[1], config);
+          break;
+        case "update_note":
+          result = await update_note(vaultRoot, toolArgs as Parameters<typeof update_note>[1], config);
+          break;
+        case "delete_note":
+          result = await delete_note(vaultRoot, toolArgs as Parameters<typeof delete_note>[1], config);
           break;
         case "add_connection":
           result = await add_connection(vaultRoot, toolArgs as Parameters<typeof add_connection>[1]);
