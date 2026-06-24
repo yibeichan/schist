@@ -72,4 +72,31 @@ describe("markdown-parser", () => {
     expect(parsed.connections[1].target).toBe(connections[1].target);
     expect(parsed.connections[1].type).toBe(connections[1].type);
   });
+
+  test("parseNote accepts unquoted hashtag values in frontmatter flow sequences", () => {
+    const parsed = parseNote(
+      "---\n" +
+      "title: Tagged Note\n" +
+      "tags: [ #foo, #bar-baz, already-plain ]\n" +
+      "concepts: [ #concept ]\n" +
+      "---\n\n" +
+      "Body\n"
+    );
+
+    expect(parsed.metadata.tags).toEqual(["#foo", "#bar-baz", "already-plain"]);
+    expect(parsed.metadata.concepts).toEqual(["#concept"]);
+    expect(parsed.body).toContain("Body");
+  });
+
+  test("parseNote leaves already quoted hashtag flow values intact", () => {
+    const parsed = parseNote(
+      "---\n" +
+      "title: Quoted Tags\n" +
+      "tags: [ \"#foo\", '#bar' ]\n" +
+      "---\n\n" +
+      "Body\n"
+    );
+
+    expect(parsed.metadata.tags).toEqual(["#foo", "#bar"]);
+  });
 });

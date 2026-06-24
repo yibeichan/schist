@@ -28,12 +28,77 @@ export function parseConnections(body: string): Connection[] {
   return connections;
 }
 
+const HASHTAG_AT_START_RE = /^#[\p{L}\p{N}_-]+/u;
+
+function quoteFlowHashtags(line: string): string {
+  if (!line.includes("#") || !line.includes("[")) return line;
+
+  let result = "";
+  let flowDepth = 0;
+  let inSingle = false;
+  let inDouble = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    const prev = i > 0 ? line[i - 1] : "";
+
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      result += ch;
+      continue;
+    }
+    if (ch === '"' && !inSingle && prev !== "\\") {
+      inDouble = !inDouble;
+      result += ch;
+      continue;
+    }
+    if (!inSingle && !inDouble) {
+      if (ch === "[") flowDepth++;
+      else if (ch === "]" && flowDepth > 0) flowDepth--;
+      else if (ch === "#" && flowDepth > 0) {
+        const match = line.slice(i).match(HASHTAG_AT_START_RE);
+        if (match) {
+          result += `"${match[0]}"`;
+          i += match[0].length - 1;
+          continue;
+        }
+      }
+    }
+    result += ch;
+  }
+
+  return result;
+}
+
+function patchFrontmatterFlowHashtags(content: string): string {
+  const lines = content.split("\n");
+  let inFrontmatter = false;
+  let patched = false;
+  const patchedLines = lines.map((line, i) => {
+    if (i === 0 && line.trim() === "---") {
+      inFrontmatter = true;
+      return line;
+    }
+    if (inFrontmatter && line.trim() === "---") {
+      inFrontmatter = false;
+      return line;
+    }
+    if (!inFrontmatter) return line;
+
+    const next = quoteFlowHashtags(line);
+    if (next !== line) patched = true;
+    return next;
+  });
+
+  return patched ? patchedLines.join("\n") : content;
+}
+
 export function parseNote(content: string): {
   metadata: Record<string, unknown>;
   body: string;
   connections: Connection[];
 } {
-  const parsed = matter(content);
+  const parsed = matter(patchFrontmatterFlowHashtags(content));
   const connections = parseConnections(parsed.content);
   return {
     metadata: parsed.data as Record<string, unknown>,
