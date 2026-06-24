@@ -174,6 +174,8 @@ This gives the agent a snapshot of graph stats, recent notes, and hot concepts.
 | `search_notes` | Full-text search across all notes |
 | `get_note` | Get a note with full content and connections |
 | `create_note` | Create a new note (auto-commits to git) |
+| `update_note` | Update a note's body and/or frontmatter (auto-commits) |
+| `delete_note` | Delete a note via git rm; refuses on inbound edges unless `cascade` |
 | `add_connection` | Add a typed edge between two nodes |
 | `list_concepts` | List all concept nodes |
 | `query_graph` | Run read-only SQL against the graph database |

@@ -197,6 +197,36 @@ export function makeWriteTools(config: VaultConfig) {
       },
     },
     {
+      name: "update_note",
+      description: "Update an existing note: replace its body and/or patch frontmatter fields. Auto-commits to git. At least one of body/frontmatter_patch is required; a no-op update is deduplicated. Does not rename the file when the title changes.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          owner: { type: "string", description: "Agent identity. Required; validated against SCHIST_ALLOWED_AGENTS or SCHIST_AGENT_ID. Stamped on the git commit message." },
+          id: { type: "string", description: "Vault-relative note path, e.g. 'notes/2026-06-18-foo.md' (as returned by create_note/search_notes)." },
+          body: { type: "string", description: "Optional. Replaces the markdown body verbatim, including any '## Connections' section." },
+          frontmatter_patch: {
+            type: "object",
+            description: "Optional. Shallow-merged into existing frontmatter. A null value deletes that key. Does not rename the file.",
+          },
+        },
+        required: ["owner", "id"],
+      },
+    },
+    {
+      name: "delete_note",
+      description: "Delete a note via git rm. Auto-commits. Refuses with INBOUND_EDGES if other notes link to it (best-effort: inbound detection reads the graph index, which may lag connections added in the last moment before ingest finishes); pass cascade=true to delete anyway and strip the now-dangling connection lines from those notes in the same commit. Recoverable from git history.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          owner: { type: "string", description: "Agent identity. Required; validated against SCHIST_ALLOWED_AGENTS or SCHIST_AGENT_ID. Stamped on the git commit message." },
+          id: { type: "string", description: "Vault-relative note path, e.g. 'notes/2026-06-18-foo.md'." },
+          cascade: { type: "boolean", description: "When true, delete even if inbound edges exist and auto-strip the dangling '## Connections' lines from the linking notes. Default false (refuse)." },
+        },
+        required: ["owner", "id"],
+      },
+    },
+    {
       name: "add_connection",
       description: "Add a typed connection between two notes or concepts",
       inputSchema: {
