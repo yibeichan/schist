@@ -23,6 +23,7 @@ describe("listAllTools — unconditional tool exposure", () => {
       "compose_brief",
       "create_note",
       "delete_agent_state",
+      "delete_note",
       "get_agent_state",
       "get_context",
       "get_note",
@@ -33,6 +34,7 @@ describe("listAllTools — unconditional tool exposure", () => {
       "set_agent_state",
       "sync_retry",
       "sync_status",
+      "update_note",
     ].sort();
 
     expect(names).toEqual(expected);
@@ -46,6 +48,8 @@ describe("listAllTools — unconditional tool exposure", () => {
 
     for (const tool of [
       "create_note",
+      "update_note",
+      "delete_note",
       "add_connection",
       "add_memory",
       "set_agent_state",
@@ -101,7 +105,7 @@ describe("listAllTools — unconditional tool exposure", () => {
     // CONFIG_ERROR / VALIDATION_ERROR — wasting tokens on an avoidable
     // round-trip. This test catches that drift at build time.
     const tools = listAllTools(testConfig());
-    for (const name of ["create_note", "add_connection"]) {
+    for (const name of ["create_note", "update_note", "delete_note", "add_connection"]) {
       const tool = tools.find((t) => t.name === name);
       expect(tool).toBeDefined();
       const required = (tool!.inputSchema as { required?: string[] }).required ?? [];
