@@ -1712,6 +1712,31 @@ describe("update_note", () => {
     expect(after).toContain("edited");
   }, 30000);
 
+  it("updates notes whose frontmatter has unquoted hashtag flow tags", async () => {
+    const { vault, config, id } = await vaultWithNote();
+    await fs.writeFile(
+      path.join(vault, id),
+      "---\n" +
+        "title: Hashtag Tags\n" +
+        "date: 2026-06-24\n" +
+        "tags: [ #foo, #bar-baz ]\n" +
+        "status: draft\n" +
+        "---\n\n" +
+        "original body\n",
+      "utf-8",
+    );
+
+    const res = await update_note(vault, { owner: TEST_AGENT, id, body: "edited body" }, config) as {
+      updated: boolean;
+    };
+
+    expect(res.updated).toBe(true);
+    const after = await fs.readFile(path.join(vault, id), "utf-8");
+    expect(after).toContain("edited body");
+    expect(after).toContain("'#foo'");
+    expect(after).toContain("'#bar-baz'");
+  }, 30000);
+
   it("deletes a frontmatter key when the patch value is null", async () => {
     const { vault, config, id } = await vaultWithNote({ confidence: "high" });
     expect(await fs.readFile(path.join(vault, id), "utf-8")).toContain("confidence: high");
