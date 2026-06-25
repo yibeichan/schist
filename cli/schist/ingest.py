@@ -44,8 +44,8 @@ def _trailing_backslashes(line: str, i: int) -> int:
 
 
 def _quote_flow_hashtags(line: str) -> str:
-    """Quote unquoted #tags inside YAML flow sequences before YAML parsing."""
-    if '#' not in line or '[' not in line:
+    """Quote unquoted #tags inside YAML flow collections before YAML parsing."""
+    if '#' not in line or ('[' not in line and '{' not in line):
         return line
 
     result: list[str] = []
@@ -90,13 +90,13 @@ def _quote_flow_hashtags(line: str) -> str:
             result.append(ch)
             i += 1
             continue
-        if ch == '[':
+        if ch in {'[', '{'}:
             flow_depth += 1
             last_significant = ch
             result.append(ch)
             i += 1
             continue
-        if ch == ']':
+        if ch in {']', '}'}:
             if flow_depth > 0:
                 flow_depth -= 1
             last_significant = ch
