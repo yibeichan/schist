@@ -10,6 +10,9 @@ unquoted hashtag tokens in YAML flow collections, such as `tags: [ #foo ]` or
 `extra: { category: #foo }`.
 The canonical behavior is pinned in `schema/frontmatter-parser-parity.json` and
 exercised by both the CLI pytest suite and the MCP Jest suite.
+Unquoted hashtag values in flow collections are quoted from `#` through the
+next whitespace or flow delimiter, so identifier-like values such as
+`#cs.AI.1234` stay intact.
 
 Decision for depth-zero trailing hashtags: outside an actual YAML flow sequence,
 `#` starts a YAML comment. For example, `title: read [book] about #life` parses

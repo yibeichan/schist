@@ -28,7 +28,7 @@ export function parseConnections(body: string): Connection[] {
   return connections;
 }
 
-const HASHTAG_AT_START_RE = /^#[\p{L}\p{N}_-]+/u;
+const HASHTAG_AT_START_RE = /^#[^\s,\]\}]+/u;
 
 // A quote (' or ") only *opens* a quoted scalar when it sits where a node can
 // start: at the beginning of the value, or right after a flow indicator

@@ -40,6 +40,16 @@
     }
   },
   {
+    "name": "unquoted dotted hashtag in flow mapping value",
+    "frontmatter": "verification: {source: arxiv, id: #cs.AI.1234}",
+    "expected": {
+      "verification": {
+        "source": "arxiv",
+        "id": "#cs.AI.1234"
+      }
+    }
+  },
+  {
     "name": "depth zero trailing hashtag is a YAML comment",
     "frontmatter": "title: read [book] about #life",
     "expected": {
