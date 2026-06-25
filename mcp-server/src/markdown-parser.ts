@@ -56,7 +56,7 @@ function trailingBackslashes(line: string, i: number): number {
 }
 
 function quoteFlowHashtags(line: string): string {
-  if (!line.includes("#") || !line.includes("[")) return line;
+  if (!line.includes("#") || (!line.includes("[") && !line.includes("{"))) return line;
 
   let result = "";
   let flowDepth = 0;
@@ -106,13 +106,13 @@ function quoteFlowHashtags(line: string): string {
       result += ch;
       continue;
     }
-    if (ch === "[") {
+    if (ch === "[" || ch === "{") {
       flowDepth++;
       lastSignificant = ch;
       result += ch;
       continue;
     }
-    if (ch === "]") {
+    if (ch === "]" || ch === "}") {
       if (flowDepth > 0) flowDepth--;
       lastSignificant = ch;
       result += ch;

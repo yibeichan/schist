@@ -6,7 +6,8 @@ schist has two frontmatter readers:
 - TypeScript `parseNote` (`mcp-server/src/markdown-parser.ts`) for MCP note edits.
 
 Both readers must accept the same frontmatter for legacy notes that contain
-unquoted hashtag tokens in YAML flow sequences, such as `tags: [ #foo ]`.
+unquoted hashtag tokens in YAML flow collections, such as `tags: [ #foo ]` or
+`extra: { category: #foo }`.
 The canonical behavior is pinned in `schema/frontmatter-parser-parity.json` and
 exercised by both the CLI pytest suite and the MCP Jest suite.
 

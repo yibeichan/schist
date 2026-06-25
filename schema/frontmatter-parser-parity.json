@@ -31,6 +31,15 @@
     }
   },
   {
+    "name": "unquoted hashtag in flow mapping value",
+    "frontmatter": "extra: {category: #machine-learning}",
+    "expected": {
+      "extra": {
+        "category": "#machine-learning"
+      }
+    }
+  },
+  {
     "name": "depth zero trailing hashtag is a YAML comment",
     "frontmatter": "title: read [book] about #life",
     "expected": {
