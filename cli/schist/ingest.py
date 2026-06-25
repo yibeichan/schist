@@ -11,7 +11,7 @@ from pathlib import Path
 import frontmatter
 
 SKIP_DIRS = {'.git', '.schist'}
-HASHTAG_AT_START_RE = re.compile(r'^#[\w-]+')
+HASHTAG_AT_START_RE = re.compile(r'^#[^\s,\]\}]+')
 CONNECTION_RE = re.compile(
     r'^-\s+(\S+):\s+(\S+)(?:\s+"([^"]*)")?(?:\s+—\s+(.*))?$'
 )
