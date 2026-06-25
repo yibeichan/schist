@@ -31,7 +31,17 @@ import sys
 from types import SimpleNamespace
 from pathlib import Path
 
+import frontmatter
 import pytest
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _frontmatter_parity_cases() -> list[dict]:
+    fixture = _repo_root() / "schema" / "frontmatter-parser-parity.json"
+    return json.loads(fixture.read_text(encoding="utf-8"))
 
 
 def _write_vault(root: Path) -> None:
@@ -86,6 +96,18 @@ def _assert_vault_ingested(db_path: Path) -> None:
         assert "file_ref" in file_ref_cols
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("case", _frontmatter_parity_cases(), ids=lambda c: c["name"])
+def test_ingest_frontmatter_parser_matches_shared_parity_cases(case: dict) -> None:
+    """Python ingest and TS parseNote must agree on frontmatter pre-patching."""
+    from schist.ingest import patch_frontmatter_flow_hashtags
+
+    raw = f"---\n{case['frontmatter']}\n---\n\nBody\n"
+    post = frontmatter.loads(patch_frontmatter_flow_hashtags(raw))
+
+    for key, value in case["expected"].items():
+        assert post.metadata[key] == value
 
 
 def test_ingest_deduplicates_implicit_concept_edges(tmp_path: Path) -> None:

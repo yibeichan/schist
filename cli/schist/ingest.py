@@ -11,8 +11,7 @@ from pathlib import Path
 import frontmatter
 
 SKIP_DIRS = {'.git', '.schist'}
-# Matches #word inside YAML flow sequences — quote them so YAML doesn't treat # as comment
-HASH_TAG_RE = re.compile(r'(#[\w-]+)')
+HASHTAG_AT_START_RE = re.compile(r'^#[\w-]+')
 CONNECTION_RE = re.compile(
     r'^-\s+(\S+):\s+(\S+)(?:\s+"([^"]*)")?(?:\s+—\s+(.*))?$'
 )
@@ -29,6 +28,120 @@ PAPER_FIELDS = {
     'url',
     'verification',
 }
+
+
+def _opens_quoted_scalar(last_significant: str) -> bool:
+    return last_significant in {'', '[', '{', ',', ':'}
+
+
+def _trailing_backslashes(line: str, i: int) -> int:
+    count = 0
+    j = i - 1
+    while j >= 0 and line[j] == '\\':
+        count += 1
+        j -= 1
+    return count
+
+
+def _quote_flow_hashtags(line: str) -> str:
+    """Quote unquoted #tags inside YAML flow sequences before YAML parsing."""
+    if '#' not in line or '[' not in line:
+        return line
+
+    result: list[str] = []
+    flow_depth = 0
+    in_single = False
+    in_double = False
+    last_significant = ''
+
+    i = 0
+    while i < len(line):
+        ch = line[i]
+
+        if in_single:
+            if ch == "'":
+                if i + 1 < len(line) and line[i + 1] == "'":
+                    result.append("''")
+                    i += 2
+                    continue
+                in_single = False
+                last_significant = "'"
+            result.append(ch)
+            i += 1
+            continue
+
+        if in_double:
+            if ch == '"' and _trailing_backslashes(line, i) % 2 == 0:
+                in_double = False
+                last_significant = '"'
+            result.append(ch)
+            i += 1
+            continue
+
+        if ch == "'" and _opens_quoted_scalar(last_significant):
+            in_single = True
+            last_significant = "'"
+            result.append(ch)
+            i += 1
+            continue
+        if ch == '"' and _opens_quoted_scalar(last_significant):
+            in_double = True
+            last_significant = '"'
+            result.append(ch)
+            i += 1
+            continue
+        if ch == '[':
+            flow_depth += 1
+            last_significant = ch
+            result.append(ch)
+            i += 1
+            continue
+        if ch == ']':
+            if flow_depth > 0:
+                flow_depth -= 1
+            last_significant = ch
+            result.append(ch)
+            i += 1
+            continue
+        if ch == '#' and flow_depth > 0:
+            match = HASHTAG_AT_START_RE.match(line[i:])
+            if match:
+                tag = match.group(0)
+                result.append(f'"{tag}"')
+                last_significant = tag[-1]
+                i += len(tag)
+                continue
+
+        result.append(ch)
+        if ch not in {' ', '\t'}:
+            last_significant = ch
+        i += 1
+
+    return ''.join(result)
+
+
+def patch_frontmatter_flow_hashtags(content: str) -> str:
+    """Mirror mcp-server parseNote's pre-patch before frontmatter parsing."""
+    lines = content.split('\n')
+    in_fm = False
+    patched = False
+    patched_lines = []
+    for i, ln in enumerate(lines):
+        if i == 0 and ln.strip() == '---':
+            in_fm = True
+            patched_lines.append(ln)
+            continue
+        if in_fm and ln.strip() == '---':
+            in_fm = False
+            patched_lines.append(ln)
+            continue
+        if in_fm:
+            next_ln = _quote_flow_hashtags(ln)
+            patched = patched or next_ln != ln
+            ln = next_ln
+        patched_lines.append(ln)
+
+    return '\n'.join(patched_lines) if patched else content
 
 
 def parse_connections(body: str) -> list[dict]:
@@ -174,23 +287,7 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
             continue
 
         raw_text = md_file.read_text(encoding='utf-8')
-        # Quote #hashtags in YAML flow sequences so YAML parser doesn't treat # as comment
-        lines = raw_text.split('\n')
-        in_fm = False
-        patched_lines = []
-        for i, ln in enumerate(lines):
-            if i == 0 and ln.strip() == '---':
-                in_fm = True
-                patched_lines.append(ln)
-                continue
-            if in_fm and ln.strip() == '---':
-                in_fm = False
-                patched_lines.append(ln)
-                continue
-            if in_fm and '#' in ln and '[' in ln:
-                ln = HASH_TAG_RE.sub(r'"\1"', ln)
-            patched_lines.append(ln)
-        patched_text = '\n'.join(patched_lines)
+        patched_text = patch_frontmatter_flow_hashtags(raw_text)
 
         try:
             post = frontmatter.loads(patched_text)

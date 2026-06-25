@@ -1,4 +1,21 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseNote, buildNote, buildConnectionLine, parseConnections } from "../src/markdown-parser.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+type FrontmatterParityCase = {
+  name: string;
+  frontmatter: string;
+  expected: Record<string, unknown>;
+};
+
+function loadFrontmatterParityCases(): FrontmatterParityCase[] {
+  const fixturePath = path.resolve(__dirname, "..", "..", "schema", "frontmatter-parser-parity.json");
+  return JSON.parse(readFileSync(fixturePath, "utf-8")) as FrontmatterParityCase[];
+}
 
 describe("markdown-parser", () => {
   test("Connection injection: newline in context is stripped to single line", () => {
@@ -73,6 +90,17 @@ describe("markdown-parser", () => {
     expect(parsed.connections[1].type).toBe(connections[1].type);
   });
 
+  test.each(loadFrontmatterParityCases())(
+    "parseNote matches shared frontmatter parity fixture: $name",
+    ({ frontmatter, expected }) => {
+      const parsed = parseNote(`---\n${frontmatter}\n---\n\nBody\n`);
+
+      for (const [key, value] of Object.entries(expected)) {
+        expect(parsed.metadata[key]).toEqual(value);
+      }
+    }
+  );
+
   test("parseNote accepts unquoted hashtag values in frontmatter flow sequences", () => {
     const parsed = parseNote(
       "---\n" +
@@ -128,13 +156,11 @@ describe("markdown-parser", () => {
     expect(parsed.metadata.tags).toEqual(["ends\\", "a\"b", "it's", "#foo"]);
   });
 
-  // KNOWN, ACCEPTED DIVERGENCE from ingest (#260 follow-up): a bare `[` in a
-  // plain scalar with a trailing `# token` is not a flow sequence, so the
-  // hashtag stays at flowDepth 0 and YAML treats it as a comment (dropped).
-  // ingest's blind regex instead "rescues" it into the value — arguably the
-  // wrong behavior. Pinned here so the divergence stays visible if either
-  // parser changes.
-  test("parseNote drops a depth-0 trailing hashtag comment (documented divergence)", () => {
+  // Shared parser-parity decision (#263): a bare `[` in a plain scalar with a
+  // trailing `# token` is not a flow sequence, so the hashtag stays at
+  // flowDepth 0 and YAML treats it as a comment (dropped). Python ingest and TS
+  // parseNote both pin this behavior via schema/frontmatter-parser-parity.json.
+  test("parseNote drops a depth-0 trailing hashtag comment (documented parity decision)", () => {
     const parsed = parseNote(
       "---\n" +
       "title: read [book] about #life\n" +
