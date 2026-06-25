@@ -1,0 +1,40 @@
+[
+  {
+    "name": "unquoted hashtag flow values",
+    "frontmatter": "title: Tagged Note\ntags: [ #foo, #bar-baz, already-plain ]\nconcepts: [ #concept ]",
+    "expected": {
+      "title": "Tagged Note",
+      "tags": ["#foo", "#bar-baz", "already-plain"],
+      "concepts": ["#concept"]
+    }
+  },
+  {
+    "name": "already quoted hashtag flow values",
+    "frontmatter": "title: Quoted Tags\ntags: [ \"#foo\", '#bar' ]",
+    "expected": {
+      "title": "Quoted Tags",
+      "tags": ["#foo", "#bar"]
+    }
+  },
+  {
+    "name": "apostrophes in bare flow scalars",
+    "frontmatter": "tags: [ it's, can't, #foo ]",
+    "expected": {
+      "tags": ["it's", "can't", "#foo"]
+    }
+  },
+  {
+    "name": "escaped backslashes and quotes in flow scalars",
+    "frontmatter": "tags: [ \"ends\\\\\", \"a\\\"b\", 'it''s', #foo ]",
+    "expected": {
+      "tags": ["ends\\", "a\"b", "it's", "#foo"]
+    }
+  },
+  {
+    "name": "depth zero trailing hashtag is a YAML comment",
+    "frontmatter": "title: read [book] about #life",
+    "expected": {
+      "title": "read [book] about"
+    }
+  }
+]
