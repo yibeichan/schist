@@ -231,6 +231,52 @@ def test_ingest_skips_non_string_tag_elements(tmp_path: Path) -> None:
     assert json.loads(row[0]) == ["research", "writing"]
 
 
+def test_ingest_skips_non_string_concept_elements(tmp_path: Path) -> None:
+    """Malformed concept list entries are ignored instead of aborting vault ingest."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-06-26-non-string-concepts.md",
+        "---\n"
+        "title: Non String Concepts\n"
+        "date: 2026-06-26\n"
+        "concepts: [42, machine-learning, true, null, writing]\n"
+        "---\n"
+        "\n"
+        "Body.\n",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        doc_row = conn.execute(
+            "SELECT concepts FROM docs WHERE title = 'Non String Concepts'"
+        ).fetchone()
+        concept_slugs = {
+            row[0]
+            for row in conn.execute("SELECT slug FROM concepts WHERE slug IN ('machine-learning', 'writing')")
+        }
+        edge_targets = {
+            row[0]
+            for row in conn.execute(
+                "SELECT target FROM edges WHERE source = ? AND type = 'references'",
+                ("notes/2026-06-26-non-string-concepts.md",),
+            )
+        }
+    finally:
+        conn.close()
+
+    assert json.loads(doc_row[0]) == ["machine-learning", "writing"]
+    assert concept_slugs == {"machine-learning", "writing"}
+    assert edge_targets == {"machine-learning", "writing"}
+
+
 def test_ingest_prunes_concept_aliases_for_missing_concepts(tmp_path: Path) -> None:
     """Aliases survive rebuild only while both referenced concepts still exist."""
     from schist.ingest import ingest
