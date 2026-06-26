@@ -300,7 +300,7 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         # Normalize tags: strip # prefix
         raw_tags = meta.get('tags', [])
         if isinstance(raw_tags, list):
-            tags = [t.lstrip('#') for t in raw_tags]
+            tags = [t.lstrip('#') for t in raw_tags if isinstance(t, str)]
         else:
             tags = []
 

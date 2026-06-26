@@ -200,6 +200,37 @@ def test_ingest_preserves_missing_status_as_null(tmp_path: Path) -> None:
     assert row == (None,)
 
 
+def test_ingest_skips_non_string_tag_elements(tmp_path: Path) -> None:
+    """Malformed tag list entries are ignored instead of aborting vault ingest."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-06-26-non-string-tags.md",
+        "---\n"
+        "title: Non String Tags\n"
+        "date: 2026-06-26\n"
+        "tags: [2024, '#research', true, null, writing]\n"
+        "---\n"
+        "\n"
+        "Body.\n",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute("SELECT tags FROM docs WHERE title = 'Non String Tags'").fetchone()
+    finally:
+        conn.close()
+
+    assert json.loads(row[0]) == ["research", "writing"]
+
+
 def test_ingest_prunes_concept_aliases_for_missing_concepts(tmp_path: Path) -> None:
     """Aliases survive rebuild only while both referenced concepts still exist."""
     from schist.ingest import ingest
