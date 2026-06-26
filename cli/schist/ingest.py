@@ -308,7 +308,10 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
 
         # Concepts from frontmatter
         raw_concepts = meta.get('concepts', [])
-        concepts = raw_concepts if isinstance(raw_concepts, list) else []
+        if isinstance(raw_concepts, list):
+            concepts = [c for c in raw_concepts if isinstance(c, str) and c.strip()]
+        else:
+            concepts = []
         concepts_json = json.dumps(concepts) if concepts else None
 
         # Scope: explicit frontmatter > directory path > 'global'
