@@ -161,7 +161,10 @@ const PATCHABLE_FRONTMATTER_KEYS = new Set([
  * either silently corrupt the note or, worse, be reinterpreted by ingest
  * (e.g. tags must stay a string array). Returns a ToolError or null.
  */
-function validateFrontmatterPatch(patch: Record<string, unknown> | undefined): ToolError | null {
+function validateFrontmatterPatch(
+  patch: Record<string, unknown> | undefined,
+  config: VaultConfig
+): ToolError | null {
   if (patch === undefined) return null;
   for (const [key, value] of Object.entries(patch)) {
     if (!PATCHABLE_FRONTMATTER_KEYS.has(key)) {
@@ -178,6 +181,13 @@ function validateFrontmatterPatch(patch: Record<string, unknown> | undefined): T
     } else if (key === "confidence") {
       if (!["low", "medium", "high"].includes(value as string)) {
         return { error: "VALIDATION_ERROR", message: `confidence must be one of: low, medium, high (got "${value}")` };
+      }
+    } else if (key === "status") {
+      if (typeof value !== "string") {
+        return { error: "VALIDATION_ERROR", message: "frontmatter_patch.status must be a string" };
+      }
+      if (!config.statuses.includes(value)) {
+        return { error: "VALIDATION_ERROR", message: `status must be one of: ${config.statuses.join(", ")} (got "${value}")` };
       }
     } else if (typeof value !== "string") {
       return { error: "VALIDATION_ERROR", message: `frontmatter_patch.${key} must be a string` };
@@ -1735,7 +1745,7 @@ export async function update_note(
         message: "frontmatter_patch must be an object",
       } satisfies ToolError;
     }
-    const patchError = validateFrontmatterPatch(args.frontmatter_patch);
+    const patchError = validateFrontmatterPatch(args.frontmatter_patch, config);
     if (patchError !== null) return patchError;
 
     const idError = validateNoteId(args.id, config);

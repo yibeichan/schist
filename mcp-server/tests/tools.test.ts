@@ -1758,6 +1758,16 @@ describe("update_note", () => {
     expect(res.error).toBe("VALIDATION_ERROR");
   }, 30000);
 
+  it("rejects an invalid status patch", async () => {
+    const { vault, config, id } = await vaultWithNote();
+    const res = await update_note(vault, {
+      owner: TEST_AGENT, id, frontmatter_patch: { status: "not-a-real-status" },
+    }, config) as { error: string; message: string };
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toMatch(/status must be one of/);
+    expect(await fs.readFile(path.join(vault, id), "utf-8")).not.toContain("not-a-real-status");
+  }, 30000);
+
   it("rejects a non-allowlisted frontmatter key (scope-spoof guard)", async () => {
     const { vault, config, id } = await vaultWithNote();
     const res = await update_note(vault, {
