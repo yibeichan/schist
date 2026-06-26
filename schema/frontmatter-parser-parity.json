@@ -55,5 +55,47 @@
     "expected": {
       "title": "read [book] about"
     }
+  },
+  {
+    "name": "hashtag in comment after a closed flow sequence is dropped",
+    "frontmatter": "tags: [ a, b ] # ref #foo",
+    "expected": {
+      "tags": ["a", "b"]
+    }
+  },
+  {
+    "name": "dotted hashtag in flow sequence value",
+    "frontmatter": "tags: [ #a.b.c, #d ]",
+    "expected": {
+      "tags": ["#a.b.c", "#d"]
+    }
+  },
+  {
+    "name": "hashtag with colon in flow sequence value",
+    "frontmatter": "tags: [ #foo:bar, x ]",
+    "expected": {
+      "tags": ["#foo:bar", "x"]
+    }
+  },
+  {
+    "name": "hashtag in single-key flow mapping value",
+    "frontmatter": "extra: {k: #tag}",
+    "expected": {
+      "extra": {
+        "k": "#tag"
+      }
+    }
+  },
+  {
+    "name": "hashtags across nested flow mapping and sequence depths",
+    "frontmatter": "x: [ {a: #t1}, #t2 ]",
+    "expected": {
+      "x": [
+        {
+          "a": "#t1"
+        },
+        "#t2"
+      ]
+    }
   }
 ]
