@@ -1925,7 +1925,45 @@ describe("delete_note", () => {
     expect(res.deleted).toBe(true);
     expect(res.repaired).toContain(linker.id);
     await expect(fs.access(path.join(vault, target.id))).rejects.toThrow();
-    expect(await fs.readFile(path.join(vault, linker.id), "utf-8")).not.toContain(`extends: ${target.id}`);
+    const after = await fs.readFile(path.join(vault, linker.id), "utf-8");
+    expect(after).not.toContain(`extends: ${target.id}`);
+    expect(after).not.toContain("## Connections");
+  }, 30000);
+
+  it("cascade keeps the Connections section when other connection lines remain", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const target = await create_note(
+      vault, { owner: TEST_AGENT, title: "Target Other", body: "b", directory: "notes" }, config,
+    ) as { id: string };
+    const other = await create_note(
+      vault, { owner: TEST_AGENT, title: "Other", body: "b", directory: "notes" }, config,
+    ) as { id: string };
+    const linker = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT,
+        title: "Linker Other",
+        body: "b",
+        directory: "notes",
+        connections: [
+          { target: target.id, type: "extends" },
+          { target: other.id, type: "supports" },
+        ],
+      },
+      config,
+    ) as { id: string };
+    await seedEdgesDb(vault, [{ source: linker.id, target: target.id, type: "extends" }]);
+
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: target.id, cascade: true }, config) as {
+      deleted: boolean; repaired: string[];
+    };
+    expect(res.deleted).toBe(true);
+    expect(res.repaired).toContain(linker.id);
+    const after = await fs.readFile(path.join(vault, linker.id), "utf-8");
+    expect(after).toContain("## Connections");
+    expect(after).not.toContain(`extends: ${target.id}`);
+    expect(after).toContain(`supports: ${other.id}`);
   }, 30000);
 
   it("cascade strips a bare-slug connection to a concept note (#7)", async () => {

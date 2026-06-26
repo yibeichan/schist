@@ -1469,7 +1469,30 @@ function stripConnectionsTo(content: string, targets: string[]): { content: stri
     }
     out.push(line);
   }
-  return { content: out.join("\n"), removed };
+  if (removed === 0) return { content: out.join("\n"), removed };
+
+  const cleaned: string[] = [];
+  for (let i = 0; i < out.length; i++) {
+    const stripped = out[i].trim();
+    if (!stripped.startsWith("## Connections")) {
+      cleaned.push(out[i]);
+      continue;
+    }
+
+    let j = i + 1;
+    while (j < out.length && out[j].trim() === "") j++;
+    const next = j < out.length ? out[j].trim() : "";
+    if (j >= out.length || next.startsWith("## ")) {
+      while (cleaned.length > 0 && cleaned[cleaned.length - 1].trim() === "") cleaned.pop();
+      if (j < out.length) cleaned.push("");
+      i = j - 1;
+      continue;
+    }
+
+    cleaned.push(out[i]);
+  }
+
+  return { content: cleaned.join("\n"), removed };
 }
 
 /**
