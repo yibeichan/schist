@@ -251,6 +251,36 @@ describe("create_note filename collision", () => {
 });
 
 // ---------------------------------------------------------------------------
+// create_note — frontmatter array validation
+// ---------------------------------------------------------------------------
+
+describe("create_note frontmatter array validation", () => {
+  test("rejects empty tag and concept elements", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const emptyTags = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Empty Tags", body: "x", tags: ["", "valid"] },
+      config
+    ) as { error: string; message: string };
+    expect(emptyTags.error).toBe("VALIDATION_ERROR");
+    expect(emptyTags.message).toMatch(/tags.*non-empty strings/);
+
+    const emptyConcepts = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Empty Concepts", body: "x", concepts: ["valid", "   "] },
+      config
+    ) as { error: string; message: string };
+    expect(emptyConcepts.error).toBe("VALIDATION_ERROR");
+    expect(emptyConcepts.message).toMatch(/concepts.*non-empty strings/);
+
+    const entries = await fs.readdir(path.join(vault, "notes")).catch(() => []);
+    expect(entries).toEqual([]);
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
 // create_note — date-prefix title rejection (#118)
 // ---------------------------------------------------------------------------
 

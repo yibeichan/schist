@@ -154,6 +154,13 @@ const PATCHABLE_FRONTMATTER_KEYS = new Set([
   "title", "date", "status", "tags", "concepts", "confidence", "file_ref",
 ]);
 
+function validateNonEmptyStringArray(value: unknown, label: string): ToolError | null {
+  if (!Array.isArray(value) || value.some((v) => typeof v !== "string" || !v.trim())) {
+    return { error: "VALIDATION_ERROR", message: `${label} must be an array of non-empty strings` };
+  }
+  return null;
+}
+
 /**
  * Validate update_note's frontmatter_patch against the allowlist + per-key
  * types. A `null` value (delete-the-key) is always allowed. Rejects unknown
@@ -175,9 +182,8 @@ function validateFrontmatterPatch(
     }
     if (value === null) continue; // null = delete the key
     if (key === "tags" || key === "concepts") {
-      if (!Array.isArray(value) || value.some((v) => typeof v !== "string" || !v.trim())) {
-        return { error: "VALIDATION_ERROR", message: `frontmatter_patch.${key} must be an array of non-empty strings` };
-      }
+      const arrayError = validateNonEmptyStringArray(value, `frontmatter_patch.${key}`);
+      if (arrayError !== null) return arrayError;
     } else if (key === "confidence") {
       if (!["low", "medium", "high"].includes(value as string)) {
         return { error: "VALIDATION_ERROR", message: `confidence must be one of: low, medium, high (got "${value}")` };
@@ -1211,6 +1217,12 @@ export async function create_note(
         error: "VALIDATION_ERROR",
         message: `confidence must be one of: low, medium, high (got "${args.confidence}")`,
       } satisfies ToolError;
+    }
+    for (const key of ["tags", "concepts"] as const) {
+      if (args[key] !== undefined) {
+        const arrayError = validateNonEmptyStringArray(args[key], key);
+        if (arrayError !== null) return arrayError;
+      }
     }
     const directory = args.directory ?? "notes";
     if (directory.includes("..") || path.isAbsolute(directory)) {
