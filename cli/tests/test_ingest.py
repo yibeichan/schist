@@ -144,6 +144,77 @@ def test_ingest_deduplicates_implicit_concept_edges(tmp_path: Path) -> None:
     assert rows == [("notes/2026-06-08-duplicate-concepts.md", "ingestion", "references")]
 
 
+def test_ingest_normalizes_frontmatter_concept_slugs(tmp_path: Path) -> None:
+    """Frontmatter concept labels resolve to the same slugs as concept files."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-06-29-concept-slugs.md",
+        "---\n"
+        "title: Concept Slugs\n"
+        "date: 2026-06-29\n"
+        "concepts: [Machine Learning, Writing Drafts]\n"
+        "---\n"
+        "\n"
+        "Body.\n",
+    )
+    concepts_dir = vault / "concepts"
+    concepts_dir.mkdir()
+    (concepts_dir / "machine-learning.md").write_text(
+        "---\n"
+        "concept: machine-learning\n"
+        "title: Machine Learning\n"
+        "---\n"
+        "\n"
+        "Canonical concept.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        doc_concepts = conn.execute(
+            "SELECT concepts FROM docs WHERE id = ?",
+            ("notes/2026-06-29-concept-slugs.md",),
+        ).fetchone()[0]
+        concept_slugs = {
+            row[0]
+            for row in conn.execute(
+                "SELECT slug FROM concepts WHERE slug IN (?, ?, ?, ?)",
+                (
+                    "machine-learning",
+                    "Machine Learning",
+                    "writing-drafts",
+                    "Writing Drafts",
+                ),
+            )
+        }
+        edge_targets = {
+            row[0]
+            for row in conn.execute(
+                "SELECT target FROM edges WHERE source = ? AND type = 'references'",
+                ("notes/2026-06-29-concept-slugs.md",),
+            )
+        }
+        machine_learning_edge_count = conn.execute(
+            "SELECT COUNT(*) FROM edges WHERE target = ?",
+            ("machine-learning",),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert json.loads(doc_concepts) == ["machine-learning", "writing-drafts"]
+    assert concept_slugs == {"machine-learning", "writing-drafts"}
+    assert edge_targets == {"machine-learning", "writing-drafts"}
+    assert machine_learning_edge_count == 1
+
+
 def test_ingest_indexes_file_ref_frontmatter(tmp_path: Path) -> None:
     """`file_ref` is stored as a nullable docs column for query_graph lookup."""
     from schist.ingest import ingest
