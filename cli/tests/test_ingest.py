@@ -379,6 +379,56 @@ def test_ingest_skips_non_string_concept_elements(tmp_path: Path) -> None:
     assert edge_targets == {"machine-learning", "writing"}
 
 
+def test_ingest_handles_non_string_concept_key_with_concepts_list(tmp_path: Path) -> None:
+    """A non-string `concept:` key must not crash the frontmatter concept loop."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-06-30-non-string-concept-key.md",
+        "---\n"
+        "title: Non String Concept Key\n"
+        "date: 2026-06-30\n"
+        "concept: 2023-10-15\n"
+        "concepts: [some-other-slug]\n"
+        "---\n"
+        "\n"
+        "Body.\n",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        doc_row = conn.execute(
+            "SELECT concepts FROM docs WHERE title = 'Non String Concept Key'"
+        ).fetchone()
+        edge_targets = {
+            row[0]
+            for row in conn.execute(
+                "SELECT target FROM edges WHERE source = ? AND type = 'references'",
+                ("notes/2026-06-30-non-string-concept-key.md",),
+            )
+        }
+        concept_slugs = {
+            row[0]
+            for row in conn.execute(
+                "SELECT slug FROM concepts WHERE slug = ?",
+                ("2026-06-30-non-string-concept-key",),
+            )
+        }
+    finally:
+        conn.close()
+
+    assert json.loads(doc_row[0]) == ["some-other-slug"]
+    assert concept_slugs == {"2026-06-30-non-string-concept-key"}
+    assert edge_targets == set()
+
+
 def test_ingest_prunes_concept_aliases_for_missing_concepts(tmp_path: Path) -> None:
     """Aliases survive rebuild only while both referenced concepts still exist."""
     from schist.ingest import ingest
