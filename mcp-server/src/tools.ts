@@ -161,6 +161,21 @@ function validateNonEmptyStringArray(value: unknown, label: string): ToolError |
   return null;
 }
 
+function normalizeTag(value: string): string {
+  return value.trim().replace(/^#+/, "").trim();
+}
+
+function validateTags(value: unknown, label: string): ToolError | null {
+  if (!Array.isArray(value) || value.some((v) => typeof v !== "string" || !normalizeTag(v))) {
+    return { error: "VALIDATION_ERROR", message: `${label} must be an array of non-empty tags` };
+  }
+  return null;
+}
+
+function normalizeTags(value: string[]): string[] {
+  return value.map(normalizeTag);
+}
+
 /**
  * Validate update_note's frontmatter_patch against the allowlist + per-key
  * types. A `null` value (delete-the-key) is always allowed. Rejects unknown
@@ -181,7 +196,10 @@ function validateFrontmatterPatch(
       };
     }
     if (value === null) continue; // null = delete the key
-    if (key === "tags" || key === "concepts") {
+    if (key === "tags") {
+      const tagsError = validateTags(value, "frontmatter_patch.tags");
+      if (tagsError !== null) return tagsError;
+    } else if (key === "concepts") {
       const arrayError = validateNonEmptyStringArray(value, `frontmatter_patch.${key}`);
       if (arrayError !== null) return arrayError;
     } else if (key === "confidence") {
@@ -1218,11 +1236,13 @@ export async function create_note(
         message: `confidence must be one of: low, medium, high (got "${args.confidence}")`,
       } satisfies ToolError;
     }
-    for (const key of ["tags", "concepts"] as const) {
-      if (args[key] !== undefined) {
-        const arrayError = validateNonEmptyStringArray(args[key], key);
-        if (arrayError !== null) return arrayError;
-      }
+    if (args.tags !== undefined) {
+      const tagsError = validateTags(args.tags, "tags");
+      if (tagsError !== null) return tagsError;
+    }
+    if (args.concepts !== undefined) {
+      const arrayError = validateNonEmptyStringArray(args.concepts, "concepts");
+      if (arrayError !== null) return arrayError;
     }
     const directory = args.directory ?? "notes";
     if (directory.includes("..") || path.isAbsolute(directory)) {
@@ -1322,7 +1342,7 @@ export async function create_note(
     const metadata: Record<string, unknown> = {
       title: args.title,
       date,
-      tags: args.tags ?? [],
+      tags: args.tags !== undefined ? normalizeTags(args.tags) : [],
       concepts: args.concepts ?? [],
       status: args.status ?? "draft",
       source_agent: owner,
@@ -1812,7 +1832,7 @@ export async function update_note(
       if (args.frontmatter_patch !== undefined) {
         for (const [key, value] of Object.entries(args.frontmatter_patch)) {
           if (value === null) delete mergedMeta[key];
-          else mergedMeta[key] = value;
+          else mergedMeta[key] = key === "tags" ? normalizeTags(value as string[]) : value;
         }
       }
       // gray-matter parses YAML timestamps into JS Dates; matter.stringify would
