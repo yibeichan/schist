@@ -1478,6 +1478,10 @@ function noteRefTokens(id: string): string[] {
   return [...tokens];
 }
 
+function normalizeConceptSlug(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, "-");
+}
+
 /**
  * Remove every `## Connections` line in `content` whose target matches any of
  * `targets`. Returns the rewritten content and the count removed. Used by
@@ -1551,8 +1555,8 @@ function stripConceptRefs(content: string, targets: string[]): { content: string
   const { metadata, body } = parseNote(content);
   const concepts = metadata.concepts;
   if (!Array.isArray(concepts)) return { content, changed: false };
-  const targetSet = new Set(targets);
-  const filtered = concepts.filter((c) => !targetSet.has(c));
+  const targetSet = new Set(targets.flatMap((target) => [target, normalizeConceptSlug(target)]));
+  const filtered = concepts.filter((c) => typeof c !== "string" || !targetSet.has(normalizeConceptSlug(c)));
   if (filtered.length === concepts.length) return { content, changed: false };
   const newMeta: Record<string, unknown> = { ...metadata, concepts: filtered };
   // Same Date-coercion guard as update_note: don't let the round-trip rewrite
