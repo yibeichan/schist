@@ -383,10 +383,11 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
             )
 
         # Insert concept record if this is a concept file
+        concept_slug = None
         if is_concept:
             slug = meta.get('concept', rel.stem)
-            if isinstance(slug, str):
-                slug = _normalize_concept_slug(slug)
+            slug = _normalize_concept_slug(slug if isinstance(slug, str) else rel.stem)
+            concept_slug = slug
             desc = body.split('\n\n')[0].strip() if body else None
             concept_tags = json.dumps(tags) if tags else None
             conn.execute(
@@ -402,7 +403,7 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
                 (c, c.replace('-', ' ').title()),
             )
             # Don't double-count if already counted above
-            if not (is_concept and c == meta.get('concept', '').lower().replace(' ', '-')):
+            if not (is_concept and concept_slug is not None and c == concept_slug):
                 concept_count += 1
             if not is_concept:
                 result = conn.execute(
