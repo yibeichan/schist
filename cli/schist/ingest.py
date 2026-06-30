@@ -30,6 +30,10 @@ PAPER_FIELDS = {
 }
 
 
+def _normalize_concept_slug(value: str) -> str:
+    return value.strip().lower().replace(' ', '-')
+
+
 def _opens_quoted_scalar(last_significant: str) -> bool:
     return last_significant in {'', '[', '{', ',', ':'}
 
@@ -309,7 +313,11 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         # Concepts from frontmatter
         raw_concepts = meta.get('concepts', [])
         if isinstance(raw_concepts, list):
-            concepts = [c for c in raw_concepts if isinstance(c, str) and c.strip()]
+            concepts = [
+                _normalize_concept_slug(c)
+                for c in raw_concepts
+                if isinstance(c, str) and c.strip()
+            ]
         else:
             concepts = []
         concepts_json = json.dumps(concepts) if concepts else None
@@ -370,7 +378,7 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         if is_concept:
             slug = meta.get('concept', rel.stem)
             if isinstance(slug, str):
-                slug = slug.lower().replace(' ', '-')
+                slug = _normalize_concept_slug(slug)
             desc = body.split('\n\n')[0].strip() if body else None
             concept_tags = json.dumps(tags) if tags else None
             conn.execute(
