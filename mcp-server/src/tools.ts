@@ -175,8 +175,8 @@ function validateFrontmatterPatch(
     }
     if (value === null) continue; // null = delete the key
     if (key === "tags" || key === "concepts") {
-      if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) {
-        return { error: "VALIDATION_ERROR", message: `frontmatter_patch.${key} must be an array of strings` };
+      if (!Array.isArray(value) || value.some((v) => typeof v !== "string" || !v.trim())) {
+        return { error: "VALIDATION_ERROR", message: `frontmatter_patch.${key} must be an array of non-empty strings` };
       }
     } else if (key === "confidence") {
       if (!["low", "medium", "high"].includes(value as string)) {

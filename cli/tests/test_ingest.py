@@ -302,6 +302,37 @@ def test_ingest_skips_non_string_tag_elements(tmp_path: Path) -> None:
     assert json.loads(row[0]) == ["research", "writing"]
 
 
+def test_ingest_drops_hash_only_tags(tmp_path: Path) -> None:
+    """Hash-only tags strip to empty and should not be indexed."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-06-30-empty-tags.md",
+        "---\n"
+        "title: Empty Tags\n"
+        "date: 2026-06-30\n"
+        "tags: ['#', '##', '  #  ', '#research', writing]\n"
+        "---\n"
+        "\n"
+        "Body.\n",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute("SELECT tags FROM docs WHERE title = 'Empty Tags'").fetchone()
+    finally:
+        conn.close()
+
+    assert json.loads(row[0]) == ["research", "writing"]
+
+
 def test_ingest_skips_non_string_concept_elements(tmp_path: Path) -> None:
     """Malformed concept list entries are ignored instead of aborting vault ingest."""
     from schist.ingest import ingest
