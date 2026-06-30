@@ -2135,6 +2135,45 @@ describe("delete_note", () => {
     expect(after).not.toMatch(new RegExp(`- ${slug}\\b`));
   }, 30000);
 
+  it("cascade strips un-normalized concepts: frontmatter references (#287)", async () => {
+    const vault = await makeTempVault();
+    await fs.writeFile(
+      path.join(vault, "schist.yaml"),
+      "name: Test Vault\nwrite_branch: drafts\ndirectories:\n  - notes\n  - papers\n  - concepts\nstatuses:\n  - draft\n  - final\nconnection_types:\n  - extends\n  - supports\n",
+    );
+    await execFile("git", ["add", "schist.yaml"], { cwd: vault });
+    await execFile("git", ["commit", "-m", "add concepts dir"], { cwd: vault });
+    const config = await loadVaultConfig(vault);
+    const conceptId = "concepts/machine-learning.md";
+    const linkerId = "notes/2026-06-30-linker-unnormalized.md";
+    await fs.mkdir(path.join(vault, "concepts"), { recursive: true });
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, conceptId),
+      "---\nconcept: machine-learning\ntitle: Machine Learning\n---\n\nb\n",
+      "utf-8",
+    );
+    await fs.writeFile(
+      path.join(vault, linkerId),
+      "---\ntitle: Linker Unnormalized\nconcepts:\n  - Machine Learning\n---\n\nb\n",
+      "utf-8",
+    );
+    await execFile("git", ["add", conceptId, linkerId], { cwd: vault });
+    await execFile("git", ["commit", "-m", "add concept cascade fixtures"], { cwd: vault });
+    const linkerPath = path.join(vault, linkerId);
+
+    await seedEdgesDb(vault, [{ source: linkerId, target: "machine-learning", type: "references" }]);
+
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: conceptId, cascade: true }, config) as {
+      deleted: boolean; repaired: string[];
+    };
+    expect(res.deleted).toBe(true);
+    expect(res.repaired).toContain(linkerId);
+    const after = await fs.readFile(linkerPath, "utf-8");
+    expect(after).toContain("concepts: []");
+    expect(after).not.toContain("Machine Learning");
+  }, 30000);
+
   it("a failed delete rolls back only its own paths, preserving unrelated uncommitted edits (#119)", async () => {
     const vault = await makeTempVault();
     const config = await loadVaultConfig(vault);
