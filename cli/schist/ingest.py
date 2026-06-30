@@ -34,6 +34,10 @@ def _normalize_concept_slug(value: str) -> str:
     return value.strip().lower().replace(' ', '-')
 
 
+def _normalize_tag(value: str) -> str:
+    return value.strip().lstrip('#').strip()
+
+
 def _opens_quoted_scalar(last_significant: str) -> bool:
     return last_significant in {'', '[', '{', ',', ':'}
 
@@ -304,7 +308,11 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         # Normalize tags: strip # prefix
         raw_tags = meta.get('tags', [])
         if isinstance(raw_tags, list):
-            tags = [t.lstrip('#') for t in raw_tags if isinstance(t, str)]
+            tags = [
+                tag
+                for t in raw_tags
+                if isinstance(t, str) and (tag := _normalize_tag(t))
+            ]
         else:
             tags = []
 
