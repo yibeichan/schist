@@ -265,7 +265,15 @@ describe("create_note frontmatter array validation", () => {
       config
     ) as { error: string; message: string };
     expect(emptyTags.error).toBe("VALIDATION_ERROR");
-    expect(emptyTags.message).toMatch(/tags.*non-empty strings/);
+    expect(emptyTags.message).toMatch(/tags.*non-empty tags/);
+
+    const hashOnlyTags = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Hash Tags", body: "x", tags: ["  #  "] },
+      config
+    ) as { error: string; message: string };
+    expect(hashOnlyTags.error).toBe("VALIDATION_ERROR");
+    expect(hashOnlyTags.message).toMatch(/tags.*non-empty tags/);
 
     const emptyConcepts = await create_note(
       vault,
@@ -277,6 +285,23 @@ describe("create_note frontmatter array validation", () => {
 
     const entries = await fs.readdir(path.join(vault, "notes")).catch(() => []);
     expect(entries).toEqual([]);
+  }, 30000);
+
+  test("normalizes hashtag-prefixed tags before writing frontmatter", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const created = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Hashtag Tags", body: "x", tags: ["#research", "  ##writing  "] },
+      config
+    ) as { id: string };
+
+    const content = await fs.readFile(path.join(vault, created.id), "utf-8");
+    expect(content).toContain("research");
+    expect(content).toContain("writing");
+    expect(content).not.toContain("#research");
+    expect(content).not.toContain("##writing");
   }, 30000);
 });
 
@@ -1823,7 +1848,13 @@ describe("update_note", () => {
       owner: TEST_AGENT, id, frontmatter_patch: { tags: ["", "valid"] },
     }, config) as { error: string; message: string };
     expect(emptyTags.error).toBe("VALIDATION_ERROR");
-    expect(emptyTags.message).toMatch(/tags.*non-empty strings/);
+    expect(emptyTags.message).toMatch(/tags.*non-empty tags/);
+
+    const hashOnlyTags = await update_note(vault, {
+      owner: TEST_AGENT, id, frontmatter_patch: { tags: ["  #  "] },
+    }, config) as { error: string; message: string };
+    expect(hashOnlyTags.error).toBe("VALIDATION_ERROR");
+    expect(hashOnlyTags.message).toMatch(/tags.*non-empty tags/);
 
     const emptyConcepts = await update_note(vault, {
       owner: TEST_AGENT, id, frontmatter_patch: { concepts: ["valid", "   "] },
@@ -1833,6 +1864,21 @@ describe("update_note", () => {
 
     const content = await fs.readFile(path.join(vault, id), "utf-8");
     expect(content).not.toContain("valid");
+  }, 30000);
+
+  it("normalizes hashtag-prefixed tag patch elements before writing frontmatter", async () => {
+    const { vault, config, id } = await vaultWithNote();
+
+    const res = await update_note(vault, {
+      owner: TEST_AGENT, id, frontmatter_patch: { tags: ["#curated", "  ##reviewed  "] },
+    }, config) as { updated: boolean };
+    expect(res.updated).toBe(true);
+
+    const content = await fs.readFile(path.join(vault, id), "utf-8");
+    expect(content).toContain("curated");
+    expect(content).toContain("reviewed");
+    expect(content).not.toContain("#curated");
+    expect(content).not.toContain("##reviewed");
   }, 30000);
 
   it("rejects a non-.md id and a .git/.schist id", async () => {
