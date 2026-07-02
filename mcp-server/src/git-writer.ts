@@ -24,9 +24,32 @@ const WRITE_TIMEOUT_ERROR = Object.assign(
  */
 export const writeMutex = withTimeout(new Mutex(), 10000, WRITE_TIMEOUT_ERROR);
 
-async function git(vaultRoot: string, args: string[]): Promise<string> {
-  const { stdout } = await execFile("git", args, { cwd: vaultRoot });
-  return stdout.trim();
+// Fast local git ops (checkout/add/diff/rev-parse) should never take long;
+// `git commit` fires the synchronous post-commit hook (schist-ingest), so it
+// needs a much larger ceiling. Without a timeout a stalled ingest wedges the
+// held write mutex forever, and every subsequent write returns WRITE_TIMEOUT
+// while the root call never resolves (#257). Both are env-overridable.
+const GIT_OP_TIMEOUT_MS = Number(process.env.SCHIST_GIT_OP_TIMEOUT_MS) || 30000;
+const GIT_COMMIT_TIMEOUT_MS = Number(process.env.SCHIST_GIT_COMMIT_TIMEOUT_MS) || 120000;
+
+async function git(vaultRoot: string, args: string[], timeoutMs: number = GIT_OP_TIMEOUT_MS): Promise<string> {
+  try {
+    const { stdout } = await execFile("git", args, { cwd: vaultRoot, timeout: timeoutMs });
+    return stdout.trim();
+  } catch (e: unknown) {
+    // execFile kills the child with SIGTERM on timeout and rejects with
+    // killed=true. Surface a typed, actionable error instead of a raw
+    // "Command failed" so the caller can distinguish a hang from a git error.
+    if (e !== null && typeof e === "object" && (e as { killed?: boolean }).killed) {
+      throw Object.assign(
+        new Error(
+          `git ${args[0]} timed out after ${timeoutMs}ms — the post-commit hook / schist-ingest may be stalled`,
+        ),
+        { error: "GIT_TIMEOUT" },
+      );
+    }
+    throw e;
+  }
 }
 
 async function getWriteBranch(vaultRoot: string): Promise<string> {
@@ -151,8 +174,19 @@ async function withWriteLock(
     // throws on non-zero exit, so we catch the "has diff" branch.
     let hasChanges = false;
     try {
-      await execFile("git", ["diff", "--cached", "--quiet", "--", relPath], { cwd: vaultRoot });
-    } catch {
+      await execFile("git", ["diff", "--cached", "--quiet", "--", relPath], { cwd: vaultRoot, timeout: GIT_OP_TIMEOUT_MS });
+    } catch (e: unknown) {
+      // `git diff --cached --quiet` exits 1 when there IS a staged diff, which
+      // execFile reports as a throw — that's the normal "has changes" path. A
+      // timeout also throws (killed=true); don't silently treat a hung diff as
+      // "has changes" — surface it so the write fails loudly rather than
+      // committing on a bad signal.
+      if (e !== null && typeof e === "object" && (e as { killed?: boolean }).killed) {
+        throw Object.assign(
+          new Error(`git diff timed out after ${GIT_OP_TIMEOUT_MS}ms`),
+          { error: "GIT_TIMEOUT" },
+        );
+      }
       hasChanges = true;
     }
     if (!hasChanges) {
@@ -160,8 +194,9 @@ async function withWriteLock(
       return { path: relPath, commitSha: sha, committed: false };
     }
 
-    // NEVER --no-verify — hard coded out
-    await git(vaultRoot, ["commit", "-m", commitMessage]);
+    // NEVER --no-verify — hard coded out. Larger timeout: commit runs the
+    // synchronous post-commit ingest hook.
+    await git(vaultRoot, ["commit", "-m", commitMessage], GIT_COMMIT_TIMEOUT_MS);
     const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
     return { path: relPath, commitSha: sha, committed: true };
   } finally {
