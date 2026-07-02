@@ -19,13 +19,22 @@ def commit(vault_path: str, message: str, files: list[str] | None = None) -> tup
         subprocess.run(
             ['git', 'add'] + add_args,
             cwd=vault_path, check=True, capture_output=True, text=True,
+            timeout=60,
         )
+        # `git commit` runs the synchronous post-commit hook (schist-ingest),
+        # so it needs a generous ceiling — but it MUST have one. Without it a
+        # stalled ingest hangs `schist add`/`link`/`sync push` forever with no
+        # way out but kill (#256). Mirrors clone/pull/push, which all set one.
         result = subprocess.run(
             ['git', 'commit', '-m', message],
             cwd=vault_path, capture_output=True, text=True,
+            timeout=120,
         )
         output = result.stdout + result.stderr
         return result.returncode == 0, output.strip()
+    except subprocess.TimeoutExpired as e:
+        cmd = e.cmd[1] if isinstance(e.cmd, list) and len(e.cmd) > 1 else 'command'
+        return False, f"git {cmd} timed out after {e.timeout}s (post-commit ingest may be stalled)"
     except subprocess.CalledProcessError as e:
         return False, (e.stdout or '') + (e.stderr or '')
 

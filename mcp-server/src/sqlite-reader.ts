@@ -258,11 +258,27 @@ function runIngestSync(vaultRoot: string): void {
   // here (1 line) rather than imported to avoid a tools→reader→tools cycle.
   const ingestBin = process.env.SCHIST_INGEST_BIN?.trim() || "schist-ingest";
   const dbPath = path.join(vaultRoot, ".schist", "schist.db");
+  // A full vault rebuild can be slow on large vaults / slow disks, so the
+  // ceiling is generous — but it MUST exist. Without it, a stalled
+  // schist-ingest (I/O contention, filesystem lock) blocks the MCP server
+  // forever on the first read after schema drift, since openDb → every read
+  // tool routes through here (#247). Env-overridable.
+  const timeoutMs = Number(process.env.SCHIST_INGEST_TIMEOUT_MS) || 120000;
   const res = spawnSync(ingestBin, ["--vault", vaultRoot, "--db", dbPath], {
     cwd: vaultRoot,
     stdio: ["ignore", "ignore", "pipe"],
     encoding: "utf-8",
+    timeout: timeoutMs,
   });
+  // spawnSync sets res.error to an ETIMEDOUT Error and kills the child on
+  // timeout; surface that as an actionable message rather than a raw spawn err.
+  if (res.error && (res.error as NodeJS.ErrnoException).code === "ETIMEDOUT") {
+    throw new Error(
+      `schist-ingest timed out after ${timeoutMs}ms during schema-drift rebuild — ` +
+      `the vault may be very large or the process stalled. ` +
+      `Raise SCHIST_INGEST_TIMEOUT_MS if the vault legitimately needs longer.`,
+    );
+  }
   if (res.error || res.status !== 0) {
     const stderr = (res.stderr ?? "").toString().trim();
     throw new Error(

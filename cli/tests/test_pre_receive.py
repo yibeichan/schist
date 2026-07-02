@@ -348,6 +348,18 @@ class TestMain:
             )
         assert rc == 0
 
+    def test_git_log_timeout_rejects_with_human_message(self, acl, capsys):
+        """#243: a TimeoutExpired from get_changed_files rejects fail-safe with a
+        readable message, not an uncaught traceback leaked to the pusher."""
+        stdin = ["abc123 def456 refs/heads/main"]
+        timeout = subprocess.TimeoutExpired(cmd=["git", "log"], timeout=30)
+        with patch("schist.pre_receive.get_changed_files", side_effect=timeout):
+            rc = main(stdin=stdin, acl=acl, identity="cluster-mario")
+        assert rc == 1
+        stderr = capsys.readouterr().err
+        assert "timed out" in stderr
+        assert "Traceback" not in stderr
+
     def test_empty_stdin(self, acl):
         rc = self._run(acl, "admin", [""], [])
         assert rc == 0
