@@ -294,13 +294,18 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         if any(part in SKIP_DIRS for part in rel.parts):
             continue
 
-        raw_text = md_file.read_text(encoding='utf-8')
-        patched_text = patch_frontmatter_flow_hashtags(raw_text)
-
         try:
+            raw_text = md_file.read_text(encoding='utf-8')
+            patched_text = patch_frontmatter_flow_hashtags(raw_text)
             post = frontmatter.loads(patched_text)
+        except UnicodeDecodeError as e:
+            # A single non-UTF-8 .md file (binary attachment, non-UTF-8 editor,
+            # corruption) must never abort the whole index — that leaves the
+            # vault in a permanent read outage until the file is removed (#296).
+            print(f'  WARN: skipping {rel} — invalid UTF-8: {e}')
+            continue
         except Exception as e:
-            print(f'  WARN: skipping {rel} — frontmatter parse error: {e}')
+            print(f'  WARN: skipping {rel} — {type(e).__name__}: {e}')
             continue
         meta = post.metadata
         body = post.content
