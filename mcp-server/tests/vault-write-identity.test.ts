@@ -84,12 +84,13 @@ describe("#63 vault-write identity enforcement", () => {
 
     test("add_connection returns CONFIG_ERROR", async () => {
       const vault = await makeTempVault();
+      const config = await loadVaultConfig(vault);
       const result = (await add_connection(vault, {
         owner: "anything",
         source: "notes/missing.md",
         target: "t",
         type: "related",
-      })) as { error: string; message: string };
+      }, config)) as { error: string; message: string };
       expect(result.error).toBe("CONFIG_ERROR");
     });
   });
@@ -117,12 +118,13 @@ describe("#63 vault-write identity enforcement", () => {
       // not NOT_FOUND. This proves the gate fires before vault reads.
       process.env.SCHIST_AGENT_ID = "octopus";
       const vault = await makeTempVault();
+      const config = await loadVaultConfig(vault);
       const result = (await add_connection(vault, {
         owner: "atwood",
         source: "notes/never-existed.md",
         target: "t",
         type: "related",
-      })) as { error: string; message: string };
+      }, config)) as { error: string; message: string };
       expect(result.error).toBe("VALIDATION_ERROR");
     });
 
@@ -268,7 +270,7 @@ describe("#63 vault-write identity enforcement", () => {
         source: seed.path,
         target: "some-target",
         type: "related",
-      });
+      }, config);
 
       const { stdout } = await execFile("git", ["log", "-2", "--format=%s"], { cwd: vault });
       const subjects = stdout.trim().split("\n");

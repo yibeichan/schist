@@ -1386,7 +1386,8 @@ export async function create_note(
 
 export async function add_connection(
   vaultRoot: string,
-  args: { owner: string; source: string; target: string; type: string; context?: string }
+  args: { owner: string; source: string; target: string; type: string; context?: string },
+  config: VaultConfig
 ): Promise<unknown> {
   try {
     // Identity gate (#63): same ordering as create_note. Reassign to the
@@ -1394,11 +1395,16 @@ export async function add_connection(
     const owner = validateOwner(args.owner);
     const syncDirty = await blockWriteIfSyncDirty(vaultRoot);
     if (syncDirty !== null) return syncDirty;
+    const srcIdError = validateNoteId(args.source, config);
+    if (srcIdError !== null) return srcIdError;
     const filePath = path.join(vaultRoot, args.source);
     const absVaultRoot = path.resolve(vaultRoot);
     const absFilePath = path.resolve(filePath);
     if (!absFilePath.startsWith(absVaultRoot + path.sep)) {
       return { error: "PATH_TRAVERSAL", message: "Source path is outside vault root" } satisfies ToolError;
+    }
+    if (!(await resolvesInsideVault(vaultRoot, args.source))) {
+      return { error: "PATH_TRAVERSAL", message: "Source path resolves outside the vault (symlink?)" } satisfies ToolError;
     }
 
     let content: string;
@@ -1431,7 +1437,14 @@ export async function add_connection(
 
     let newContent: string;
     if (content.includes("## Connections")) {
-      newContent = content.replace(/(## Connections\n(?:.*\n)*?)(\n## |\s*$)/, (match, section, after) => {
+      // The insertion regex's `(?:.*\n)*?` only matches lines that end in \n.
+      // If the source's last line has no trailing newline (hand-edited notes,
+      // parseNote round-trips), the regex matches nothing and `String.replace`
+      // returns the content unchanged — writeNote skips the commit but the tool
+      // still reports success, silently dropping the edge (#295). Guarantee a
+      // terminal newline first so the section body is always matchable.
+      const normalized = content.endsWith("\n") ? content : content + "\n";
+      newContent = normalized.replace(/(## Connections\n(?:.*\n)*?)(\n## |\s*$)/, (match, section, after) => {
         return section.trimEnd() + "\n" + connLine + "\n" + after;
       });
     } else {
@@ -1530,7 +1543,12 @@ function stripConnectionsTo(content: string, targets: string[]): { content: stri
     const next = j < out.length ? out[j].trim() : "";
     if (j >= out.length || next.startsWith("## ")) {
       while (cleaned.length > 0 && cleaned[cleaned.length - 1].trim() === "") cleaned.pop();
-      if (j < out.length) cleaned.push("");
+      // Push a single "" either way: as the blank separator before the next
+      // section (j < out.length), or — when Connections was the last section
+      // (j >= out.length) — as the terminal element that join("\n") turns back
+      // into the file's trailing newline. Omitting it here stripped the final
+      // newline from cascade-deleted notes (#280).
+      cleaned.push("");
       i = j - 1;
       continue;
     }
