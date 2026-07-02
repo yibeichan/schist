@@ -207,6 +207,7 @@ function ensureSchemaCurrent(vaultRoot: string): void {
   const checkMissing = (): string[] => {
     try {
       const db = new Database(dbPath, { readonly: true });
+      db.pragma("busy_timeout = 5000");
       try {
         const tableRows = db.prepare(
           "SELECT name FROM sqlite_master WHERE type = 'table'",
@@ -294,6 +295,10 @@ function openDb(vaultRoot: string, opts?: { readonly?: boolean }): Database.Data
   const dbPath = path.join(vaultRoot, ".schist", "schist.db");
   const readonly = opts?.readonly ?? true;
   const db = new Database(dbPath, { readonly });
+  // Grace period for residual lock contention (e.g. WAL checkpoints during
+  // ingest); without it the first concurrent read fails hard with
+  // SQLITE_BUSY. Matches openMemoryDb. See #254.
+  db.pragma("busy_timeout = 5000");
   if (!readonly) {
     db.pragma("foreign_keys = ON");
   }
@@ -540,6 +545,7 @@ function runQueryGraphChild(
       try {
         const request = JSON.parse(input);
         const db = new Database(request.dbPath, { readonly: true });
+        db.pragma("busy_timeout = 5000");
         try {
           const stmt = db.prepare(request.sql);
           const columns = stmt.columns().map((c) => c.name);

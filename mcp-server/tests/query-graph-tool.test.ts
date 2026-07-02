@@ -131,6 +131,19 @@ describe("query_graph tool — SQL guards still in force", () => {
     if (!("rows" in r)) throw new Error(`expected rows: ${JSON.stringify(r)}`);
     expect(r.rows.length).toBe(1);
   });
+
+  it("reads a WAL-mode vault DB through the readonly child (#254)", async () => {
+    // schema.sql now switches vault DBs to WAL; the readonly query child and
+    // openDb must keep working against that journal mode.
+    vaultRoot = await makeVault(3);
+    const db = new Database(path.join(vaultRoot, ".schist", "schist.db"));
+    expect(db.pragma("journal_mode = WAL", { simple: true })).toBe("wal");
+    db.close();
+
+    const r = await query_graph(vaultRoot, { sql: "SELECT id FROM docs ORDER BY id" });
+    if (!("rows" in r)) throw new Error(`expected rows: ${JSON.stringify(r)}`);
+    expect(r.rows.length).toBe(3);
+  });
 });
 
 // ── cursor decoding ────────────────────────────────────────────────────────
