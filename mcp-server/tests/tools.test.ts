@@ -1237,7 +1237,7 @@ describe("write-tool sync dirty blocking (#75)", () => {
       source: noteResult.path,
       target: "some-target",
       type: "related",
-    })) as { error?: string; message?: string };
+    }, await loadVaultConfig(vault))) as { error?: string; message?: string };
 
     expect(result.error).toBe("SYNC_DIRTY");
     expect(result.message).toContain("push spawn failed");
@@ -1634,6 +1634,7 @@ access:
     const result = await add_connection(
       vault,
       { owner: TEST_AGENT, source: created.path, target: "[[Some Concept]]", type: "related" },
+      config,
     ) as { error: string; message: string };
     expect(result.error).toBe("ACL_DENIED");
     expect(result.message).toMatch(/papers/);
@@ -1659,6 +1660,7 @@ access:
       const result = await add_connection(
         vault,
         { owner: "claude-desktop", source: created.path, target: "[[Some Concept]]", type: "related" },
+        config,
       ) as { commitSha?: string; error?: string };
       expect(result.error).toBeUndefined();
     } finally {
@@ -1689,6 +1691,7 @@ access:
       const result = await add_connection(
         vault,
         { owner: "dragonfly", source: created.path, target: "[[Some Concept]]", type: "related" },
+        config,
       ) as { error: string; message: string };
       expect(result.error).toBe("ACL_DENIED");
       expect(result.message).toMatch(/orcd/);
@@ -1701,8 +1704,92 @@ access:
 
 
 // ---------------------------------------------------------------------------
+// add_connection — source id validation (#294) + symlink guard (#258)
+// ---------------------------------------------------------------------------
+
+describe("add_connection source validation", () => {
+  test("rejects a non-.md config-file source (#294)", async () => {
+    const vault = await makeTempVault();
+    const result = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: "schist.yaml", target: "some-target", type: "extends" },
+      await loadVaultConfig(vault),
+    ) as { error?: string };
+    // validateNoteId must fire before the file is ever read/written, so the
+    // ## Connections block can never be injected into vault config.
+    expect(result.error).toBe("VALIDATION_ERROR");
+  });
+
+  test("rejects a dot-prefixed segment source such as .git/config (#294)", async () => {
+    const vault = await makeTempVault();
+    const result = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: ".git/config", target: "some-target", type: "extends" },
+      await loadVaultConfig(vault),
+    ) as { error?: string };
+    expect(result.error).toBe("VALIDATION_ERROR");
+  });
+
+  test("rejects a .md symlink whose target resolves outside the vault (#258)", async () => {
+    const vault = await makeTempVault();
+    // A secret living outside the vault the attacker wants to append to.
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "schist-outside-"));
+    createdDirs.add(outside);
+    const secret = path.join(outside, "secret.txt");
+    await fs.writeFile(secret, "outside-content\n");
+    // Tracked symlink inside a granted note directory: passes validateNoteId
+    // and the lexical prefix guard, but realpath escapes the vault.
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.symlink(secret, path.join(vault, "notes", "leak.md"));
+    const result = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: "notes/leak.md", target: "some-target", type: "extends" },
+      await loadVaultConfig(vault),
+    ) as { error?: string };
+    expect(result.error).toBe("PATH_TRAVERSAL");
+    // The symlink target must be untouched.
+    expect(await fs.readFile(secret, "utf-8")).toBe("outside-content\n");
+  });
+});
+
+
+// ---------------------------------------------------------------------------
 // update_note (#119)
 // ---------------------------------------------------------------------------
+
+describe("add_connection append path (#295)", () => {
+  it("appends an edge when the existing Connections section has no trailing newline", async () => {
+    const vault = await makeTempVault();
+    const rel = "notes/2026-07-01-no-newline.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    // Hand-edited note: existing ## Connections section whose last line has NO
+    // trailing newline. The old insertion regex matched nothing here, so the
+    // append was silently dropped while the tool still reported a commitSha.
+    await fs.writeFile(
+      path.join(vault, rel),
+      "---\ntitle: No Newline\n---\n\n## Connections\n\n- extends: notes/other.md",
+      "utf-8",
+    );
+    await execFile("git", ["add", "."], { cwd: vault });
+    await execFile("git", ["commit", "-m", "no-newline fixture"], { cwd: vault });
+
+    const res = await add_connection(vault, {
+      owner: TEST_AGENT,
+      source: rel,
+      target: "notes/new.md",
+      type: "supports",
+    }, await loadVaultConfig(vault)) as { commitSha?: string; error?: string };
+
+    expect(res.error).toBeUndefined();
+    expect(res.commitSha).toBeDefined();
+
+    const after = await fs.readFile(path.join(vault, rel), "utf-8");
+    expect(after).toContain("- supports: notes/new.md"); // the new edge landed
+    expect(after).toContain("- extends: notes/other.md"); // the existing one survived
+    expect(after.endsWith("\n")).toBe(true);
+  }, 30000);
+});
+
 
 describe("update_note", () => {
   async function vaultWithNote(extra?: Partial<Parameters<typeof create_note>[1]>): Promise<{ vault: string; config: Awaited<ReturnType<typeof loadVaultConfig>>; id: string }> {
@@ -2032,6 +2119,10 @@ describe("delete_note", () => {
     const after = await fs.readFile(path.join(vault, linker.id), "utf-8");
     expect(after).not.toContain(`extends: ${target.id}`);
     expect(after).not.toContain("## Connections");
+    // #280: removing the last (Connections) section must preserve the file's
+    // terminal newline — a bare stripConnectionsTo dropped it.
+    expect(after.endsWith("\n")).toBe(true);
+    expect(after).not.toMatch(/\n\n$/); // exactly one trailing newline, no blank tail
   }, 30000);
 
   it("cascade keeps the Connections section when other connection lines remain", async () => {

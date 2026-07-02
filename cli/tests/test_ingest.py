@@ -341,6 +341,44 @@ def test_ingest_skips_non_string_tag_elements(tmp_path: Path) -> None:
     assert json.loads(row[0]) == ["research", "writing"]
 
 
+def test_ingest_skips_invalid_utf8_file(tmp_path: Path) -> None:
+    """#296: a single non-UTF-8 .md file must be skipped, not abort the vault.
+
+    Previously the read_text() call sat outside the per-file try/except, so a
+    UnicodeDecodeError propagated up through ingest(), the DB was closed
+    without a commit, and the caller deleted it — a permanent read outage.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    # A good note that must still be indexed despite the corrupt sibling.
+    _write_note(
+        vault,
+        "2026-07-01-good.md",
+        "---\ntitle: Good Note\ndate: 2026-07-01\n---\n\nBody.\n",
+    )
+    # A .md file containing an invalid UTF-8 byte (0xFF).
+    (vault / "notes" / "2026-07-01-corrupt.md").write_bytes(
+        b"---\ntitle: Corrupt\n---\n\n\xff\xfe binary junk\n"
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    # Must not raise, and the DB must survive with the good note indexed.
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT title FROM docs ORDER BY title").fetchall()
+    finally:
+        conn.close()
+
+    titles = [r[0] for r in rows]
+    assert "Good Note" in titles
+    assert "Corrupt" not in titles
+
+
 def test_ingest_drops_hash_only_tags(tmp_path: Path) -> None:
     """Hash-only tags strip to empty and should not be indexed."""
     from schist.ingest import ingest
