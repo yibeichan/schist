@@ -131,6 +131,43 @@ describe("query_graph tool — SQL guards still in force", () => {
     if (!("rows" in r)) throw new Error(`expected rows: ${JSON.stringify(r)}`);
     expect(r.rows.length).toBe(1);
   });
+
+  it("allows backtick-quoted identifiers named after blocked keywords (#253)", async () => {
+    vaultRoot = await makeVault(1);
+    const r = await query_graph(vaultRoot, {
+      sql: "SELECT id AS `create`, title AS `delete` FROM docs",
+    });
+    if (!("rows" in r)) throw new Error(`expected rows: ${JSON.stringify(r)}`);
+    expect(r.columns).toEqual(["create", "delete"]);
+    expect(r.rows.length).toBe(1);
+  });
+
+  it("allows a backtick-quoted table alias named after a blocked keyword (#253)", async () => {
+    vaultRoot = await makeVault(1);
+    const r = await query_graph(vaultRoot, {
+      sql: "SELECT `DROP`.id FROM docs AS `DROP`",
+    });
+    if (!("rows" in r)) throw new Error(`expected rows: ${JSON.stringify(r)}`);
+    expect(r.rows.length).toBe(1);
+  });
+
+  it("allows bracket-quoted identifiers named after blocked keywords (#253)", async () => {
+    vaultRoot = await makeVault(1);
+    const r = await query_graph(vaultRoot, {
+      sql: "SELECT id AS [update] FROM docs",
+    });
+    if (!("rows" in r)) throw new Error(`expected rows: ${JSON.stringify(r)}`);
+    expect(r.columns).toEqual(["update"]);
+    expect(r.rows.length).toBe(1);
+  });
+
+  it("still rejects DML keywords outside backtick identifiers (#253)", async () => {
+    vaultRoot = await makeVault(1);
+    const r = await query_graph(vaultRoot, {
+      sql: "WITH x AS (SELECT 1) DELETE FROM `docs`",
+    });
+    expect(r).toMatchObject({ error: "INVALID_SQL" });
+  });
 });
 
 // ── cursor decoding ────────────────────────────────────────────────────────
