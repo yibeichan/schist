@@ -120,7 +120,7 @@ async function main() {
           result = await delete_note(vaultRoot, toolArgs as Parameters<typeof delete_note>[1], config);
           break;
         case "add_connection":
-          result = await add_connection(vaultRoot, toolArgs as Parameters<typeof add_connection>[1]);
+          result = await add_connection(vaultRoot, toolArgs as Parameters<typeof add_connection>[1], config);
           break;
         case "list_concepts":
           result = await list_concepts(vaultRoot, toolArgs as Parameters<typeof list_concepts>[1]);

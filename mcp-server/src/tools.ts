@@ -1386,7 +1386,8 @@ export async function create_note(
 
 export async function add_connection(
   vaultRoot: string,
-  args: { owner: string; source: string; target: string; type: string; context?: string }
+  args: { owner: string; source: string; target: string; type: string; context?: string },
+  config: VaultConfig
 ): Promise<unknown> {
   try {
     // Identity gate (#63): same ordering as create_note. Reassign to the
@@ -1394,11 +1395,16 @@ export async function add_connection(
     const owner = validateOwner(args.owner);
     const syncDirty = await blockWriteIfSyncDirty(vaultRoot);
     if (syncDirty !== null) return syncDirty;
+    const srcIdError = validateNoteId(args.source, config);
+    if (srcIdError !== null) return srcIdError;
     const filePath = path.join(vaultRoot, args.source);
     const absVaultRoot = path.resolve(vaultRoot);
     const absFilePath = path.resolve(filePath);
     if (!absFilePath.startsWith(absVaultRoot + path.sep)) {
       return { error: "PATH_TRAVERSAL", message: "Source path is outside vault root" } satisfies ToolError;
+    }
+    if (!(await resolvesInsideVault(vaultRoot, args.source))) {
+      return { error: "PATH_TRAVERSAL", message: "Source path resolves outside the vault (symlink?)" } satisfies ToolError;
     }
 
     let content: string;
