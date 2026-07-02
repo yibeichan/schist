@@ -281,6 +281,42 @@ def test_raw_query_rejects_cte_prefixed_insert(capsys) -> None:
     assert "INSERT statements are not allowed" in capsys.readouterr().err
 
 
+def test_raw_query_rejects_cte_prefixed_replace(capsys) -> None:
+    """REPLACE INTO is SQLite's INSERT-OR-REPLACE alias and can ride a CTE
+    prefix with no FROM/JOIN — the same bypass class as #239, for a verb not
+    in the main keyword loop. Adversarial-review finding."""
+    conn = _docs_concepts_conn()
+    conn.execute("INSERT INTO docs (id, title) VALUES ('a', 'ok')")
+
+    with pytest.raises(SystemExit):
+        raw_query(
+            conn,
+            "WITH x AS (SELECT 1) REPLACE INTO docs (id, title) VALUES ('a', 'PWNED')",
+        )
+
+    assert "REPLACE statements are not allowed" in capsys.readouterr().err
+    # Guard must fire before the write executes.
+    assert conn.execute("SELECT title FROM docs WHERE id='a'").fetchone()[0] == "ok"
+
+
+def test_raw_query_rejects_plain_replace_into(capsys) -> None:
+    conn = _docs_concepts_conn()
+
+    with pytest.raises(SystemExit):
+        raw_query(conn, "REPLACE INTO docs (id, title) VALUES ('a', 'b')")
+
+
+def test_raw_query_allows_replace_scalar_function() -> None:
+    """The bare REPLACE() string function must stay allowed — only REPLACE
+    INTO is a write."""
+    conn = _docs_concepts_conn()
+    conn.execute("INSERT INTO docs (id, title) VALUES ('a', 'Note A')")
+
+    result = raw_query(conn, "SELECT REPLACE(title, 'Note', 'Doc') AS t FROM docs")
+
+    assert result == {"columns": ["t"], "rows": [["Doc A"]]}
+
+
 def test_raw_query_rejects_double_quoted_disallowed_table(capsys) -> None:
     """Double-quoted SQLite identifiers must not bypass ALLOWED_TABLES. See #240."""
     conn = _docs_concepts_conn()

@@ -240,6 +240,17 @@ def _validate_sql(sql: str):
             print(f'Error: {keyword} statements are not allowed', file=sys.stderr)
             sys.exit(1)
 
+    # REPLACE needs its own check, NOT a slot in the loop above: `REPLACE INTO`
+    # is SQLite's `INSERT OR REPLACE` alias — a write verb that can ride a CTE
+    # prefix (`WITH x AS (...) REPLACE INTO docs ...`) and carries no FROM/JOIN,
+    # so nothing else here catches it. But bare `REPLACE` is also the scalar
+    # string function (`SELECT REPLACE(title, 'a', 'b') FROM docs`), which must
+    # stay allowed — hence the required `INTO`, not `\bREPLACE\b`. Do not fold
+    # this back into the tuple. See adversarial review of #239/#240.
+    if re.search(r'\bREPLACE\s+INTO\b', cleaned, re.IGNORECASE):
+        print('Error: REPLACE statements are not allowed', file=sys.stderr)
+        sys.exit(1)
+
     # CTE alias names are virtual tables defined by `WITH name AS (...)`; a
     # reference like `FROM name` must not be checked against ALLOWED_TABLES.
     # See #223. Extracted from the masked view so text inside strings or
