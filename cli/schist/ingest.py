@@ -294,13 +294,18 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         if any(part in SKIP_DIRS for part in rel.parts):
             continue
 
-        raw_text = md_file.read_text(encoding='utf-8')
-        patched_text = patch_frontmatter_flow_hashtags(raw_text)
-
         try:
+            raw_text = md_file.read_text(encoding='utf-8')
+            patched_text = patch_frontmatter_flow_hashtags(raw_text)
             post = frontmatter.loads(patched_text)
+        except UnicodeDecodeError as e:
+            # A single non-UTF-8 .md file (binary attachment, non-UTF-8 editor,
+            # corruption) must never abort the whole index — that leaves the
+            # vault in a permanent read outage until the file is removed (#296).
+            print(f'  WARN: skipping {rel} — invalid UTF-8: {e}')
+            continue
         except Exception as e:
-            print(f'  WARN: skipping {rel} — frontmatter parse error: {e}')
+            print(f'  WARN: skipping {rel} — {type(e).__name__}: {e}')
             continue
         meta = post.metadata
         body = post.content
@@ -359,13 +364,22 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         # Title: explicit title > concept key > derive from filename
         title = meta.get('title') or meta.get('topic') or meta.get('concept') or title_from_filename(rel.name)
 
+        # Status: type-guard like every other scalar field above. A non-string
+        # value (status: 42, status: true, status: [draft]) would otherwise be
+        # stored with SQLite's native affinity, so `WHERE status = 'draft'`
+        # silently misses it and TS readers treating status as string break.
+        # (#278; distinct from #276 which validates the string against
+        # config.statuses in create_note.)
+        raw_status = meta.get('status')
+        status = raw_status if isinstance(raw_status, str) else None
+
         # Insert into docs
         date_val = meta.get('date')
         if date_val is not None:
             date_val = str(date_val)
         conn.execute(
             'INSERT INTO docs (id, title, date, status, tags, concepts, body, scope, source, confidence, file_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (doc_id, title, date_val, meta.get('status'), tags_json, concepts_json, body, scope, source, confidence, file_ref),
+            (doc_id, title, date_val, status, tags_json, concepts_json, body, scope, source, confidence, file_ref),
         )
         doc_count += 1
 

@@ -271,6 +271,45 @@ def test_ingest_preserves_missing_status_as_null(tmp_path: Path) -> None:
     assert row == (None,)
 
 
+def test_ingest_coerces_non_string_status_to_null(tmp_path: Path) -> None:
+    """#278: a non-string status must land as NULL, not a native-affinity value.
+
+    Otherwise `WHERE status = 'draft'` silently misses the row and TS readers
+    treating status as a string get a number/bool back.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-07-01-int-status.md",
+        "---\ntitle: Int Status\ndate: 2026-07-01\nstatus: 42\n---\n\nBody.\n",
+    )
+    _write_note(
+        vault,
+        "2026-07-01-list-status.md",
+        "---\ntitle: List Status\ndate: 2026-07-01\nstatus: [draft, final]\n---\n\nBody.\n",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = dict(
+            conn.execute(
+                "SELECT title, status FROM docs WHERE title IN ('Int Status', 'List Status')"
+            ).fetchall()
+        )
+    finally:
+        conn.close()
+
+    assert rows["Int Status"] is None
+    assert rows["List Status"] is None
+
+
 def test_ingest_skips_non_string_tag_elements(tmp_path: Path) -> None:
     """Malformed tag list entries are ignored instead of aborting vault ingest."""
     from schist.ingest import ingest
@@ -300,6 +339,44 @@ def test_ingest_skips_non_string_tag_elements(tmp_path: Path) -> None:
         conn.close()
 
     assert json.loads(row[0]) == ["research", "writing"]
+
+
+def test_ingest_skips_invalid_utf8_file(tmp_path: Path) -> None:
+    """#296: a single non-UTF-8 .md file must be skipped, not abort the vault.
+
+    Previously the read_text() call sat outside the per-file try/except, so a
+    UnicodeDecodeError propagated up through ingest(), the DB was closed
+    without a commit, and the caller deleted it — a permanent read outage.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    # A good note that must still be indexed despite the corrupt sibling.
+    _write_note(
+        vault,
+        "2026-07-01-good.md",
+        "---\ntitle: Good Note\ndate: 2026-07-01\n---\n\nBody.\n",
+    )
+    # A .md file containing an invalid UTF-8 byte (0xFF).
+    (vault / "notes" / "2026-07-01-corrupt.md").write_bytes(
+        b"---\ntitle: Corrupt\n---\n\n\xff\xfe binary junk\n"
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    # Must not raise, and the DB must survive with the good note indexed.
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT title FROM docs ORDER BY title").fetchall()
+    finally:
+        conn.close()
+
+    titles = [r[0] for r in rows]
+    assert "Good Note" in titles
+    assert "Corrupt" not in titles
 
 
 def test_ingest_drops_hash_only_tags(tmp_path: Path) -> None:
