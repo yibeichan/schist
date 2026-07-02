@@ -61,10 +61,15 @@ def _run_ingest(vault_path: str, db_path: str):
     try:
         ingest(vault_path, db_path)
     except Exception:
-        try:
-            os.unlink(db_path)
-        except OSError:
-            pass
+        # Delete the -wal/-shm siblings too: in WAL mode (#254) the failed
+        # ingest's data can live entirely in the -wal, and a surviving -wal
+        # would be silently replayed into whatever DB file next appears at
+        # this path (e.g. the backup _rebuild_index restores).
+        for p in (db_path, f"{db_path}-wal", f"{db_path}-shm"):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
         raise
 
 

@@ -1053,6 +1053,33 @@ def _dispatch_init(args) -> None:
     init_standalone(args)
 
 
+def _wal_siblings(db: Path) -> tuple[Path, Path]:
+    """The -wal/-shm files SQLite pairs with `db` (WAL mode, see #254)."""
+    return Path(f"{db}-wal"), Path(f"{db}-shm")
+
+
+def _unlink_db_with_wal(db: Path) -> None:
+    """Remove a SQLite DB together with any -wal/-shm siblings."""
+    for p in (db, *_wal_siblings(db)):
+        p.unlink(missing_ok=True)
+
+
+def _move_db_with_wal(src: Path, dst: Path) -> None:
+    """Rename a SQLite DB together with any -wal/-shm siblings.
+
+    SQLite derives the WAL file name from the DB file name, so moving only
+    the main file divorces it from its WAL. If a close-checkpoint was ever
+    blocked (an MCP reader open at ingest-close time), the -wal holds the
+    live data and the moved main file alone reads as EMPTY — and a stray
+    -wal left at the destination name would be silently replayed into the
+    moved file. Move all three names as a unit.
+    """
+    src.rename(dst)
+    for s, d in zip(_wal_siblings(src), _wal_siblings(dst)):
+        if s.exists():
+            s.rename(d)
+
+
 def _rebuild_index(vault_path: str, db_path: str) -> None:
     """Delete existing SQLite and re-ingest from markdown files.
 
@@ -1063,12 +1090,20 @@ def _rebuild_index(vault_path: str, db_path: str) -> None:
     rebuild it survives naturally (ingest.py runs against the existing DB).
     Here we rename the whole file, so the copy is the only thing keeping
     its rows alive.
+
+    All file moves/removals go through the WAL-aware helpers above; with the
+    DB in WAL mode (#254) the -wal sibling can hold the entire index, and
+    handling only the main file silently loses or corrupts it.
     """
     db = Path(db_path)
     backup = None
     if db.exists():
         backup = db.with_suffix(".db.bak")
-        db.rename(backup)
+        # Clear any stale backup first — a leftover .bak-wal from an earlier
+        # crashed rebuild would otherwise pair with the fresh backup and be
+        # replayed into it.
+        _unlink_db_with_wal(backup)
+        _move_db_with_wal(db, backup)
 
     from .sqlite_query import _run_ingest
 
@@ -1076,11 +1111,14 @@ def _rebuild_index(vault_path: str, db_path: str) -> None:
         _run_ingest(vault_path, db_path)
         if backup and backup.exists():
             _preserve_side_tables(backup, db)
-            backup.unlink()
+            _unlink_db_with_wal(backup)
     except Exception as e:
-        # Restore backup so user keeps old (stale) index rather than none
+        # Restore backup so user keeps old (stale) index rather than none.
+        # Remove anything the failed ingest left at the live name first so
+        # its -wal can't be replayed into the restored backup.
         if backup and backup.exists():
-            backup.rename(db)
+            _unlink_db_with_wal(db)
+            _move_db_with_wal(backup, db)
         print(f"Warning: index rebuild failed: {e}", file=sys.stderr)
 
 

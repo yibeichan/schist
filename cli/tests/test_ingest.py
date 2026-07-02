@@ -993,3 +993,29 @@ def test_ingest_switches_db_to_wal_mode(tmp_path: Path) -> None:
         assert conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_ingest_no_wal_env_keeps_rollback_journal(tmp_path: Path, monkeypatch) -> None:
+    """#254: SCHIST_NO_WAL=1 opts out of WAL for vaults on network
+    filesystems (HPC spokes), where SQLite documents WAL as unsafe."""
+    from schist.ingest import ingest
+
+    monkeypatch.setenv("SCHIST_NO_WAL", "1")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-07-02-nowal.md",
+        "---\ntitle: NoWal\ndate: 2026-07-02\n---\n\nBody.\n",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        assert conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0] == 1
+    finally:
+        conn.close()

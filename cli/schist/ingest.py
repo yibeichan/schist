@@ -284,6 +284,14 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     """
     conn.executescript(schema_path.read_text())
 
+    # WAL (set by schema.sql, #254) is unsafe when the vault lives on a
+    # network filesystem — SQLite requires all processes using a WAL DB to
+    # be on the same host, and HPC spokes (e.g. orcd) may serve the vault
+    # over NFS/Lustre to login and compute nodes at once. SCHIST_NO_WAL=1
+    # keeps the pre-#254 rollback-journal behavior on such deployments.
+    if os.environ.get('SCHIST_NO_WAL'):
+        conn.execute('PRAGMA journal_mode=DELETE')
+
     doc_count = 0
     concept_count = 0
     edge_count = 0

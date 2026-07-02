@@ -975,3 +975,101 @@ class TestBuildStandaloneVault:
         data = _build_standalone_vault(name="v", identity="local")
         acl = parse_vault_data(data)
         assert acl.scope_convention == "flat"
+
+
+class TestRebuildIndexWalSafety:
+    """#254 follow-up: _rebuild_index must move/delete the -wal/-shm siblings
+    with the main DB file, or a WAL DB whose close-checkpoint was blocked
+    (an MCP reader open at ingest-close time) silently loses its index."""
+
+    def test_aliases_survive_rebuild_when_index_lives_in_wal(self, tmp_path):
+        import sqlite3
+        from schist.sync import _rebuild_index
+
+        vault, db_path = _init_vault_with_schema(tmp_path)
+        # Alias endpoints must exist as concepts or the #213 dangling-FK
+        # prune (not the WAL handling under test) removes the row.
+        concepts = Path(vault) / "concepts"
+        (concepts / "bp.md").write_text(
+            "---\nconcept: bp\ntitle: BP\n---\n\nShort form.\n"
+        )
+        (concepts / "backpropagation.md").write_text(
+            "---\nconcept: backpropagation\ntitle: Backpropagation\n---\n\nCanonical.\n"
+        )
+        _rebuild_index(vault, db_path)
+
+        # Put an alias row in, then force the "entire index in the -wal"
+        # state: a read-only connection with an active statement blocks the
+        # writer's close-checkpoint, and a read-only close can't checkpoint.
+        writer = sqlite3.connect(db_path)
+        writer.execute(
+            "INSERT INTO concept_aliases "
+            "(duplicate_slug, canonical_slug, reason, created_by) "
+            "VALUES ('bp', 'backpropagation', 'short', 'tester')"
+        )
+        writer.commit()
+        reader = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        cursor = reader.execute("SELECT id FROM docs")
+        writer.close()
+        cursor.fetchall()
+        reader.close()
+
+        wal = Path(f"{db_path}-wal")
+        assert wal.exists() and wal.stat().st_size > 0, (
+            "test precondition failed: expected the index to be left in the -wal"
+        )
+
+        _rebuild_index(vault, db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT duplicate_slug, canonical_slug FROM concept_aliases"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert ("bp", "backpropagation") in rows
+        # No orphaned backup or sibling files left behind
+        assert not Path(f"{db_path}.bak").exists()
+        assert not Path(f"{db_path}.bak-wal").exists()
+
+    def test_failed_rebuild_restores_backup_without_replaying_stray_wal(self, tmp_path, capsys):
+        import sqlite3
+        from unittest.mock import patch as _patch
+        from schist.sync import _rebuild_index
+
+        vault, db_path = _init_vault_with_schema(tmp_path)
+        conn = sqlite3.connect(db_path)
+        old_docs = conn.execute("SELECT id FROM docs ORDER BY id").fetchall()
+        conn.close()
+
+        def poison_then_fail(vault_path, db):
+            # Mimic a rebuild that dies after ingest wrote at the live path
+            # (e.g. _preserve_side_tables raising): a fresh WAL DB whose data
+            # sits in its -wal file.
+            c = sqlite3.connect(db)
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("CREATE TABLE junk (x)")
+            c.execute("INSERT INTO junk VALUES (1)")
+            c.commit()
+            # Leave the connection open so close-checkpointing can't fold the
+            # -wal back into the main file, then abandon it.
+            raise RuntimeError("boom after partial write")
+
+        with _patch("schist.sqlite_query._run_ingest", side_effect=poison_then_fail):
+            _rebuild_index(vault, db_path)
+
+        assert "index rebuild failed" in capsys.readouterr().err
+        conn = sqlite3.connect(db_path)
+        try:
+            docs = conn.execute("SELECT id FROM docs ORDER BY id").fetchall()
+            tables = {
+                r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        assert docs == old_docs
+        assert "junk" not in tables, "failed ingest's -wal was replayed into the restored backup"
+        assert not Path(f"{db_path}.bak").exists()

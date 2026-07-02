@@ -208,6 +208,16 @@ ls -la ~/schist-vault/.schist/schist.db
 
 ## 5. ORCD Spoke Setup
 
+> **⚠️ Network filesystems: set `SCHIST_NO_WAL=1`.** Since #254, ingest puts
+> `schist.db` in WAL journal mode for concurrent-read performance. SQLite's
+> WAL mode is **unsafe across hosts** — all processes touching the DB must be
+> on the same machine, and HPC home/scratch directories are typically
+> NFS/Lustre mounts shared between login and compute nodes (e.g. a SLURM job
+> writing notes while a login-node shell queries). On any spoke whose vault
+> lives on a network filesystem, add `export SCHIST_NO_WAL=1` next to
+> `SCHIST_IDENTITY` in `~/.bashrc` (and in the container `%environment`
+> block below) to keep the rollback journal mode instead.
+
 ### Option A: uv (recommended)
 
 Most HPC clusters provide Python and Git via environment modules. Use `uv` to install schist into a venv — no root, no containers.
