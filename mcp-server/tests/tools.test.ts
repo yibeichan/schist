@@ -1704,6 +1704,40 @@ access:
 // update_note (#119)
 // ---------------------------------------------------------------------------
 
+describe("add_connection append path (#295)", () => {
+  it("appends an edge when the existing Connections section has no trailing newline", async () => {
+    const vault = await makeTempVault();
+    const rel = "notes/2026-07-01-no-newline.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    // Hand-edited note: existing ## Connections section whose last line has NO
+    // trailing newline. The old insertion regex matched nothing here, so the
+    // append was silently dropped while the tool still reported a commitSha.
+    await fs.writeFile(
+      path.join(vault, rel),
+      "---\ntitle: No Newline\n---\n\n## Connections\n\n- extends: notes/other.md",
+      "utf-8",
+    );
+    await execFile("git", ["add", "."], { cwd: vault });
+    await execFile("git", ["commit", "-m", "no-newline fixture"], { cwd: vault });
+
+    const res = await add_connection(vault, {
+      owner: TEST_AGENT,
+      source: rel,
+      target: "notes/new.md",
+      type: "supports",
+    }) as { commitSha?: string; error?: string };
+
+    expect(res.error).toBeUndefined();
+    expect(res.commitSha).toBeDefined();
+
+    const after = await fs.readFile(path.join(vault, rel), "utf-8");
+    expect(after).toContain("- supports: notes/new.md"); // the new edge landed
+    expect(after).toContain("- extends: notes/other.md"); // the existing one survived
+    expect(after.endsWith("\n")).toBe(true);
+  }, 30000);
+});
+
+
 describe("update_note", () => {
   async function vaultWithNote(extra?: Partial<Parameters<typeof create_note>[1]>): Promise<{ vault: string; config: Awaited<ReturnType<typeof loadVaultConfig>>; id: string }> {
     const vault = await makeTempVault();
@@ -2032,6 +2066,10 @@ describe("delete_note", () => {
     const after = await fs.readFile(path.join(vault, linker.id), "utf-8");
     expect(after).not.toContain(`extends: ${target.id}`);
     expect(after).not.toContain("## Connections");
+    // #280: removing the last (Connections) section must preserve the file's
+    // terminal newline — a bare stripConnectionsTo dropped it.
+    expect(after.endsWith("\n")).toBe(true);
+    expect(after).not.toMatch(/\n\n$/); // exactly one trailing newline, no blank tail
   }, 30000);
 
   it("cascade keeps the Connections section when other connection lines remain", async () => {
