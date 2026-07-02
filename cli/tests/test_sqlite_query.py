@@ -339,6 +339,43 @@ def test_raw_query_quoted_identifier_cannot_mint_cte_alias(capsys) -> None:
     assert 'table "sqlite_master" is not allowed' in capsys.readouterr().err
 
 
+def test_raw_query_allows_from_phrases_inside_double_quoted_strings() -> None:
+    """SQLite falls back to treating an unresolvable "double-quoted" token as
+    a string literal, and LLM-generated SQL uses that form constantly. Text
+    like "notes from meeting" inside one must not be parsed as a phantom
+    `FROM meeting` table ref (adversarial-review finding on the #240 fix)."""
+    conn = _docs_concepts_conn()
+    conn.execute("INSERT INTO docs (id, title) VALUES ('a', 'notes from meeting')")
+
+    for sql in (
+        'SELECT * FROM docs WHERE title = "notes from meeting"',
+        'SELECT id FROM docs WHERE title LIKE "%from now on%"',
+        'SELECT * FROM docs WHERE title = "join tomorrow"',
+    ):
+        raw_query(conn, sql)  # must not SystemExit
+
+
+def test_raw_query_allows_attach_as_identifier() -> None:
+    """ATTACH is non-reserved and legal as a bare column/alias name; the
+    keyword scan must not block it. Real ATTACH statements are still caught
+    by the SELECT/WITH prefix check (next test)."""
+    conn = _docs_concepts_conn()
+    conn.execute("INSERT INTO docs (id, title) VALUES ('a', 'A')")
+
+    result = raw_query(conn, "SELECT id AS attach FROM docs")
+
+    assert result == {"columns": ["attach"], "rows": [["a"]]}
+
+
+def test_raw_query_still_rejects_attach_statement(capsys) -> None:
+    conn = _docs_concepts_conn()
+
+    with pytest.raises(SystemExit):
+        raw_query(conn, "ATTACH DATABASE '/tmp/evil.db' AS evil")
+
+    assert "only SELECT queries are allowed" in capsys.readouterr().err
+
+
 def test_raw_query_rejects_bracket_quoted_table() -> None:
     """Bracket-quoted identifiers must not bypass ALLOWED_TABLES either."""
     conn = _docs_concepts_conn()

@@ -125,20 +125,20 @@ def raw_query(db: sqlite3.Connection, sql: str, params: tuple = ()) -> dict:
     return {'columns': columns, 'rows': rows}
 
 
-def _mask_sql_literals_and_comments(sql: str, mask_identifiers: bool = False) -> str:
-    """Replace SQL string/comment contents with spaces before regex checks.
+def _mask_sql_literals_and_comments(sql: str) -> str:
+    """Replace SQL string/comment/quoted-identifier contents with spaces.
 
-    Quoted identifiers ("...", `...`, [...]) are handled in two modes:
+    Blanks the contents of single-quoted string literals, comments, and all
+    three quoted-identifier forms ("...", `...`, [...]) while keeping the
+    delimiters, so regex checks see the statement's structure but never
+    user-controlled text — a column named "delete" can't false-positive the
+    keyword scan, and text inside a string can't mint a fake CTE name or a
+    phantom `FROM x` table ref (see #239/#240/#253).
 
-    - mask_identifiers=True blanks their contents too. Used by the write-keyword
-      check so a column legitimately named e.g. "delete" cannot false-positive
-      the keyword scan (see #239/#253) and cannot poison the CTE-name
-      extraction.
-    - mask_identifiers=False (default) preserves their contents while still
-      tracking quote state, so the table allow-list check can read quoted table
-      names after FROM/JOIN (see #228/#240).
-
-    Single-quoted string literals and comments are always blanked.
+    The output is the same length as the input, character for character.
+    _validate_sql relies on that: it locates quoted table refs by their
+    delimiter positions here, then reads the identifier text out of the
+    ORIGINAL sql by span.
     """
     chars = list(sql)
     i = 0
@@ -175,26 +175,24 @@ def _mask_sql_literals_and_comments(sql: str, mask_identifiers: bool = False) ->
                 chars[i] = " "
         elif state == "double":
             if ch == '"' and nxt == '"':
-                if mask_identifiers:
-                    chars[i] = chars[i + 1] = " "
+                chars[i] = chars[i + 1] = " "
                 i += 1
             elif ch == '"':
                 state = "normal"
-            elif mask_identifiers:
+            else:
                 chars[i] = " "
         elif state == "backtick":
             if ch == "`" and nxt == "`":
-                if mask_identifiers:
-                    chars[i] = chars[i + 1] = " "
+                chars[i] = chars[i + 1] = " "
                 i += 1
             elif ch == "`":
                 state = "normal"
-            elif mask_identifiers:
+            else:
                 chars[i] = " "
         elif state == "bracket":
             if ch == "]":
                 state = "normal"
-            elif mask_identifiers:
+            else:
                 chars[i] = " "
         elif state == "line_comment":
             if ch == "\n":
@@ -216,15 +214,16 @@ def _mask_sql_literals_and_comments(sql: str, mask_identifiers: bool = False) ->
 
 def _validate_sql(sql: str):
     """Ensure SQL is SELECT-only and uses only allowed tables."""
-    # Two masked views of the same SQL: keyword checks must not see quoted
-    # identifier contents (a column named "delete" is legal); the table
-    # allow-list check must see them (`FROM "sqlite_master"` is a real ref).
-    keyword_masked = _mask_sql_literals_and_comments(sql, mask_identifiers=True).strip()
-    table_masked = _mask_sql_literals_and_comments(sql).strip()
+    # Every check runs on the masked view, where all user-controlled text
+    # (strings, comments, quoted-identifier contents) is blanked to spaces.
+    # NOT .strip()ed: the masked view stays position-aligned with `sql` so
+    # quoted table names can be read back out of the original by span.
+    cleaned = _mask_sql_literals_and_comments(sql)
 
     # Accept WITH (CTEs) as well as SELECT — both are read-only and the MCP
-    # query_graph guard already allows them. See #223.
-    if not re.match(r'(SELECT|WITH)\b', keyword_masked, re.IGNORECASE):
+    # query_graph guard already allows them. See #223. Leading whitespace is
+    # tolerated inline (a leading comment masks to spaces).
+    if not re.match(r'\s*(SELECT|WITH)\b', cleaned, re.IGNORECASE):
         print('Error: only SELECT queries are allowed', file=sys.stderr)
         sys.exit(1)
 
@@ -232,30 +231,38 @@ def _validate_sql(sql: str):
     # stacked statements and let single-statement CTE-prefixed DML through,
     # e.g. `WITH x AS (SELECT 1) DELETE FROM docs`. See #239. Safe to scan
     # everywhere because string literals, comments, and quoted identifiers are
-    # all blanked in keyword_masked.
-    for keyword in ('INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE', 'ATTACH'):
-        if re.search(rf'\b{keyword}\b', keyword_masked, re.IGNORECASE):
+    # all blanked in the masked view. ATTACH is deliberately absent: it is
+    # non-reserved (legal as a bare column/alias name), and an ATTACH
+    # statement can neither follow a CTE nor pass the SELECT/WITH prefix
+    # check above, so scanning for it adds only false positives.
+    for keyword in ('INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE'):
+        if re.search(rf'\b{keyword}\b', cleaned, re.IGNORECASE):
             print(f'Error: {keyword} statements are not allowed', file=sys.stderr)
             sys.exit(1)
 
     # CTE alias names are virtual tables defined by `WITH name AS (...)`; a
     # reference like `FROM name` must not be checked against ALLOWED_TABLES.
-    # See #223. Extracted from keyword_masked so text inside quoted
-    # identifiers can't mint a fake CTE name that shadows a blocked table.
-    cte_names = {m.lower() for m in re.findall(r'\b(\w+)\s+AS\s*\(', keyword_masked, re.IGNORECASE)}
+    # See #223. Extracted from the masked view so text inside strings or
+    # quoted identifiers can't mint a fake CTE name that shadows a blocked
+    # table.
+    cte_names = {m.lower() for m in re.findall(r'\b(\w+)\s+AS\s*\(', cleaned, re.IGNORECASE)}
 
-    # Validate table references — capture the identifier after FROM/JOIN whether
-    # bare, `backtick`-quoted, [bracket]-quoted, or "double"-quoted. `\w+` alone
-    # misses the quoted forms (the quote chars aren't word characters), silently
-    # skipping the allow-list check and letting e.g. `FROM \`sqlite_master\``
-    # or `FROM "sqlite_master"` through. See #228/#240.
-    table_refs = re.findall(
-        r'\b(?:FROM|JOIN)\s+(?:`([^`]+)`|\[([^\]]+)\]|"([^"]+)"|(\w+))',
-        table_masked,
+    # Validate table references — capture the identifier after FROM/JOIN
+    # whether bare, `backtick`-quoted, [bracket]-quoted, or "double"-quoted.
+    # `\w+` alone misses the quoted forms (the quote chars aren't word
+    # characters), silently skipping the allow-list check and letting e.g.
+    # `FROM \`sqlite_master\`` or `FROM "sqlite_master"` through. See
+    # #228/#240. The refs are LOCATED on the masked view — where a string
+    # like 'notes from meeting' can't produce a phantom ref — but a quoted
+    # identifier's content is blanked there, so the actual name is read from
+    # the original sql at the capture-group span (masking is 1:1 on length).
+    for m in re.finditer(
+        r'\b(?:FROM|JOIN)\s+(?:`([^`]*)`|\[([^\]]*)\]|"([^"]*)"|(\w+))',
+        cleaned,
         re.IGNORECASE,
-    )
-    for backtick, bracket, dquoted, bare in table_refs:
-        table = backtick or bracket or dquoted or bare
+    ):
+        group = next(g for g in (1, 2, 3, 4) if m.group(g) is not None)
+        table = sql[m.start(group):m.end(group)]
         if table.lower() in ALLOWED_TABLES or table.lower() in cte_names:
             continue
         print(f'Error: table "{table}" is not allowed (allowed: {", ".join(sorted(ALLOWED_TABLES))})', file=sys.stderr)
