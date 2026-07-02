@@ -1073,3 +1073,61 @@ class TestRebuildIndexWalSafety:
         assert docs == old_docs
         assert "junk" not in tables, "failed ingest's -wal was replayed into the restored backup"
         assert not Path(f"{db_path}.bak").exists()
+
+
+class TestMoveDbWithWalAtomicity:
+    """#254 /review finding: _move_db_with_wal must not leave a half-moved
+    set (a stray -wal at a path a fresh DB later reuses) if one rename fails."""
+
+    def test_partial_move_rolls_back_to_source(self, tmp_path, monkeypatch):
+        import schist.sync as sync
+
+        src = tmp_path / "schist.db"
+        dst = tmp_path / "schist.db.bak"
+        src.write_bytes(b"main")
+        Path(f"{src}-wal").write_bytes(b"wal")
+        Path(f"{src}-shm").write_bytes(b"shm")
+
+        real_rename = Path.rename
+
+        def flaky_rename(self, target):
+            # Fail specifically on the main-file move (siblings move first),
+            # so at least one sibling has already been renamed to dst.
+            if self == src:
+                raise OSError("simulated rename failure")
+            return real_rename(self, target)
+
+        monkeypatch.setattr(Path, "rename", flaky_rename)
+        with pytest.raises(OSError):
+            sync._move_db_with_wal(src, dst)
+        monkeypatch.undo()
+
+        # Everything rolled back to src; nothing orphaned at dst.
+        assert src.exists() and Path(f"{src}-wal").exists() and Path(f"{src}-shm").exists()
+        assert not dst.exists()
+        assert not Path(f"{dst}-wal").exists()
+        assert not Path(f"{dst}-shm").exists()
+
+    def test_rebuild_aborts_intact_when_backup_move_fails(self, tmp_path, monkeypatch, capsys):
+        import sqlite3
+        import schist.sync as sync
+
+        vault, db_path = _init_vault_with_schema(tmp_path)
+        conn = sqlite3.connect(db_path)
+        before = conn.execute("SELECT id FROM docs ORDER BY id").fetchall()
+        conn.close()
+
+        def always_fail(src, dst):
+            raise OSError("simulated backup failure")
+
+        monkeypatch.setattr(sync, "_move_db_with_wal", always_fail)
+        sync._rebuild_index(vault, db_path)
+        monkeypatch.undo()
+
+        assert "rebuild skipped (backup failed)" in capsys.readouterr().err
+        conn = sqlite3.connect(db_path)
+        try:
+            after = conn.execute("SELECT id FROM docs ORDER BY id").fetchall()
+        finally:
+            conn.close()
+        assert after == before  # existing index left intact, not overwritten

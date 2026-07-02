@@ -1065,19 +1065,37 @@ def _unlink_db_with_wal(db: Path) -> None:
 
 
 def _move_db_with_wal(src: Path, dst: Path) -> None:
-    """Rename a SQLite DB together with any -wal/-shm siblings.
+    """Rename a SQLite DB together with any -wal/-shm siblings, atomically.
 
     SQLite derives the WAL file name from the DB file name, so moving only
     the main file divorces it from its WAL. If a close-checkpoint was ever
     blocked (an MCP reader open at ingest-close time), the -wal holds the
     live data and the moved main file alone reads as EMPTY — and a stray
-    -wal left at the destination name would be silently replayed into the
-    moved file. Move all three names as a unit.
+    -wal left at any path is silently replayed into whatever main DB later
+    appears there. So the three names must move as a unit.
+
+    rename() is per-file atomic but the group is not: if one rename fails
+    partway (e.g. a transient NFS error on the HPC spokes this targets), a
+    naive sequence would leave a half-moved set — the exact stray-wal state
+    that causes silent corruption. So on any failure we roll every completed
+    move back to `src` and re-raise, leaving the source set intact. The main
+    file moves LAST and reverts FIRST, so a `-wal` never sits at a path whose
+    main DB is absent except transiently within this function.
     """
-    src.rename(dst)
-    for s, d in zip(_wal_siblings(src), _wal_siblings(dst)):
-        if s.exists():
-            s.rename(d)
+    done: list[tuple[Path, Path]] = []
+    try:
+        for s, d in zip(_wal_siblings(src), _wal_siblings(dst)):
+            if s.exists():
+                s.rename(d)
+                done.append((s, d))
+        src.rename(dst)
+    except OSError:
+        for s, d in reversed(done):
+            try:
+                d.rename(s)
+            except OSError:
+                pass
+        raise
 
 
 def _rebuild_index(vault_path: str, db_path: str) -> None:
@@ -1103,7 +1121,14 @@ def _rebuild_index(vault_path: str, db_path: str) -> None:
         # crashed rebuild would otherwise pair with the fresh backup and be
         # replayed into it.
         _unlink_db_with_wal(backup)
-        _move_db_with_wal(db, backup)
+        try:
+            _move_db_with_wal(db, backup)
+        except OSError as e:
+            # The backup move rolled itself back, so the existing index is
+            # still intact at db_path. Abort rather than proceed to an ingest
+            # that would overwrite it with no recoverable backup.
+            print(f"Warning: index rebuild skipped (backup failed): {e}", file=sys.stderr)
+            return
 
     from .sqlite_query import _run_ingest
 
@@ -1118,7 +1143,16 @@ def _rebuild_index(vault_path: str, db_path: str) -> None:
         # its -wal can't be replayed into the restored backup.
         if backup and backup.exists():
             _unlink_db_with_wal(db)
-            _move_db_with_wal(backup, db)
+            try:
+                _move_db_with_wal(backup, db)
+            except OSError as restore_err:
+                # Restore itself failed but rolled back, so the good index is
+                # still at the backup path — tell the user where it is rather
+                # than dying with a traceback.
+                print(
+                    f"Warning: index restore failed; last-good DB left at {backup}: {restore_err}",
+                    file=sys.stderr,
+                )
         print(f"Warning: index rebuild failed: {e}", file=sys.stderr)
 
 
