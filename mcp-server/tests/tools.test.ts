@@ -1778,7 +1778,7 @@ describe("add_connection append path (#295)", () => {
       source: rel,
       target: "notes/new.md",
       type: "supports",
-    }) as { commitSha?: string; error?: string };
+    }, await loadVaultConfig(vault)) as { commitSha?: string; error?: string };
 
     expect(res.error).toBeUndefined();
     expect(res.commitSha).toBeDefined();
