@@ -359,13 +359,22 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         # Title: explicit title > concept key > derive from filename
         title = meta.get('title') or meta.get('topic') or meta.get('concept') or title_from_filename(rel.name)
 
+        # Status: type-guard like every other scalar field above. A non-string
+        # value (status: 42, status: true, status: [draft]) would otherwise be
+        # stored with SQLite's native affinity, so `WHERE status = 'draft'`
+        # silently misses it and TS readers treating status as string break.
+        # (#278; distinct from #276 which validates the string against
+        # config.statuses in create_note.)
+        raw_status = meta.get('status')
+        status = raw_status if isinstance(raw_status, str) else None
+
         # Insert into docs
         date_val = meta.get('date')
         if date_val is not None:
             date_val = str(date_val)
         conn.execute(
             'INSERT INTO docs (id, title, date, status, tags, concepts, body, scope, source, confidence, file_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (doc_id, title, date_val, meta.get('status'), tags_json, concepts_json, body, scope, source, confidence, file_ref),
+            (doc_id, title, date_val, status, tags_json, concepts_json, body, scope, source, confidence, file_ref),
         )
         doc_count += 1
 
