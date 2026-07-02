@@ -339,6 +339,19 @@ def main(
 
         try:
             changed_files = get_changed_files(oldrev, newrev)
+        except subprocess.TimeoutExpired:
+            # get_changed_files runs `git log` with timeout=30. On a slow hub
+            # (large repo, NFS) that can expire, raising TimeoutExpired — NOT a
+            # CalledProcessError subclass, so it would escape the handler below
+            # and dump a raw traceback (internal paths, stack frames) onto the
+            # pusher's terminal. Reject fail-safe with a human-readable message
+            # instead (#243).
+            print(
+                f"ERROR: timed out diffing {oldrev}..{newrev} — the hub may be "
+                f"under load; please retry the push.",
+                file=sys.stderr,
+            )
+            return 1
         except subprocess.CalledProcessError as e:
             print(f"ERROR: failed to diff {oldrev}..{newrev}: {e}", file=sys.stderr)
             return 1
