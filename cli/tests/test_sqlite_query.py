@@ -375,6 +375,22 @@ def test_raw_query_quoted_identifier_cannot_mint_cte_alias(capsys) -> None:
     assert 'table "sqlite_master" is not allowed' in capsys.readouterr().err
 
 
+def test_raw_query_allows_quoted_cte_aliases() -> None:
+    """A CTE alias may be quoted in any of the three SQLite forms, and the
+    quoted `FROM` ref back to it must resolve to the CTE — not be checked
+    against ALLOWED_TABLES. Regression from extending the FROM check to
+    quoted forms without teaching the CTE collector the same (review finding)."""
+    conn = _docs_concepts_conn()
+
+    for sql in (
+        'WITH "myres" AS (SELECT id FROM docs) SELECT * FROM "myres"',
+        "WITH `myres` AS (SELECT id FROM docs) SELECT * FROM `myres`",
+        "WITH [myres] AS (SELECT id FROM docs) SELECT * FROM [myres]",
+        "WITH myres AS (SELECT id FROM docs) SELECT * FROM myres",
+    ):
+        raw_query(conn, sql)  # must not SystemExit
+
+
 def test_raw_query_allows_from_phrases_inside_double_quoted_strings() -> None:
     """SQLite falls back to treating an unresolvable "double-quoted" token as
     a string literal, and LLM-generated SQL uses that form constantly. Text

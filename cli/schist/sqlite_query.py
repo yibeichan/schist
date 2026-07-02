@@ -253,10 +253,21 @@ def _validate_sql(sql: str):
 
     # CTE alias names are virtual tables defined by `WITH name AS (...)`; a
     # reference like `FROM name` must not be checked against ALLOWED_TABLES.
-    # See #223. Extracted from the masked view so text inside strings or
-    # quoted identifiers can't mint a fake CTE name that shadows a blocked
-    # table.
-    cte_names = {m.lower() for m in re.findall(r'\b(\w+)\s+AS\s*\(', cleaned, re.IGNORECASE)}
+    # See #223. A CTE alias may itself be quoted (`WITH "myres" AS (...)`),
+    # and the FROM/JOIN check below now matches quoted table refs — so the
+    # collector must recognize the same four identifier forms, or a quoted
+    # alias is never registered and its quoted `FROM` ref is falsely rejected.
+    # Located on the masked view (so string/identifier text can't mint a fake
+    # CTE name) but the name is read from the original sql by span, exactly
+    # like the table-ref check (masking is length-preserving).
+    cte_names = set()
+    for m in re.finditer(
+        r'(?:`([^`]*)`|\[([^\]]*)\]|"([^"]*)"|\b(\w+))\s+AS\s*\(',
+        cleaned,
+        re.IGNORECASE,
+    ):
+        group = next(g for g in (1, 2, 3, 4) if m.group(g) is not None)
+        cte_names.add(sql[m.start(group):m.end(group)].lower())
 
     # Validate table references — capture the identifier after FROM/JOIN
     # whether bare, `backtick`-quoted, [bracket]-quoted, or "double"-quoted.
