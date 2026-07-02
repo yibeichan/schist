@@ -271,6 +271,45 @@ def test_ingest_preserves_missing_status_as_null(tmp_path: Path) -> None:
     assert row == (None,)
 
 
+def test_ingest_coerces_non_string_status_to_null(tmp_path: Path) -> None:
+    """#278: a non-string status must land as NULL, not a native-affinity value.
+
+    Otherwise `WHERE status = 'draft'` silently misses the row and TS readers
+    treating status as a string get a number/bool back.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-07-01-int-status.md",
+        "---\ntitle: Int Status\ndate: 2026-07-01\nstatus: 42\n---\n\nBody.\n",
+    )
+    _write_note(
+        vault,
+        "2026-07-01-list-status.md",
+        "---\ntitle: List Status\ndate: 2026-07-01\nstatus: [draft, final]\n---\n\nBody.\n",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = dict(
+            conn.execute(
+                "SELECT title, status FROM docs WHERE title IN ('Int Status', 'List Status')"
+            ).fetchall()
+        )
+    finally:
+        conn.close()
+
+    assert rows["Int Status"] is None
+    assert rows["List Status"] is None
+
+
 def test_ingest_skips_non_string_tag_elements(tmp_path: Path) -> None:
     """Malformed tag list entries are ignored instead of aborting vault ingest."""
     from schist.ingest import ingest
