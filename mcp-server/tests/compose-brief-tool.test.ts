@@ -327,6 +327,20 @@ describe("compose_brief cluster fixes (#236/#237/#238/#259)", () => {
     expect(brief.markdown).not.toContain("None found in recent local git history");
   });
 
+  it("treats a zero-commit repo as an accurate none-found, not unavailable (#238)", async () => {
+    // Hand-rolled `git init` vaults (no seed commit) exit 128 from git log;
+    // that is a true "nothing added", not a git failure.
+    await fs.rm(path.join(vaultRoot, ".git"), { recursive: true, force: true });
+    execFileSync("git", ["init"], { cwd: vaultRoot, stdio: "ignore" });
+    const result = await compose_brief(vaultRoot, { topic: "paper catalog metadata" });
+    if ("error" in (result as Record<string, unknown>)) throw new Error(JSON.stringify(result));
+    const brief = result as Exclude<Awaited<ReturnType<typeof compose_brief>>, { error: string }>;
+
+    expect(brief.recent_paths).toEqual([]);
+    expect(brief.recent_paths_unavailable).toBeUndefined();
+    expect(brief.markdown).toContain("None found in recent local git history");
+  });
+
   it("keeps explicitly pinned related_notes that fall outside scope (#259)", async () => {
     const result = await compose_brief(vaultRoot, {
       topic: "paper catalog metadata",

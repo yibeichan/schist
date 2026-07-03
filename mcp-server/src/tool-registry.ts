@@ -289,18 +289,18 @@ export function makeWriteTools(config: VaultConfig) {
           topic: { type: "string", description: "Free-text description of what the brief is about." },
           scope: {
             type: "array",
-            items: { type: "string" },
-            description: "Optional path-prefix filter, such as ['concepts', 'ops', 'decisions'].",
+            items: { type: "string", minLength: 1 },
+            description: "Optional path-prefix filter, such as ['concepts', 'ops', 'decisions']. Elements must be non-empty.",
           },
           related_notes: {
             type: "array",
-            items: { type: "string" },
-            description: "Optional explicit note ids to pin into the brief.",
+            items: { type: "string", minLength: 1 },
+            description: "Optional explicit note ids to pin into the brief. Elements must be non-empty.",
           },
           related_external: {
             type: "array",
-            items: { type: "string" },
-            description: "Optional external cross-references, such as GitHub issue ids.",
+            items: { type: "string", minLength: 1 },
+            description: "Optional external cross-references, such as GitHub issue ids. Elements must be non-empty.",
           },
           session_paths: {
             type: "boolean",

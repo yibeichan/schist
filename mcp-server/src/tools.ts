@@ -871,8 +871,14 @@ async function recentAddedPaths(
   ], 2_000);
   // Distinguish "git failed/timed out" from "no files added" (#238): the
   // 2s timeout fires exactly on the slow-git deployments where an agent
-  // would otherwise trust an empty "Recent session context" section.
-  if (!outcome.ok) return { ok: false, rows: [] };
+  // would otherwise trust an empty "Recent session context" section. One
+  // failure IS an accurate "none": a repo with zero commits exits 128 with
+  // "does not have any commits" — schist init always seeds a commit, but a
+  // hand-rolled `git init` vault shouldn't read as "unavailable" forever.
+  if (!outcome.ok) {
+    const noCommitsYet = (outcome.stderr ?? "").includes("does not have any commits");
+    return { ok: noCommitsYet, rows: [] };
+  }
   if (!outcome.stdout) return { ok: true, rows: [] };
 
   const rows: Array<{ path: string; commit: string }> = [];
