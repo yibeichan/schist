@@ -1246,10 +1246,16 @@ export async function create_note(
     }
     // #276: the JSON-Schema enum in tool-registry is a client-side hint only;
     // enforce server-side like update_note's frontmatter_patch.status check.
-    if (args.status !== undefined && !config.statuses.includes(args.status)) {
+    // Validate the RESOLVED value, not just an explicit arg: on a vault whose
+    // custom statuses exclude "draft", the bare default must not slip an
+    // out-of-vocabulary status onto disk — fall back to the vault's first
+    // configured status instead.
+    const status = args.status
+      ?? (config.statuses.includes("draft") ? "draft" : config.statuses[0]);
+    if (!config.statuses.includes(status)) {
       return {
         error: "VALIDATION_ERROR",
-        message: `status must be one of: ${config.statuses.join(", ")} (got "${args.status}")`,
+        message: `status must be one of: ${config.statuses.join(", ")} (got "${status}")`,
       } satisfies ToolError;
     }
     // #304: connections carry a controlled type vocabulary (vault.yaml
@@ -1367,7 +1373,7 @@ export async function create_note(
       // slug in the index, so writing the raw value to disk makes the file
       // and the DB disagree on the concept identifier.
       concepts: args.concepts !== undefined ? args.concepts.map(normalizeConceptSlug) : [],
-      status: args.status ?? "draft",
+      status,
       source_agent: owner,
     };
     if (args.confidence !== undefined) {

@@ -327,6 +327,27 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     expect(entries).toEqual([]);
   }, 30000);
 
+  test("create_note default status respects a custom statuses vocabulary (#276)", async () => {
+    // Review finding on the #276 fix: with `statuses: [active, done]` the
+    // bare default must not write an out-of-vocabulary `draft` to disk.
+    const vault = await makeTempVault();
+    const custom = (await fs.readFile(path.join(vault, "schist.yaml"), "utf-8"))
+      .replace(/statuses:\n(  - .*\n)+/, "statuses:\n  - active\n  - done\n");
+    await fs.writeFile(path.join(vault, "schist.yaml"), custom);
+    const config = await loadVaultConfig(vault);
+    expect(config.statuses).toEqual(["active", "done"]);
+
+    const created = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Custom Default", body: "x" },
+      config
+    ) as { id: string };
+
+    const content = await fs.readFile(path.join(vault, created.id), "utf-8");
+    expect(content).toContain("status: active");
+    expect(content).not.toContain("status: draft");
+  }, 30000);
+
   test("create_note rejects a connection type outside config.connectionTypes (#304)", async () => {
     const vault = await makeTempVault();
     const config = await loadVaultConfig(vault);
