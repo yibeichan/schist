@@ -306,6 +306,89 @@ describe("create_note frontmatter array validation", () => {
 });
 
 // ---------------------------------------------------------------------------
+// write-path validation & normalization (#276 / #302 / #304)
+// ---------------------------------------------------------------------------
+
+describe("write-path validation and normalization (#276/#302/#304)", () => {
+  test("create_note rejects a status outside config.statuses (#276)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const res = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Bad Status", body: "x", status: "not-a-real-status" },
+      config
+    ) as { error: string; message: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toMatch(/status must be one of/);
+    // Rejection happens before any write.
+    const entries = await fs.readdir(path.join(vault, "notes")).catch(() => []);
+    expect(entries).toEqual([]);
+  }, 30000);
+
+  test("create_note rejects a connection type outside config.connectionTypes (#304)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const res = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT, title: "Bad Conn", body: "x",
+        connections: [{ target: "notes/other.md", type: "related-to" }],
+      },
+      config
+    ) as { error: string; message: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toMatch(/connection type must be one of/);
+    const entries = await fs.readdir(path.join(vault, "notes")).catch(() => []);
+    expect(entries).toEqual([]);
+  }, 30000);
+
+  test("add_connection rejects a type outside config.connectionTypes (#304)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const rel = "notes/2026-07-02-conn-type.md";
+    const original = "---\ntitle: Conn Type\n---\n\nBody.\n";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, rel), original);
+
+    const res = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: rel, target: "some-target", type: "foobar" },
+      config
+    ) as { error: string; message: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toMatch(/connection type must be one of/);
+    // Source note untouched — validation fires before the read/append path.
+    expect(await fs.readFile(path.join(vault, rel), "utf-8")).toBe(original);
+  }, 30000);
+
+  test("create_note normalizes concept slugs before writing frontmatter (#302)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const created = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT, title: "Concept Slugs", body: "x",
+        concepts: ["Neural Networks", "foo  bar", "already-normal"],
+      },
+      config
+    ) as { id: string };
+
+    const content = await fs.readFile(path.join(vault, created.id), "utf-8");
+    expect(content).toContain("neural-networks");
+    expect(content).toContain("foo-bar");
+    expect(content).toContain("already-normal");
+    expect(content).not.toContain("Neural Networks");
+    expect(content).not.toContain("foo  bar");
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
 // create_note — date-prefix title rejection (#118)
 // ---------------------------------------------------------------------------
 
@@ -1236,7 +1319,7 @@ describe("write-tool sync dirty blocking (#75)", () => {
       owner: TEST_AGENT,
       source: noteResult.path,
       target: "some-target",
-      type: "related",
+      type: "extends",
     }, await loadVaultConfig(vault))) as { error?: string; message?: string };
 
     expect(result.error).toBe("SYNC_DIRTY");
@@ -1633,7 +1716,7 @@ access:
     // Step 3: add_connection should now be denied for the papers note
     const result = await add_connection(
       vault,
-      { owner: TEST_AGENT, source: created.path, target: "[[Some Concept]]", type: "related" },
+      { owner: TEST_AGENT, source: created.path, target: "[[Some Concept]]", type: "extends" },
       config,
     ) as { error: string; message: string };
     expect(result.error).toBe("ACL_DENIED");
@@ -1659,7 +1742,7 @@ access:
 
       const result = await add_connection(
         vault,
-        { owner: "claude-desktop", source: created.path, target: "[[Some Concept]]", type: "related" },
+        { owner: "claude-desktop", source: created.path, target: "[[Some Concept]]", type: "extends" },
         config,
       ) as { commitSha?: string; error?: string };
       expect(result.error).toBeUndefined();
@@ -1690,7 +1773,7 @@ access:
       process.env.SCHIST_IDENTITY = "orcd";
       const result = await add_connection(
         vault,
-        { owner: "dragonfly", source: created.path, target: "[[Some Concept]]", type: "related" },
+        { owner: "dragonfly", source: created.path, target: "[[Some Concept]]", type: "extends" },
         config,
       ) as { error: string; message: string };
       expect(result.error).toBe("ACL_DENIED");
@@ -1908,6 +1991,17 @@ describe("update_note", () => {
     expect(res.error).toBe("VALIDATION_ERROR");
     expect(res.message).toMatch(/status must be one of/);
     expect(await fs.readFile(path.join(vault, id), "utf-8")).not.toContain("not-a-real-status");
+  }, 30000);
+
+  it("normalizes a concepts patch before writing frontmatter (#302)", async () => {
+    const { vault, config, id } = await vaultWithNote();
+    await update_note(vault, {
+      owner: TEST_AGENT, id, frontmatter_patch: { concepts: ["Neural Networks", "foo  bar"] },
+    }, config);
+    const content = await fs.readFile(path.join(vault, id), "utf-8");
+    expect(content).toContain("neural-networks");
+    expect(content).toContain("foo-bar");
+    expect(content).not.toContain("Neural Networks");
   }, 30000);
 
   it("rejects a non-allowlisted frontmatter key (scope-spoof guard)", async () => {
