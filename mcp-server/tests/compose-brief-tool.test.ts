@@ -295,3 +295,65 @@ describe("compose_brief tool", () => {
     });
   });
 });
+
+describe("compose_brief cluster fixes (#236/#237/#238/#259)", () => {
+  it("strips FTS5 <b> highlight markers from topic-search annotations (#236)", async () => {
+    const result = await compose_brief(vaultRoot, { topic: "paper catalog metadata" });
+    if ("error" in (result as Record<string, unknown>)) throw new Error(JSON.stringify(result));
+    const brief = result as Exclude<Awaited<ReturnType<typeof compose_brief>>, { error: string }>;
+
+    expect(brief.markdown).toContain("`research/topic.md`");
+    // oneLine blanks `>` but not `<`; unstripped markers leak as `<b …< /b`.
+    expect(brief.markdown).not.toContain("<");
+  });
+
+  it("rejects empty-string scope elements instead of returning an empty brief (#237)", async () => {
+    for (const scope of [[""], ["  "], ["research", ""]]) {
+      const result = await compose_brief(vaultRoot, { topic: "paper catalog", scope });
+      expect(result).toMatchObject({ error: "VALIDATION_ERROR" });
+      expect((result as { message: string }).message).toMatch(/non-empty/);
+    }
+  });
+
+  it("signals when recent git history is unavailable instead of claiming none found (#238)", async () => {
+    await fs.rm(path.join(vaultRoot, ".git"), { recursive: true, force: true });
+    const result = await compose_brief(vaultRoot, { topic: "paper catalog metadata" });
+    if ("error" in (result as Record<string, unknown>)) throw new Error(JSON.stringify(result));
+    const brief = result as Exclude<Awaited<ReturnType<typeof compose_brief>>, { error: string }>;
+
+    expect(brief.recent_paths).toEqual([]);
+    expect(brief.recent_paths_unavailable).toBe(true);
+    expect(brief.markdown).toContain("Recent git history unavailable");
+    expect(brief.markdown).not.toContain("None found in recent local git history");
+  });
+
+  it("treats a zero-commit repo as an accurate none-found, not unavailable (#238)", async () => {
+    // Hand-rolled `git init` vaults (no seed commit) exit 128 from git log;
+    // that is a true "nothing added", not a git failure.
+    await fs.rm(path.join(vaultRoot, ".git"), { recursive: true, force: true });
+    execFileSync("git", ["init"], { cwd: vaultRoot, stdio: "ignore" });
+    const result = await compose_brief(vaultRoot, { topic: "paper catalog metadata" });
+    if ("error" in (result as Record<string, unknown>)) throw new Error(JSON.stringify(result));
+    const brief = result as Exclude<Awaited<ReturnType<typeof compose_brief>>, { error: string }>;
+
+    expect(brief.recent_paths).toEqual([]);
+    expect(brief.recent_paths_unavailable).toBeUndefined();
+    expect(brief.markdown).toContain("None found in recent local git history");
+  });
+
+  it("keeps explicitly pinned related_notes that fall outside scope (#259)", async () => {
+    const result = await compose_brief(vaultRoot, {
+      topic: "paper catalog metadata",
+      scope: ["ops"],
+      related_notes: ["decisions/pinned.md"],
+    });
+    if ("error" in (result as Record<string, unknown>)) throw new Error(JSON.stringify(result));
+    const brief = result as Exclude<Awaited<ReturnType<typeof compose_brief>>, { error: string }>;
+
+    const ids = brief.related_notes.map((note) => note.id);
+    // Pinned = explicit caller directive: included despite scope ["ops"].
+    expect(ids).toContain("decisions/pinned.md");
+    // Scope still filters DISCOVERY: the out-of-scope topic-search hit stays out.
+    expect(ids).not.toContain("research/topic.md");
+  });
+});

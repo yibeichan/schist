@@ -785,8 +785,12 @@ function outcomeMessage(outcome: SyncCommandOutcome): string {
 
 function ensureStringArray(value: unknown, field: string): string[] | ToolError {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-    return { error: "VALIDATION_ERROR", message: `${field} must be an array of strings` };
+  // Non-empty required (#237): an empty-string scope element makes
+  // matchesScopePath false for every vault id (ids never start with "/"),
+  // silently returning an empty brief; empty note ids/refs are equally
+  // meaningless in the other two fields.
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) {
+    return { error: "VALIDATION_ERROR", message: `${field} must be an array of non-empty strings` };
   }
   return value;
 }
@@ -836,7 +840,11 @@ function briefNoteFromSearch(note: SearchResult, reason: string): BriefNote {
     title: note.title,
     reason,
     tags: note.tags,
-    annotation: oneLine(note.snippet) || note.title,
+    // Strip searchNotes' FTS5 highlight markers (<b>…</b>) before oneLine:
+    // its markdown-char class blanks `>` but not `<`, so the markers would
+    // otherwise leak into every topic-search annotation as `<b …< /b` noise.
+    // See #236.
+    annotation: oneLine(note.snippet.replace(/<\/?b>/g, "")) || note.title,
   };
 }
 
@@ -850,7 +858,10 @@ function briefNoteFromNote(note: Note, reason: string): BriefNote {
   };
 }
 
-async function recentAddedPaths(vaultRoot: string, scope: string[]): Promise<Array<{ path: string; commit: string }>> {
+async function recentAddedPaths(
+  vaultRoot: string,
+  scope: string[]
+): Promise<{ ok: boolean; rows: Array<{ path: string; commit: string }> }> {
   const outcome = await runGit(vaultRoot, [
     "log",
     "--since=24 hours ago",
@@ -858,7 +869,17 @@ async function recentAddedPaths(vaultRoot: string, scope: string[]): Promise<Arr
     "--name-only",
     "--pretty=format:commit:%h",
   ], 2_000);
-  if (!outcome.ok || !outcome.stdout) return [];
+  // Distinguish "git failed/timed out" from "no files added" (#238): the
+  // 2s timeout fires exactly on the slow-git deployments where an agent
+  // would otherwise trust an empty "Recent session context" section. One
+  // failure IS an accurate "none": a repo with zero commits exits 128 with
+  // "does not have any commits" — schist init always seeds a commit, but a
+  // hand-rolled `git init` vault shouldn't read as "unavailable" forever.
+  if (!outcome.ok) {
+    const noCommitsYet = (outcome.stderr ?? "").includes("does not have any commits");
+    return { ok: noCommitsYet, rows: [] };
+  }
+  if (!outcome.stdout) return { ok: true, rows: [] };
 
   const rows: Array<{ path: string; commit: string }> = [];
   let commit = "";
@@ -872,7 +893,7 @@ async function recentAddedPaths(vaultRoot: string, scope: string[]): Promise<Arr
     if (matchesScopePath(line, scope)) rows.push({ path: line, commit });
     if (rows.length >= 8) break;
   }
-  return rows;
+  return { ok: true, rows };
 }
 
 function isAclRejection(outcome: SyncCommandOutcome): boolean {
@@ -2167,8 +2188,11 @@ export async function compose_brief(
       if (byId.size >= 5) break;
     }
 
+    // No scope filter here (#259): scope narrows DISCOVERY (topic search
+    // above, graph expansion below); related_notes is an explicit caller
+    // directive — the caller already decided these belong in the brief, and
+    // silently dropping them produced briefs missing requested context.
     for (const id of pinned) {
-      if (!matchesScopePath(id, scope)) continue;
       const note = sqliteReader.getNote(vaultRoot, id);
       if (!note) continue;
       byId.set(id, briefNoteFromNote(note, "pinned"));
@@ -2222,7 +2246,10 @@ export async function compose_brief(
   }
 
   const relatedNotes = [...byId.values()].slice(0, 10);
-  const recent = args.session_paths === false ? [] : await recentAddedPaths(vaultRoot, scope);
+  const recentOutcome = args.session_paths === false
+    ? { ok: true, rows: [] }
+    : await recentAddedPaths(vaultRoot, scope);
+  const recent = recentOutcome.rows;
   const suggestedTags = [...tagCounts.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .slice(0, 8)
@@ -2234,7 +2261,9 @@ export async function compose_brief(
     : ["- None found."];
   const pathLines = recent.length > 0
     ? recent.map((entry) => `- Added: \`${entry.path}\` @ \`${entry.commit || "unknown"}\``)
-    : ["- None found in recent local git history."];
+    : [recentOutcome.ok
+        ? "- None found in recent local git history."
+        : "- Recent git history unavailable (git log failed or timed out) — not necessarily empty."];
   const refLines = crossRefs.length > 0
     ? crossRefs.map((ref) => `- ${ref}`)
     : ["- None identified."];
@@ -2265,6 +2294,7 @@ export async function compose_brief(
     cross_refs: crossRefs,
     related_notes: relatedNotes.map(({ id, title, reason }) => ({ id, title, reason })),
     recent_paths: recent,
+    ...(recentOutcome.ok ? {} : { recent_paths_unavailable: true as const }),
   };
 }
 
