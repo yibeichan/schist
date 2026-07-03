@@ -255,6 +255,179 @@ def test_raw_query_rejects_backtick_quoted_table() -> None:
         raw_query(conn, "SELECT name FROM `sqlite_master`")
 
 
+def test_raw_query_rejects_cte_prefixed_delete(capsys) -> None:
+    """A CTE followed by DML is a single statement with no semicolon; the
+    write-keyword guard must still catch it. See #239."""
+    conn = _docs_concepts_conn()
+    conn.execute("INSERT INTO docs (id, title) VALUES ('a', 'A')")
+
+    with pytest.raises(SystemExit):
+        raw_query(conn, "WITH x AS (SELECT 1) DELETE FROM docs WHERE 1=1")
+
+    assert "DELETE statements are not allowed" in capsys.readouterr().err
+    # The guard must fire during validation, before the DELETE executes.
+    assert conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0] == 1
+
+
+def test_raw_query_rejects_cte_prefixed_insert(capsys) -> None:
+    conn = _docs_concepts_conn()
+
+    with pytest.raises(SystemExit):
+        raw_query(
+            conn,
+            "WITH x AS (SELECT 1) INSERT INTO docs (id, title) SELECT 'a', 'A' FROM x",
+        )
+
+    assert "INSERT statements are not allowed" in capsys.readouterr().err
+
+
+def test_raw_query_rejects_cte_prefixed_replace(capsys) -> None:
+    """REPLACE INTO is SQLite's INSERT-OR-REPLACE alias and can ride a CTE
+    prefix with no FROM/JOIN — the same bypass class as #239, for a verb not
+    in the main keyword loop. Adversarial-review finding."""
+    conn = _docs_concepts_conn()
+    conn.execute("INSERT INTO docs (id, title) VALUES ('a', 'ok')")
+
+    with pytest.raises(SystemExit):
+        raw_query(
+            conn,
+            "WITH x AS (SELECT 1) REPLACE INTO docs (id, title) VALUES ('a', 'PWNED')",
+        )
+
+    assert "REPLACE statements are not allowed" in capsys.readouterr().err
+    # Guard must fire before the write executes.
+    assert conn.execute("SELECT title FROM docs WHERE id='a'").fetchone()[0] == "ok"
+
+
+def test_raw_query_rejects_plain_replace_into(capsys) -> None:
+    conn = _docs_concepts_conn()
+
+    with pytest.raises(SystemExit):
+        raw_query(conn, "REPLACE INTO docs (id, title) VALUES ('a', 'b')")
+
+
+def test_raw_query_allows_replace_scalar_function() -> None:
+    """The bare REPLACE() string function must stay allowed — only REPLACE
+    INTO is a write."""
+    conn = _docs_concepts_conn()
+    conn.execute("INSERT INTO docs (id, title) VALUES ('a', 'Note A')")
+
+    result = raw_query(conn, "SELECT REPLACE(title, 'Note', 'Doc') AS t FROM docs")
+
+    assert result == {"columns": ["t"], "rows": [["Doc A"]]}
+
+
+def test_raw_query_rejects_double_quoted_disallowed_table(capsys) -> None:
+    """Double-quoted SQLite identifiers must not bypass ALLOWED_TABLES. See #240."""
+    conn = _docs_concepts_conn()
+
+    with pytest.raises(SystemExit):
+        raw_query(conn, 'SELECT name FROM "sqlite_master"')
+
+    assert 'table "sqlite_master" is not allowed' in capsys.readouterr().err
+
+
+def test_raw_query_allows_double_quoted_allowed_table() -> None:
+    conn = _docs_concepts_conn()
+    conn.execute("INSERT INTO docs (id, title) VALUES ('a', 'A')")
+
+    result = raw_query(conn, 'SELECT id FROM "docs"')
+
+    assert result == {"columns": ["id"], "rows": [["a"]]}
+
+
+def test_raw_query_allows_keyword_named_quoted_identifiers() -> None:
+    """Quoted identifiers whose names are write keywords must not trip the
+    unanchored keyword scan (the #239 fix must not regress into #253's
+    false-positive). Covers all three SQLite identifier-quoting forms."""
+    conn = _connect()
+    conn.execute('CREATE TABLE docs (id TEXT PRIMARY KEY, "delete" TEXT, "update" TEXT)')
+    conn.execute("INSERT INTO docs (id, \"delete\", \"update\") VALUES ('a', 'd', 'u')")
+
+    for sql in (
+        'SELECT "delete" FROM docs',
+        "SELECT `delete`, `update` FROM docs",
+        "SELECT [delete] FROM docs",
+        'SELECT id AS "create" FROM docs',
+    ):
+        result = raw_query(conn, sql)
+        assert result["rows"], sql
+
+
+def test_raw_query_allows_write_keywords_inside_string_literals() -> None:
+    """Standalone keywords in string values must not trip the unanchored scan."""
+    conn = _docs_concepts_conn()
+    conn.execute("INSERT INTO docs (id, title) VALUES ('a', 'when to DELETE FROM a vault')")
+
+    result = raw_query(conn, "SELECT id FROM docs WHERE title LIKE '%DELETE%'")
+
+    assert result == {"columns": ["id"], "rows": [["a"]]}
+
+
+def test_raw_query_quoted_identifier_cannot_mint_cte_alias(capsys) -> None:
+    """Text inside a quoted identifier must not register as a CTE name that
+    shadows a blocked table in the allow-list check."""
+    conn = _docs_concepts_conn()
+
+    with pytest.raises(SystemExit):
+        raw_query(conn, 'SELECT "sqlite_master AS (" FROM sqlite_master')
+
+    assert 'table "sqlite_master" is not allowed' in capsys.readouterr().err
+
+
+def test_raw_query_allows_quoted_cte_aliases() -> None:
+    """A CTE alias may be quoted in any of the three SQLite forms, and the
+    quoted `FROM` ref back to it must resolve to the CTE — not be checked
+    against ALLOWED_TABLES. Regression from extending the FROM check to
+    quoted forms without teaching the CTE collector the same (review finding)."""
+    conn = _docs_concepts_conn()
+
+    for sql in (
+        'WITH "myres" AS (SELECT id FROM docs) SELECT * FROM "myres"',
+        "WITH `myres` AS (SELECT id FROM docs) SELECT * FROM `myres`",
+        "WITH [myres] AS (SELECT id FROM docs) SELECT * FROM [myres]",
+        "WITH myres AS (SELECT id FROM docs) SELECT * FROM myres",
+    ):
+        raw_query(conn, sql)  # must not SystemExit
+
+
+def test_raw_query_allows_from_phrases_inside_double_quoted_strings() -> None:
+    """SQLite falls back to treating an unresolvable "double-quoted" token as
+    a string literal, and LLM-generated SQL uses that form constantly. Text
+    like "notes from meeting" inside one must not be parsed as a phantom
+    `FROM meeting` table ref (adversarial-review finding on the #240 fix)."""
+    conn = _docs_concepts_conn()
+    conn.execute("INSERT INTO docs (id, title) VALUES ('a', 'notes from meeting')")
+
+    for sql in (
+        'SELECT * FROM docs WHERE title = "notes from meeting"',
+        'SELECT id FROM docs WHERE title LIKE "%from now on%"',
+        'SELECT * FROM docs WHERE title = "join tomorrow"',
+    ):
+        raw_query(conn, sql)  # must not SystemExit
+
+
+def test_raw_query_allows_attach_as_identifier() -> None:
+    """ATTACH is non-reserved and legal as a bare column/alias name; the
+    keyword scan must not block it. Real ATTACH statements are still caught
+    by the SELECT/WITH prefix check (next test)."""
+    conn = _docs_concepts_conn()
+    conn.execute("INSERT INTO docs (id, title) VALUES ('a', 'A')")
+
+    result = raw_query(conn, "SELECT id AS attach FROM docs")
+
+    assert result == {"columns": ["attach"], "rows": [["a"]]}
+
+
+def test_raw_query_still_rejects_attach_statement(capsys) -> None:
+    conn = _docs_concepts_conn()
+
+    with pytest.raises(SystemExit):
+        raw_query(conn, "ATTACH DATABASE '/tmp/evil.db' AS evil")
+
+    assert "only SELECT queries are allowed" in capsys.readouterr().err
+
+
 def test_raw_query_rejects_bracket_quoted_table() -> None:
     """Bracket-quoted identifiers must not bypass ALLOWED_TABLES either."""
     conn = _docs_concepts_conn()

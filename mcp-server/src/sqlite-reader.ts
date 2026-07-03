@@ -113,7 +113,7 @@ function escapeLike(value: string): string {
 function maskSqlLiteralsAndComments(sql: string): string {
   const chars = [...sql];
   let i = 0;
-  let state: "normal" | "single" | "double" | "line_comment" | "block_comment" = "normal";
+  let state: "normal" | "single" | "double" | "backtick" | "bracket" | "line_comment" | "block_comment" = "normal";
 
   while (i < chars.length) {
     const ch = chars[i];
@@ -124,6 +124,10 @@ function maskSqlLiteralsAndComments(sql: string): string {
         state = "single";
       } else if (ch === "\"") {
         state = "double";
+      } else if (ch === "`") {
+        state = "backtick";
+      } else if (ch === "[") {
+        state = "bracket";
       } else if (ch === "-" && next === "-") {
         chars[i] = " ";
         chars[i + 1] = " ";
@@ -151,6 +155,27 @@ function maskSqlLiteralsAndComments(sql: string): string {
         chars[i + 1] = " ";
         i += 1;
       } else if (ch === "\"") {
+        state = "normal";
+      } else {
+        chars[i] = " ";
+      }
+    } else if (state === "backtick") {
+      // SQLite also accepts MySQL-style `...` identifier quoting; without this
+      // state, a column legitimately named e.g. `delete` reaches the DML
+      // keyword scan unmasked and gets falsely rejected as INVALID_SQL. See #253.
+      if (ch === "`" && next === "`") {
+        chars[i] = " ";
+        chars[i + 1] = " ";
+        i += 1;
+      } else if (ch === "`") {
+        state = "normal";
+      } else {
+        chars[i] = " ";
+      }
+    } else if (state === "bracket") {
+      // Same for SQL-Server-style [...] identifier quoting (no escape form;
+      // a `]` always closes the identifier).
+      if (ch === "]") {
         state = "normal";
       } else {
         chars[i] = " ";
