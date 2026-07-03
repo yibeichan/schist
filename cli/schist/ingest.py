@@ -282,15 +282,20 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     schema-only DB so the next get_db() rebuilds from scratch instead
     of trusting an empty index.
     """
-    conn.executescript(schema_path.read_text())
+    # WAL lets the MCP server keep reading while ingest rebuilds the tables;
+    # rollback-journal mode holds an EXCLUSIVE lock through the DDL phase and
+    # concurrent readers fail with SQLITE_BUSY. But WAL is unsafe when the
+    # vault lives on a network filesystem — SQLite requires all processes
+    # using a WAL DB to be on the same host, and HPC spokes (e.g. orcd) may
+    # serve the vault over NFS/Lustre to login and compute nodes at once.
+    # SCHIST_NO_WAL=1 keeps the pre-#254 rollback-journal behavior there.
+    # Must run BEFORE executescript so the DROP/CREATE phase never touches
+    # WAL mode on such deployments; journal_mode requires autocommit, which
+    # holds here (fresh connection, no open transaction). See #254.
+    mode = 'DELETE' if os.environ.get('SCHIST_NO_WAL') else 'WAL'
+    conn.execute(f'PRAGMA journal_mode={mode}')
 
-    # WAL (set by schema.sql, #254) is unsafe when the vault lives on a
-    # network filesystem — SQLite requires all processes using a WAL DB to
-    # be on the same host, and HPC spokes (e.g. orcd) may serve the vault
-    # over NFS/Lustre to login and compute nodes at once. SCHIST_NO_WAL=1
-    # keeps the pre-#254 rollback-journal behavior on such deployments.
-    if os.environ.get('SCHIST_NO_WAL'):
-        conn.execute('PRAGMA journal_mode=DELETE')
+    conn.executescript(schema_path.read_text())
 
     doc_count = 0
     concept_count = 0

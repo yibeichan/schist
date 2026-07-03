@@ -1,13 +1,9 @@
 -- schist.db — query layer, rebuilt from markdown on every commit
 -- NEVER the source of truth. Disposable. Delete and re-ingest anytime.
 
--- WAL lets the MCP server keep reading while ingest rebuilds the tables;
--- rollback-journal mode holds an EXCLUSIVE lock through the DDL phase and
--- concurrent readers fail with SQLITE_BUSY. Journal mode is a DB-level
--- setting: it persists across the DROP/CREATE rebuild below and is a no-op
--- when already WAL. Runs outside a transaction (executescript autocommits),
--- which PRAGMA journal_mode requires. See #254.
-PRAGMA journal_mode=WAL;
+-- Journal mode (WAL, or rollback under SCHIST_NO_WAL) is set by
+-- _ingest_into() BEFORE this script runs, so the DROP/CREATE phase below
+-- executes in the mode the deployment asked for. See #254.
 
 DROP TABLE IF EXISTS docs_fts;
 DROP TABLE IF EXISTS paper_metadata;
