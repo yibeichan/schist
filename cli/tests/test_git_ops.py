@@ -52,7 +52,7 @@ def _timeout(argv, kwargs):
     raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
 
 
-def test_sync_path_git_calls_all_carry_timeouts():
+def test_sync_path_git_calls_all_carry_timeouts(tmp_path):
     """#314: every git call in the spoke-sync hot path must be bounded."""
     calls = []
 
@@ -61,11 +61,11 @@ def test_sync_path_git_calls_all_carry_timeouts():
         return subprocess.CompletedProcess(args[0], 0, stdout="main\n", stderr="")
 
     with patch("schist.git_ops.subprocess.run", side_effect=_record):
-        git_ops.current_branch("/tmp/vault")
-        git_ops.has_uncommitted_changes("/tmp/vault")
-        git_ops.has_unpushed_commits("/tmp/vault")
-        git_ops.stage_scope_files("/tmp/vault", "research")
-        git_ops._global_scope_targets("/tmp/vault")
+        git_ops.current_branch(str(tmp_path))
+        git_ops.has_uncommitted_changes(str(tmp_path))
+        git_ops.has_unpushed_commits(str(tmp_path))
+        git_ops.stage_scope_files(str(tmp_path), "research")
+        git_ops._global_scope_targets(str(tmp_path))
 
     assert calls, "expected git subprocess calls"
     for argv, timeout in calls:
