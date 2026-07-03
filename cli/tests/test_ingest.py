@@ -1019,3 +1019,18 @@ def test_ingest_no_wal_env_keeps_rollback_journal(tmp_path: Path, monkeypatch) -
         assert conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_normalize_concept_slug_matches_ts_whitespace_collapse() -> None:
+    """#303: parity with mcp-server normalizeConceptSlug (`/\\s+/g` -> "-").
+    A whitespace RUN must collapse to a single dash — `foo--bar` vs `foo-bar`
+    skew between the index and delete_note's TS-side cascade comparison
+    silently leaves dangling concept refs."""
+    from schist.ingest import _normalize_concept_slug
+
+    assert _normalize_concept_slug("foo  bar") == "foo-bar"
+    assert _normalize_concept_slug("foo\tbar") == "foo-bar"
+    assert _normalize_concept_slug("foo \t\n bar") == "foo-bar"
+    assert _normalize_concept_slug("foo\u00a0bar") == "foo-bar"  # NBSP, the realistic copy-paste case
+    assert _normalize_concept_slug("  Neural Networks  ") == "neural-networks"
+    assert _normalize_concept_slug("already-normal") == "already-normal"
