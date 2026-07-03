@@ -181,6 +181,31 @@ describe("query_graph tool — SQL guards still in force", () => {
     });
     expect(r).toMatchObject({ error: "INVALID_SQL" });
   });
+
+  it("rejects CTE-prefixed REPLACE INTO with a clean INVALID_SQL (#313)", async () => {
+    vaultRoot = await makeVault(1);
+    const r = await query_graph(vaultRoot, {
+      sql: "WITH x AS (SELECT 1) REPLACE INTO docs (id, title, date, body) VALUES ('x', 'y', 'z', 'w')",
+    });
+    expect(r).toMatchObject({ error: "INVALID_SQL" });
+  });
+
+  it("rejects bare REPLACE INTO (#313)", async () => {
+    vaultRoot = await makeVault(1);
+    const r = await query_graph(vaultRoot, {
+      sql: "REPLACE INTO docs (id, title, date, body) VALUES ('x', 'y', 'z', 'w')",
+    });
+    expect(r).toMatchObject({ error: "INVALID_SQL" });
+  });
+
+  it("still allows the scalar REPLACE function (#313)", async () => {
+    vaultRoot = await makeVault(1);
+    const r = await query_graph(vaultRoot, {
+      sql: "SELECT REPLACE(title, 'Note', 'Doc') AS renamed FROM docs",
+    });
+    if (!("rows" in r)) throw new Error(`expected rows: ${JSON.stringify(r)}`);
+    expect(r.rows[0][0]).toBe("Doc 0000");
+  });
 });
 
 // ── cursor decoding ────────────────────────────────────────────────────────
