@@ -40,11 +40,18 @@ def commit(vault_path: str, message: str, files: list[str] | None = None) -> tup
 
 
 def current_branch(vault_path: str) -> str:
-    """Return current git branch name."""
-    result = subprocess.run(
-        ['git', 'branch', '--show-current'],
-        cwd=vault_path, capture_output=True, text=True,
-    )
+    """Return current git branch name.
+
+    Returns '' on timeout — callers already treat empty as detached HEAD
+    and fall back conservatively (see has_unpushed_commits). #314.
+    """
+    try:
+        result = subprocess.run(
+            ['git', 'branch', '--show-current'],
+            cwd=vault_path, capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return ''
     return result.stdout.strip()
 
 
@@ -133,11 +140,19 @@ def push(vault_path: str) -> tuple[bool, str]:
 
 
 def has_uncommitted_changes(vault_path: str) -> bool:
-    """Check for staged or unstaged changes."""
-    result = subprocess.run(
-        ['git', 'status', '--porcelain'],
-        cwd=vault_path, capture_output=True, text=True,
-    )
+    """Check for staged or unstaged changes.
+
+    Returns True on timeout (conservative: the sync path then attempts the
+    stage/commit — whose own timeouts surface a real error message — rather
+    than silently skipping a push). #314.
+    """
+    try:
+        result = subprocess.run(
+            ['git', 'status', '--porcelain'],
+            cwd=vault_path, capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return True
     return bool(result.stdout.strip())
 
 
@@ -150,10 +165,13 @@ def has_unpushed_commits(vault_path: str) -> bool:
     branch = current_branch(vault_path)
     if not branch:
         return True  # Detached HEAD — let push attempt and report the real error
-    result = subprocess.run(
-        ['git', 'rev-list', f'origin/{branch}..HEAD', '--count'],
-        cwd=vault_path, capture_output=True, text=True,
-    )
+    try:
+        result = subprocess.run(
+            ['git', 'rev-list', f'origin/{branch}..HEAD', '--count'],
+            cwd=vault_path, capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return True  # Can't determine (#314) — assume yes so push is attempted
     if result.returncode != 0:
         return True  # Can't determine — assume yes so push is attempted
     try:
@@ -177,12 +195,16 @@ def stage_scope_files(vault_path: str, scope: str) -> tuple[bool, str]:
         else:
             add_args = ['git', 'add', '--', scope.rstrip('/') + '/']
 
+        # timeout matches commit()'s git add (#256/#314): staging is the same
+        # index-write operation and stalls the same way on NFS lock contention.
         result = subprocess.run(
             add_args,
-            cwd=vault_path, capture_output=True, text=True,
+            cwd=vault_path, capture_output=True, text=True, timeout=60,
         )
         output = result.stdout + result.stderr
         return result.returncode == 0, output.strip()
+    except subprocess.TimeoutExpired:
+        return False, 'git add timed out after 60s (NFS stall or stale index lock?)'
     except subprocess.CalledProcessError as e:
         return False, (e.stdout or '') + (e.stderr or '')
 
@@ -209,10 +231,16 @@ def _global_scope_targets(vault_path: str) -> list[str]:
         if (Path(vault_path) / d).exists():
             targets.append(target)
             continue
-        tracked = subprocess.run(
-            ['git', 'ls-files', '--', target],
-            cwd=vault_path, capture_output=True, text=True,
-        )
+        try:
+            tracked = subprocess.run(
+                ['git', 'ls-files', '--', target],
+                cwd=vault_path, capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            # Skip the stalled directory (#314): a partial target list stages
+            # less than everything, which the next push attempt picks up —
+            # better than hanging the whole sync path.
+            continue
         if tracked.returncode == 0 and tracked.stdout.strip():
             targets.append(target)
     return targets

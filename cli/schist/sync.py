@@ -534,10 +534,17 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
         # Count staged files
         import subprocess
 
-        result = subprocess.run(
-            ["git", "diff", "--cached", "--name-only"],
-            cwd=vault_path, capture_output=True, text=True,
-        )
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--cached", "--name-only"],
+                cwd=vault_path, capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            # #314 review: the sixth unbounded git call in this hot path.
+            # Bail like a stage failure — the staged files stay staged and
+            # the next push attempt picks them up.
+            print("Error: git diff --cached timed out after 30s (NFS stall?)", file=sys.stderr)
+            sys.exit(1)
         staged = [f for f in result.stdout.strip().split("\n") if f]
         n = len(staged)
 
