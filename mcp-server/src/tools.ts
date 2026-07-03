@@ -1244,6 +1244,32 @@ export async function create_note(
       const arrayError = validateNonEmptyStringArray(args.concepts, "concepts");
       if (arrayError !== null) return arrayError;
     }
+    // #276: the JSON-Schema enum in tool-registry is a client-side hint only;
+    // enforce server-side like update_note's frontmatter_patch.status check.
+    // Validate the RESOLVED value, not just an explicit arg: on a vault whose
+    // custom statuses exclude "draft", the bare default must not slip an
+    // out-of-vocabulary status onto disk — fall back to the vault's first
+    // configured status instead.
+    const status = args.status
+      ?? (config.statuses.includes("draft") ? "draft" : config.statuses[0]);
+    if (!config.statuses.includes(status)) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: `status must be one of: ${config.statuses.join(", ")} (got "${status}")`,
+      } satisfies ToolError;
+    }
+    // #304: connections carry a controlled type vocabulary (vault.yaml
+    // connection_types); unchecked strings silently drift the graph taxonomy
+    // and a type with whitespace/newlines produces `## Connections` lines
+    // CONNECTION_RE can't round-trip.
+    for (const conn of args.connections ?? []) {
+      if (!config.connectionTypes.includes(conn.type)) {
+        return {
+          error: "VALIDATION_ERROR",
+          message: `connection type must be one of: ${config.connectionTypes.join(", ")} (got "${conn.type}")`,
+        } satisfies ToolError;
+      }
+    }
     const directory = args.directory ?? "notes";
     if (directory.includes("..") || path.isAbsolute(directory)) {
       return {
@@ -1343,8 +1369,11 @@ export async function create_note(
       title: args.title,
       date,
       tags: args.tags !== undefined ? normalizeTags(args.tags) : [],
-      concepts: args.concepts ?? [],
-      status: args.status ?? "draft",
+      // #302: mirror the tags normalization — ingest stores the normalized
+      // slug in the index, so writing the raw value to disk makes the file
+      // and the DB disagree on the concept identifier.
+      concepts: args.concepts !== undefined ? args.concepts.map(normalizeConceptSlug) : [],
+      status,
       source_agent: owner,
     };
     if (args.confidence !== undefined) {
@@ -1395,6 +1424,13 @@ export async function add_connection(
     const owner = validateOwner(args.owner);
     const syncDirty = await blockWriteIfSyncDirty(vaultRoot);
     if (syncDirty !== null) return syncDirty;
+    // #304: same controlled-vocabulary check as create_note's connections.
+    if (!config.connectionTypes.includes(args.type)) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: `connection type must be one of: ${config.connectionTypes.join(", ")} (got "${args.type}")`,
+      } satisfies ToolError;
+    }
     const srcIdError = validateNoteId(args.source, config);
     if (srcIdError !== null) return srcIdError;
     const filePath = path.join(vaultRoot, args.source);
@@ -1854,7 +1890,10 @@ export async function update_note(
       if (args.frontmatter_patch !== undefined) {
         for (const [key, value] of Object.entries(args.frontmatter_patch)) {
           if (value === null) delete mergedMeta[key];
-          else mergedMeta[key] = key === "tags" ? normalizeTags(value as string[]) : value;
+          // #302: concepts normalize like tags do — see create_note.
+          else if (key === "tags") mergedMeta[key] = normalizeTags(value as string[]);
+          else if (key === "concepts") mergedMeta[key] = (value as string[]).map(normalizeConceptSlug);
+          else mergedMeta[key] = value;
         }
       }
       // gray-matter parses YAML timestamps into JS Dates; matter.stringify would
