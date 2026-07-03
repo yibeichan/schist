@@ -1031,5 +1031,6 @@ def test_normalize_concept_slug_matches_ts_whitespace_collapse() -> None:
     assert _normalize_concept_slug("foo  bar") == "foo-bar"
     assert _normalize_concept_slug("foo\tbar") == "foo-bar"
     assert _normalize_concept_slug("foo \t\n bar") == "foo-bar"
+    assert _normalize_concept_slug("foo\u00a0bar") == "foo-bar"  # NBSP, the realistic copy-paste case
     assert _normalize_concept_slug("  Neural Networks  ") == "neural-networks"
     assert _normalize_concept_slug("already-normal") == "already-normal"
