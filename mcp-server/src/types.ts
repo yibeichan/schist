@@ -123,6 +123,9 @@ export interface ComposeBriefResponse {
     path: string;
     commit: string;
   }>;
+  /** Present (true) when the recent-paths git lookup failed or timed out, so
+   *  an empty recent_paths can't be mistaken for "nothing added". #238. */
+  recent_paths_unavailable?: boolean;
 }
 
 export interface VaultConfig {
