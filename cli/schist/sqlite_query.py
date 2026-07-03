@@ -121,12 +121,75 @@ def _escape_like(value: str) -> str:
     return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
 
 
+def _query_authorizer(denied: list):
+    """Build a SQLite authorizer enforcing the read-only table boundary.
+
+    The regex checks in _validate_sql re-derive SQLite's table-reference
+    grammar and always trail it — comma joins (`FROM docs, sqlite_master`),
+    no-space quoting (`FROM"sqlite_master"`), and parenthesized refs
+    (`FROM (sqlite_master)`) all bypassed the allow-list (the #223 → #228 →
+    #240 → #306 lineage). The authorizer runs inside prepare, so it sees
+    every table the engine actually resolves, however the SQL spelled it.
+    The regex pass stays as the friendly-error fast path; this is the
+    backstop that makes the boundary real.
+
+    CTE names need no special-casing: reads through a CTE are reported
+    against the underlying real table (the CTE name only appears in the
+    authorizer's inner-most-trigger-or-view argument).
+
+    Denials are recorded in `denied` as (action, arg1) so raw_query can
+    turn the engine's terse "not authorized" into the fast path's error
+    style.
+    """
+    def authorize(action, arg1, arg2, db_name, trigger):
+        if action in (sqlite3.SQLITE_SELECT, sqlite3.SQLITE_FUNCTION,
+                      sqlite3.SQLITE_RECURSIVE):
+            return sqlite3.SQLITE_OK
+        if action == sqlite3.SQLITE_READ:
+            table = (arg1 or '').lower()
+            # docs_fts_* are the FTS5 shadow tables (docs_fts_idx, _data,
+            # _docsize, _config); MATCH/snippet/bm25 read them internally,
+            # so they must be readable wherever docs_fts itself is.
+            if table in ALLOWED_TABLES or table.startswith('docs_fts_'):
+                return sqlite3.SQLITE_OK
+        elif action == sqlite3.SQLITE_PRAGMA and arg1 == 'data_version':
+            # FTS5 reads `PRAGMA data_version` internally on every MATCH to
+            # detect external-content changes; denying it breaks all FTS
+            # queries. Read-only, and a user-typed `PRAGMA ...` statement
+            # never reaches the engine anyway (_validate_sql requires a
+            # SELECT/WITH prefix).
+            return sqlite3.SQLITE_OK
+        denied.append((action, arg1))
+        return sqlite3.SQLITE_DENY
+
+    return authorize
+
+
 def raw_query(db: sqlite3.Connection, sql: str, params: tuple = ()) -> dict:
     """Execute a validated SELECT query. Returns {columns, rows}."""
     _validate_sql(sql)
-    cursor = db.execute(sql, params)
-    columns = [desc[0] for desc in cursor.description] if cursor.description else []
-    rows = [list(row) for row in cursor.fetchall()]
+
+    denied: list = []
+    db.set_authorizer(_query_authorizer(denied))
+    try:
+        cursor = db.execute(sql, params)
+        columns = [desc[0] for desc in cursor.description] if cursor.description else []
+        rows = [list(row) for row in cursor.fetchall()]
+    except sqlite3.DatabaseError:
+        if denied:
+            action, name = denied[0]
+            if action == sqlite3.SQLITE_READ:
+                print(f'Error: table "{name}" is not allowed (allowed: {", ".join(sorted(ALLOWED_TABLES))})', file=sys.stderr)
+            else:
+                print('Error: only SELECT queries are allowed', file=sys.stderr)
+            sys.exit(1)
+        raise
+    finally:
+        # Clear the hook so later statements on this connection (ingest,
+        # fts_search) run unrestricted. Passing None requires Python >= 3.11
+        # (on 3.10 it failed to remove the hook, leaving the connection
+        # denying everything); the cli package floor is 3.12.
+        db.set_authorizer(None)
     return {'columns': columns, 'rows': rows}
 
 
@@ -265,9 +328,14 @@ def _validate_sql(sql: str):
     # Located on the masked view (so string/identifier text can't mint a fake
     # CTE name) but the name is read from the original sql by span, exactly
     # like the table-ref check (masking is length-preserving).
+    # The optional `\([^)]*\)` matches a CTE column list — `WITH cnt(x) AS
+    # (...)` — which recursive CTEs use almost universally; without it the
+    # alias is never collected and `FROM cnt` is falsely rejected (#306).
+    # Over-matching here only loosens the fast path: the authorizer in
+    # raw_query still enforces the real table boundary.
     cte_names = set()
     for m in re.finditer(
-        r'(?:`([^`]*)`|\[([^\]]*)\]|"([^"]*)"|\b(\w+))\s+AS\s*\(',
+        r'(?:`([^`]*)`|\[([^\]]*)\]|"([^"]*)"|\b(\w+))\s*(?:\([^)]*\))?\s+AS\s*\(',
         cleaned,
         re.IGNORECASE,
     ):

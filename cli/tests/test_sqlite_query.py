@@ -482,3 +482,122 @@ def test_run_ingest_failure_removes_wal_siblings(tmp_path: Path) -> None:
 
     for suffix in ("", "-wal", "-shm"):
         assert not Path(f"{db}{suffix}").exists(), suffix
+
+
+# ── #306: engine-level authorizer backstop ──────────────────────────────────
+
+
+def _fts_conn() -> sqlite3.Connection:
+    """docs + external-content docs_fts, mirroring schema.sql's FTS setup."""
+    conn = _connect()
+    conn.execute(
+        "CREATE TABLE docs (id TEXT PRIMARY KEY, title TEXT, body TEXT,"
+        " tags TEXT, scope TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO docs VALUES ('a', 'Note 1', 'hello world', '[]', 'global')"
+    )
+    conn.execute(
+        "CREATE VIRTUAL TABLE docs_fts USING fts5(title, body, tags,"
+        " scope UNINDEXED, content='docs', content_rowid='rowid')"
+    )
+    conn.execute(
+        "INSERT INTO docs_fts(rowid, title, body, tags, scope)"
+        " SELECT rowid, title, body, tags, scope FROM docs"
+    )
+    conn.commit()
+    return conn
+
+
+def test_raw_query_rejects_comma_join_disallowed_table(capsys) -> None:
+    """`FROM docs, sqlite_master`: the regex captures only the first table
+    after FROM, so the fast path passes — the authorizer must catch it."""
+    conn = _docs_concepts_conn()
+
+    with pytest.raises(SystemExit):
+        raw_query(conn, "SELECT * FROM docs, sqlite_master")
+
+    assert 'table "sqlite_master" is not allowed' in capsys.readouterr().err
+
+
+def test_raw_query_rejects_no_space_quoted_disallowed_table(capsys) -> None:
+    """`FROM"sqlite_master"` (no whitespace) is valid SQLite the regex's
+    `\\s+` never matches."""
+    conn = _docs_concepts_conn()
+
+    with pytest.raises(SystemExit):
+        raw_query(conn, 'SELECT * FROM"sqlite_master"')
+
+    assert 'table "sqlite_master" is not allowed' in capsys.readouterr().err
+
+
+def test_raw_query_rejects_parenthesized_disallowed_table(capsys) -> None:
+    conn = _docs_concepts_conn()
+
+    with pytest.raises(SystemExit):
+        raw_query(conn, "SELECT * FROM (sqlite_master)")
+
+    assert 'table "sqlite_master" is not allowed' in capsys.readouterr().err
+
+
+def test_raw_query_rejects_pragma_table_valued_function(capsys) -> None:
+    """pragma_* table-valued functions read schema metadata without any
+    FROM-able table name the regex would flag."""
+    conn = _docs_concepts_conn()
+
+    with pytest.raises(SystemExit):
+        raw_query(conn, "SELECT * FROM pragma_table_info('docs')")
+
+    assert 'is not allowed' in capsys.readouterr().err
+
+
+def test_raw_query_allows_fts_match_with_snippet_and_rank() -> None:
+    """FTS5 MATCH internally reads the docs_fts_* shadow tables, the docs
+    content table, and `PRAGMA data_version`; the authorizer must allow all
+    three or every FTS query dies with 'not authorized'."""
+    conn = _fts_conn()
+
+    result = raw_query(
+        conn,
+        "SELECT d.id, snippet(docs_fts, 1, '[', ']', '...', 32) AS snip"
+        " FROM docs_fts fts JOIN docs d ON d.rowid = fts.rowid"
+        " WHERE docs_fts MATCH 'hello' ORDER BY rank LIMIT 5",
+    )
+
+    assert result["columns"] == ["id", "snip"]
+    assert result["rows"] == [["a", "[hello] world"]]
+
+
+def test_raw_query_allows_recursive_cte() -> None:
+    conn = _docs_concepts_conn()
+
+    result = raw_query(
+        conn,
+        "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt"
+        " WHERE x < 3) SELECT x FROM cnt",
+    )
+
+    assert result["rows"] == [[1], [2], [3]]
+
+
+def test_raw_query_authorizer_removed_after_success() -> None:
+    """The backstop must not outlive the query: later statements on the same
+    connection (ingest, fts_search, get_db's schema probe) run unrestricted.
+    Guards the Python 3.10 pitfall where set_authorizer(None) fails to clear
+    the hook and leaves the connection denying everything."""
+    conn = _docs_concepts_conn()
+
+    raw_query(conn, "SELECT id FROM docs")
+
+    names = conn.execute("SELECT name FROM sqlite_master").fetchall()
+    assert names  # would raise sqlite3.DatabaseError if still restricted
+
+
+def test_raw_query_authorizer_removed_after_denial() -> None:
+    conn = _docs_concepts_conn()
+
+    with pytest.raises(SystemExit):
+        raw_query(conn, "SELECT * FROM docs, sqlite_master")
+
+    names = conn.execute("SELECT name FROM sqlite_master").fetchall()
+    assert names
