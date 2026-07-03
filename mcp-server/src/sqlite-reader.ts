@@ -704,9 +704,17 @@ export async function queryGraph(
   // rejected as non-SELECT. The blocked-keyword scan below is unanchored, so
   // trimming doesn't affect it. See #222.
   const guardSql = maskSqlLiteralsAndComments(trimmed).trimStart();
+  // REPLACE INTO is SQLite's INSERT OR REPLACE alias: it rides a CTE prefix
+  // (`WITH x AS (...) REPLACE INTO docs ...`) and carries no FROM/JOIN, so
+  // nothing else here catches it. The required `INTO` matters — bare REPLACE
+  // is the scalar string function (`SELECT REPLACE(title, 'a', 'b')`) and
+  // must stay allowed. Mirrors Python _validate_sql (#305/#313); without
+  // this the readonly child still refuses the write, but the caller gets a
+  // confusing internal error instead of the clean INVALID_SQL.
   if (
     !guardSql.match(/^(SELECT|WITH)\b/i) ||
-    guardSql.match(/\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE)\b/i)
+    guardSql.match(/\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE)\b/i) ||
+    guardSql.match(/\bREPLACE\s+INTO\b/i)
   ) {
     // Return a ToolError result rather than throwing a plain object.
     // Throwing non-Error objects loses stack traces and breaks instanceof checks
