@@ -31,7 +31,12 @@ PAPER_FIELDS = {
 
 
 def _normalize_concept_slug(value: str) -> str:
-    return value.strip().lower().replace(' ', '-')
+    """Mirror mcp-server normalizeConceptSlug: `.trim().toLowerCase()
+    .replace(/\\s+/g, "-")`. Collapsing any whitespace RUN to one dash (not
+    just single spaces) matters: delete_note's cascade compares slugs it
+    normalizes in TS against slugs this function stored in the index, and a
+    `foo--bar` / `foo-bar` skew silently leaves dangling refs. See #303."""
+    return re.sub(r'\s+', '-', value.strip().lower())
 
 
 def _normalize_tag(value: str) -> str:
