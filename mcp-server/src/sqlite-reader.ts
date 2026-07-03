@@ -232,6 +232,7 @@ function ensureSchemaCurrent(vaultRoot: string): void {
   const checkMissing = (): string[] => {
     try {
       const db = new Database(dbPath, { readonly: true });
+      db.pragma("busy_timeout = 5000");
       try {
         const tableRows = db.prepare(
           "SELECT name FROM sqlite_master WHERE type = 'table'",
@@ -319,6 +320,10 @@ function openDb(vaultRoot: string, opts?: { readonly?: boolean }): Database.Data
   const dbPath = path.join(vaultRoot, ".schist", "schist.db");
   const readonly = opts?.readonly ?? true;
   const db = new Database(dbPath, { readonly });
+  // Grace period for residual lock contention (e.g. WAL checkpoints during
+  // ingest); without it the first concurrent read fails hard with
+  // SQLITE_BUSY. Matches openMemoryDb. See #254.
+  db.pragma("busy_timeout = 5000");
   if (!readonly) {
     db.pragma("foreign_keys = ON");
   }
@@ -565,6 +570,7 @@ function runQueryGraphChild(
       try {
         const request = JSON.parse(input);
         const db = new Database(request.dbPath, { readonly: true });
+        db.pragma("busy_timeout = " + request.busyTimeoutMs);
         try {
           const stmt = db.prepare(request.sql);
           const columns = stmt.columns().map((c) => c.name);
@@ -668,7 +674,15 @@ function runQueryGraphChild(
         reject(err);
       });
     });
-    child.stdin.end(JSON.stringify({ dbPath, sql, params, byteBudget: opts.byteBudget }));
+    // Derive the child's SQLite busy_timeout from the outer kill-timeout with
+    // headroom, rather than a fixed 5000ms. A hardcoded value equal to the
+    // default timeout let a lock-contended query burn its entire budget
+    // waiting on the lock, leaving no time to run+serialize once it cleared —
+    // the parent SIGTERMs the child right as it would have succeeded. Reserve
+    // ~1s (but always allow at least 1s of waiting) so a query that gets the
+    // lock still has time to finish before the outer timer fires. See #254 review.
+    const busyTimeoutMs = Math.max(1000, opts.timeoutMs - 1000);
+    child.stdin.end(JSON.stringify({ dbPath, sql, params, byteBudget: opts.byteBudget, busyTimeoutMs }));
   });
 }
 

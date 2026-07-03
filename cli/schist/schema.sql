@@ -1,6 +1,10 @@
 -- schist.db — query layer, rebuilt from markdown on every commit
 -- NEVER the source of truth. Disposable. Delete and re-ingest anytime.
 
+-- Journal mode (WAL, or rollback under SCHIST_NO_WAL) is set by
+-- _ingest_into() BEFORE this script runs, so the DROP/CREATE phase below
+-- executes in the mode the deployment asked for. See #254.
+
 DROP TABLE IF EXISTS docs_fts;
 DROP TABLE IF EXISTS paper_metadata;
 DROP TABLE IF EXISTS edges;

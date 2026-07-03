@@ -975,3 +975,159 @@ class TestBuildStandaloneVault:
         data = _build_standalone_vault(name="v", identity="local")
         acl = parse_vault_data(data)
         assert acl.scope_convention == "flat"
+
+
+class TestRebuildIndexWalSafety:
+    """#254 follow-up: _rebuild_index must move/delete the -wal/-shm siblings
+    with the main DB file, or a WAL DB whose close-checkpoint was blocked
+    (an MCP reader open at ingest-close time) silently loses its index."""
+
+    def test_aliases_survive_rebuild_when_index_lives_in_wal(self, tmp_path):
+        import sqlite3
+        from schist.sync import _rebuild_index
+
+        vault, db_path = _init_vault_with_schema(tmp_path)
+        # Alias endpoints must exist as concepts or the #213 dangling-FK
+        # prune (not the WAL handling under test) removes the row.
+        concepts = Path(vault) / "concepts"
+        (concepts / "bp.md").write_text(
+            "---\nconcept: bp\ntitle: BP\n---\n\nShort form.\n"
+        )
+        (concepts / "backpropagation.md").write_text(
+            "---\nconcept: backpropagation\ntitle: Backpropagation\n---\n\nCanonical.\n"
+        )
+        _rebuild_index(vault, db_path)
+
+        # Put an alias row in, then force the "entire index in the -wal"
+        # state: a read-only connection with an active statement blocks the
+        # writer's close-checkpoint, and a read-only close can't checkpoint.
+        writer = sqlite3.connect(db_path)
+        writer.execute(
+            "INSERT INTO concept_aliases "
+            "(duplicate_slug, canonical_slug, reason, created_by) "
+            "VALUES ('bp', 'backpropagation', 'short', 'tester')"
+        )
+        writer.commit()
+        reader = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        cursor = reader.execute("SELECT id FROM docs")
+        writer.close()
+        cursor.fetchall()
+        reader.close()
+
+        wal = Path(f"{db_path}-wal")
+        assert wal.exists() and wal.stat().st_size > 0, (
+            "test precondition failed: expected the index to be left in the -wal"
+        )
+
+        _rebuild_index(vault, db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT duplicate_slug, canonical_slug FROM concept_aliases"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert ("bp", "backpropagation") in rows
+        # No orphaned backup or sibling files left behind
+        assert not Path(f"{db_path}.bak").exists()
+        assert not Path(f"{db_path}.bak-wal").exists()
+
+    def test_failed_rebuild_restores_backup_without_replaying_stray_wal(self, tmp_path, capsys):
+        import sqlite3
+        from unittest.mock import patch as _patch
+        from schist.sync import _rebuild_index
+
+        vault, db_path = _init_vault_with_schema(tmp_path)
+        conn = sqlite3.connect(db_path)
+        old_docs = conn.execute("SELECT id FROM docs ORDER BY id").fetchall()
+        conn.close()
+
+        def poison_then_fail(vault_path, db):
+            # Mimic a rebuild that dies after ingest wrote at the live path
+            # (e.g. _preserve_side_tables raising): a fresh WAL DB whose data
+            # sits in its -wal file.
+            c = sqlite3.connect(db)
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("CREATE TABLE junk (x)")
+            c.execute("INSERT INTO junk VALUES (1)")
+            c.commit()
+            # Leave the connection open so close-checkpointing can't fold the
+            # -wal back into the main file, then abandon it.
+            raise RuntimeError("boom after partial write")
+
+        with _patch("schist.sqlite_query._run_ingest", side_effect=poison_then_fail):
+            _rebuild_index(vault, db_path)
+
+        assert "index rebuild failed" in capsys.readouterr().err
+        conn = sqlite3.connect(db_path)
+        try:
+            docs = conn.execute("SELECT id FROM docs ORDER BY id").fetchall()
+            tables = {
+                r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        assert docs == old_docs
+        assert "junk" not in tables, "failed ingest's -wal was replayed into the restored backup"
+        assert not Path(f"{db_path}.bak").exists()
+
+
+class TestMoveDbWithWalAtomicity:
+    """#254 /review finding: _move_db_with_wal must not leave a half-moved
+    set (a stray -wal at a path a fresh DB later reuses) if one rename fails."""
+
+    def test_partial_move_rolls_back_to_source(self, tmp_path, monkeypatch):
+        import schist.sync as sync
+
+        src = tmp_path / "schist.db"
+        dst = tmp_path / "schist.db.bak"
+        src.write_bytes(b"main")
+        Path(f"{src}-wal").write_bytes(b"wal")
+        Path(f"{src}-shm").write_bytes(b"shm")
+
+        real_rename = Path.rename
+
+        def flaky_rename(self, target):
+            # Fail specifically on the main-file move (siblings move first),
+            # so at least one sibling has already been renamed to dst.
+            if self == src:
+                raise OSError("simulated rename failure")
+            return real_rename(self, target)
+
+        monkeypatch.setattr(Path, "rename", flaky_rename)
+        with pytest.raises(OSError):
+            sync._move_db_with_wal(src, dst)
+        monkeypatch.undo()
+
+        # Everything rolled back to src; nothing orphaned at dst.
+        assert src.exists() and Path(f"{src}-wal").exists() and Path(f"{src}-shm").exists()
+        assert not dst.exists()
+        assert not Path(f"{dst}-wal").exists()
+        assert not Path(f"{dst}-shm").exists()
+
+    def test_rebuild_aborts_intact_when_backup_move_fails(self, tmp_path, monkeypatch, capsys):
+        import sqlite3
+        import schist.sync as sync
+
+        vault, db_path = _init_vault_with_schema(tmp_path)
+        conn = sqlite3.connect(db_path)
+        before = conn.execute("SELECT id FROM docs ORDER BY id").fetchall()
+        conn.close()
+
+        def always_fail(src, dst):
+            raise OSError("simulated backup failure")
+
+        monkeypatch.setattr(sync, "_move_db_with_wal", always_fail)
+        sync._rebuild_index(vault, db_path)
+        monkeypatch.undo()
+
+        assert "rebuild skipped (backup failed)" in capsys.readouterr().err
+        conn = sqlite3.connect(db_path)
+        try:
+            after = conn.execute("SELECT id FROM docs ORDER BY id").fetchall()
+        finally:
+            conn.close()
+        assert after == before  # existing index left intact, not overwritten

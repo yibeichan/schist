@@ -465,3 +465,20 @@ def test_fts_search_tag_underscore_is_not_a_wildcard() -> None:
     rows = fts_search(conn, "ml", tags=["machine_learning"])
 
     assert [row["id"] for row in rows] == ["notes/a.md"]
+
+
+def test_run_ingest_failure_removes_wal_siblings(tmp_path: Path) -> None:
+    """#254: a failed ingest must delete its -wal/-shm too, or the surviving
+    -wal is silently replayed into the next DB file created at this path."""
+    from schist.sqlite_query import _run_ingest
+
+    db = tmp_path / "schist.db"
+    for suffix in ("", "-wal", "-shm"):
+        Path(f"{db}{suffix}").write_bytes(b"junk")
+
+    with patch("schist.ingest.ingest", side_effect=RuntimeError("boom")):
+        with pytest.raises(RuntimeError):
+            _run_ingest(str(tmp_path), str(db))
+
+    for suffix in ("", "-wal", "-shm"):
+        assert not Path(f"{db}{suffix}").exists(), suffix
