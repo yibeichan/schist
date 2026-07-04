@@ -102,6 +102,50 @@ def test_secret_in_filename_with_spaces_is_blocked(vault: Path) -> None:
     assert "research note with spaces.md" in output
 
 
+def test_secret_in_filename_with_single_quote_is_blocked(vault: Path) -> None:
+    """A quote in a staged path must not break the scanner's argument passing
+    (#279). Filenames reach the inner sh as argv slots, never as script text."""
+    result = _try_commit(
+        vault,
+        "it's-todo.md",
+        "api_key = 'sk-redacted-but-quoted-value-here'\n",
+    )
+    assert result.returncode != 0, (
+        "Hook silently accepted a secret in a staged filename containing a single quote"
+    )
+    assert "Potential secret detected" in result.stdout + result.stderr
+
+
+def _long_relpath(vault: Path) -> str:
+    """A staged path well past BSD xargs' 255-byte -I replacement buffer."""
+    subdir = vault / ("d" * 100) / ("e" * 100)
+    subdir.mkdir(parents=True)
+    return str((subdir / ("f" * 80 + ".md")).relative_to(vault))
+
+
+def test_secret_in_long_path_is_blocked(vault: Path) -> None:
+    """BSD xargs -I aborts on items longer than its 255-byte replacement
+    buffer; the old hook then treated the failed scan as "no match" and let
+    the secret through (#279). Long paths must scan like any other."""
+    result = _try_commit(
+        vault,
+        _long_relpath(vault),
+        "api_key = 'sk-redacted-but-quoted-value-here'\n",
+    )
+    assert result.returncode != 0, (
+        "Hook silently accepted a secret in a staged path longer than 255 bytes"
+    )
+    assert "Potential secret detected" in result.stdout + result.stderr
+
+
+def test_benign_long_path_commits(vault: Path) -> None:
+    """The long-path fix must not fail closed on clean files."""
+    result = _try_commit(vault, _long_relpath(vault), "just a note\n")
+    assert result.returncode == 0, (
+        f"Hook rejected a benign file at a long path: {result.stdout}{result.stderr}"
+    )
+
+
 def test_staged_secret_blocked_after_worktree_cleanup(vault: Path) -> None:
     """The hook must inspect the staged blob, not the working-tree file."""
     note = vault / "secret.md"
@@ -247,3 +291,37 @@ def test_missing_hook_returns_none() -> None:
     from schist.doctor import _installed_hook_version
 
     assert _installed_hook_version(Path("/nonexistent/hook")) is None
+
+
+def test_secret_in_colon_prefixed_filename_is_blocked(vault: Path) -> None:
+    """A file named "0:evil.md" makes the bare ":<path>" pathspec parse as
+    "stage 0 of evil.md" — git errors (file skipped, secret through) or, with
+    a clean sibling evil.md staged, scans the WRONG blob. The explicit
+    ":0:<path>" stage form takes the path literally."""
+    result = _try_commit(
+        vault,
+        "0:evil.md",
+        "api_key = 'sk-redacted-but-quoted-value-here'\n",
+    )
+    assert result.returncode != 0, (
+        "Hook silently accepted a secret in a staged filename starting with '0:'"
+    )
+    assert "Potential secret detected" in result.stdout + result.stderr
+
+
+def test_secret_not_masked_by_clean_sibling_blob(vault: Path) -> None:
+    """Wrong-blob variant: with a clean "x.md" staged, the bare pathspec for
+    "0:x.md" resolved to x.md's clean blob and the secret passed unseen."""
+    (vault / "x.md").write_text("clean sibling\n")
+    subprocess.run(["git", "add", "x.md"], cwd=vault, check=True)
+    result = _try_commit(
+        vault,
+        "0:x.md",
+        "api_key = 'sk-redacted-but-quoted-value-here'\n",
+    )
+    assert result.returncode != 0, (
+        "Hook scanned the clean sibling blob instead of the staged '0:x.md'"
+    )
+    output = result.stdout + result.stderr
+    assert "Potential secret detected" in output
+    assert "0:x.md" in output
