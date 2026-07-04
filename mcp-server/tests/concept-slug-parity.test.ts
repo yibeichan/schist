@@ -32,4 +32,15 @@ describe("concept-slug parity (#318)", () => {
       expect(normalizeConceptSlug(c.input)).toBe(c.slug);
     });
   }
+
+  test("normalization is linear, not quadratic, on huge whitespace runs", () => {
+    // Edge-strip must be an index scan, not a `^[ws]+|[ws]+$` regex — the
+    // alternated form backtracks quadratically (minutes at this size), and
+    // create_note's `concepts` args reach it with no length validation on a
+    // single-threaded server.
+    const big = "a" + " ".repeat(1_000_000) + "b";
+    const t0 = performance.now();
+    expect(normalizeConceptSlug(big)).toBe("a-b");
+    expect(performance.now() - t0).toBeLessThan(5000); // linear is ~10 ms
+  });
 });
