@@ -187,6 +187,14 @@ async function withWriteLock(
 
     const absPath = path.resolve(vaultRoot, relPath);
     await fs.mkdir(path.dirname(absPath), { recursive: true });
+    // Authoritative symlink/containment guard, post-checkout — the only point
+    // where on-disk symlink state matches the write branch (see
+    // assertResolvesInside). Lives HERE, not in each caller's fn, so every
+    // writer routed through withWriteLock is covered; writeNote and
+    // appendToNote skipped it when it lived only in updateNote's fn (#323).
+    // Must run AFTER the mkdir above: the guard realpaths the parent dir,
+    // which may not exist yet for a brand-new subdirectory.
+    await assertResolvesInside(vaultRoot, relPath);
     await fn(absPath);
 
     await git(vaultRoot, ["add", relPath]);
@@ -311,10 +319,8 @@ export async function updateNote(
     relPath,
     `feat(schist): update ${title} — ${attribution(owner)}`,
     async (absPath) => {
-      // Authoritative symlink/containment guard, post-checkout (see
-      // assertResolvesInside) — the handler's pre-checkout check can be skipped
-      // by branch skew. Runs before any read/write follows the path.
-      await assertResolvesInside(vaultRoot, relPath);
+      // Symlink/containment guard runs in withWriteLock, post-checkout,
+      // before this callback (#323).
       // Re-read the note INSIDE the write lock (after checkout) and build the
       // new content from the fresh on-disk state. If the note vanished since the
       // handler's pre-lock read — e.g. a concurrent delete_note committed in the

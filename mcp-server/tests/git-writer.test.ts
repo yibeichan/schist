@@ -1,4 +1,4 @@
-import { writeNote, writeMutex } from "../src/git-writer.js";
+import { writeNote, appendToNote, writeMutex } from "../src/git-writer.js";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
@@ -108,6 +108,54 @@ describe("git-writer", () => {
     const third = await writeNote(vault, "notes/dup.md", content + "\nmore", "Dedup");
     expect(third.committed).toBe(true);
     expect(third.commitSha).not.toBe(first.commitSha);
+  }, 30000);
+
+  // Plant a symlink at notes/x.md on the write branch (drafts) pointing at a
+  // file outside the vault, while the base branch has no such path. A lexical
+  // pre-checkout check cannot see the symlink; only the in-lock post-checkout
+  // guard can. Shared by the two branch-skew tests below (#323).
+  async function plantWriteBranchSymlink(vault: string): Promise<string> {
+    const { stdout } = await execFile("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: vault });
+    const baseBranch = stdout.trim();
+    const outside = path.join(path.dirname(vault), `outside-${path.basename(vault)}.txt`);
+    await fs.writeFile(outside, "SECRET", "utf-8");
+    await execFile("git", ["checkout", "-b", "drafts"], { cwd: vault });
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.symlink(outside, path.join(vault, "notes", "x.md"));
+    await execFile("git", ["add", "-A"], { cwd: vault });
+    await execFile("git", ["commit", "-m", "symlink on write branch"], { cwd: vault });
+    await execFile("git", ["checkout", baseBranch], { cwd: vault });
+    return outside;
+  }
+
+  test("writeNote refuses to write through a symlink that exists only on the write branch (#323)", async () => {
+    const vault = await makeTempVault();
+    const outside = await plantWriteBranchSymlink(vault);
+
+    await expect(writeNote(vault, "notes/x.md", "pwned")).rejects.toMatchObject({
+      error: "PATH_TRAVERSAL",
+    });
+    expect(await fs.readFile(outside, "utf-8")).toBe("SECRET"); // never written through
+    await fs.rm(outside, { force: true });
+  }, 30000);
+
+  test("appendToNote refuses to append through a symlink that exists only on the write branch (#323)", async () => {
+    const vault = await makeTempVault();
+    const outside = await plantWriteBranchSymlink(vault);
+
+    await expect(appendToNote(vault, "notes/x.md", "pwned")).rejects.toMatchObject({
+      error: "PATH_TRAVERSAL",
+    });
+    expect(await fs.readFile(outside, "utf-8")).toBe("SECRET"); // never read or written through
+    await fs.rm(outside, { force: true });
+  }, 30000);
+
+  test("writeNote to a brand-new subdirectory still succeeds (guard runs after mkdir, #323)", async () => {
+    const vault = await makeTempVault();
+    const result = await writeNote(vault, "notes/newdir/fresh.md", "---\ntitle: Fresh\n---\nBody");
+    expect(result.committed).toBe(true);
+    const { stdout } = await execFile("git", ["show", "drafts:notes/newdir/fresh.md"], { cwd: vault });
+    expect(stdout).toContain("Fresh");
   }, 30000);
 
   test("commit title is sanitized: newlines collapsed, length capped", async () => {
