@@ -1548,8 +1548,39 @@ function noteRefTokens(id: string): string[] {
   return [...tokens];
 }
 
-function normalizeConceptSlug(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, "-");
+// Explicit whitespace set shared verbatim with cli/schist/ingest.py's
+// _normalize_concept_slug. JS's \s and Python's \s disagree at the edges —
+// JS adds U+FEFF (ZWNBSP), Python adds U+001C–U+001F (C0 separators) and
+// U+0085 (NEL) — exactly the cross-language drift family that caused #303.
+// This is the UNION of both engines' sets (30 codepoints, all BMP single
+// code units), so either language's notion of whitespace becomes a slug
+// separator. schema/concept-slug-parity.json pins both implementations to
+// the same table. #318.
+const SLUG_WS_CHARS =
+  "\t\n\v\f\r\u001c\u001d\u001e\u001f \u0085\u00a0\u1680" +
+  "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007" +
+  "\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
+const SLUG_WS_SET = new Set(SLUG_WS_CHARS);
+// None of the members are regex metacharacters, so they can sit in a class raw.
+const SLUG_WS_RUN = new RegExp(`[${SLUG_WS_CHARS}]+`, "g");
+
+/**
+ * Edge-strip via index scan — LINEAR — not a `^[ws]+|[ws]+$` regex, which
+ * backtracks quadratically over interior whitespace runs (~6s on a
+ * 100k-space string; `concepts` args reach this with no length validation,
+ * and the server is single-threaded).
+ */
+function trimSlugWs(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && SLUG_WS_SET.has(value[start])) start++;
+  while (end > start && SLUG_WS_SET.has(value[end - 1])) end--;
+  return start === 0 && end === value.length ? value : value.slice(start, end);
+}
+
+/** @internal — exported for the schema/concept-slug-parity.json fixture test. */
+export function normalizeConceptSlug(value: string): string {
+  return trimSlugWs(value).toLowerCase().replace(SLUG_WS_RUN, "-");
 }
 
 /**

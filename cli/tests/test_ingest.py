@@ -110,6 +110,42 @@ def test_ingest_frontmatter_parser_matches_shared_parity_cases(case: dict) -> No
         assert post.metadata[key] == value
 
 
+def _slug_parity_cases() -> list[dict]:
+    fixture = _repo_root() / "schema" / "concept-slug-parity.json"
+    return json.loads(fixture.read_text(encoding="utf-8"))
+
+
+def test_concept_slug_parity_fixture_is_nontrivial() -> None:
+    """An emptied/mangled fixture must fail loudly, not skip-collect green
+    (parametrize over an empty list collects as a single skipped test)."""
+    assert len(_slug_parity_cases()) >= 20
+
+
+@pytest.mark.parametrize("case", _slug_parity_cases(), ids=lambda c: c["name"])
+def test_concept_slug_matches_shared_parity_cases(case: dict) -> None:
+    """Python _normalize_concept_slug and TS normalizeConceptSlug must produce
+    byte-identical slugs — the index stores Python's output, delete_note's
+    cascade compares against TS's, and any skew silently leaves dangling refs
+    (#303). The shared fixture is the single source of truth (#318)."""
+    from schist.ingest import _normalize_concept_slug
+
+    assert _normalize_concept_slug(case["input"]) == case["slug"]
+
+
+def test_concept_slug_normalization_is_linear_on_huge_whitespace() -> None:
+    """Edge-strip must be str.strip(chars), not a `^[ws]+|[ws]+$` regex —
+    the alternated form backtracks quadratically (~35 min at this size) and
+    is reachable from agent-supplied frontmatter on every post-write ingest."""
+    import time
+
+    from schist.ingest import _normalize_concept_slug
+
+    big = "a" + " " * 1_000_000 + "b"
+    t0 = time.perf_counter()
+    assert _normalize_concept_slug(big) == "a-b"
+    assert time.perf_counter() - t0 < 5.0  # linear is ~4 ms; huge margin for CI
+
+
 def test_ingest_deduplicates_implicit_concept_edges(tmp_path: Path) -> None:
     """Frontmatter concepts emit one references edge per unique source/target/type."""
     from schist.ingest import ingest

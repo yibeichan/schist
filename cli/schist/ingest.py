@@ -30,13 +30,33 @@ PAPER_FIELDS = {
 }
 
 
+# Explicit whitespace set shared verbatim with mcp-server's
+# normalizeConceptSlug (tools.ts). Python's \s and JS's \s disagree at the
+# edges — Python adds U+001C–U+001F (C0 separators) and U+0085 (NEL), JS adds
+# U+FEFF (ZWNBSP) — exactly the cross-language drift family that caused #303.
+# This is the UNION of both engines' sets (30 codepoints), so either
+# language's notion of whitespace becomes a slug separator.
+# schema/concept-slug-parity.json pins both implementations to the same
+# table. #318.
+_SLUG_WS_CHARS = (
+    '\t\n\x0b\x0c\r\x1c\x1d\x1e\x1f \x85\xa0\u1680'
+    '\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007'
+    '\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'
+)
+# Edge-stripping uses str.strip(chars) — LINEAR — not a `^[ws]+|[ws]+$`
+# regex, which backtracks quadratically over interior whitespace runs
+# (20s on a 100k-space concept string; reachable from agent-supplied
+# frontmatter, and ingest runs after every write).
+_SLUG_WS_RUN = re.compile(f'[{re.escape(_SLUG_WS_CHARS)}]+')
+
+
 def _normalize_concept_slug(value: str) -> str:
-    """Mirror mcp-server normalizeConceptSlug: `.trim().toLowerCase()
-    .replace(/\\s+/g, "-")`. Collapsing any whitespace RUN to one dash (not
-    just single spaces) matters: delete_note's cascade compares slugs it
-    normalizes in TS against slugs this function stored in the index, and a
-    `foo--bar` / `foo-bar` skew silently leaves dangling refs. See #303."""
-    return re.sub(r'\s+', '-', value.strip().lower())
+    """Mirror mcp-server normalizeConceptSlug: strip edge whitespace,
+    lowercase, collapse each whitespace RUN to one dash (not just single
+    spaces). The run-collapse matters: delete_note's cascade compares slugs
+    it normalizes in TS against slugs this function stored in the index, and
+    a `foo--bar` / `foo-bar` skew silently leaves dangling refs. See #303."""
+    return _SLUG_WS_RUN.sub('-', value.strip(_SLUG_WS_CHARS).lower())
 
 
 def _normalize_tag(value: str) -> str:
