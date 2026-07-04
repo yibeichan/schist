@@ -383,8 +383,14 @@ export async function deleteNote(
         await git(vaultRoot, ["add", "--", r.relPath]);
       }
 
-      // NEVER --no-verify — hard coded out (mirrors withWriteLock).
-      await git(vaultRoot, ["commit", "-m", `feat(schist): delete ${title} — ${attribution(owner)}`]);
+      // NEVER --no-verify — hard coded out (mirrors withWriteLock). Commit
+      // runs the synchronous post-commit ingest hook, so it needs the larger
+      // ceiling — the 30s default killed deletes on large vaults (#324).
+      await git(
+        vaultRoot,
+        ["commit", "-m", `feat(schist): delete ${title} — ${attribution(owner)}`],
+        GIT_COMMIT_TIMEOUT_MS,
+      );
       const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
       return { path: relPath, commitSha: sha, committed: true };
     } catch (e) {
