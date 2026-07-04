@@ -1034,3 +1034,42 @@ def test_normalize_concept_slug_matches_ts_whitespace_collapse() -> None:
     assert _normalize_concept_slug("foo\u00a0bar") == "foo-bar"  # NBSP, the realistic copy-paste case
     assert _normalize_concept_slug("  Neural Networks  ") == "neural-networks"
     assert _normalize_concept_slug("already-normal") == "already-normal"
+
+
+def test_ingest_sets_completion_marker(tmp_path: Path) -> None:
+    """#244: a successful ingest must stamp user_version=1 so get_db can tell
+    a completed (possibly empty) index apart from a SIGKILL'd one."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-07-04-marker.md",
+        "---\ntitle: Marker\ndate: 2026-07-04\n---\n\nBody.\n",
+    )
+    db_path = tmp_path / "schist.db"
+    ingest(str(vault), str(db_path))
+
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_ingest_sets_completion_marker_for_empty_vault(tmp_path: Path) -> None:
+    """An empty vault is a legitimately empty index — it must still be marked
+    complete, or get_db would re-ingest it on every call (#244)."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    db_path = tmp_path / "schist.db"
+    ingest(str(vault), str(db_path))
+
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    finally:
+        conn.close()

@@ -23,6 +23,13 @@ def get_db(vault_path: str, db_path: str | None = None) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     needs_ingest = not os.path.exists(db_path) or os.path.getsize(db_path) == 0
 
+    # Note on WAL (#310): when an open reader blocks the writer's close-time
+    # checkpoint, the whole index legitimately lives in the -wal sibling and
+    # the main file stays a header-only page. That state passes the size
+    # check above (the journal_mode=WAL transition materializes the 4 KB
+    # header immediately, so the main file is never 0 bytes with a populated
+    # WAL), and the connection below replays the WAL, so the table check sees
+    # the real schema. Pinned by a regression test.
     if not needs_ingest:
         conn = sqlite3.connect(db_path)
         try:
@@ -34,9 +41,20 @@ def get_db(vault_path: str, db_path: str | None = None) -> sqlite3.Connection:
             }
             if not REQUIRED_TABLES.issubset(table_names):
                 needs_ingest = True
-                conn.close()
+            elif (
+                conn.execute('PRAGMA user_version').fetchone()[0] == 0
+                and not conn.execute('SELECT EXISTS(SELECT 1 FROM docs)').fetchone()[0]
+            ):
+                # SIGKILL during ingest commits the schema (executescript
+                # auto-commits) but rolls back the data transaction, leaving
+                # valid empty tables that the check above accepts. Ingest sets
+                # user_version=1 atomically with the data, so version 0 plus
+                # an empty docs table means the ingest never completed (#244).
+                # Pre-marker DBs with rows keep version 0 and are left alone.
+                needs_ingest = True
         except sqlite3.DatabaseError:
             needs_ingest = True
+        finally:
             conn.close()
 
     if needs_ingest:
