@@ -54,16 +54,33 @@ async function git(vaultRoot: string, args: string[], timeoutMs: number = GIT_OP
 }
 
 async function getWriteBranch(vaultRoot: string): Promise<string> {
+  const configPath = path.join(vaultRoot, "schist.yaml");
+  let content: string;
   try {
-    const configPath = path.join(vaultRoot, "schist.yaml");
-    const content = await fs.readFile(configPath, "utf-8");
+    content = await fs.readFile(configPath, "utf-8");
+  } catch {
+    return "drafts"; // no schist.yaml — expected for bare test vaults
+  }
+  try {
     // Real YAML parse, not a regex: a trailing inline comment on the
     // write_branch line made the old regex miss and silently fall back to
     // "drafts", diverging from loadVaultConfig's js-yaml result (#277).
     const raw = yamlLoad(content) as Record<string, unknown> | null;
     const v = raw?.write_branch;
-    return typeof v === "string" && v.trim() ? v.trim() : "drafts";
-  } catch {
+    if (typeof v === "string" && v.trim()) return v.trim();
+    if (v !== undefined && v !== null) {
+      // Same fallback loadVaultConfig's getString applies, but writes landing
+      // on an unexpected branch must not be silent — that's the #277 failure
+      // mode. stderr is safe for a stdio MCP server.
+      console.error(
+        `schist: write_branch in schist.yaml is not a string (${JSON.stringify(v)}) — writing to "drafts"`,
+      );
+    }
+    return "drafts";
+  } catch (e) {
+    console.error(
+      `schist: cannot parse schist.yaml — writing to "drafts": ${e instanceof Error ? e.message : String(e)}`,
+    );
     return "drafts";
   }
 }
