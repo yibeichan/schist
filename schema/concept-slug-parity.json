@@ -1,0 +1,102 @@
+[
+  {
+    "name": "plain slug passthrough",
+    "input": "alignment",
+    "slug": "alignment"
+  },
+  {
+    "name": "mixed case, single spaces",
+    "input": "Sparse Coding",
+    "slug": "sparse-coding"
+  },
+  {
+    "name": "whitespace run collapses to ONE dash (#303)",
+    "input": "foo \t\n  bar",
+    "slug": "foo-bar"
+  },
+  {
+    "name": "edge whitespace stripped",
+    "input": " \t sparse coding \n ",
+    "slug": "sparse-coding"
+  },
+  {
+    "name": "NBSP and ideographic space are separators",
+    "input": "foo\u00a0bar\u3000baz",
+    "slug": "foo-bar-baz"
+  },
+  {
+    "name": "en/em/thin space run",
+    "input": "a\u2002\u2003\u2009b",
+    "slug": "a-b"
+  },
+  {
+    "name": "line/paragraph separators",
+    "input": "a\u2028b\u2029c",
+    "slug": "a-b-c"
+  },
+  {
+    "name": "NEL U+0085 is a separator (Python-only under backslash-s)",
+    "input": "a\u0085b",
+    "slug": "a-b"
+  },
+  {
+    "name": "C0 separators U+001C-001F (Python-only under backslash-s)",
+    "input": "a\u001cb\u001dc\u001ed\u001fe",
+    "slug": "a-b-c-d-e"
+  },
+  {
+    "name": "ZWNBSP U+FEFF mid-string (JS-only under backslash-s)",
+    "input": "a\ufeffb",
+    "slug": "a-b"
+  },
+  {
+    "name": "leading BOM stripped",
+    "input": "\ufeffconcept",
+    "slug": "concept"
+  },
+  {
+    "name": "Ogham space mark U+1680",
+    "input": "a\u1680b",
+    "slug": "a-b"
+  },
+  {
+    "name": "Turkish capital dotted I",
+    "input": "\u0130stanbul",
+    "slug": "i\u0307stanbul"
+  },
+  {
+    "name": "Greek final sigma (context-sensitive lowering)",
+    "input": "\u03a3\u0391\u03a3",
+    "slug": "\u03c3\u03b1\u03c2"
+  },
+  {
+    "name": "capital sharp S lowers to eszett",
+    "input": "GRO\u1e9e",
+    "slug": "gro\u00df"
+  },
+  {
+    "name": "fi ligature is untouched",
+    "input": "\ufb01le",
+    "slug": "\ufb01le"
+  },
+  {
+    "name": "existing hyphens preserved, not collapsed with new ones",
+    "input": "foo - bar",
+    "slug": "foo---bar"
+  },
+  {
+    "name": "zero-width space U+200B is NOT a separator",
+    "input": "a\u200bb",
+    "slug": "a\u200bb"
+  },
+  {
+    "name": "empty string",
+    "input": "",
+    "slug": ""
+  },
+  {
+    "name": "whitespace-only becomes empty",
+    "input": " \t\ufeff\u3000 ",
+    "slug": ""
+  }
+]

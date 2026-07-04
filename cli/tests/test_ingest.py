@@ -110,6 +110,22 @@ def test_ingest_frontmatter_parser_matches_shared_parity_cases(case: dict) -> No
         assert post.metadata[key] == value
 
 
+def _slug_parity_cases() -> list[dict]:
+    fixture = _repo_root() / "schema" / "concept-slug-parity.json"
+    return json.loads(fixture.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("case", _slug_parity_cases(), ids=lambda c: c["name"])
+def test_concept_slug_matches_shared_parity_cases(case: dict) -> None:
+    """Python _normalize_concept_slug and TS normalizeConceptSlug must produce
+    byte-identical slugs — the index stores Python's output, delete_note's
+    cascade compares against TS's, and any skew silently leaves dangling refs
+    (#303). The shared fixture is the single source of truth (#318)."""
+    from schist.ingest import _normalize_concept_slug
+
+    assert _normalize_concept_slug(case["input"]) == case["slug"]
+
+
 def test_ingest_deduplicates_implicit_concept_edges(tmp_path: Path) -> None:
     """Frontmatter concepts emit one references edge per unique source/target/type."""
     from schist.ingest import ingest

@@ -1548,8 +1548,21 @@ function noteRefTokens(id: string): string[] {
   return [...tokens];
 }
 
-function normalizeConceptSlug(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, "-");
+// Explicit whitespace class shared verbatim with cli/schist/ingest.py's
+// _normalize_concept_slug. JS's \s and Python's \s disagree at the edges —
+// JS adds U+FEFF (ZWNBSP), Python adds U+001C–U+001F (C0 separators) and
+// U+0085 (NEL) — exactly the cross-language drift family that caused #303.
+// This is the UNION of both engines' sets, so either language's notion of
+// whitespace becomes a slug separator. schema/concept-slug-parity.json pins
+// both implementations to the same table. #318.
+const SLUG_WS =
+  "\\t\\n\\v\\f\\r\\u001c-\\u001f \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff";
+const SLUG_WS_EDGE = new RegExp(`^[${SLUG_WS}]+|[${SLUG_WS}]+$`, "g");
+const SLUG_WS_RUN = new RegExp(`[${SLUG_WS}]+`, "g");
+
+/** @internal — exported for the schema/concept-slug-parity.json fixture test. */
+export function normalizeConceptSlug(value: string): string {
+  return value.replace(SLUG_WS_EDGE, "").toLowerCase().replace(SLUG_WS_RUN, "-");
 }
 
 /**
