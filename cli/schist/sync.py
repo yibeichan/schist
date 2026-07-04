@@ -99,9 +99,12 @@ fi
 # also matters: BSD xargs' -I replacement buffer is 255 bytes, so a longer
 # staged path aborted the whole scan and the secret guard was silently
 # skipped (#279). The scan now fails closed if xargs/sh themselves error.
+# The explicit-stage ":0:$f" form is required: a bare ":$f" on a file named
+# "0:evil.md" parses as "stage 0 of evil.md", silently scanning the wrong
+# blob (or none); after the second colon the path is taken literally.
 if ! MATCH=$(xargs -0 sh -c 'pat="$1"; shift
 for f in "$@"; do
-    git show ":$f" 2>/dev/null | grep -qE "$pat" && printf "%s\n" "$f"
+    git show ":0:$f" 2>/dev/null | grep -qE "$pat" && printf "%s\n" "$f"
 done
 exit 0' sh "$PATTERNS" < "$STAGED_FILES"); then
     echo "ERROR: secret scan could not run — aborting commit rather than skipping the guard."

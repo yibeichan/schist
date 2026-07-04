@@ -291,3 +291,37 @@ def test_missing_hook_returns_none() -> None:
     from schist.doctor import _installed_hook_version
 
     assert _installed_hook_version(Path("/nonexistent/hook")) is None
+
+
+def test_secret_in_colon_prefixed_filename_is_blocked(vault: Path) -> None:
+    """A file named "0:evil.md" makes the bare ":<path>" pathspec parse as
+    "stage 0 of evil.md" — git errors (file skipped, secret through) or, with
+    a clean sibling evil.md staged, scans the WRONG blob. The explicit
+    ":0:<path>" stage form takes the path literally."""
+    result = _try_commit(
+        vault,
+        "0:evil.md",
+        "api_key = 'sk-redacted-but-quoted-value-here'\n",
+    )
+    assert result.returncode != 0, (
+        "Hook silently accepted a secret in a staged filename starting with '0:'"
+    )
+    assert "Potential secret detected" in result.stdout + result.stderr
+
+
+def test_secret_not_masked_by_clean_sibling_blob(vault: Path) -> None:
+    """Wrong-blob variant: with a clean "x.md" staged, the bare pathspec for
+    "0:x.md" resolved to x.md's clean blob and the secret passed unseen."""
+    (vault / "x.md").write_text("clean sibling\n")
+    subprocess.run(["git", "add", "x.md"], cwd=vault, check=True)
+    result = _try_commit(
+        vault,
+        "0:x.md",
+        "api_key = 'sk-redacted-but-quoted-value-here'\n",
+    )
+    assert result.returncode != 0, (
+        "Hook scanned the clean sibling blob instead of the staged '0:x.md'"
+    )
+    output = result.stdout + result.stderr
+    assert "Potential secret detected" in output
+    assert "0:x.md" in output
