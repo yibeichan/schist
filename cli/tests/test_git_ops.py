@@ -79,6 +79,46 @@ def test_current_branch_returns_empty_on_timeout():
         assert git_ops.current_branch("/tmp/vault") == ""
 
 
+def test_pull_rebase_fails_fast_when_branch_unknown():
+    """#325: '' as refspec makes `git pull --rebase origin ''` silently rebase
+    onto the remote's default-branch HEAD (exit 0) — it must never reach git."""
+    calls = []
+
+    def _branch_stalls_rest_records(*args, **kwargs):
+        argv = args[0]
+        if argv[1] == "branch":
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    with patch("schist.git_ops.subprocess.run", side_effect=_branch_stalls_rest_records):
+        ok, msg = git_ops.pull_rebase("/tmp/vault")
+
+    assert ok is False
+    assert "Could not determine current branch" in msg
+    assert not any("pull" in argv for argv in calls), "git pull must not run with an empty refspec"
+
+
+def test_push_fails_fast_when_branch_unknown():
+    """#325: '' as refspec is 'fatal: invalid refspec' (or a silent no-op on
+    older gits) — surface the real cause instead."""
+    calls = []
+
+    def _branch_stalls_rest_records(*args, **kwargs):
+        argv = args[0]
+        if argv[1] == "branch":
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    with patch("schist.git_ops.subprocess.run", side_effect=_branch_stalls_rest_records):
+        ok, msg = git_ops.push("/tmp/vault")
+
+    assert ok is False
+    assert "Could not determine current branch" in msg
+    assert not any("push" in argv for argv in calls), "git push must not run with an empty refspec"
+
+
 def test_has_uncommitted_changes_true_on_timeout():
     with patch("schist.git_ops.subprocess.run",
                side_effect=lambda *a, **k: _timeout(a[0], k)):
