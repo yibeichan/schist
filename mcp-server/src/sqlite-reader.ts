@@ -11,23 +11,48 @@ import { validateOwner } from "./agent-identity.js";
 
 // ── Agent scope map (loaded from vault.yaml) ─────────────────────────────
 
-/** Map of vaultRoot → (agent name → default scope), loaded once per vault from vault.yaml */
-const agentScopeCache: Map<string, Map<string, string>> = new Map();
+interface ScopeCacheEntry {
+  map: Map<string, string>;
+  /** mtimeMs + size of vault.yaml when the map was built; -1/-1 when the file was missing/unreadable. */
+  mtimeMs: number;
+  size: number;
+}
+
+/** Map of vaultRoot → cached scope map keyed to the vault.yaml stat identity. */
+const agentScopeCache: Map<string, ScopeCacheEntry> = new Map();
 
 /**
  * Load participant default scopes from vault.yaml.
  * Supports both string[] and object[] participant formats.
- * Cached per vaultRoot after first load.
+ *
+ * Cached per vaultRoot, invalidated when vault.yaml's mtime or size changes:
+ * vault.yaml is operator-editable at runtime (scope renames, new agents), and
+ * a process-lifetime cache made those edits silently invisible to
+ * scope=inherit searches until an MCP server restart (#248). A statSync per
+ * call is cheap relative to the SQLite query this map feeds. Size is checked
+ * alongside mtime to narrow the same-mtime-tick edit window on coarse-
+ * granularity filesystems.
  */
 export function loadAgentScopeMap(vaultRoot: string): Map<string, string> {
+  const vaultYamlPath = path.join(vaultRoot, "vault.yaml");
+  let mtimeMs = -1;
+  let size = -1;
+  try {
+    const st = fs.statSync(vaultYamlPath);
+    mtimeMs = st.mtimeMs;
+    size = st.size;
+  } catch {
+    // missing/unreadable — keep the sentinel identity so the empty map below
+    // stays cached until the file appears
+  }
+
   const cached = agentScopeCache.get(vaultRoot);
-  if (cached) return cached;
+  if (cached && cached.mtimeMs === mtimeMs && cached.size === size) return cached.map;
 
   const agentScopeMap = new Map<string, string>();
-  agentScopeCache.set(vaultRoot, agentScopeMap);
+  agentScopeCache.set(vaultRoot, { map: agentScopeMap, mtimeMs, size });
   try {
-    const vaultYamlPath = path.join(vaultRoot, "vault.yaml");
-    if (!fs.existsSync(vaultYamlPath)) return agentScopeMap;
+    if (mtimeMs < 0) return agentScopeMap;
 
     const raw = yamlLoad(fs.readFileSync(vaultYamlPath, "utf-8")) as Record<string, unknown>;
     const participants = raw.participants;
@@ -42,7 +67,7 @@ export function loadAgentScopeMap(vaultRoot: string): Map<string, string> {
       }
     }
   } catch {
-    // vault.yaml missing or malformed — use empty map
+    // vault.yaml malformed — use empty map (re-read on next change)
   }
   return agentScopeMap;
 }

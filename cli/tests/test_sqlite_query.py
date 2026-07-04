@@ -36,6 +36,10 @@ def test_get_db_reingests_when_required_side_table_missing(tmp_path: Path) -> No
 
 
 def test_get_db_keeps_current_db_when_required_tables_exist(tmp_path: Path) -> None:
+    """A healthy populated DB with all required tables is kept as-is. (The
+    docs row matters since #244: required tables with an empty docs table and
+    no completion marker is exactly the SIGKILL-artifact shape and would
+    correctly trigger re-ingest.)"""
     vault = tmp_path / "vault"
     db_path = vault / ".schist" / "schist.db"
     db_path.parent.mkdir(parents=True)
@@ -44,6 +48,7 @@ def test_get_db_keeps_current_db_when_required_tables_exist(tmp_path: Path) -> N
     conn.execute("CREATE TABLE docs (id TEXT PRIMARY KEY)")
     conn.execute("CREATE TABLE paper_metadata (doc_id TEXT PRIMARY KEY)")
     conn.execute("CREATE TABLE concept_aliases (duplicate_slug TEXT PRIMARY KEY)")
+    conn.execute("INSERT INTO docs VALUES ('d1')")
     conn.commit()
     conn.close()
 
@@ -52,6 +57,119 @@ def test_get_db_keeps_current_db_when_required_tables_exist(tmp_path: Path) -> N
         db.close()
 
     run_ingest.assert_not_called()
+
+
+def _vault_db(tmp_path: Path) -> tuple[Path, Path]:
+    vault = tmp_path / "vault"
+    db_path = vault / ".schist" / "schist.db"
+    db_path.parent.mkdir(parents=True)
+    return vault, db_path
+
+
+def _create_required_tables(conn: sqlite3.Connection) -> None:
+    conn.execute("CREATE TABLE docs (id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE paper_metadata (doc_id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE concept_aliases (duplicate_slug TEXT PRIMARY KEY)")
+
+
+def test_get_db_reingests_sigkill_artifact_schema_only_db(tmp_path: Path) -> None:
+    """SIGKILL during ingest commits the schema DDL but rolls back the data,
+    leaving valid empty tables with user_version=0. get_db must treat that as
+    an incomplete ingest instead of silently serving an empty index (#244)."""
+    vault, db_path = _vault_db(tmp_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA user_version = 0")
+    _create_required_tables(conn)
+    conn.commit()
+    conn.close()
+
+    with patch("schist.sqlite_query._run_ingest") as run_ingest:
+        db = get_db(str(vault), str(db_path))
+        db.close()
+
+    run_ingest.assert_called_once_with(str(vault), str(db_path))
+
+
+def test_get_db_keeps_pre_marker_db_with_rows(tmp_path: Path) -> None:
+    """DBs built before the user_version marker existed have version 0 but
+    real rows — they must NOT be re-ingested on upgrade day (#244)."""
+    vault, db_path = _vault_db(tmp_path)
+
+    conn = sqlite3.connect(db_path)
+    _create_required_tables(conn)
+    conn.execute("INSERT INTO docs VALUES ('d1')")
+    conn.commit()
+    conn.close()
+
+    with patch("schist.sqlite_query._run_ingest") as run_ingest:
+        db = get_db(str(vault), str(db_path))
+        db.close()
+
+    run_ingest.assert_not_called()
+
+
+def test_get_db_keeps_completed_ingest_of_empty_vault(tmp_path: Path) -> None:
+    """A vault with no notes legitimately produces zero docs; the completion
+    marker distinguishes that from a crashed ingest — no re-ingest loop."""
+    vault, db_path = _vault_db(tmp_path)
+
+    conn = sqlite3.connect(db_path)
+    _create_required_tables(conn)
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+    with patch("schist.sqlite_query._run_ingest") as run_ingest:
+        db = get_db(str(vault), str(db_path))
+        db.close()
+
+    run_ingest.assert_not_called()
+
+
+def test_get_db_opens_wal_resident_index_without_reingest(tmp_path: Path) -> None:
+    """Since #254 an open reader can block the writer's close-checkpoint,
+    leaving the main file as a header-only page with the entire index in the
+    -wal sibling. get_db must open that DB (SQLite replays the WAL) instead
+    of re-running a full ingest — the scenario #310 worried about. The
+    journal_mode=WAL transition materializes the header page immediately, so
+    the main file is never 0 bytes here and the size check passes."""
+    import os
+
+    vault, db_path = _vault_db(tmp_path)
+
+    writer = sqlite3.connect(db_path)
+    writer.execute("PRAGMA journal_mode=WAL")
+    _create_required_tables(writer)
+    writer.execute("INSERT INTO docs VALUES ('d1')")
+    writer.execute("PRAGMA user_version = 1")
+    writer.commit()
+
+    # A read-only connection with an active statement blocks the writer's
+    # close-time checkpoint, and a read-only close can't checkpoint either —
+    # same technique as test_sync's WAL-resident-index fixture.
+    reader = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    cursor = reader.execute("SELECT name FROM sqlite_master")
+    writer.close()
+    cursor.fetchall()
+    reader.close()
+
+    # Precondition: header-only main file, index in the -wal.
+    assert os.path.getsize(db_path) <= 4096, (
+        "test precondition failed: expected a header-only main file"
+    )
+    wal = Path(f"{db_path}-wal")
+    assert wal.exists() and wal.stat().st_size > 0, (
+        "test precondition failed: expected the index to live in the -wal"
+    )
+
+    with patch("schist.sqlite_query._run_ingest") as run_ingest:
+        db = get_db(str(vault), str(db_path))
+        rows = db.execute("SELECT id FROM docs").fetchall()
+        db.close()
+
+    run_ingest.assert_not_called()
+    assert [row["id"] for row in rows] == ["d1"]
 
 
 def test_get_db_reingests_when_concept_aliases_missing(tmp_path: Path) -> None:
