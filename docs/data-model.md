@@ -44,8 +44,8 @@ Key facts the design builds on:
   commit (`ingest.py:495`); `get_db` heals on `0 + empty docs`
   (`sqlite_query.py:45`).
 - The memory DB already has a vault back-reference column
-  (`agent_memory.related_doc`, `sqlite-reader.ts:851`) but it is free-text
-  and undocumented.
+  (`agent_memory.related_doc`, `sqlite-reader.ts:851`) but it is free-text,
+  documented as a parameter name only, with no defined semantics.
 - `get_context` (`sqlite-reader.ts:783`) never touches the memory DB at any
   depth, so the "fuel station" does not actually fuel session startup.
 - The frontmatter field list exists **only as prose tables** in
@@ -106,29 +106,53 @@ Add `schema/frontmatter-contract.json`: one array of field descriptors —
    path**; no ALTER migrations). This is deliberately collision-free with
    the #244 marker because the marker and the version become one value:
    "complete at schema version N".
+
+   **Deployment-skew rule**: the TS stale-version path MUST go through the
+   existing `ensureSchemaCurrent` rebuild-once → recheck → typed-error
+   pattern (`sqlite-reader.ts:236–301`) — a newer mcp-server paired with an
+   older installed `schist-ingest` still stamps the old version after a
+   rebuild, and without the recheck-then-error the server would either
+   rebuild the vault index on every tool call or loop uninformatively. The
+   Python side is skew-free by construction: `_run_ingest` imports
+   `schist.ingest` in-process, so reader and writer always share a version.
 2. **Single source for the table contract**: `schema/index-contract.json`
    holding `{ "schemaVersion": 1, "tables": [...], "requiredTables": [...],
    "rebuildSurvivors": ["concept_aliases"] }`. `sqlite_query.py` and
-   `sqlite-reader.ts` both load it (packaged as data with each component);
-   per-language constants are deleted. A parity test in each suite asserts
-   the loaded contract matches what `schema.sql` actually creates.
+   `sqlite-reader.ts` both load it, and the per-language `REQUIRED_TABLES`
+   constants are deleted (TS `REQUIRED_DOCS_COLUMNS` survives unless the
+   contract also carries column lists — pre-marker DBs are exempt from the
+   version check, so column drift on them is caught only by the column
+   check). **Packaging mechanism** (repo-root files cannot be Python
+   package-data, and the npm package ships only `dist/`): use the existing
+   `default.yaml` pattern — relative-path load in a repo checkout with a
+   baked-in mirror in each component, pinned by a drift test
+   (`tools.ts:26–66` precedent); the mirror-vs-schema/ parity test is what
+   makes the single source real. A parity test in each suite additionally
+   asserts the loaded contract matches what `schema.sql` actually creates.
 3. Fixes #339 (the `docs` drift) as a side effect, in the direction of the
    CLI's stricter set — a DB without `docs` is unusable for every read path.
 
 ### D4 — Memory contract: formalize the fuel station (slice C)
 
-1. **Back-references**: document `agent_memory.related_doc` as "a vault note
-   id (`notes/….md`)"; `add_memory` validates the *shape* (id-like string)
+1. **Back-references**: `agent_memory.related_doc` exists today but is
+   documented as a name only, with no semantics
+   (`docs/cross-project-memory.md`). Define it as "a vault note id
+   (`notes/….md`)"; `add_memory` validates the *shape* (id-like string)
    but not existence (memory must be writable when the vault is unavailable
-   — no FK, no cross-DB check). `search_memory`/`get_context` surface it so
-   agents can hop memory → note.
+   — no FK, no cross-DB check). `search_memory` already returns it; the new
+   work is the shape validation, the documented semantics, and carrying it
+   into `get_context`'s memory block so agents can hop memory → note.
 2. **`get_context` surfaces memory**: at `standard` and `full` depth, append
-   a `recentMemory` block — the caller-owner's N (default 5) most recent
+   a `recentMemory` block — the owner's N (default 5) most recent
    `agent_memory` entries (id, date, entry_type, 100-char content snippet,
-   related_doc). Clearly namespaced so vault context and ephemeral memory
-   are visually distinct; `minimal` stays counts-only. Memory-DB-unavailable
-   degrades to an absent block, never an error (get_context must not break
-   when the fuel station is missing).
+   related_doc). **Owner resolution**: `get_context` has no identity today
+   (`tools.ts:2350` takes only `depth`/`verbose`); resolve from
+   `SCHIST_AGENT_ID`, and on multi-owner servers (`SCHIST_ALLOWED_AGENTS`)
+   accept an optional `owner` arg validated against the allowlist, falling
+   back to `SCHIST_AGENT_ID` when omitted. Clearly namespaced so vault
+   context and ephemeral memory are visually distinct; `minimal` stays
+   counts-only. Memory-DB-unavailable degrades to an absent block, never an
+   error (get_context must not break when the fuel station is missing).
 3. **Decision boundary in server instructions**: extend
    `mcp-server/src/server-instructions.ts` with the one-paragraph rule:
    memory = frequent/small/session-scoped (decisions made, blockers hit,
@@ -155,4 +179,8 @@ Order matters: A and B are prerequisites for shape-ossifying features
 - No merged notes+memory search; no dual-write hooks (D1).
 - No SQL migration framework for the index — rebuild is the migration.
 - No memory-entry TTL/retention automation (D4.4).
+- No confidence-weighted memory search ranking (#130 proposal item 4):
+  `search_memory` already filters on confidence; changing result *ordering*
+  is a retrieval-quality experiment, not a data-model contract, and can be
+  revisited after slice C ships.
 - No change to `vault.yaml` `vault_version` (separate config contract).
