@@ -99,6 +99,16 @@ def pull_rebase(vault_path: str) -> tuple[bool, str]:
     """Pull with rebase from origin. Aborts rebase on conflict."""
     try:
         branch = current_branch(vault_path)
+        if not branch:
+            # '' would be passed straight through as the refspec, and
+            # `git pull --rebase origin ''` SUCCEEDS — it fetches the
+            # remote's default-branch HEAD and silently rebases the current
+            # branch onto it (verified on git 2.50). Fail loudly instead. #325
+            return False, (
+                "Could not determine current branch (detached HEAD, git failure, or timeout); "
+                "if a previous sync --force left HEAD detached, reattach with "
+                "'git checkout <branch>' in the vault"
+            )
         result = subprocess.run(
             ['git', 'pull', '--rebase', 'origin', branch],
             cwd=vault_path, capture_output=True, text=True, timeout=60,
@@ -127,6 +137,15 @@ def push(vault_path: str) -> tuple[bool, str]:
     """Push current branch to origin."""
     try:
         branch = current_branch(vault_path)
+        if not branch:
+            # `git push origin ''` fails with the cryptic "fatal: invalid
+            # refspec ''" (git 2.50); older gits may treat it as a no-op
+            # while sync_push reports success. Name the real cause. #325
+            return False, (
+                "Could not determine current branch (detached HEAD, git failure, or timeout); "
+                "if a previous sync --force left HEAD detached, reattach with "
+                "'git checkout <branch>' in the vault"
+            )
         result = subprocess.run(
             ['git', 'push', 'origin', branch],
             cwd=vault_path, capture_output=True, text=True, timeout=60,
