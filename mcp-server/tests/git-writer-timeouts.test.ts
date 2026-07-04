@@ -23,11 +23,17 @@ const HOOK_SLEEP_S = 3;
 
 const createdDirs = new Set<string>();
 const savedOpTimeout = process.env.SCHIST_GIT_OP_TIMEOUT_MS;
+const savedCommitTimeout = process.env.SCHIST_GIT_COMMIT_TIMEOUT_MS;
 process.env.SCHIST_GIT_OP_TIMEOUT_MS = OP_TIMEOUT_MS;
+// Pin the commit ceiling too: an ambient shell export below the hook's sleep
+// would fail the test spuriously even with the fix in place.
+process.env.SCHIST_GIT_COMMIT_TIMEOUT_MS = "20000";
 
 afterAll(async () => {
   if (savedOpTimeout === undefined) delete process.env.SCHIST_GIT_OP_TIMEOUT_MS;
   else process.env.SCHIST_GIT_OP_TIMEOUT_MS = savedOpTimeout;
+  if (savedCommitTimeout === undefined) delete process.env.SCHIST_GIT_COMMIT_TIMEOUT_MS;
+  else process.env.SCHIST_GIT_COMMIT_TIMEOUT_MS = savedCommitTimeout;
   for (const dir of createdDirs) {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -39,6 +45,10 @@ async function makeTempVault(): Promise<string> {
   await execFile("git", ["init"], { cwd: dir });
   await execFile("git", ["config", "user.email", "test@test.com"], { cwd: dir });
   await execFile("git", ["config", "user.name", "Test"], { cwd: dir });
+  // A machine-global core.hooksPath (husky-style setups) would make git
+  // ignore .git/hooks entirely and the slow hook below would never run,
+  // letting the test pass with or without the fix. Pin it per-repo.
+  await execFile("git", ["config", "core.hooksPath", ".git/hooks"], { cwd: dir });
   await fs.writeFile(path.join(dir, "schist.yaml"), "name: test\nwrite_branch: drafts\n");
   await execFile("git", ["add", "."], { cwd: dir });
   await execFile("git", ["commit", "-m", "init"], { cwd: dir });
@@ -56,15 +66,21 @@ describe("deleteNote commit timeout ceiling (#324)", () => {
     await execFile("git", ["add", "-A"], { cwd: vault });
     await execFile("git", ["commit", "-m", "add doomed note"], { cwd: vault });
 
-    // Post-commit hook that outlives GIT_OP_TIMEOUT_MS but not the commit ceiling.
+    // Post-commit hook that outlives GIT_OP_TIMEOUT_MS but not the commit
+    // ceiling. It drops a marker file so we can assert it actually ran —
+    // without that, a hook silently skipped by git config would vacuously
+    // pass this test.
+    const marker = path.join(vault, ".git", "hook-ran");
     const hookPath = path.join(vault, ".git", "hooks", "post-commit");
-    await fs.writeFile(hookPath, `#!/bin/sh\nsleep ${HOOK_SLEEP_S}\n`);
+    await fs.writeFile(hookPath, `#!/bin/sh\nsleep ${HOOK_SLEEP_S}\ntouch "${marker}"\n`);
     await fs.chmod(hookPath, 0o755);
 
     const result = await deleteNote(vault, "notes/doomed.md", "Doomed");
     expect(result.committed).toBe(true);
+    await expect(fs.access(marker)).resolves.toBeUndefined(); // hook really ran, past its sleep
 
     // The delete really landed on the write branch.
+    await execFile("git", ["rev-parse", "--verify", "drafts"], { cwd: vault });
     await expect(
       execFile("git", ["cat-file", "-e", "drafts:notes/doomed.md"], { cwd: vault }),
     ).rejects.toThrow();
