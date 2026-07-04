@@ -300,6 +300,14 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     mode = 'DELETE' if os.environ.get('SCHIST_NO_WAL') else 'WAL'
     conn.execute(f'PRAGMA journal_mode={mode}')
 
+    # Completion marker (#244): clear it before the schema DDL commits, set it
+    # back to 1 atomically with the data commit at the end. A SIGKILL between
+    # the two (OOM killer, CI timeout, kill -9) leaves user_version=0 with
+    # empty committed tables, which get_db() detects and heals by
+    # re-ingesting — the on-failure unlink in _run_ingest only covers Python
+    # exceptions.
+    conn.execute('PRAGMA user_version = 0')
+
     conn.executescript(schema_path.read_text())
 
     doc_count = 0
@@ -462,6 +470,9 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
            OR canonical_slug NOT IN (SELECT slug FROM concepts)
         """
     )
+    # user_version lives in the DB header and is transactional, so the
+    # completion marker lands atomically with the data commit (#244).
+    conn.execute('PRAGMA user_version = 1')
     conn.commit()
     print(f'Ingested: {doc_count} docs, {concept_count} concepts, {edge_count} edges')
 
