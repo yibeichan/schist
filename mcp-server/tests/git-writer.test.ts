@@ -145,6 +145,38 @@ describe("git-writer", () => {
     expect(stdout).not.toContain(">-");
   }, 30000);
 
+  test("write_branch with trailing inline comment is honored, not silently 'drafts' (#277)", async () => {
+    const vault = await makeTempVault();
+    await fs.writeFile(
+      path.join(vault, "schist.yaml"),
+      "name: test\nwrite_branch: custom-notes  # inline comment is valid YAML\n"
+    );
+    await execFile("git", ["add", "schist.yaml"], { cwd: vault });
+    await execFile("git", ["commit", "-m", "set write_branch with comment"], { cwd: vault });
+
+    await writeNote(vault, "notes/branch-check.md", "---\ntitle: Branch Check\n---\nBody");
+
+    const { stdout } = await execFile("git", ["branch", "--show-current"], { cwd: vault });
+    expect(stdout.trim()).toBe("custom-notes");
+    const { stdout: branches } = await execFile("git", ["branch", "--list", "drafts"], { cwd: vault });
+    expect(branches.trim()).toBe("");
+  }, 30000);
+
+  test("quoted write_branch value still parses (#277 regression guard)", async () => {
+    const vault = await makeTempVault();
+    await fs.writeFile(
+      path.join(vault, "schist.yaml"),
+      'name: test\nwrite_branch: "quoted-branch"\n'
+    );
+    await execFile("git", ["add", "schist.yaml"], { cwd: vault });
+    await execFile("git", ["commit", "-m", "quoted write_branch"], { cwd: vault });
+
+    await writeNote(vault, "notes/quoted-check.md", "---\ntitle: Quoted\n---\nBody");
+
+    const { stdout } = await execFile("git", ["branch", "--show-current"], { cwd: vault });
+    expect(stdout.trim()).toBe("quoted-branch");
+  }, 30000);
+
   test("Mutex: lock is NOT left held after withTimeout fires", async () => {
     const { Mutex, withTimeout } = await import("async-mutex");
 

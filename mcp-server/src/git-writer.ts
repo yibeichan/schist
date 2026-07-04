@@ -3,6 +3,7 @@ import { promisify } from "util";
 import { Mutex, withTimeout } from "async-mutex";
 import * as fs from "fs/promises";
 import * as path from "path";
+import { load as yamlLoad } from "js-yaml";
 
 const execFile = promisify(execFileCb);
 const WRITE_TIMEOUT_ERROR = Object.assign(
@@ -56,8 +57,12 @@ async function getWriteBranch(vaultRoot: string): Promise<string> {
   try {
     const configPath = path.join(vaultRoot, "schist.yaml");
     const content = await fs.readFile(configPath, "utf-8");
-    const match = content.match(/write_branch:\s*["']?(\S+?)["']?\s*$/m);
-    return match ? match[1] : "drafts";
+    // Real YAML parse, not a regex: a trailing inline comment on the
+    // write_branch line made the old regex miss and silently fall back to
+    // "drafts", diverging from loadVaultConfig's js-yaml result (#277).
+    const raw = yamlLoad(content) as Record<string, unknown> | null;
+    const v = raw?.write_branch;
+    return typeof v === "string" && v.trim() ? v.trim() : "drafts";
   } catch {
     return "drafts";
   }
