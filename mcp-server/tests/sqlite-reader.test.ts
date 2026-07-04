@@ -1,4 +1,4 @@
-import { queryGraph, searchNotes, resetAgentScopeMap } from "../src/sqlite-reader.js";
+import { queryGraph, searchNotes, loadAgentScopeMap, resetAgentScopeMap } from "../src/sqlite-reader.js";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
@@ -204,5 +204,86 @@ describe("searchNotes scope='inherit' identity resolution (#62)", () => {
     const r = searchNotes(vault, "haystack", { scope: "inherit" });
     const ids = r.map((x) => x.id).sort();
     expect(ids).toEqual(["notes/global.md"]);
+  });
+});
+
+// ── agent scope map cache invalidation (#248) ─────────────────────────────
+
+describe("agent scope map cache invalidation (#248)", () => {
+  beforeEach(() => resetAgentScopeMap());
+  afterEach(() => resetAgentScopeMap());
+
+  async function writeVaultYaml(dir: string, scope: string, when: Date): Promise<void> {
+    const p = path.join(dir, "vault.yaml");
+    await fs.writeFile(
+      p,
+      `name: scope-test\nparticipants:\n  - { name: octopus, default_scope: ${scope} }\n`
+    );
+    // Pin mtime explicitly so back-to-back writes can't land in the same
+    // filesystem timestamp tick and defeat the invalidation under test.
+    await fs.utimes(p, when, when);
+  }
+
+  it("re-reads vault.yaml when it changes after being cached", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-scopecache-"));
+    createdDirs.add(dir);
+    await writeVaultYaml(dir, "octopus", new Date(Date.now() - 10_000));
+
+    expect(loadAgentScopeMap(dir).get("octopus")).toBe("octopus");
+
+    // Operator renames the scope at runtime — pre-#248 this stayed invisible
+    // until an MCP server restart.
+    await writeVaultYaml(dir, "octopus-2026", new Date());
+    expect(loadAgentScopeMap(dir).get("octopus")).toBe("octopus-2026");
+  });
+
+  it("returns the same cached map while vault.yaml is unchanged", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-scopecache-"));
+    createdDirs.add(dir);
+    await writeVaultYaml(dir, "octopus", new Date());
+
+    const first = loadAgentScopeMap(dir);
+    expect(loadAgentScopeMap(dir)).toBe(first);
+  });
+
+  it("picks up a vault.yaml that appears after the missing-file state was cached", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-scopecache-"));
+    createdDirs.add(dir);
+
+    expect(loadAgentScopeMap(dir).size).toBe(0);
+    expect(loadAgentScopeMap(dir).size).toBe(0);
+
+    await writeVaultYaml(dir, "octopus", new Date());
+    expect(loadAgentScopeMap(dir).get("octopus")).toBe("octopus");
+  });
+
+  it("scope=inherit follows a runtime default_scope change end-to-end", async () => {
+    const vault = await makeScopedVault();
+    const saved = process.env.SCHIST_ALLOWED_AGENTS;
+    process.env.SCHIST_ALLOWED_AGENTS = "octopus,sansan";
+    try {
+      const before = searchNotes(vault, "haystack", { scope: "inherit", owner: "octopus" });
+      expect(before.map((x) => x.id).sort()).toEqual(["notes/global.md", "notes/octopus.md"]);
+
+      const p = path.join(vault, "vault.yaml");
+      await fs.writeFile(
+        p,
+        [
+          "name: scope-test",
+          "participants:",
+          "  - { name: octopus, default_scope: sansan }",
+          "  - { name: sansan,  default_scope: sansan }",
+          "",
+        ].join("\n")
+      );
+      const future = new Date(Date.now() + 2_000);
+      await fs.utimes(p, future, future);
+
+      const after = searchNotes(vault, "haystack", { scope: "inherit", owner: "octopus" });
+      expect(after.map((x) => x.id).sort()).toEqual(["notes/global.md", "notes/sansan.md"]);
+    } finally {
+      if (saved === undefined) delete process.env.SCHIST_ALLOWED_AGENTS;
+      else process.env.SCHIST_ALLOWED_AGENTS = saved;
+    }
   });
 });
