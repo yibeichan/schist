@@ -46,7 +46,7 @@ sys.exit(main())
 
 POST_COMMIT_HOOK = r"""#!/bin/sh
 # schist post-commit hook — re-ingest vault into SQLite after every commit
-# schist-hook-version: 4
+# schist-hook-version: 5
 
 VAULT_ROOT=$(git rev-parse --show-toplevel)
 DB_PATH="$VAULT_ROOT/.schist/schist.db"
@@ -74,11 +74,11 @@ python3 "$INGEST" --vault "$VAULT_ROOT" --db "$DB_PATH"
 # `# schist-hook-version: N` line lives inside each hook script body. A user
 # who has intentionally customized their hook can replace the version line
 # with `# schist-hook-version: pinned` to silence the staleness warning.
-HOOK_VERSION = 4
+HOOK_VERSION = 5
 
 PRE_COMMIT_HOOK = r"""#!/bin/sh
 # schist pre-commit hook — reject staged files containing secrets
-# schist-hook-version: 4
+# schist-hook-version: 5
 
 # Patterns intentionally require a left boundary on token prefixes so substrings
 # like "task-..." inside a filename don't trigger on "sk-...", and require a
@@ -94,7 +94,20 @@ if [ ! -s "$STAGED_FILES" ]; then
     exit 0
 fi
 
-MATCH=$(xargs -0 -I {} sh -c 'git show ":$1" 2>/dev/null | grep -qE "$2" && printf "%s\n" "$1"' sh {} "$PATTERNS" < "$STAGED_FILES")
+# Filenames reach the scanner only as positional argv slots — never spliced
+# into script text — so no filename byte can break out of its argument. No -I
+# also matters: BSD xargs' -I replacement buffer is 255 bytes, so a longer
+# staged path aborted the whole scan and the secret guard was silently
+# skipped (#279). The scan now fails closed if xargs/sh themselves error.
+if ! MATCH=$(xargs -0 sh -c 'pat="$1"; shift
+for f in "$@"; do
+    git show ":$f" 2>/dev/null | grep -qE "$pat" && printf "%s\n" "$f"
+done
+exit 0' sh "$PATTERNS" < "$STAGED_FILES"); then
+    echo "ERROR: secret scan could not run — aborting commit rather than skipping the guard."
+    echo "If this is intentional, use git commit --no-verify"
+    exit 1
+fi
 if [ -n "$MATCH" ]; then
     echo "ERROR: Potential secret detected in staged files:"
     echo "$MATCH" | sed 's/^/  /'
