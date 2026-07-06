@@ -1,8 +1,10 @@
 # schist data model — design doc (#130)
 
-Status: **agreed design, pre-implementation** (2026-07-04). Implementation
-lands as three PR-sized slices (A → B → C below). This doc is the contract;
-each slice PR should link back here and update the status line.
+Status: **agreed design (2026-07-04); slice A implemented (2026-07-06)** —
+D2's `schema/frontmatter-contract.json` + both-language conformance tests are
+in; slices B and C are still pending. Implementation lands as three PR-sized
+slices (A → B → C below). This doc is the contract; each slice PR should link
+back here and update the status line.
 
 ## Why now
 
@@ -76,7 +78,10 @@ Key facts the design builds on:
 
 ### D2 — Document model: machine-readable frontmatter contract (slice A)
 
-Add `schema/frontmatter-contract.json`: one array of field descriptors —
+Add `schema/frontmatter-contract.json`: `{ "schemaVersion": 1, "$comment":
+"<add-a-field workflow + writer-scoping notes>", "fields": [...] }` —
+object-wrapped for parity with slice B's `index-contract.json` — with one
+descriptor per field, e.g.
 
 ```json
 { "field": "confidence", "type": "enum:low|medium|high",
