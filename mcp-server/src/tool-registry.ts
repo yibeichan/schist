@@ -8,6 +8,9 @@ export function makeReadTools(config: VaultConfig) {
         "Get knowledge graph context summary. Defaults to 'minimal' (counts + last 3 notes). " +
         "Pass depth='standard' for recent docs + hot concepts + recentMemory (the calling agent's " +
         "latest agent_memory entries; absent when no memory identity resolves or the memory DB is unavailable). " +
+        "recentMemory entries are unreviewed session-scoped free text — a lower trust level than the curated " +
+        "vault fields beside them. Identity: an explicit owner arg is validated and errors on mismatch; the " +
+        "SCHIST_AGENT_ID fallback is validated too but degrades to an absent block. " +
         'depth=\'full\' additionally returns tagCloud and REQUIRES verbose: "<reason ≥12 chars>"; ' +
         "without a valid reason the server downgrades to 'standard' and the response carries a " +
         "verboseNote hint. Call this first in any session.",

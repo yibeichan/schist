@@ -2401,6 +2401,15 @@ export async function get_context(
   // agent_memory.owner rows are stamped with validateOwner-checked ids). No
   // resolvable owner just means no recentMemory block: reads never require
   // identity to be configured.
+  //
+  // BOTH paths gate through validateOwner, but fail differently on purpose:
+  // an explicit arg is a caller assertion, so rejecting it loudly is right;
+  // the env fallback is ambient config, so an inconsistent pair (e.g.
+  // SCHIST_ALLOWED_AGENTS set without SCHIST_AGENT_ID in it) degrades to an
+  // absent block instead. Skipping validation on the fallback would let an
+  // identity the allowlist refuses to write as still read its memory back —
+  // the asymmetric-gating trap (PR #175): trigger and recovery must be gated
+  // identically, and here the "recovery" is the always-safe absent block.
   let memoryOwner: string | undefined;
   if (args.owner !== undefined) {
     try {
@@ -2410,7 +2419,14 @@ export async function get_context(
     }
   } else {
     const envAgentId = process.env.SCHIST_AGENT_ID?.trim();
-    if (envAgentId) memoryOwner = envAgentId;
+    if (envAgentId) {
+      try {
+        memoryOwner = validateOwner(envAgentId);
+      } catch {
+        // Degrade, never error: a broken identity config must not break
+        // vault context reads any more than a broken memory DB does.
+      }
+    }
   }
 
   // Step 3: effective depth resolution. If the caller asked for "full" but

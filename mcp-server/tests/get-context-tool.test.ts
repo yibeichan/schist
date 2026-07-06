@@ -389,9 +389,11 @@ describe("get_context tool — verboseNote concat (downgrade + rate-limit)", () 
     );
     const fnIdx = src.indexOf("export async function get_context(");
     expect(fnIdx).toBeGreaterThan(0);
-    // Window sized to cover the whole handler; grew in slice C when the
-    // memory-owner resolution + recentMemory steps were added.
-    const body = src.slice(fnIdx, fnIdx + 9000);
+    // Slice to the next top-level export so the window tracks the handler's
+    // actual extent instead of a fixed offset that needs manual re-widening
+    // every time the function grows.
+    const nextExportIdx = src.indexOf("\nexport ", fnIdx + 1);
+    const body = src.slice(fnIdx, nextExportIdx === -1 ? undefined : nextExportIdx);
     // Assert the concat shape: downgradeNote + "; " + freqNote
     expect(body).toMatch(/`\$\{downgradeNote\}; \$\{freqNote\}`/);
     // Assert the fallback ?? chain orders downgradeNote first, freqNote second.
@@ -442,10 +444,62 @@ describe("get_context tool — recentMemory happy path", () => {
     const entries = r.recentMemory!.entries;
     expect(entries.length).toBe(2);
     const [short, long] = entries; // newest first
-    expect(short.content).toBe("short one, no back-reference");
-    expect(short.related_doc).toBeUndefined();
-    expect(long.content).toBe("x".repeat(100) + "…");
-    expect(long.related_doc).toBe("notes/fuel-station.md");
+    // Exact key sets (toEqual fails on extra keys): widening the row shape —
+    // e.g. an accidental SELECT * leaking owner/created_at/tags — must be a
+    // conscious decision that updates this pin, not a silent drive-by.
+    expect(short).toEqual({
+      id: expect.any(Number),
+      date: expect.any(String),
+      entry_type: "decision",
+      content: "short one, no back-reference",
+    });
+    expect(long).toEqual({
+      id: expect.any(Number),
+      date: expect.any(String),
+      entry_type: "decision",
+      content: "x".repeat(100) + "…",
+      related_doc: "notes/fuel-station.md",
+    });
+  });
+
+  it("keeps an oversized content row process-safe: SQL-side bound + 100-cp snippet", async () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    // Large enough to prove the row is bounded before snippetContent spreads
+    // it into a code-point array, small enough to keep the test fast. The
+    // SQL-side substr() in getRecentMemory is what keeps a hostile
+    // multi-hundred-MB row from ever being loaded into process memory.
+    seedMemory("sansan", [{ content: "y".repeat(500_000) }]);
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    if ("error" in r) throw new Error("unexpected error");
+    const entries = r.recentMemory!.entries;
+    expect(entries.length).toBe(1);
+    expect(entries[0].content).toBe("y".repeat(100) + "…");
+  });
+
+  it("omits related_doc values that fail the note-id shape rule at read time (untrusted rows)", async () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    // Seed via the sqlite-reader layer, which (deliberately) does not shape-
+    // validate — mimicking legacy rows written before add_memory's validation
+    // and rows planted by other software in the shared per-machine DB.
+    seedMemory("sansan", [
+      { content: "junk empty", related_doc: "" },
+      { content: "junk dotfile", related_doc: ".git/config" },
+      { content: "junk traversal", related_doc: "../x.md" },
+      { content: "good ref", related_doc: "notes/legit.md" },
+    ]);
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    if ("error" in r) throw new Error("unexpected error");
+    const entries = r.recentMemory!.entries;
+    expect(entries.length).toBe(4);
+    for (const entry of entries) {
+      if (entry.content === "good ref") {
+        expect(entry.related_doc).toBe("notes/legit.md");
+      } else {
+        // Key omitted entirely — a present-but-junk key would still read as
+        // "this entry has a back-reference" to consumers.
+        expect(entry).not.toHaveProperty("related_doc");
+      }
+    }
   });
 
   it("appears at depth=full too, and stays absent at depth=minimal", async () => {
@@ -485,11 +539,13 @@ describe("get_context tool — recentMemory degradation (absent block, never an 
     await expect(fs.access(memDbPath)).rejects.toThrow();
   });
 
-  it("unreadable memory DB file → block absent, no error", async () => {
+  // chmod 000 only blocks non-root users — root (e.g. a Docker CI runner)
+  // reads it anyway and the test would FAIL rather than exercise the
+  // degradation path, so skip under uid 0.
+  const itUnlessRoot = process.getuid?.() === 0 ? it.skip : it;
+  itUnlessRoot("unreadable memory DB file → block absent, no error", async () => {
     process.env.SCHIST_AGENT_ID = "sansan";
     seedMemory("sansan", [{ content: "soon unreadable" }]);
-    // chmod 000 makes the open fail with EACCES for non-root users (CI
-    // runners and dev machines both run unprivileged).
     await fs.chmod(memDbPath, 0o000);
     const r = await get_context(vaultRoot, { depth: "standard" });
     if ("error" in r) throw new Error("unexpected error");
@@ -524,6 +580,22 @@ describe("get_context tool — recentMemory degradation (absent block, never an 
     if ("error" in r) throw new Error("unexpected error");
     expect(r.recentMemory).toBeUndefined();
     expect(r.recent).toBeDefined();
+  });
+
+  it("env fallback identity outside SCHIST_ALLOWED_AGENTS → block absent, no error (no allowlist bypass)", async () => {
+    // Asymmetric-gating guard: with SCHIST_ALLOWED_AGENTS=alpha,beta and
+    // SCHIST_AGENT_ID=gamma, add_memory refuses to write as gamma and an
+    // explicit owner:"gamma" arg is rejected — so the implicit env fallback
+    // must not quietly serve gamma's memory either. It degrades to an absent
+    // block (never an error: it is ambient config, not a caller assertion).
+    seedMemory("gamma", [{ content: "written before the allowlist was tightened" }]);
+    process.env.SCHIST_ALLOWED_AGENTS = "alpha,beta";
+    process.env.SCHIST_AGENT_ID = "gamma";
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    if ("error" in r) throw new Error("unexpected error");
+    expect(r.recentMemory).toBeUndefined();
+    expect(r.recent).toBeDefined();
+    expect(r.hotConcepts).toBeDefined();
   });
 });
 
@@ -568,6 +640,16 @@ describe("get_context tool — recentMemory owner resolution (multi-owner server
     const r = await get_context(vaultRoot, { depth: "standard" });
     if ("error" in r) throw new Error("unexpected error");
     expect(r.recentMemory).toBeUndefined();
+  });
+
+  it("env fallback identity INSIDE the allowlist still surfaces the block (validation must not over-degrade)", async () => {
+    seedMemory("alpha", [{ content: "allowlisted env identity" }]);
+    process.env.SCHIST_ALLOWED_AGENTS = "alpha,beta";
+    process.env.SCHIST_AGENT_ID = "alpha";
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    if ("error" in r) throw new Error("unexpected error");
+    expect(r.recentMemory!.owner).toBe("alpha");
+    expect(r.recentMemory!.entries.map(e => e.content)).toEqual(["allowlisted env identity"]);
   });
 });
 

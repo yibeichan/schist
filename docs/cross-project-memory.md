@@ -113,10 +113,17 @@ treat it as a hint, not a guarantee.
 
 `search_memory` returns `related_doc` on each entry, and `get_context`
 (depth `standard`/`full`) carries it in the `recentMemory` block: the
-owner's five most recent entries (id, date, entry_type, 100-char content
-snippet, related_doc), resolved from the explicit `owner` argument or
-`SCHIST_AGENT_ID`. When the memory DB is missing or unreadable the block is
-simply absent — a broken fuel station never breaks vault context reads.
+owner's five most recent entries (id, date, entry_type, content snippet
+truncated to 100 Unicode code points with a trailing `…`, related_doc).
+The owner comes from the explicit `owner` argument (validated against the
+identity config; invalid → `VALIDATION_ERROR`) or, when omitted, from
+`SCHIST_AGENT_ID` — also validated, but an inconsistent env pair (e.g. an
+agent id missing from `SCHIST_ALLOWED_AGENTS`) degrades to an absent block
+rather than an error. When the memory DB is missing or unreadable the
+block is likewise simply absent — a broken fuel station never breaks vault
+context reads. At read time, stored `related_doc` values that fail the
+shape rule (legacy rows, foreign writers to the shared DB) are omitted
+from the block.
 
 ## Memory vs. vault note: the decision boundary
 

@@ -13,18 +13,27 @@ import { searchMemory } from "../src/sqlite-reader.js";
 // add_memory call below uses a vault root that does not exist.
 
 let tempDir: string;
+// Snapshot/restore (not delete) — jest workers reuse one process across test
+// files, so blindly deleting a shell-inherited var here would silently wipe
+// it for suites that run later in the same worker.
+const envSnapshot: Record<string, string | undefined> = {};
+const envKeys = ["SCHIST_MEMORY_DB", "SCHIST_AGENT_ID", "SCHIST_ALLOWED_AGENTS"] as const;
 
 beforeEach(async () => {
+  for (const k of envKeys) {
+    envSnapshot[k] = process.env[k];
+    delete process.env[k];
+  }
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-relateddoc-test-"));
   process.env.SCHIST_MEMORY_DB = path.join(tempDir, "test-memory.db");
   process.env.SCHIST_AGENT_ID = "sansan";
-  delete process.env.SCHIST_ALLOWED_AGENTS;
 });
 
 afterEach(async () => {
-  delete process.env.SCHIST_MEMORY_DB;
-  delete process.env.SCHIST_AGENT_ID;
-  delete process.env.SCHIST_ALLOWED_AGENTS;
+  for (const k of envKeys) {
+    if (envSnapshot[k] === undefined) delete process.env[k];
+    else process.env[k] = envSnapshot[k];
+  }
   await fs.rm(tempDir, { recursive: true, force: true });
 });
 

@@ -2086,7 +2086,9 @@ describe("update_note", () => {
   it("rejects a non-.md id and a .git/.schist id", async () => {
     const vault = await makeTempVault();
     const config = await loadVaultConfig(vault);
-    for (const id of ["notes/x.txt", ".git/hooks/post-commit", ".schist/schist.db", "notes/../.git/config"]) {
+    // "notes/.hidden.md" isolates the dot-segment rule: it ends in .md and
+    // sits under a configured directory, so only that rule rejects it.
+    for (const id of ["notes/x.txt", ".git/hooks/post-commit", ".schist/schist.db", "notes/../.git/config", "notes/.hidden.md"]) {
       const res = await update_note(vault, { owner: TEST_AGENT, id, body: "x" }, config) as { error: string };
       expect(["VALIDATION_ERROR", "PATH_TRAVERSAL"]).toContain(res.error);
     }
@@ -2429,7 +2431,9 @@ describe("delete_note", () => {
   it("rejects a .git/.schist/non-.md id", async () => {
     const vault = await makeTempVault();
     const config = await loadVaultConfig(vault);
-    for (const id of [".git/hooks/post-commit", ".schist/schist.db", "notes/x.txt"]) {
+    // "notes/.hidden.md" isolates the dot-segment rule: it ends in .md and
+    // sits under a configured directory, so only that rule rejects it.
+    for (const id of [".git/hooks/post-commit", ".schist/schist.db", "notes/x.txt", "notes/.hidden.md"]) {
       const res = await delete_note(vault, { owner: TEST_AGENT, id }, config) as { error: string };
       expect(["VALIDATION_ERROR", "PATH_TRAVERSAL"]).toContain(res.error);
     }
