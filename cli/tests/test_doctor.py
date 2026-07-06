@@ -342,6 +342,63 @@ class TestCheckIngestAvailable:
                 assert r.status == "FAIL"
 
 
+class TestCheckIngestAvailableStaleHandCopy:
+    """Hand-provisioned `.schist/ingest.py` copies must be refreshed alongside
+    slice B (#130 D3). A pre-contract copy re-stamps the old user_version
+    after every commit while readers expect the new one — a silent
+    rebuild-on-every-read ping-pong with no error anywhere. doctor is the
+    only surface that can see it coming."""
+
+    def _cli_schist_dir(self) -> Path:
+        import schist.ingest
+
+        return Path(schist.ingest.__file__).parent
+
+    def _vault_with_copy(self, tmp_path: Path, *, with_sibling: bool,
+                         script_text: str | None = None) -> Path:
+        dot = tmp_path / ".schist"
+        dot.mkdir(parents=True)
+        src = self._cli_schist_dir()
+        if script_text is None:
+            (dot / "ingest.py").write_text((src / "ingest.py").read_text())
+        else:
+            (dot / "ingest.py").write_text(script_text)
+        if with_sibling:
+            (dot / "index_contract.py").write_text(
+                (src / "index_contract.py").read_text()
+            )
+        return tmp_path
+
+    def test_pass_when_copy_is_current(self, tmp_path):
+        vault = self._vault_with_copy(tmp_path, with_sibling=True)
+        with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
+            r = check_ingest_available(str(vault))
+        assert r.status == "PASS", r.message
+
+    def test_warn_when_sibling_index_contract_missing(self, tmp_path):
+        vault = self._vault_with_copy(tmp_path, with_sibling=False)
+        with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
+            r = check_ingest_available(str(vault))
+        assert r.status == "WARN"
+        assert "index_contract.py" in r.message
+        assert r.fix is not None and "Refresh" in r.fix
+
+    def test_warn_when_copy_stamps_hardcoded_version_one(self, tmp_path):
+        pre_slice_b = (
+            "#!/usr/bin/env python3\n"
+            "def _ingest_into(conn):\n"
+            "    conn.execute('PRAGMA user_version = 0')\n"
+            "    conn.execute('PRAGMA user_version = 1')\n"
+        )
+        vault = self._vault_with_copy(
+            tmp_path, with_sibling=True, script_text=pre_slice_b
+        )
+        with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
+            r = check_ingest_available(str(vault))
+        assert r.status == "WARN"
+        assert "user_version=1" in r.message
+
+
 class TestCheckSpoke:
     def test_no_path(self):
         r = check_spoke(None)
@@ -656,6 +713,146 @@ class TestCheckMcpSchemaAlignment:
         r = check_mcp_schema_alignment(None)
         assert r.status == "SKIP"
         assert "REQUIRED_DOCS_COLUMNS not declared" in r.message
+
+
+class TestCheckIndexSchemaVersion:
+    """#130 D3: the column-based alignment check above cannot see a pure
+    schemaVersion bump (no new column the MCP reader SELECTs). This check
+    compares the vault index's user_version, the installed CLI's
+    INDEX_SCHEMA_VERSION, and the MCP dist's baked schemaVersion, and must
+    name the direction-correct remedy — the runtime error from
+    ensureSchemaCurrent claims doctor diagnoses the direction, so it has to."""
+
+    def _write_dist_with_version(self, dist_dir: Path, version: int) -> None:
+        dist_dir.mkdir(parents=True, exist_ok=True)
+        (dist_dir / "index.js").write_text("// stub\n")
+        (dist_dir / "sqlite-reader.js").write_text(
+            "export const INDEX_CONTRACT_FALLBACK = {\n"
+            f"    schemaVersion: {version},\n"
+            '    tables: ["docs"],\n'
+            "};\n"
+        )
+
+    def _write_claude_json(self, tmp_path: Path, dist_dir: Path) -> None:
+        (tmp_path / ".claude.json").write_text(json.dumps({
+            "mcpServers": {"schist": {
+                "command": "node", "args": [str(dist_dir / "index.js")],
+            }}
+        }))
+
+    def _make_vault(self, tmp_path: Path, stamped: int) -> str:
+        vault = tmp_path / "vault"
+        (vault / ".schist").mkdir(parents=True)
+        conn = sqlite3.connect(vault / ".schist" / "schist.db")
+        conn.execute("CREATE TABLE docs (id TEXT PRIMARY KEY)")
+        conn.execute(f"PRAGMA user_version = {stamped}")
+        conn.commit()
+        conn.close()
+        return str(vault)
+
+    def test_pass_when_all_current(self, tmp_path, monkeypatch):
+        from schist.doctor import INDEX_SCHEMA_VERSION, check_index_schema_version
+
+        vault = self._make_vault(tmp_path, INDEX_SCHEMA_VERSION)
+        dist_dir = tmp_path / "mcp" / "dist"
+        self._write_dist_with_version(dist_dir, INDEX_SCHEMA_VERSION)
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_index_schema_version(vault)
+        assert r.status == "PASS", r.message
+        assert f"index v{INDEX_SCHEMA_VERSION}" in r.message
+        assert f"MCP dist v{INDEX_SCHEMA_VERSION}" in r.message
+
+    def test_pass_when_index_unstamped(self, tmp_path, monkeypatch):
+        """user_version=0 is the in-flight/pre-marker state, not a skew."""
+        from schist.doctor import check_index_schema_version
+
+        vault = self._make_vault(tmp_path, 0)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_index_schema_version(vault)
+        assert r.status == "PASS", r.message
+        assert "unstamped" in r.message
+
+    def test_warn_when_index_newer_than_cli(self, tmp_path, monkeypatch):
+        """Index stamped by something newer → remedy is upgrading the CLI,
+        NOT re-running ingest (which would silently downgrade the index)."""
+        from schist.doctor import INDEX_SCHEMA_VERSION, check_index_schema_version
+
+        vault = self._make_vault(tmp_path, INDEX_SCHEMA_VERSION + 1)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_index_schema_version(vault)
+        assert r.status == "WARN"
+        assert "NEWER" in r.message
+        assert r.fix is not None and "uv tool install" in r.fix
+
+    def test_warn_when_index_older_than_cli(self, tmp_path, monkeypatch):
+        """Index predates the installed CLI's schema → remedy is a rebuild.
+        (Requires INDEX_SCHEMA_VERSION >= 2 to be reachable, so pin the
+        module constant doctor uses.)"""
+        from schist.doctor import check_index_schema_version
+
+        monkeypatch.setattr("schist.doctor.INDEX_SCHEMA_VERSION", 2)
+        vault = self._make_vault(tmp_path, 1)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_index_schema_version(vault)
+        assert r.status == "WARN"
+        assert "stamped v1" in r.message
+        assert r.fix is not None and "schist-ingest --vault" in r.fix
+
+    def test_warn_when_mcp_dist_newer_than_cli(self, tmp_path, monkeypatch):
+        """The runtime-error direction: newer mcp-server + older installed
+        schist-ingest. Remedy is upgrading the CLI."""
+        from schist.doctor import INDEX_SCHEMA_VERSION, check_index_schema_version
+
+        vault = self._make_vault(tmp_path, INDEX_SCHEMA_VERSION)
+        dist_dir = tmp_path / "mcp" / "dist"
+        self._write_dist_with_version(dist_dir, INDEX_SCHEMA_VERSION + 1)
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_index_schema_version(vault)
+        assert r.status == "WARN"
+        assert "MCP dist expects" in r.message
+        assert r.fix is not None and "uv tool install" in r.fix
+
+    def test_warn_when_mcp_dist_older_than_cli(self, tmp_path, monkeypatch):
+        """Reverse skew: stale MCP dist. Remedy is rebuilding the dist —
+        the direction the runtime error cannot tell the user about."""
+        from schist.doctor import check_index_schema_version
+
+        monkeypatch.setattr("schist.doctor.INDEX_SCHEMA_VERSION", 2)
+        vault = self._make_vault(tmp_path, 2)
+        dist_dir = tmp_path / "mcp" / "dist"
+        self._write_dist_with_version(dist_dir, 1)
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_index_schema_version(vault)
+        assert r.status == "WARN"
+        assert r.fix is not None and "npm run build" in r.fix
+
+    def test_skip_without_index_db(self, tmp_path, monkeypatch):
+        from schist.doctor import check_index_schema_version
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_index_schema_version(str(vault))
+        assert r.status == "SKIP"
+
+    def test_skip_when_dist_predates_the_contract(self, tmp_path, monkeypatch):
+        """Pre-slice-B dist has no INDEX_CONTRACT_FALLBACK — the dist leg is
+        silently skipped, not misreported as skew."""
+        from schist.doctor import INDEX_SCHEMA_VERSION, check_index_schema_version
+
+        vault = self._make_vault(tmp_path, INDEX_SCHEMA_VERSION)
+        dist_dir = tmp_path / "mcp" / "dist"
+        dist_dir.mkdir(parents=True)
+        (dist_dir / "index.js").write_text("// stub\n")
+        (dist_dir / "sqlite-reader.js").write_text("// older MCP server\n")
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_index_schema_version(vault)
+        assert r.status == "PASS", r.message
+        assert "MCP dist" not in r.message
 
 
 class TestCheckSkillToolReferences:

@@ -1073,8 +1073,9 @@ def test_normalize_concept_slug_matches_ts_whitespace_collapse() -> None:
 
 
 def test_ingest_sets_completion_marker(tmp_path: Path) -> None:
-    """#244: a successful ingest must stamp user_version=1 so get_db can tell
-    a completed (possibly empty) index apart from a SIGKILL'd one."""
+    """#244: a successful ingest must stamp user_version=INDEX_SCHEMA_VERSION
+    so get_db can tell a completed (possibly empty) index apart from a
+    SIGKILL'd one."""
     from schist.ingest import ingest
 
     vault = tmp_path / "vault"
@@ -1089,7 +1090,11 @@ def test_ingest_sets_completion_marker(tmp_path: Path) -> None:
 
     conn = sqlite3.connect(db_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        from schist.index_contract import INDEX_SCHEMA_VERSION
+
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0] == INDEX_SCHEMA_VERSION
+        )
     finally:
         conn.close()
 
@@ -1106,6 +1111,10 @@ def test_ingest_sets_completion_marker_for_empty_vault(tmp_path: Path) -> None:
 
     conn = sqlite3.connect(db_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        from schist.index_contract import INDEX_SCHEMA_VERSION
+
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0] == INDEX_SCHEMA_VERSION
+        )
     finally:
         conn.close()
