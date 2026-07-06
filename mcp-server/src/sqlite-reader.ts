@@ -117,6 +117,14 @@ export interface IndexContract {
   requiredTables: readonly string[];
   requiredDocsColumns: readonly string[];
   rebuildSurvivors: readonly string[];
+  /**
+   * SHA-256 over the materialized schema (sqlite_master rows after running
+   * schema.sql; recompute recipe in cli/schist/index_contract.py). Not
+   * consumed at runtime — it exists so ANY DDL edit forces a visible
+   * contract diff and a failing parity test in both suites, even when the
+   * author forgets the schemaVersion bump or a requiredDocsColumns entry.
+   */
+  schemaSqlDigest: string;
 }
 
 // Columns the read paths SELECT from `docs` — a deliberate subset of the
@@ -135,40 +143,59 @@ const REQUIRED_DOCS_COLUMNS: ReadonlySet<string> = new Set([
 // concept_aliases sits in requiredTables so vaults upgraded from a
 // pre-concept_aliases schema (which still have docs + paper_metadata)
 // trigger an ingest rebuild before add_concept_alias hits "no such
-// table" (#224).
+// table" (#224). rebuildSurvivors is declarative — enforced by parity
+// tests against schema.sql and sync.py's _SIDE_TABLE_COLUMNS, not read at
+// runtime; changing a SURVIVOR table's DDL needs an explicit copy-forward
+// migration, because a version bump alone silently keeps the survivor's
+// old shape (its CREATE is IF NOT EXISTS) while stamping the new version.
 export const INDEX_CONTRACT_FALLBACK: IndexContract = {
   schemaVersion: 1,
   tables: ["docs", "concepts", "edges", "docs_fts", "paper_metadata", "concept_aliases"],
   requiredTables: ["docs", "paper_metadata", "concept_aliases"],
   requiredDocsColumns: [...REQUIRED_DOCS_COLUMNS],
   rebuildSurvivors: ["concept_aliases"],
+  schemaSqlDigest: "6cd775da8d6592bdf38b4fa246f6d49400ee7d70b23934843c0232148f56e212",
 };
 
 function isNonEmptyStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.length > 0 && value.every((v) => typeof v === "string");
 }
 
+// `PRAGMA user_version` is a signed 32-bit header field; a larger stamp
+// would truncate on write, readers would never see their expected version,
+// and every access would trigger a full rebuild — forever. Mirrors
+// _MAX_SCHEMA_VERSION in cli/schist/index_contract.py.
+const MAX_SCHEMA_VERSION = 0x7fffffff;
+
 /**
  * Load the canonical contract from <repo>/schema/index-contract.json,
- * falling back to the baked-in mirror when the file is unreadable or
- * malformed (fail-open, like tools.ts's canonical-directories load — a
+ * falling back to the baked-in mirror when the file is missing, unreadable,
+ * or malformed (fail-open, like tools.ts's canonical-directories load — a
  * standalone install without the monorepo checkout must keep running).
+ * A missing file is SILENT — the published npm package ships only dist/,
+ * so absence is the normal production state there, not an anomaly worth
+ * logging on every server start. Anything else (parse error, permissions,
+ * failed validation) warns. `contractPathOverride` exists for tests.
  */
-export function loadIndexContract(): IndexContract {
+export function loadIndexContract(contractPathOverride?: string): IndexContract {
   // Resolves from both src/ (jest) and dist/ (production): either way the
   // repo root is two levels up from this file's directory.
   const hereDir = path.dirname(fileURLToPath(import.meta.url));
-  const contractPath = path.resolve(hereDir, "..", "..", "schema", "index-contract.json");
+  const contractPath =
+    contractPathOverride ?? path.resolve(hereDir, "..", "..", "schema", "index-contract.json");
   try {
     const raw = JSON.parse(fs.readFileSync(contractPath, "utf-8")) as Record<string, unknown>;
     if (
       typeof raw.schemaVersion === "number" &&
       Number.isInteger(raw.schemaVersion) &&
       raw.schemaVersion > 0 &&
+      raw.schemaVersion <= MAX_SCHEMA_VERSION &&
       isNonEmptyStringArray(raw.tables) &&
       isNonEmptyStringArray(raw.requiredTables) &&
       isNonEmptyStringArray(raw.requiredDocsColumns) &&
-      isNonEmptyStringArray(raw.rebuildSurvivors)
+      isNonEmptyStringArray(raw.rebuildSurvivors) &&
+      typeof raw.schemaSqlDigest === "string" &&
+      /^[0-9a-f]{64}$/.test(raw.schemaSqlDigest)
     ) {
       return raw as unknown as IndexContract;
     }
@@ -176,11 +203,13 @@ export function loadIndexContract(): IndexContract {
       `schist: ${contractPath} is malformed; using the baked-in index-contract mirror.`,
     );
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.warn(
-      `schist: schema/index-contract.json unreadable (${msg}); ` +
-      `using the baked-in index-contract mirror.`,
-    );
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn(
+        `schist: ${contractPath} unreadable (${msg}); ` +
+        `using the baked-in index-contract mirror.`,
+      );
+    }
   }
   return INDEX_CONTRACT_FALLBACK;
 }
@@ -399,8 +428,8 @@ function ensureSchemaCurrent(vaultRoot: string): void {
       `most often schist-ingest is older than this MCP server. ` +
       `Upgrade it: \`uv tool install --reinstall --force <path-to-schist/cli>\`. ` +
       `If the error persists, the skew is reversed (stale MCP dist): rebuild with ` +
-      `\`cd <schist>/mcp-server && npm run build\` and restart — ` +
-      `\`schist doctor\` diagnoses the direction.`,
+      `\`cd <schist>/mcp-server && npm run build\` and restart — \`schist doctor\`'s ` +
+      `"Index schema version" and "MCP schema alignment" checks diagnose the direction.`,
     );
   }
   verifiedVaults.add(vaultRoot);

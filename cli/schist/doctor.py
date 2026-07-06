@@ -15,6 +15,7 @@ from typing import Optional
 
 import yaml
 
+from .index_contract import INDEX_SCHEMA_VERSION
 from .spoke_config import is_spoke, load_spoke_config
 
 MIN_PYTHON = (3, 12)
@@ -311,6 +312,32 @@ def check_ingest_available(vault_path: Optional[str]) -> CheckResult:
 
     vault_script = Path(vault_path) / ".schist" / "ingest.py"
     if vault_script.exists():
+        # Hand-provisioned bare-script copies must be refreshed alongside
+        # slice B (#130 D3): ingest.py now imports a sibling
+        # index_contract.py (like the sibling schema.sql it always needed)
+        # and stamps INDEX_SCHEMA_VERSION instead of a literal 1. A stale
+        # copy re-stamps the OLD version after every commit while readers
+        # expect the new one, so every read triggers a full rebuild — a
+        # silent ping-pong with no error anywhere.
+        issues = []
+        if not (vault_script.parent / "index_contract.py").exists():
+            issues.append("missing sibling index_contract.py")
+        try:
+            script_text = vault_script.read_text()
+        except (OSError, UnicodeDecodeError):
+            script_text = ""
+        if re.search(r"PRAGMA user_version = 1\b", script_text):
+            issues.append("stamps a hardcoded user_version=1 (pre-index-contract copy)")
+        if issues:
+            return CheckResult(
+                "WARN", "Ingest",
+                f"{vault_script} is a stale hand-provisioned copy: {'; '.join(issues)}",
+                "Refresh the copy from cli/schist/ (ingest.py + index_contract.py + "
+                "schema.sql), or delete it so the hook falls back to the installed "
+                "schist-ingest. After the next index-schema bump a stale copy causes "
+                "a silent rebuild loop: the post-commit hook restamps the old "
+                "version, and every read rebuilds the whole index again.",
+            )
         return CheckResult("PASS", "Ingest", str(vault_script))
 
     if shutil.which("schist-ingest"):
@@ -667,9 +694,13 @@ def check_mcp_config(vault_path: Optional[str]) -> CheckResult:
 # Match `REQUIRED_DOCS_COLUMNS = new Set([ "id", "title", ... ])` in the
 # compiled JS. Tolerant of newlines and trailing commas. The inner-string
 # match is non-greedy so a later `Set(...)` literal in the file doesn't
-# extend the capture.
+# extend the capture. The optional `(?::[^=]*)?` also tolerates the source
+# form's type annotation (`: ReadonlySet<string>`), so
+# cli/tests/test_index_contract.py can pin this regex against the REAL
+# sqlite-reader.ts text — a refactor of the literal there would otherwise
+# silently downgrade this check to SKIP on the next build.
 _REQUIRED_DOCS_RE = re.compile(
-    r"REQUIRED_DOCS_COLUMNS\s*=\s*new\s+Set\(\s*\[(.*?)\]\s*\)",
+    r"REQUIRED_DOCS_COLUMNS(?::[^=]*)?\s*=\s*new\s+Set\(\s*\[(.*?)\]\s*\)",
     re.DOTALL,
 )
 _DOC_COL_STRING_RE = re.compile(r"""['"]([a-zA-Z_][a-zA-Z0-9_]*)['"]""")
@@ -886,6 +917,128 @@ def check_mcp_schema_alignment(vault_path: Optional[str]) -> CheckResult:
     )
 
 
+# Match the `schemaVersion: <int>` entry of the INDEX_CONTRACT_FALLBACK
+# object literal in the compiled dist/sqlite-reader.js. Non-greedy `\{(.*?)\}`
+# is safe: the object nests arrays (brackets), never braces. The optional
+# `(?::[^=]*)?` tolerates the source form's `: IndexContract` annotation so
+# cli/tests/test_index_contract.py can pin this regex against the REAL
+# sqlite-reader.ts text — a refactor of the literal there would otherwise
+# silently downgrade the version leg of check_index_schema_version to
+# "not declared".
+_INDEX_CONTRACT_FALLBACK_RE = re.compile(
+    r"INDEX_CONTRACT_FALLBACK(?::[^=]*)?\s*=\s*\{(.*?)\}", re.DOTALL,
+)
+_SCHEMA_VERSION_KEY_RE = re.compile(r"schemaVersion:\s*(\d+)")
+
+
+def _extract_mcp_index_schema_version(dist_dir: Path) -> Optional[int]:
+    """Read the index schema version the MCP server's compiled
+    sqlite-reader.js was built with. Returns None when the constant can't be
+    found — pre-slice-B builds (#130 D3) don't declare it.
+    """
+    reader = dist_dir / "sqlite-reader.js"
+    try:
+        text = reader.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    block = _INDEX_CONTRACT_FALLBACK_RE.search(text)
+    if not block:
+        return None
+    m = _SCHEMA_VERSION_KEY_RE.search(block.group(1))
+    return int(m.group(1)) if m else None
+
+
+def check_index_schema_version(vault_path: Optional[str],
+                               db_path: Optional[str] = None) -> CheckResult:
+    """Detect index-schema-VERSION skew — the axis the column-based 'MCP
+    schema alignment' check cannot see (a version bump with no column the
+    MCP reader SELECTs changes user_version only).
+
+    Compares three values and names the direction-specific remedy:
+      - the vault index's `PRAGMA user_version` (what the last completed
+        ingest stamped),
+      - the installed CLI's INDEX_SCHEMA_VERSION (what this schist-ingest
+        stamps and get_db expects),
+      - the schemaVersion baked into the configured MCP dist (what
+        ensureSchemaCurrent expects).
+    """
+    label = "Index schema version"
+    if not vault_path:
+        return CheckResult("SKIP", label, "skipped (no vault)")
+    if db_path is None:
+        db_path = str(Path(vault_path) / ".schist" / "schist.db")
+    if not Path(db_path).exists():
+        return CheckResult("SKIP", label,
+                           "skipped (no index DB yet — built on first read)")
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            stamped = conn.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return CheckResult("SKIP", label,
+                           "skipped (index DB unreadable — see the SQLite check)")
+
+    warnings: list[str] = []
+    fixes: list[str] = []
+
+    if stamped != 0 and stamped != INDEX_SCHEMA_VERSION:
+        if stamped < INDEX_SCHEMA_VERSION:
+            warnings.append(
+                f"index is stamped v{stamped} but the installed schist-ingest "
+                f"expects v{INDEX_SCHEMA_VERSION}"
+            )
+            fixes.append(
+                "Rebuild the index: `schist-ingest --vault <vault> --db "
+                "<vault>/.schist/schist.db` (readers also rebuild it "
+                "automatically on next access)."
+            )
+        else:
+            warnings.append(
+                f"index is stamped v{stamped}, NEWER than the installed "
+                f"schist-ingest (v{INDEX_SCHEMA_VERSION}) — something newer "
+                "built it, and this CLI would downgrade it on rebuild"
+            )
+            fixes.append(
+                "Upgrade schist: `uv tool install --reinstall --force "
+                "<path-to-schist/cli>`."
+            )
+
+    dist_dir = _mcp_dist_dir_from_config(vault_path)
+    mcp_version = _extract_mcp_index_schema_version(dist_dir) if dist_dir else None
+    if mcp_version is not None and mcp_version != INDEX_SCHEMA_VERSION:
+        if mcp_version > INDEX_SCHEMA_VERSION:
+            warnings.append(
+                f"MCP dist expects index schema v{mcp_version} but the installed "
+                f"schist-ingest stamps v{INDEX_SCHEMA_VERSION} — MCP reads will "
+                "rebuild once, recheck, and fail with the 'schist-ingest is older' error"
+            )
+            fixes.append(
+                "Upgrade schist: `uv tool install --reinstall --force "
+                "<path-to-schist/cli>`."
+            )
+        else:
+            warnings.append(
+                f"MCP dist expects index schema v{mcp_version} but the installed "
+                f"schist-ingest stamps v{INDEX_SCHEMA_VERSION} — MCP reads will "
+                "trigger a full index rebuild on every tool call"
+            )
+            fixes.append(
+                "Rebuild the MCP server dist: `cd <schist>/mcp-server && npm run "
+                "build`, then restart Claude Code / Claude Desktop."
+            )
+
+    if warnings:
+        return CheckResult("WARN", label, "; ".join(warnings), " ".join(fixes))
+
+    parts = [f"index v{stamped}" if stamped != 0 else "index unstamped (v0: pre-marker or ingest in flight)",
+             f"schist-ingest v{INDEX_SCHEMA_VERSION}"]
+    if mcp_version is not None:
+        parts.append(f"MCP dist v{mcp_version}")
+    return CheckResult("PASS", label, ", ".join(parts))
+
+
 def check_skill_tool_references(vault_path: Optional[str]) -> CheckResult:
     """Catch skills that call schist MCP tools the installed server no longer
     exposes — the failure mode that surfaced as the `request_capabilities`
@@ -968,6 +1121,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_spoke_acl_drift(vault_path),
         check_mcp_config(vault_path),
         check_mcp_schema_alignment(vault_path),
+        check_index_schema_version(vault_path, db_path),
         check_skill_tool_references(vault_path),
     ]
     if hub_path:

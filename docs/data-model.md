@@ -107,12 +107,14 @@ descriptor per field, e.g.
    `user_version = 0` while an ingest is in flight (unchanged heal
    semantics), `user_version = INDEX_SCHEMA_VERSION` on completion. Today
    `INDEX_SCHEMA_VERSION = 1`, so existing DBs are already valid; the value
-   is bumped only on DDL changes to `schema.sql`. A reader that finds
-   `0 < user_version != INDEX_SCHEMA_VERSION` treats the DB as stale and
-   forces a rebuild (the index is disposable — **rebuild IS the migration
-   path**; no ALTER migrations). This is deliberately collision-free with
-   the #244 marker because the marker and the version become one value:
-   "complete at schema version N".
+   is bumped only on DDL changes to `schema.sql`. A reader that finds a
+   non-zero `user_version != INDEX_SCHEMA_VERSION` treats the DB as stale
+   and forces a rebuild — the exemption is exactly `user_version == 0`;
+   anything else that mismatches (including a corrupt negative value) is
+   stale (the index is disposable — **rebuild IS the migration path**; no
+   ALTER migrations). This is deliberately collision-free with the #244
+   marker because the marker and the version become one value: "complete at
+   schema version N".
 
    **Deployment-skew rule**: the TS stale-version path MUST go through the
    existing `ensureSchemaCurrent` rebuild-once → recheck → typed-error
@@ -135,9 +137,26 @@ descriptor per field, e.g.
    baked-in mirror in each component, pinned by a drift test
    (`tools.ts:26–66` precedent); the mirror-vs-schema/ parity test is what
    makes the single source real. A parity test in each suite additionally
-   asserts the loaded contract matches what `schema.sql` actually creates.
+   asserts the loaded contract matches what `schema.sql` actually creates,
+   including a `schemaSqlDigest` over the materialized DDL — a version bump
+   is a human judgment, but the digest changes on ANY `schema.sql` edit, so
+   forgetting the bump (or a required-columns entry) fails both suites
+   instead of surfacing as a raw `no such column` on existing spokes.
+
+   **Survivor-table caveat**: `rebuildSurvivors` tables are created with
+   `IF NOT EXISTS` and never dropped, so changing a SURVIVOR's DDL needs an
+   explicit copy-forward migration — a version bump alone rebuilds every
+   dropped table but silently keeps the survivor's old shape while stamping
+   the new version. (Enforced structurally: parity tests pin the survivors
+   to schema.sql's DROP/CREATE layout and to sync.py's
+   `_SIDE_TABLE_COLUMNS`.)
 3. Fixes #339 (the `docs` drift) as a side effect, in the direction of the
    CLI's stricter set — a DB without `docs` is unusable for every read path.
+   Hand-provisioned `.schist/ingest.py` hook copies must carry
+   `index_contract.py` as a sibling file (like the sibling `schema.sql`);
+   `schist doctor`'s Ingest check WARNs on pre-contract copies, and its
+   "Index schema version" check reports version skew across index ↔ CLI ↔
+   MCP dist with direction-specific remedies.
 
 ### D4 — Memory contract: formalize the fuel station (slice C)
 

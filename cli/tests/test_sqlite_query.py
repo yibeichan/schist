@@ -129,11 +129,11 @@ def test_get_db_keeps_completed_ingest_of_empty_vault(tmp_path: Path) -> None:
 
 
 def test_get_db_reingests_stale_schema_version(tmp_path: Path) -> None:
-    """0 < user_version != INDEX_SCHEMA_VERSION means the index was completed
-    by a different schema.sql generation — the index is disposable, so rebuild
-    IS the migration path (#130 D3). Rows present, so neither the #244 heal
-    nor the required-tables check would fire; only the version check catches
-    this."""
+    """A non-zero user_version different from INDEX_SCHEMA_VERSION means the
+    index was completed by a different schema.sql generation — the index is
+    disposable, so rebuild IS the migration path (#130 D3). Rows present, so
+    neither the #244 heal nor the required-tables check would fire; only the
+    version check catches this."""
     vault, db_path = _vault_db(tmp_path)
 
     conn = sqlite3.connect(db_path)

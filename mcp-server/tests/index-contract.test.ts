@@ -13,9 +13,12 @@
  *      actually creates, so neither can change without the other.
  * The Python twin lives in cli/tests/test_index_contract.py.
  */
-import { readFileSync } from "node:fs";
+import { jest } from "@jest/globals";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import * as os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
 import {
   INDEX_CONTRACT_FALLBACK,
@@ -126,5 +129,98 @@ describe("index-contract ↔ schema.sql parity", () => {
         expect(dropped.has(table)).toBe(true);
       }
     }
+  });
+});
+
+describe("schemaSqlDigest pins the materialized DDL", () => {
+  test("recomputed digest matches the contract", () => {
+    // ANY schema.sql DDL edit must force a visible contract diff, even one
+    // that dodges every list-based check (e.g. adding a docs column + a
+    // reader SELECT while forgetting the schemaVersion bump and
+    // requiredDocsColumns entry — requiredDocsColumns is only checked as a
+    // subset). Recompute recipe documented in cli/schist/index_contract.py;
+    // the Python twin recomputes it identically. On failure: update
+    // schema/index-contract.json + both baked mirrors AND decide whether
+    // schemaVersion must bump.
+    const db = new Database(":memory:");
+    let computed: string;
+    try {
+      db.exec(schemaSql);
+      const rows = db
+        .prepare("SELECT type, name, sql FROM sqlite_master")
+        .all() as Array<{ type: string; name: string; sql: string | null }>;
+      const kept = rows
+        .filter((r) => !r.name.startsWith("sqlite_") && !r.name.startsWith("docs_fts_"))
+        .map((r) => `${r.type}\x1f${r.name}\x1f${r.sql ?? ""}`)
+        .sort();
+      computed = createHash("sha256").update(kept.join("\x1e"), "utf-8").digest("hex");
+    } finally {
+      db.close();
+    }
+    expect(contract.schemaSqlDigest).toBe(computed);
+  });
+});
+
+describe("loadIndexContract fallback paths (the only paths production npm installs exercise)", () => {
+  let tmpDir: string;
+  let warnSpy: ReturnType<typeof jest.spyOn<typeof console, "warn">>;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(path.join(os.tmpdir(), "schist-contract-"));
+    warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warnSpy.mockRestore();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("missing file falls back SILENTLY — absence is the normal published-package state", () => {
+    const result = loadIndexContract(path.join(tmpDir, "does-not-exist.json"));
+    expect(result).toEqual(INDEX_CONTRACT_FALLBACK);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  test("malformed JSON warns and falls back", () => {
+    const bad = path.join(tmpDir, "index-contract.json");
+    writeFileSync(bad, "{ not json");
+    const result = loadIndexContract(bad);
+    expect(result).toEqual(INDEX_CONTRACT_FALLBACK);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("invalid shape warns and falls back", () => {
+    const bad = path.join(tmpDir, "index-contract.json");
+    writeFileSync(bad, JSON.stringify({ ...INDEX_CONTRACT_FALLBACK, requiredTables: [] }));
+    const result = loadIndexContract(bad);
+    expect(result).toEqual(INDEX_CONTRACT_FALLBACK);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(String(warnSpy.mock.calls[0][0])).toContain("malformed");
+  });
+
+  test("integral-float schemaVersion (`2.0`) is the integer 2 — accepted", () => {
+    // JSON has one number type: JS cannot even observe the difference, and
+    // the Python loader coerces to match. A hand-edited `2.0` must not
+    // desync the two languages.
+    const f = path.join(tmpDir, "index-contract.json");
+    writeFileSync(f, JSON.stringify({ ...INDEX_CONTRACT_FALLBACK, schemaVersion: 2.0 }));
+    const result = loadIndexContract(f);
+    expect(result.schemaVersion).toBe(2);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  test("schemaVersion beyond 32 bits is rejected — user_version is a signed 32-bit field", () => {
+    const f = path.join(tmpDir, "index-contract.json");
+    writeFileSync(f, JSON.stringify({ ...INDEX_CONTRACT_FALLBACK, schemaVersion: 2 ** 31 }));
+    const result = loadIndexContract(f);
+    expect(result).toEqual(INDEX_CONTRACT_FALLBACK);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("non-hex schemaSqlDigest is rejected", () => {
+    const f = path.join(tmpDir, "index-contract.json");
+    writeFileSync(f, JSON.stringify({ ...INDEX_CONTRACT_FALLBACK, schemaSqlDigest: "zz" }));
+    const result = loadIndexContract(f);
+    expect(result).toEqual(INDEX_CONTRACT_FALLBACK);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
   });
 });
