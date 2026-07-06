@@ -8,6 +8,7 @@ import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote, updateNote, deleteNote } from "./git-writer.js";
 import { buildNote, buildConnectionLine, parseNote, CONNECTION_RE } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
+import { noteIdShapeError } from "./note-id.js";
 import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse, ComposeBriefResponse, Note, SearchResult } from "./types.js";
 import { loadVaultAcl, canWrite, deriveScope, resolveAclIdentity } from "./vault-acl.js";
 import {
@@ -118,29 +119,48 @@ function today(): string {
  * all resolve INSIDE the vault root. Writing there is arbitrary-file-write
  * (the post-commit hook path is RCE-on-next-commit). Constrain to a `.md` file
  * under a configured top-level directory, with no `..`, absolute path, or
- * dot-prefixed segment. Returns a ToolError to surface, or null when valid.
+ * dot-prefixed segment. The config-independent shape checks live in
+ * `noteIdShapeError` (note-id.ts) so add_memory's related_doc validation
+ * shares the exact same rule without needing vault config (D4). Returns a
+ * ToolError to surface, or null when valid.
  */
 function validateNoteId(id: string, config: VaultConfig): ToolError | null {
   if (typeof id !== "string" || id.length === 0) {
     return { error: "VALIDATION_ERROR", message: "Note id is required" };
   }
-  if (id.includes("..") || path.isAbsolute(id)) {
-    return { error: "VALIDATION_ERROR", message: "Invalid note id: must be a relative path without '..'" };
+  const shapeProblem = noteIdShapeError(id);
+  if (shapeProblem !== null) {
+    return { error: "VALIDATION_ERROR", message: `Invalid note id: ${shapeProblem}` };
   }
-  if (!id.endsWith(".md")) {
-    return { error: "VALIDATION_ERROR", message: "Invalid note id: must be a .md file" };
-  }
-  const segments = id.split("/");
-  if (segments.some((s) => s.startsWith("."))) {
-    return {
-      error: "VALIDATION_ERROR",
-      message: "Invalid note id: path segments must not start with '.' (rejects .git, .schist, dotfiles)",
-    };
-  }
-  if (!config.directories.includes(segments[0])) {
+  if (!config.directories.includes(id.split("/")[0])) {
     return {
       error: "VALIDATION_ERROR",
       message: `Note id must be under a configured directory. Allowed top-level: ${config.directories.join(", ")}`,
+    };
+  }
+  return null;
+}
+
+/**
+ * Validate add_memory's optional `related_doc` — defined (docs/data-model.md
+ * D4) as "a vault note id (`notes/….md`)". SHAPE only, by design: memory is
+ * the fuel station and must stay writable when the vault is unavailable, so
+ * there is no FK, no existence check, and no vault-DB or filesystem access —
+ * just the shared string rule from note-id.ts. Returns a ToolError naming
+ * the parameter, or null when valid.
+ */
+function validateRelatedDoc(relatedDoc: unknown): ToolError | null {
+  if (typeof relatedDoc !== "string" || relatedDoc.length === 0) {
+    return {
+      error: "VALIDATION_ERROR",
+      message: "related_doc must be a non-empty string when provided (a vault note id like notes/topic.md)",
+    };
+  }
+  const shapeProblem = noteIdShapeError(relatedDoc);
+  if (shapeProblem !== null) {
+    return {
+      error: "VALIDATION_ERROR",
+      message: `Invalid related_doc: ${shapeProblem}. Expected a vault note id like notes/topic.md (the note's existence is deliberately not checked).`,
     };
   }
   return null;
@@ -150,7 +170,10 @@ function validateNoteId(id: string, config: VaultConfig): ToolError | null {
 // let a path-authorized caller spoof graph read-visibility, since ingest
 // prefers frontmatter scope over the directory) and `source`/`source_agent`
 // (provenance must not be forgeable). Mirrors the fields create_note controls.
-const PATCHABLE_FRONTMATTER_KEYS = new Set([
+// Pinned by schema/frontmatter-contract.json (#130 slice A) — extend the
+// contract (and its Python conformance test) when adding a key here.
+/** @internal — exported for the schema/frontmatter-contract.json conformance test. */
+export const PATCHABLE_FRONTMATTER_KEYS = new Set([
   "title", "date", "status", "tags", "concepts", "confidence", "file_ref",
 ]);
 
@@ -2329,11 +2352,18 @@ export async function compose_brief(
   };
 }
 
+// Snippet budget for get_context's recentMemory entries (docs/data-model.md
+// D4). Half of search_memory's 200 — the block is an orientation teaser;
+// full rows come from search_memory.
+const RECENT_MEMORY_SNIPPET_CODE_POINTS = 100;
+
 /**
- * get_context tool handler. Adopts reason-string verbose (#50 PR 7).
+ * get_context tool handler. Adopts reason-string verbose (#50 PR 7) and the
+ * recentMemory block (docs/data-model.md D4, slice C).
  *
- *   parseVerbose → effective-depth resolution → spoke pull → sentinel read →
- *   SQLite read → optional logVerbose + noteHighFrequency → assemble response.
+ *   parseVerbose → memory-owner resolution → effective-depth resolution →
+ *   spoke pull → sentinel read → SQLite read → recentMemory append →
+ *   optional logVerbose + noteHighFrequency → assemble response.
  *
  * Soft-downgrade semantics (spec §"Reason-string verbose"):
  *   - depth="full" + valid verbose (≥12 cp) → run tagCloud, log audit line.
@@ -2349,7 +2379,7 @@ export async function compose_brief(
  */
 export async function get_context(
   vaultRoot: string,
-  args: { depth?: "minimal" | "standard" | "full"; verbose?: string }
+  args: { depth?: "minimal" | "standard" | "full"; verbose?: string; owner?: string }
 ): Promise<GetContextResponse | ToolError> {
   const TOOL_NAME = "get_context" as const;
 
@@ -2361,7 +2391,45 @@ export async function get_context(
   const verboseEnabled = v.enabled;
   const verboseReason: string | undefined = v.enabled ? v.reason : undefined;
 
-  // Step 2: effective depth resolution. If the caller asked for "full" but
+  // Step 2: memory-owner resolution for the recentMemory block (slice C,
+  // docs/data-model.md D4). Mirrors the memory write tools' identity policy:
+  // an explicit `owner` arg goes through validateOwner (SCHIST_ALLOWED_AGENTS
+  // allowlist when defined, else exact SCHIST_AGENT_ID match) and is rejected
+  // up front — before any I/O — like the parseVerbose gate above. When
+  // omitted, fall back to SCHIST_AGENT_ID (the memory identity axis;
+  // SCHIST_AGENT_NAME is the vault.yaml axis and deliberately not consulted —
+  // agent_memory.owner rows are stamped with validateOwner-checked ids). No
+  // resolvable owner just means no recentMemory block: reads never require
+  // identity to be configured.
+  //
+  // BOTH paths gate through validateOwner, but fail differently on purpose:
+  // an explicit arg is a caller assertion, so rejecting it loudly is right;
+  // the env fallback is ambient config, so an inconsistent pair (e.g.
+  // SCHIST_ALLOWED_AGENTS set without SCHIST_AGENT_ID in it) degrades to an
+  // absent block instead. Skipping validation on the fallback would let an
+  // identity the allowlist refuses to write as still read its memory back —
+  // the asymmetric-gating trap (PR #175): trigger and recovery must be gated
+  // identically, and here the "recovery" is the always-safe absent block.
+  let memoryOwner: string | undefined;
+  if (args.owner !== undefined) {
+    try {
+      memoryOwner = validateOwner(args.owner);
+    } catch (e: unknown) {
+      return normalizeError(e, "VALIDATION_ERROR");
+    }
+  } else {
+    const envAgentId = process.env.SCHIST_AGENT_ID?.trim();
+    if (envAgentId) {
+      try {
+        memoryOwner = validateOwner(envAgentId);
+      } catch {
+        // Degrade, never error: a broken identity config must not break
+        // vault context reads any more than a broken memory DB does.
+      }
+    }
+  }
+
+  // Step 3: effective depth resolution. If the caller asked for "full" but
   // didn't supply a valid verbose reason, downgrade to "standard" and prepare
   // a soft hint. Any other (depth, verbose) combination passes through.
   const requestedDepth = args.depth ?? "minimal";
@@ -2375,14 +2443,14 @@ export async function get_context(
 
   await maybeSpokePull(vaultRoot);
 
-  // Step 3: Surface any pending background-sync-failure sentinel without
+  // Step 4: Surface any pending background-sync-failure sentinel without
   // clearing it. A dirty spoke should stay machine-readable until a successful
   // push path (`triggerSpokePush` or `sync_retry`) clears the sentinel; merely
   // reading context is not proof that local commits reached the hub.
   let syncWarning: string | undefined;
   syncWarning = await readSyncWarning(vaultRoot);
 
-  // Step 4: SQLite read at effectiveDepth.
+  // Step 5: SQLite read at effectiveDepth.
   let context: Record<string, unknown>;
   try {
     context = sqliteReader.getContext(vaultRoot, effectiveDepth) as Record<string, unknown>;
@@ -2392,7 +2460,29 @@ export async function get_context(
   }
   if (syncWarning) context.syncWarning = syncWarning;
 
-  // Step 5: verbose audit log + rate-limit hint (only on the true depth="full"
+  // Step 6: recentMemory append (slice C, docs/data-model.md D4) — the
+  // ephemeral fuel station, namespaced under its own key so vault-derived
+  // fields and agent memory stay visually distinct. standard/full only;
+  // "minimal" stays counts-only. getRecentMemory returns null — and the
+  // block stays ABSENT, never an error — when the memory DB is missing,
+  // unreadable, or lacks the agent_memory table: a broken fuel station must
+  // not break vault context reads. Reachable-but-empty memory yields
+  // entries: [] (a present block), which is deliberately distinct from
+  // "unavailable".
+  if (effectiveDepth !== "minimal" && memoryOwner !== undefined) {
+    const memoryEntries = sqliteReader.getRecentMemory(memoryOwner);
+    if (memoryEntries !== null) {
+      context.recentMemory = {
+        owner: memoryOwner,
+        entries: memoryEntries.map((entry) => ({
+          ...entry,
+          content: snippetContent(entry.content, RECENT_MEMORY_SNIPPET_CODE_POINTS),
+        })),
+      };
+    }
+  }
+
+  // Step 7: verbose audit log + rate-limit hint (only on the true depth="full"
   // path — downgraded calls already carry a verboseNote).
   let freqNote: string | undefined;
   const activeOwner = resolveActiveOwner();
@@ -2406,7 +2496,7 @@ export async function get_context(
     if (note !== null) freqNote = note;
   }
 
-  // Step 6: assemble response. verboseNote is set if either (a) the call was
+  // Step 8: assemble response. verboseNote is set if either (a) the call was
   // downgraded, or (b) the rate-limit tracker fired. Concatenate when both.
   const verboseNote =
     downgradeNote !== undefined && freqNote !== undefined
@@ -2609,6 +2699,14 @@ export async function add_memory(
     // already trimmed at parse time) and stored under a key that diverges
     // from every "atwood" write by the same agent.
     const owner = validateOwner(args.owner);
+    // related_doc is the memory → vault back-reference (docs/data-model.md
+    // D4): shape-validated here, never existence-checked — see
+    // validateRelatedDoc. `!= null` treats a JSON null like an omission
+    // (both mean "no back-reference"; addMemory stores NULL either way).
+    if (args.related_doc != null) {
+      const relatedDocError = validateRelatedDoc(args.related_doc);
+      if (relatedDocError !== null) return relatedDocError;
+    }
     return sqliteReader.addMemory({ ...args, owner });
   } catch (e: unknown) {
     return normalizeError(e, "VALIDATION_ERROR");

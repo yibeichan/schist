@@ -13,6 +13,8 @@ All knowledge in a schist vault is stored as markdown files with YAML frontmatte
 
 ### Frontmatter Fields
 
+> Enforced source of truth: [`schema/frontmatter-contract.json`](frontmatter-contract.json) — the fields the MCP write tools produce and ingest reads (with their invalid-value coercions) are pinned there and CI-checked in both languages (`mcp-server/tests/frontmatter-contract.test.ts`, `cli/tests/test_frontmatter_contract.py`). This table is the human spec; change the contract first. `related` is read by neither parser (prose-only convention; typed relationships live in `## Connections`), so it is documented here only.
+
 | Field      | Type       | Required | Default   | Description |
 |------------|------------|----------|-----------|-------------|
 | `title`    | string     | yes      | —         | Human-readable title |
@@ -67,6 +69,8 @@ writer in the `agent_memory.owner` column.
 
 ### Frontmatter Fields
 
+> Enforced source of truth: the concept fields both parsers handle (`concept`, `title`, `tags`) are pinned in [`schema/frontmatter-contract.json`](frontmatter-contract.json). `aliases` is managed through the `concept_aliases` table (via `add_concept_alias`), not by the frontmatter parsers, so it is documented here only.
+
 | Field         | Type       | Required | Default | Description |
 |---------------|------------|----------|---------|-------------|
 | `title`       | string     | yes      | —       | Display name (can contain spaces, caps) |
@@ -98,6 +102,8 @@ A mechanism where each element in a sequence attends to all other elements to co
 Paper notes can use extra frontmatter to act as citation records. These fields
 are optional on generic documents, but recommended for `papers/` notes that
 future agents should trust for citation reuse.
+
+> Enforced source of truth: the paper fields ingest copies into `paper_metadata` — including the nested `verification.*` record and each field's invalid-value coercion — are pinned in [`schema/frontmatter-contract.json`](frontmatter-contract.json) (`appliesTo: papers`), CI-checked against `PAPER_FIELDS` and the ingest read path by `cli/tests/test_frontmatter_contract.py`.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|

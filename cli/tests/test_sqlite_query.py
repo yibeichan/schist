@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from schist.index_contract import INDEX_SCHEMA_VERSION
 from schist.sqlite_query import fts_search, get_db, raw_query
 
 
@@ -116,7 +117,7 @@ def test_get_db_keeps_completed_ingest_of_empty_vault(tmp_path: Path) -> None:
 
     conn = sqlite3.connect(db_path)
     _create_required_tables(conn)
-    conn.execute("PRAGMA user_version = 1")
+    conn.execute(f"PRAGMA user_version = {INDEX_SCHEMA_VERSION}")
     conn.commit()
     conn.close()
 
@@ -125,6 +126,58 @@ def test_get_db_keeps_completed_ingest_of_empty_vault(tmp_path: Path) -> None:
         db.close()
 
     run_ingest.assert_not_called()
+
+
+def test_get_db_reingests_stale_schema_version(tmp_path: Path) -> None:
+    """A non-zero user_version different from INDEX_SCHEMA_VERSION means the
+    index was completed by a different schema.sql generation — the index is
+    disposable, so rebuild IS the migration path (#130 D3). Rows present, so
+    neither the #244 heal nor the required-tables check would fire; only the
+    version check catches this."""
+    vault, db_path = _vault_db(tmp_path)
+
+    conn = sqlite3.connect(db_path)
+    _create_required_tables(conn)
+    conn.execute("INSERT INTO docs VALUES ('d1')")
+    conn.execute(f"PRAGMA user_version = {INDEX_SCHEMA_VERSION + 1}")
+    conn.commit()
+    conn.close()
+
+    with patch("schist.sqlite_query._run_ingest") as run_ingest:
+        db = get_db(str(vault), str(db_path))
+        db.close()
+
+    run_ingest.assert_called_once_with(str(vault), str(db_path))
+
+
+def test_get_db_stale_version_end_to_end_rebuild_restamps_current(tmp_path: Path) -> None:
+    """Skew-free by construction: the in-process ingest that get_db triggers
+    stamps the same INDEX_SCHEMA_VERSION the reader checked, so one rebuild
+    settles the DB — no loop."""
+    vault, db_path = _vault_db(tmp_path)
+    (vault / "2026-07-06-stale.md").write_text(
+        "---\ntitle: Stale\ndate: 2026-07-06\n---\n\nBody.\n", encoding="utf-8"
+    )
+
+    db = get_db(str(vault), str(db_path))
+    db.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(f"PRAGMA user_version = {INDEX_SCHEMA_VERSION + 1}")
+    # A row not backed by markdown — must vanish when the rebuild re-scans.
+    conn.execute(
+        "INSERT INTO docs (id, title, body) VALUES ('phantom.md', 'Phantom', 'x')"
+    )
+    conn.commit()
+    conn.close()
+
+    db = get_db(str(vault), str(db_path))
+    try:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == INDEX_SCHEMA_VERSION
+        ids = {row["id"] for row in db.execute("SELECT id FROM docs").fetchall()}
+        assert ids == {"2026-07-06-stale.md"}
+    finally:
+        db.close()
 
 
 def test_get_db_opens_wal_resident_index_without_reingest(tmp_path: Path) -> None:
@@ -142,7 +195,7 @@ def test_get_db_opens_wal_resident_index_without_reingest(tmp_path: Path) -> Non
     writer.execute("PRAGMA journal_mode=WAL")
     _create_required_tables(writer)
     writer.execute("INSERT INTO docs VALUES ('d1')")
-    writer.execute("PRAGMA user_version = 1")
+    writer.execute(f"PRAGMA user_version = {INDEX_SCHEMA_VERSION}")
     writer.commit()
 
     # A read-only connection with an active statement blocks the writer's

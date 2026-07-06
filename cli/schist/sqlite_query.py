@@ -5,14 +5,12 @@ import re
 import sqlite3
 import sys
 
+from .index_contract import INDEX_SCHEMA_VERSION, REQUIRED_TABLES, TABLES
 
-# Keep in sync with the read/queryable tables defined in schema.sql.
-ALLOWED_TABLES = {'docs', 'concepts', 'edges', 'docs_fts', 'paper_metadata', 'concept_aliases'}
-# Keep in sync with mcp-server/src/sqlite-reader.ts REQUIRED_TABLES.
-# concept_aliases is included so vaults upgraded from a pre-concept_aliases
-# schema (which still have docs + paper_metadata) re-trigger ingest instead of
-# failing later with "no such table: concept_aliases". See #224.
-REQUIRED_TABLES = {'docs', 'paper_metadata', 'concept_aliases'}
+# Both table sets are single-sourced from schema/index-contract.json via
+# index_contract.py — the same contract mcp-server/src/sqlite-reader.ts
+# consumes — so the two languages can no longer drift apart (#339, #130 D3).
+ALLOWED_TABLES = TABLES
 
 
 def get_db(vault_path: str, db_path: str | None = None) -> sqlite3.Connection:
@@ -41,17 +39,30 @@ def get_db(vault_path: str, db_path: str | None = None) -> sqlite3.Connection:
             }
             if not REQUIRED_TABLES.issubset(table_names):
                 needs_ingest = True
-            elif (
-                conn.execute('PRAGMA user_version').fetchone()[0] == 0
-                and not conn.execute('SELECT EXISTS(SELECT 1 FROM docs)').fetchone()[0]
-            ):
-                # SIGKILL during ingest commits the schema (executescript
-                # auto-commits) but rolls back the data transaction, leaving
-                # valid empty tables that the check above accepts. Ingest sets
-                # user_version=1 atomically with the data, so version 0 plus
-                # an empty docs table means the ingest never completed (#244).
-                # Pre-marker DBs with rows keep version 0 and are left alone.
-                needs_ingest = True
+            else:
+                version = conn.execute('PRAGMA user_version').fetchone()[0]
+                if version == 0:
+                    if not conn.execute(
+                        'SELECT EXISTS(SELECT 1 FROM docs)'
+                    ).fetchone()[0]:
+                        # SIGKILL during ingest commits the schema
+                        # (executescript auto-commits) but rolls back the data
+                        # transaction, leaving valid empty tables that the
+                        # check above accepts. Ingest stamps
+                        # INDEX_SCHEMA_VERSION atomically with the data, so
+                        # version 0 plus an empty docs table means the ingest
+                        # never completed (#244). Pre-marker DBs with rows
+                        # keep version 0 and are left alone — for them the
+                        # required-tables check above is the only gate.
+                        needs_ingest = True
+                elif version != INDEX_SCHEMA_VERSION:
+                    # The DB was completed by a different schema.sql
+                    # generation (#130 D3). The index is disposable, so
+                    # rebuild IS the migration path — no ALTER migrations.
+                    # Skew-free by construction: _run_ingest imports
+                    # schist.ingest in-process, so the version this reader
+                    # expects is the version that ingest will stamp.
+                    needs_ingest = True
         except sqlite3.DatabaseError:
             needs_ingest = True
         finally:

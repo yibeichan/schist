@@ -1,8 +1,12 @@
 # schist data model — design doc (#130)
 
-Status: **agreed design, pre-implementation** (2026-07-04). Implementation
-lands as three PR-sized slices (A → B → C below). This doc is the contract;
-each slice PR should link back here and update the status line.
+Status: **all three slices implemented (2026-07-06)** — D2's
+`schema/frontmatter-contract.json` + both-language conformance tests, D3's
+`schema/index-contract.json` (`INDEX_SCHEMA_VERSION` stamped via
+`user_version`, single-sourced required tables; fixed #339), and D4's memory
+contract (`related_doc` shape validation, `recentMemory` in `get_context`,
+memory-vs-note decision boundary) are in. This doc remains the contract for
+the shipped design; the slice table below records what landed where.
 
 ## Why now
 
@@ -76,7 +80,10 @@ Key facts the design builds on:
 
 ### D2 — Document model: machine-readable frontmatter contract (slice A)
 
-Add `schema/frontmatter-contract.json`: one array of field descriptors —
+Add `schema/frontmatter-contract.json`: `{ "schemaVersion": 1, "$comment":
+"<add-a-field workflow + writer-scoping notes>", "fields": [...] }` —
+object-wrapped for parity with slice B's `index-contract.json` — with one
+descriptor per field, e.g.
 
 ```json
 { "field": "confidence", "type": "enum:low|medium|high",
@@ -100,12 +107,14 @@ Add `schema/frontmatter-contract.json`: one array of field descriptors —
    `user_version = 0` while an ingest is in flight (unchanged heal
    semantics), `user_version = INDEX_SCHEMA_VERSION` on completion. Today
    `INDEX_SCHEMA_VERSION = 1`, so existing DBs are already valid; the value
-   is bumped only on DDL changes to `schema.sql`. A reader that finds
-   `0 < user_version != INDEX_SCHEMA_VERSION` treats the DB as stale and
-   forces a rebuild (the index is disposable — **rebuild IS the migration
-   path**; no ALTER migrations). This is deliberately collision-free with
-   the #244 marker because the marker and the version become one value:
-   "complete at schema version N".
+   is bumped only on DDL changes to `schema.sql`. A reader that finds a
+   non-zero `user_version != INDEX_SCHEMA_VERSION` treats the DB as stale
+   and forces a rebuild — the exemption is exactly `user_version == 0`;
+   anything else that mismatches (including a corrupt negative value) is
+   stale (the index is disposable — **rebuild IS the migration path**; no
+   ALTER migrations). This is deliberately collision-free with the #244
+   marker because the marker and the version become one value: "complete at
+   schema version N".
 
    **Deployment-skew rule**: the TS stale-version path MUST go through the
    existing `ensureSchemaCurrent` rebuild-once → recheck → typed-error
@@ -128,9 +137,26 @@ Add `schema/frontmatter-contract.json`: one array of field descriptors —
    baked-in mirror in each component, pinned by a drift test
    (`tools.ts:26–66` precedent); the mirror-vs-schema/ parity test is what
    makes the single source real. A parity test in each suite additionally
-   asserts the loaded contract matches what `schema.sql` actually creates.
+   asserts the loaded contract matches what `schema.sql` actually creates,
+   including a `schemaSqlDigest` over the materialized DDL — a version bump
+   is a human judgment, but the digest changes on ANY `schema.sql` edit, so
+   forgetting the bump (or a required-columns entry) fails both suites
+   instead of surfacing as a raw `no such column` on existing spokes.
+
+   **Survivor-table caveat**: `rebuildSurvivors` tables are created with
+   `IF NOT EXISTS` and never dropped, so changing a SURVIVOR's DDL needs an
+   explicit copy-forward migration — a version bump alone rebuilds every
+   dropped table but silently keeps the survivor's old shape while stamping
+   the new version. (Enforced structurally: parity tests pin the survivors
+   to schema.sql's DROP/CREATE layout and to sync.py's
+   `_SIDE_TABLE_COLUMNS`.)
 3. Fixes #339 (the `docs` drift) as a side effect, in the direction of the
    CLI's stricter set — a DB without `docs` is unusable for every read path.
+   Hand-provisioned `.schist/ingest.py` hook copies must carry
+   `index_contract.py` as a sibling file (like the sibling `schema.sql`);
+   `schist doctor`'s Ingest check WARNs on pre-contract copies, and its
+   "Index schema version" check reports version skew across index ↔ CLI ↔
+   MCP dist with direction-specific remedies.
 
 ### D4 — Memory contract: formalize the fuel station (slice C)
 
@@ -144,12 +170,14 @@ Add `schema/frontmatter-contract.json`: one array of field descriptors —
    into `get_context`'s memory block so agents can hop memory → note.
 2. **`get_context` surfaces memory**: at `standard` and `full` depth, append
    a `recentMemory` block — the owner's N (default 5) most recent
-   `agent_memory` entries (id, date, entry_type, 100-char content snippet,
-   related_doc). **Owner resolution**: `get_context` has no identity today
-   (`tools.ts:2350` takes only `depth`/`verbose`); resolve from
-   `SCHIST_AGENT_ID`, and on multi-owner servers (`SCHIST_ALLOWED_AGENTS`)
-   accept an optional `owner` arg validated against the allowlist, falling
-   back to `SCHIST_AGENT_ID` when omitted. Clearly namespaced so vault
+   `agent_memory` entries (id, date, entry_type, content snippet truncated
+   to 100 Unicode code points with a trailing `…`, related_doc). **Owner
+   resolution**: `get_context` has no identity today (`tools.ts:2350` takes
+   only `depth`/`verbose`); resolve from `SCHIST_AGENT_ID`, and on
+   multi-owner servers (`SCHIST_ALLOWED_AGENTS`) accept an optional `owner`
+   arg validated against the allowlist, falling back to `SCHIST_AGENT_ID`
+   when omitted (the fallback is validated too, degrading to an absent
+   block on inconsistent config rather than erroring). Clearly namespaced so vault
    context and ephemeral memory are visually distinct; `minimal` stays
    counts-only. Memory-DB-unavailable degrades to an absent block, never an
    error (get_context must not break when the fuel station is missing).

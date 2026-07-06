@@ -4,10 +4,12 @@ import * as os from "os";
 import * as fs from "fs";
 import { spawn, spawnSync } from "child_process";
 import { createRequire } from "module";
+import { fileURLToPath } from "url";
 import { load as yamlLoad } from "js-yaml";
-import type { SearchResult, Note, Concept, Connection, MemoryEntry, AgentStateEntry, ConceptAlias } from "./types.js";
+import type { SearchResult, Note, Concept, Connection, MemoryEntry, RecentMemoryEntry, AgentStateEntry, ConceptAlias } from "./types.js";
 import { CONNECTION_RE, parseConnections as parseConnectionsSync } from "./markdown-parser.js";
 import { validateOwner } from "./agent-identity.js";
+import { noteIdShapeError } from "./note-id.js";
 
 // ── Agent scope map (loaded from vault.yaml) ─────────────────────────────
 
@@ -86,30 +88,144 @@ function sanitizeFtsQuery(raw: string): string {
     .join(" ");
 }
 
-// ── Schema-drift detection (#69) ─────────────────────────────────────────
+// ── Index contract + schema staleness detection (#69, #339, #130 D3) ─────
 //
-// Pre-#69 vaults built their SQLite from an older schema.sql that lacked
-// columns the current readers SELECT. The Python `get_db` (cli/schist/
-// sqlite_query.py) only re-ingests on missing-file or missing-`docs`-table
-// — it doesn't detect column drift. So on upgrade day, the first read
-// against a pre-existing DB would throw `no such column` until something
-// else triggered a rebuild (post-commit hook, spoke pull, manual ingest).
+// The vault index's cross-language contract — which tables schema.sql
+// creates, which tables/columns readers require before trusting a DB, which
+// tables survive rebuilds, and the schema version ingest stamps into
+// `PRAGMA user_version` on completion — is single-sourced in
+// <repo>/schema/index-contract.json and consumed both here and by
+// cli/schist/index_contract.py. Duplicated per-language constants drift
+// (#339: this file's required-tables mirror had dropped `docs`).
 //
-// Fix: before every `openDb`, verify the `docs` table has the columns this
-// reader needs. If any are missing, synchronously spawn `schist-ingest` to
-// rebuild from markdown, then continue. The check is cached per-vault per-
-// process so it runs once per server start. Generalizes to all future
-// schema additions: bump REQUIRED_DOCS_COLUMNS alongside schema.sql edits
-// and existing deployments self-heal on next read.
+// Packaging: repo-root schema/ files ship with neither package (npm
+// publishes dist/ only; the Python wheel carries cli/schist/ only), so each
+// component bakes in a mirror and prefers the canonical file when the
+// monorepo checkout is present — the default.yaml pattern (tools.ts). The
+// mirror-vs-schema/ drift test in tests/index-contract.test.ts is what
+// keeps the mirror honest.
+//
+// Staleness model: before every `openDb`, verify the DB has the required
+// tables, the `docs` columns this reader SELECTs, and — when non-zero — the
+// current index schema version. If anything is off, synchronously spawn
+// `schist-ingest` to rebuild from markdown (rebuild IS the migration path;
+// no ALTER migrations), then recheck. The check is cached per-vault
+// per-process so it runs once per server start.
+
+export interface IndexContract {
+  schemaVersion: number;
+  tables: readonly string[];
+  requiredTables: readonly string[];
+  requiredDocsColumns: readonly string[];
+  rebuildSurvivors: readonly string[];
+  /**
+   * SHA-256 over the materialized schema (sqlite_master rows after running
+   * schema.sql; recompute recipe in cli/schist/index_contract.py). Not
+   * consumed at runtime — it exists so ANY DDL edit forces a visible
+   * contract diff and a failing parity test in both suites, even when the
+   * author forgets the schemaVersion bump or a requiredDocsColumns entry.
+   */
+  schemaSqlDigest: string;
+}
+
+// Columns the read paths SELECT from `docs` — a deliberate subset of the
+// full DDL (readers don't need created_at/updated_at). Kept as a
+// `new Set([...])` literal because cli/schist/doctor.py's MCP-schema-
+// alignment check parses this exact declaration textually out of the
+// compiled dist/sqlite-reader.js (_REQUIRED_DOCS_RE) — do not rename it or
+// convert it to a derived expression.
 const REQUIRED_DOCS_COLUMNS: ReadonlySet<string> = new Set([
   "id", "title", "date", "status", "tags", "concepts",
   "body", "scope", "source", "confidence", "file_ref",
 ]);
-// Keep in sync with cli/schist/sqlite_query.py REQUIRED_TABLES. concept_aliases
-// is included so vaults upgraded from a pre-concept_aliases schema (which still
-// have docs + paper_metadata, so the drift check would otherwise pass) trigger
-// an ingest rebuild before add_concept_alias hits "no such table". See #224.
-const REQUIRED_TABLES: ReadonlySet<string> = new Set(["paper_metadata", "concept_aliases"]);
+
+// Baked-in mirror of <repo>/schema/index-contract.json. Do not edit one
+// without the other — the drift test pins them equal as parsed JSON.
+// concept_aliases sits in requiredTables so vaults upgraded from a
+// pre-concept_aliases schema (which still have docs + paper_metadata)
+// trigger an ingest rebuild before add_concept_alias hits "no such
+// table" (#224). rebuildSurvivors is declarative — enforced by parity
+// tests against schema.sql and sync.py's _SIDE_TABLE_COLUMNS, not read at
+// runtime; changing a SURVIVOR table's DDL needs an explicit copy-forward
+// migration, because a version bump alone silently keeps the survivor's
+// old shape (its CREATE is IF NOT EXISTS) while stamping the new version.
+export const INDEX_CONTRACT_FALLBACK: IndexContract = {
+  schemaVersion: 1,
+  tables: ["docs", "concepts", "edges", "docs_fts", "paper_metadata", "concept_aliases"],
+  requiredTables: ["docs", "paper_metadata", "concept_aliases"],
+  requiredDocsColumns: [...REQUIRED_DOCS_COLUMNS],
+  rebuildSurvivors: ["concept_aliases"],
+  schemaSqlDigest: "6cd775da8d6592bdf38b4fa246f6d49400ee7d70b23934843c0232148f56e212",
+};
+
+function isNonEmptyStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.every((v) => typeof v === "string");
+}
+
+// `PRAGMA user_version` is a signed 32-bit header field; a larger stamp
+// would truncate on write, readers would never see their expected version,
+// and every access would trigger a full rebuild — forever. Mirrors
+// _MAX_SCHEMA_VERSION in cli/schist/index_contract.py.
+const MAX_SCHEMA_VERSION = 0x7fffffff;
+
+/**
+ * Load the canonical contract from <repo>/schema/index-contract.json,
+ * falling back to the baked-in mirror when the file is missing, unreadable,
+ * or malformed (fail-open, like tools.ts's canonical-directories load — a
+ * standalone install without the monorepo checkout must keep running).
+ * A missing file is SILENT — the published npm package ships only dist/,
+ * so absence is the normal production state there, not an anomaly worth
+ * logging on every server start. Anything else (parse error, permissions,
+ * failed validation) warns. `contractPathOverride` exists for tests.
+ */
+export function loadIndexContract(contractPathOverride?: string): IndexContract {
+  // Resolves from both src/ (jest) and dist/ (production): either way the
+  // repo root is two levels up from this file's directory.
+  const hereDir = path.dirname(fileURLToPath(import.meta.url));
+  const contractPath =
+    contractPathOverride ?? path.resolve(hereDir, "..", "..", "schema", "index-contract.json");
+  try {
+    const raw = JSON.parse(fs.readFileSync(contractPath, "utf-8")) as Record<string, unknown>;
+    if (
+      typeof raw.schemaVersion === "number" &&
+      Number.isInteger(raw.schemaVersion) &&
+      raw.schemaVersion > 0 &&
+      raw.schemaVersion <= MAX_SCHEMA_VERSION &&
+      isNonEmptyStringArray(raw.tables) &&
+      isNonEmptyStringArray(raw.requiredTables) &&
+      isNonEmptyStringArray(raw.requiredDocsColumns) &&
+      isNonEmptyStringArray(raw.rebuildSurvivors) &&
+      typeof raw.schemaSqlDigest === "string" &&
+      /^[0-9a-f]{64}$/.test(raw.schemaSqlDigest)
+    ) {
+      return raw as unknown as IndexContract;
+    }
+    console.warn(
+      `schist: ${contractPath} is malformed; using the baked-in index-contract mirror.`,
+    );
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn(
+        `schist: ${contractPath} unreadable (${msg}); ` +
+        `using the baked-in index-contract mirror.`,
+      );
+    }
+  }
+  return INDEX_CONTRACT_FALLBACK;
+}
+
+const INDEX_CONTRACT = loadIndexContract();
+
+/**
+ * The schema version a complete index carries in `PRAGMA user_version`
+ * (0 = ingest in flight, or a pre-#244 DB). Stamped by ingest atomically
+ * with the data commit; bumped only on DDL changes to schema.sql.
+ */
+export const INDEX_SCHEMA_VERSION: number = INDEX_CONTRACT.schemaVersion;
+
+const requiredTables: ReadonlySet<string> = new Set(INDEX_CONTRACT.requiredTables);
+const requiredDocsColumns: ReadonlySet<string> = new Set(INDEX_CONTRACT.requiredDocsColumns);
 
 const verifiedVaults = new Set<string>();
 const requireForWorker = createRequire(import.meta.url);
@@ -246,14 +362,18 @@ function ensureSchemaCurrent(vaultRoot: string): void {
   }
 
   const dbPath = path.join(vaultRoot, ".schist", "schist.db");
-  // Narrowed scope: only flag drift when the `docs` table EXISTS but lacks
-  // required columns. Missing-table / missing-file cases are already
-  // handled upstream by the Python `get_db` (cli/schist/sqlite_query.py),
-  // and triggering an ingest here on a test fixture that hand-crafts a
-  // minimal DB without docs would wipe its seed data. The upgrade hazard
-  // this guards against is "docs table exists from an older schema and
-  // lacks a column the current reader SELECTs" — that's the only case we
-  // need to repair from the TS side.
+  // Three staleness signals, all repaired by the same rebuild (missing DB
+  // file stays out of scope — the Python `get_db` owns first-build):
+  //   - a required table is missing (#224; `docs` included since #339 — a
+  //     DB without docs is unusable for every read path, and this reader
+  //     must not depend on a Python read having healed it first);
+  //   - the `docs` table exists but lacks a column this reader SELECTs
+  //     (pre-#69 upgrade hazard — also the only net for pre-marker DBs,
+  //     which are exempt from the version check below);
+  //   - `user_version` is non-zero but not INDEX_SCHEMA_VERSION (#130 D3):
+  //     the DB was completed by a different schema.sql generation. 0 is
+  //     exempt — it means an ingest is in flight or the DB predates the
+  //     #244 marker.
   const checkMissing = (): string[] => {
     try {
       const db = new Database(dbPath, { readonly: true });
@@ -263,16 +383,23 @@ function ensureSchemaCurrent(vaultRoot: string): void {
           "SELECT name FROM sqlite_master WHERE type = 'table'",
         ).all() as Array<{ name: string }>;
         const tables = new Set(tableRows.map((r) => r.name));
-        const missingTables = [...REQUIRED_TABLES]
+        const missing = [...requiredTables]
           .filter((t) => !tables.has(t))
           .map((t) => `table:${t}`);
         const cols = db.pragma("table_info(docs)") as Array<{ name: string }>;
-        if (cols.length === 0) return missingTables; // no docs table — only report side-table drift
-        const present = new Set(cols.map((c) => c.name));
-        return [
-          ...missingTables,
-          ...[...REQUIRED_DOCS_COLUMNS].filter((c) => !present.has(c)),
-        ];
+        if (cols.length > 0) {
+          const present = new Set(cols.map((c) => c.name));
+          missing.push(
+            ...[...requiredDocsColumns]
+              .filter((c) => !present.has(c))
+              .map((c) => `column:docs.${c}`),
+          );
+        }
+        const version = db.pragma("user_version", { simple: true }) as number;
+        if (version !== 0 && version !== INDEX_SCHEMA_VERSION) {
+          missing.push(`user_version:${version} (expected ${INDEX_SCHEMA_VERSION})`);
+        }
+        return missing;
       } finally {
         db.close();
       }
@@ -288,17 +415,22 @@ function ensureSchemaCurrent(vaultRoot: string): void {
 
   runIngestSync(vaultRoot);
 
-  // Verify ingest actually fixed the drift. Catches the "installed
-  // schist-ingest is older than this MCP server" case — the rebuild
-  // succeeds but produces the same out-of-date schema. Without this
-  // recheck the next query would throw `no such column` with no hint
-  // that the underlying problem is a version mismatch.
+  // Verify ingest actually fixed the staleness. Catches the deployment-skew
+  // case — a newer mcp-server paired with an older installed schist-ingest:
+  // the rebuild succeeds but reproduces the same out-of-date schema (and
+  // stamps the OLD version). Without this recheck-then-typed-error, the
+  // server would either throw `no such column` with no hint at the real
+  // problem or re-run a full vault rebuild on every tool call.
   const stillMissing = checkMissing();
   if (stillMissing.length > 0) {
     throw new Error(
-      `Schema drift persists after schist-ingest rebuild — docs table missing columns: ${stillMissing.join(", ")}. ` +
-      `The installed schist-ingest is likely older than this MCP server. ` +
-      `Upgrade it: \`uv tool install --reinstall --force <path-to-schist/cli>\`.`,
+      `Vault index is still stale after a schist-ingest rebuild (${stillMissing.join(", ")}). ` +
+      `This MCP server and the installed schist-ingest disagree about the index schema — ` +
+      `most often schist-ingest is older than this MCP server. ` +
+      `Upgrade it: \`uv tool install --reinstall --force <path-to-schist/cli>\`. ` +
+      `If the error persists, the skew is reversed (stale MCP dist): rebuild with ` +
+      `\`cd <schist>/mcp-server && npm run build\` and restart — \`schist doctor\`'s ` +
+      `"Index schema version" and "MCP schema alignment" checks diagnose the direction.`,
     );
   }
   verifiedVaults.add(vaultRoot);
@@ -871,9 +1003,13 @@ CREATE TABLE IF NOT EXISTS agent_state (
 );
 `;
 
-function openMemoryDb(): Database.Database {
-  const dbPath = process.env.SCHIST_MEMORY_DB ??
+function memoryDbPath(): string {
+  return process.env.SCHIST_MEMORY_DB ??
     path.join(os.homedir(), ".openclaw", "memory", "agent-state.db");
+}
+
+function openMemoryDb(): Database.Database {
+  const dbPath = memoryDbPath();
   const dir = path.dirname(dbPath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const db = new Database(dbPath);
@@ -988,6 +1124,82 @@ export function searchMemory(opts: {
       const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
       return rows.map(rowToMemoryEntry);
     }
+  } finally {
+    db.close();
+  }
+}
+
+/** Default entry count for get_context's recentMemory block (D4). */
+export const RECENT_MEMORY_DEFAULT_LIMIT = 5;
+
+// SQL-side content bound for getRecentMemory. The tool layer snippets to 100
+// code points, but snippetContent spreads the WHOLE string into a code-point
+// array first — a hostile or accidental multi-hundred-MB row would be loaded
+// and spread before any truncation. Bounding in the SELECT keeps untrusted
+// row size out of process memory entirely; 400 chars is ample headroom over
+// the 100-cp snippet.
+const RECENT_MEMORY_CONTENT_SQL_BOUND = 400;
+
+/**
+ * The owner's most recent agent_memory entries, for get_context's
+ * recentMemory block (slice C, docs/data-model.md D4). Unlike every other
+ * memory function this must NEVER create or heal the DB (readonly +
+ * fileMustExist — a vault context read should not scaffold ~/.openclaw/)
+ * and NEVER throws on availability problems: a missing file, unreadable
+ * file, non-database file, and a DB without the agent_memory table all
+ * return null so the caller degrades to an absent block. A reachable but
+ * empty table returns [] — "memory works, nothing recorded yet" is
+ * deliberately distinct from "memory unavailable". Newest first:
+ * created_at DESC with an id DESC tiebreaker (searchMemory's id ASC is a
+ * pagination-stability choice; recency wants the later insert first).
+ *
+ * Rows are treated as UNTRUSTED: the memory DB is a shared per-machine
+ * file that other software can write, and rows may predate add_memory's
+ * related_doc validation. So content is bounded in the SQL itself (see
+ * RECENT_MEMORY_CONTENT_SQL_BOUND) and related_doc values failing the
+ * shared note-id shape rule are omitted at read time — legacy junk and
+ * DB-planted lures never reach get_context consumers. The shape check is
+ * pure string work: no vault access, fuel-station independence intact.
+ */
+export function getRecentMemory(
+  owner: string,
+  limit: number = RECENT_MEMORY_DEFAULT_LIMIT
+): RecentMemoryEntry[] | null {
+  let db: Database.Database;
+  try {
+    db = new Database(memoryDbPath(), { readonly: true, fileMustExist: true });
+  } catch {
+    return null;
+  }
+  try {
+    // Match openMemoryDb's lock patience — a writer holding the DB for a
+    // moment should delay this read, not blank the block.
+    db.pragma("busy_timeout = 5000");
+    const rows = db.prepare(`
+      SELECT id, date, entry_type,
+             substr(content, 1, ${RECENT_MEMORY_CONTENT_SQL_BOUND}) AS content,
+             related_doc
+      FROM agent_memory
+      WHERE owner = ?
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `).all(owner, limit) as Record<string, unknown>[];
+    return rows.map((row) => {
+      const relatedDoc = row.related_doc;
+      const relatedDocOk =
+        typeof relatedDoc === "string" &&
+        relatedDoc.length > 0 &&
+        noteIdShapeError(relatedDoc) === null;
+      return {
+        id: row.id as number,
+        date: row.date as string,
+        entry_type: row.entry_type as RecentMemoryEntry["entry_type"],
+        content: row.content as string,
+        ...(relatedDocOk ? { related_doc: relatedDoc } : {}),
+      };
+    });
+  } catch {
+    return null;
   } finally {
     db.close();
   }
