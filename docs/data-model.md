@@ -1,12 +1,12 @@
 # schist data model — design doc (#130)
 
-Status: **agreed design (2026-07-04); slices A and B implemented (2026-07-06)** —
-D2's `schema/frontmatter-contract.json` + both-language conformance tests and
-D3's `schema/index-contract.json` (`INDEX_SCHEMA_VERSION` stamped via
-`user_version`, single-sourced required tables; fixes #339) are in; slice C is
-still pending. Implementation lands as three PR-sized slices (A → B → C
-below). This doc is the contract; each slice PR should link back here and
-update the status line.
+Status: **all three slices implemented (2026-07-06)** — D2's
+`schema/frontmatter-contract.json` + both-language conformance tests, D3's
+`schema/index-contract.json` (`INDEX_SCHEMA_VERSION` stamped via
+`user_version`, single-sourced required tables; fixed #339), and D4's memory
+contract (`related_doc` shape validation, `recentMemory` in `get_context`,
+memory-vs-note decision boundary) are in. This doc remains the contract for
+the shipped design; the slice table below records what landed where.
 
 ## Why now
 
@@ -170,12 +170,14 @@ descriptor per field, e.g.
    into `get_context`'s memory block so agents can hop memory → note.
 2. **`get_context` surfaces memory**: at `standard` and `full` depth, append
    a `recentMemory` block — the owner's N (default 5) most recent
-   `agent_memory` entries (id, date, entry_type, 100-char content snippet,
-   related_doc). **Owner resolution**: `get_context` has no identity today
-   (`tools.ts:2350` takes only `depth`/`verbose`); resolve from
-   `SCHIST_AGENT_ID`, and on multi-owner servers (`SCHIST_ALLOWED_AGENTS`)
-   accept an optional `owner` arg validated against the allowlist, falling
-   back to `SCHIST_AGENT_ID` when omitted. Clearly namespaced so vault
+   `agent_memory` entries (id, date, entry_type, content snippet truncated
+   to 100 Unicode code points with a trailing `…`, related_doc). **Owner
+   resolution**: `get_context` has no identity today (`tools.ts:2350` takes
+   only `depth`/`verbose`); resolve from `SCHIST_AGENT_ID`, and on
+   multi-owner servers (`SCHIST_ALLOWED_AGENTS`) accept an optional `owner`
+   arg validated against the allowlist, falling back to `SCHIST_AGENT_ID`
+   when omitted (the fallback is validated too, degrading to an absent
+   block on inconsistent config rather than erroring). Clearly namespaced so vault
    context and ephemeral memory are visually distinct; `minimal` stays
    counts-only. Memory-DB-unavailable degrades to an absent block, never an
    error (get_context must not break when the fuel station is missing).

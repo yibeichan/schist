@@ -75,6 +75,9 @@ export interface GetContextResponse {
   vault?: { path: string; noteCount: number; conceptCount: number; edgeCount: number };
   recent?: Array<Record<string, unknown>>;
   hotConcepts?: Array<Record<string, unknown>>;
+  /** depth >= "standard", only when a memory owner resolved AND the memory
+   *  DB is reachable — otherwise absent, never an error (D4). */
+  recentMemory?: RecentMemoryBlock;
   // depth === "full":
   tagCloud?: Array<{ tag: string; count: number }>;
   // Operational hints (set independently of depth):
@@ -161,6 +164,35 @@ export interface MemoryEntry {
   source_ref?: string;
   confidence: 'low' | 'medium' | 'high';
   created_at: string;
+}
+
+/**
+ * One row of get_context's recentMemory block (slice C, docs/data-model.md
+ * D4). A deliberate subset of MemoryEntry: enough to orient a session and
+ * hop memory → note via related_doc; use search_memory for full rows. This
+ * shape is load-bearing for session-start flows (/pickup) — extend it by
+ * ADDING optional fields, never by renaming or removing these.
+ */
+export interface RecentMemoryEntry {
+  id: number;
+  date: string;
+  entry_type: MemoryEntry["entry_type"];
+  /** Content snippet — get_context truncates to 100 code points. */
+  content: string;
+  /** Vault note id back-reference (`notes/….md`); absent when the entry has none. */
+  related_doc?: string;
+}
+
+/**
+ * get_context's ephemeral-memory block. Namespaced under its own key so
+ * agent memory (fast, session-scoped, not git-backed) reads as clearly
+ * distinct from the vault-derived fields beside it.
+ */
+export interface RecentMemoryBlock {
+  /** Resolved memory owner the entries belong to. */
+  owner: string;
+  /** Most recent entries, newest first; [] when memory is reachable but empty. */
+  entries: RecentMemoryEntry[];
 }
 
 export interface SearchMemoryResponse {

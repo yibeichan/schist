@@ -5,6 +5,7 @@ import { fileURLToPath } from "url";
 import * as fs from "fs/promises";
 import Database from "better-sqlite3";
 import { get_context } from "../src/tools.js";
+import { addMemory } from "../src/sqlite-reader.js";
 import { resetVerboseForTesting } from "../src/protocol/index.js";
 import * as verboseModule from "../src/protocol/verbose.js";
 
@@ -79,9 +80,14 @@ async function makeVault(opts?: { docTagsRow?: string }): Promise<string> {
 }
 
 let vaultRoot: string;
+let memDir: string;
+let memDbPath: string;
 let stderrSpy: { write: typeof process.stderr.write; calls: string[] };
 const envSnapshot: Record<string, string | undefined> = {};
-const envKeys = ["SCHIST_AGENT_ID", "SCHIST_AGENT_NAME", "SCHIST_VAULT_PATH"] as const;
+const envKeys = [
+  "SCHIST_AGENT_ID", "SCHIST_AGENT_NAME", "SCHIST_VAULT_PATH",
+  "SCHIST_ALLOWED_AGENTS", "SCHIST_MEMORY_DB",
+] as const;
 
 beforeEach(async () => {
   for (const k of envKeys) {
@@ -89,6 +95,12 @@ beforeEach(async () => {
     delete process.env[k];
   }
   vaultRoot = await makeVault();
+  // Point the memory DB at a per-test temp path that does NOT exist yet:
+  // recentMemory tests seed it explicitly; every other test exercises the
+  // "no memory DB file" degradation path (and never the real ~/.openclaw DB).
+  memDir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-getctx-mem-"));
+  memDbPath = path.join(memDir, "agent-state.db");
+  process.env.SCHIST_MEMORY_DB = memDbPath;
   resetVerboseForTesting();
 
   // Capture stderr writes so we can assert logVerbose audit lines without
@@ -112,7 +124,37 @@ afterEach(async () => {
     else process.env[k] = envSnapshot[k];
   }
   await fs.rm(vaultRoot, { recursive: true, force: true });
+  await fs.rm(memDir, { recursive: true, force: true });
 });
+
+// Seed agent_memory rows for `owner` through the real write path (addMemory
+// creates the DB + schema). Env juggling because addMemory validates owner
+// against SCHIST_AGENT_ID.
+function seedMemory(
+  owner: string,
+  entries: Array<{ content: string; entry_type?: string; related_doc?: string; date?: string }>,
+): void {
+  const prevId = process.env.SCHIST_AGENT_ID;
+  const prevAllowed = process.env.SCHIST_ALLOWED_AGENTS;
+  delete process.env.SCHIST_ALLOWED_AGENTS;
+  process.env.SCHIST_AGENT_ID = owner;
+  try {
+    for (const e of entries) {
+      addMemory({
+        owner,
+        entry_type: e.entry_type ?? "decision",
+        content: e.content,
+        related_doc: e.related_doc,
+        date: e.date,
+      });
+    }
+  } finally {
+    if (prevId === undefined) delete process.env.SCHIST_AGENT_ID;
+    else process.env.SCHIST_AGENT_ID = prevId;
+    if (prevAllowed === undefined) delete process.env.SCHIST_ALLOWED_AGENTS;
+    else process.env.SCHIST_ALLOWED_AGENTS = prevAllowed;
+  }
+}
 
 // ── Case 1: depth=full + valid verbose ─────────────────────────────────────
 
@@ -347,11 +389,267 @@ describe("get_context tool — verboseNote concat (downgrade + rate-limit)", () 
     );
     const fnIdx = src.indexOf("export async function get_context(");
     expect(fnIdx).toBeGreaterThan(0);
-    const body = src.slice(fnIdx, fnIdx + 4500);
+    // Slice to the next top-level export so the window tracks the handler's
+    // actual extent instead of a fixed offset that needs manual re-widening
+    // every time the function grows.
+    const nextExportIdx = src.indexOf("\nexport ", fnIdx + 1);
+    const body = src.slice(fnIdx, nextExportIdx === -1 ? undefined : nextExportIdx);
     // Assert the concat shape: downgradeNote + "; " + freqNote
     expect(body).toMatch(/`\$\{downgradeNote\}; \$\{freqNote\}`/);
     // Assert the fallback ?? chain orders downgradeNote first, freqNote second.
     expect(body).toMatch(/downgradeNote \?\? freqNote/);
+  });
+});
+
+// ── recentMemory block (slice C, docs/data-model.md D4) ────────────────────
+
+describe("get_context tool — recentMemory happy path", () => {
+  it("appends the owner's 5 most recent entries at depth=standard, newest first, owner-scoped", async () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    seedMemory("sansan", [
+      { content: "entry one" }, { content: "entry two" }, { content: "entry three" },
+      { content: "entry four" }, { content: "entry five" }, { content: "entry six" },
+      { content: "entry seven" },
+    ]);
+    seedMemory("ninjia", [{ content: "foreign entry must not leak" }]);
+
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    if ("error" in r) throw new Error("unexpected error");
+    expect(r.recentMemory).toBeDefined();
+    expect(r.recentMemory!.owner).toBe("sansan");
+    const entries = r.recentMemory!.entries;
+    expect(entries.length).toBe(5);
+    // Newest first (all rows share a created_at second → id DESC tiebreak).
+    expect(entries.map(e => e.content)).toEqual([
+      "entry seven", "entry six", "entry five", "entry four", "entry three",
+    ]);
+    // Owner-scoped: ninjia's row never appears.
+    expect(entries.some(e => e.content.includes("foreign"))).toBe(false);
+    // Row shape is the stable /pickup contract: id, date, entry_type, content.
+    for (const e of entries) {
+      expect(typeof e.id).toBe("number");
+      expect(typeof e.date).toBe("string");
+      expect(e.entry_type).toBe("decision");
+    }
+  });
+
+  it("truncates content to 100 code points with ellipsis and carries related_doc", async () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    seedMemory("sansan", [
+      { content: "x".repeat(150), related_doc: "notes/fuel-station.md" },
+      { content: "short one, no back-reference" },
+    ]);
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    if ("error" in r) throw new Error("unexpected error");
+    const entries = r.recentMemory!.entries;
+    expect(entries.length).toBe(2);
+    const [short, long] = entries; // newest first
+    // Exact key sets (toEqual fails on extra keys): widening the row shape —
+    // e.g. an accidental SELECT * leaking owner/created_at/tags — must be a
+    // conscious decision that updates this pin, not a silent drive-by.
+    expect(short).toEqual({
+      id: expect.any(Number),
+      date: expect.any(String),
+      entry_type: "decision",
+      content: "short one, no back-reference",
+    });
+    expect(long).toEqual({
+      id: expect.any(Number),
+      date: expect.any(String),
+      entry_type: "decision",
+      content: "x".repeat(100) + "…",
+      related_doc: "notes/fuel-station.md",
+    });
+  });
+
+  it("keeps an oversized content row process-safe: SQL-side bound + 100-cp snippet", async () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    // Large enough to prove the row is bounded before snippetContent spreads
+    // it into a code-point array, small enough to keep the test fast. The
+    // SQL-side substr() in getRecentMemory is what keeps a hostile
+    // multi-hundred-MB row from ever being loaded into process memory.
+    seedMemory("sansan", [{ content: "y".repeat(500_000) }]);
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    if ("error" in r) throw new Error("unexpected error");
+    const entries = r.recentMemory!.entries;
+    expect(entries.length).toBe(1);
+    expect(entries[0].content).toBe("y".repeat(100) + "…");
+  });
+
+  it("omits related_doc values that fail the note-id shape rule at read time (untrusted rows)", async () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    // Seed via the sqlite-reader layer, which (deliberately) does not shape-
+    // validate — mimicking legacy rows written before add_memory's validation
+    // and rows planted by other software in the shared per-machine DB.
+    seedMemory("sansan", [
+      { content: "junk empty", related_doc: "" },
+      { content: "junk dotfile", related_doc: ".git/config" },
+      { content: "junk traversal", related_doc: "../x.md" },
+      { content: "good ref", related_doc: "notes/legit.md" },
+    ]);
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    if ("error" in r) throw new Error("unexpected error");
+    const entries = r.recentMemory!.entries;
+    expect(entries.length).toBe(4);
+    for (const entry of entries) {
+      if (entry.content === "good ref") {
+        expect(entry.related_doc).toBe("notes/legit.md");
+      } else {
+        // Key omitted entirely — a present-but-junk key would still read as
+        // "this entry has a back-reference" to consumers.
+        expect(entry).not.toHaveProperty("related_doc");
+      }
+    }
+  });
+
+  it("appears at depth=full too, and stays absent at depth=minimal", async () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    seedMemory("sansan", [{ content: "full-depth entry" }]);
+    const full = await get_context(vaultRoot, { depth: "full", verbose: "checking full depth" });
+    if ("error" in full) throw new Error("unexpected error");
+    expect(full.recentMemory).toBeDefined();
+    expect(full.tagCloud).toBeDefined();
+
+    const minimal = await get_context(vaultRoot, { depth: "minimal" });
+    if ("error" in minimal) throw new Error("unexpected error");
+    expect(minimal.recentMemory).toBeUndefined();
+    expect(minimal.noteCount).toBeDefined();
+  });
+
+  it("returns a present block with entries: [] when memory is reachable but empty for the owner", async () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    // Table exists (another owner's write created it) but sansan has no rows:
+    // "memory works, nothing recorded" must be distinct from "unavailable".
+    seedMemory("ninjia", [{ content: "someone else's entry" }]);
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    if ("error" in r) throw new Error("unexpected error");
+    expect(r.recentMemory).toEqual({ owner: "sansan", entries: [] });
+  });
+});
+
+describe("get_context tool — recentMemory degradation (absent block, never an error)", () => {
+  it("no memory DB file → block absent, vault context intact, and the file is NOT created", async () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    if ("error" in r) throw new Error("unexpected error");
+    expect(r.recentMemory).toBeUndefined();
+    expect(r.recent).toBeDefined();
+    expect(r.hotConcepts).toBeDefined();
+    // A context read must not scaffold the memory DB (readonly open).
+    await expect(fs.access(memDbPath)).rejects.toThrow();
+  });
+
+  // chmod 000 only blocks non-root users — root (e.g. a Docker CI runner)
+  // reads it anyway and the test would FAIL rather than exercise the
+  // degradation path, so skip under uid 0.
+  const itUnlessRoot = process.getuid?.() === 0 ? it.skip : it;
+  itUnlessRoot("unreadable memory DB file → block absent, no error", async () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    seedMemory("sansan", [{ content: "soon unreadable" }]);
+    await fs.chmod(memDbPath, 0o000);
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    if ("error" in r) throw new Error("unexpected error");
+    expect(r.recentMemory).toBeUndefined();
+    expect(r.recent).toBeDefined();
+  });
+
+  it("memory DB path holds a non-SQLite file → block absent, no error", async () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    await fs.writeFile(memDbPath, "this is not a sqlite database at all");
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    if ("error" in r) throw new Error("unexpected error");
+    expect(r.recentMemory).toBeUndefined();
+    expect(r.recent).toBeDefined();
+  });
+
+  it("memory DB exists but lacks the agent_memory table → block absent, no error", async () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    const db = new Database(memDbPath);
+    db.exec("CREATE TABLE unrelated (id INTEGER PRIMARY KEY);");
+    db.close();
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    if ("error" in r) throw new Error("unexpected error");
+    expect(r.recentMemory).toBeUndefined();
+    expect(r.recent).toBeDefined();
+  });
+
+  it("no resolvable owner (no arg, no SCHIST_AGENT_ID) → block absent even with memory seeded", async () => {
+    seedMemory("sansan", [{ content: "orphaned by missing identity" }]);
+    // beforeEach cleared SCHIST_AGENT_ID / SCHIST_AGENT_NAME.
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    if ("error" in r) throw new Error("unexpected error");
+    expect(r.recentMemory).toBeUndefined();
+    expect(r.recent).toBeDefined();
+  });
+
+  it("env fallback identity outside SCHIST_ALLOWED_AGENTS → block absent, no error (no allowlist bypass)", async () => {
+    // Asymmetric-gating guard: with SCHIST_ALLOWED_AGENTS=alpha,beta and
+    // SCHIST_AGENT_ID=gamma, add_memory refuses to write as gamma and an
+    // explicit owner:"gamma" arg is rejected — so the implicit env fallback
+    // must not quietly serve gamma's memory either. It degrades to an absent
+    // block (never an error: it is ambient config, not a caller assertion).
+    seedMemory("gamma", [{ content: "written before the allowlist was tightened" }]);
+    process.env.SCHIST_ALLOWED_AGENTS = "alpha,beta";
+    process.env.SCHIST_AGENT_ID = "gamma";
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    if ("error" in r) throw new Error("unexpected error");
+    expect(r.recentMemory).toBeUndefined();
+    expect(r.recent).toBeDefined();
+    expect(r.hotConcepts).toBeDefined();
+  });
+});
+
+describe("get_context tool — recentMemory owner resolution (multi-owner servers)", () => {
+  it("accepts an allowlisted owner arg and scopes the block to it", async () => {
+    process.env.SCHIST_ALLOWED_AGENTS = "alpha,beta";
+    seedMemory("alpha", [{ content: "alpha entry" }]);
+    seedMemory("beta", [{ content: "beta entry" }]);
+    const r = await get_context(vaultRoot, { depth: "standard", owner: "beta" });
+    if ("error" in r) throw new Error("unexpected error");
+    expect(r.recentMemory!.owner).toBe("beta");
+    expect(r.recentMemory!.entries.map(e => e.content)).toEqual(["beta entry"]);
+  });
+
+  it("rejects an owner arg not in SCHIST_ALLOWED_AGENTS with VALIDATION_ERROR", async () => {
+    process.env.SCHIST_ALLOWED_AGENTS = "alpha,beta";
+    const r = await get_context(vaultRoot, { depth: "standard", owner: "mallory" });
+    expect(r).toMatchObject({
+      error: "VALIDATION_ERROR",
+      message: expect.stringContaining("SCHIST_ALLOWED_AGENTS"),
+    });
+  });
+
+  it("rejects an owner arg that mismatches SCHIST_AGENT_ID in single-agent mode", async () => {
+    process.env.SCHIST_AGENT_ID = "alpha";
+    const r = await get_context(vaultRoot, { depth: "standard", owner: "beta" });
+    expect(r).toMatchObject({
+      error: "VALIDATION_ERROR",
+      message: expect.stringContaining("SCHIST_AGENT_ID"),
+    });
+  });
+
+  it("validates an explicit owner even at depth=minimal (validate-first parity)", async () => {
+    process.env.SCHIST_ALLOWED_AGENTS = "alpha,beta";
+    const r = await get_context(vaultRoot, { depth: "minimal", owner: "mallory" });
+    expect(r).toMatchObject({ error: "VALIDATION_ERROR" });
+  });
+
+  it("allowlist-only deployment with owner omitted → block absent (no env fallback identity)", async () => {
+    process.env.SCHIST_ALLOWED_AGENTS = "alpha,beta";
+    seedMemory("alpha", [{ content: "needs an explicit owner to surface" }]);
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    if ("error" in r) throw new Error("unexpected error");
+    expect(r.recentMemory).toBeUndefined();
+  });
+
+  it("env fallback identity INSIDE the allowlist still surfaces the block (validation must not over-degrade)", async () => {
+    seedMemory("alpha", [{ content: "allowlisted env identity" }]);
+    process.env.SCHIST_ALLOWED_AGENTS = "alpha,beta";
+    process.env.SCHIST_AGENT_ID = "alpha";
+    const r = await get_context(vaultRoot, { depth: "standard" });
+    if ("error" in r) throw new Error("unexpected error");
+    expect(r.recentMemory!.owner).toBe("alpha");
+    expect(r.recentMemory!.entries.map(e => e.content)).toEqual(["allowlisted env identity"]);
   });
 });
 

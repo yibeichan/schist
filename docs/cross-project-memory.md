@@ -79,8 +79,9 @@ The memory subsystem exposes six MCP tools. All tools are listed by
 
 - `add_memory` — store a new entry. Required: `owner`, `entry_type` (one of
   `decision | lesson | blocker | completion | observation`), `content`.
-  Optional: `date`, `tags` (string array), `related_doc`, `source_ref`,
-  `confidence` (`low | medium | high`).
+  Optional: `date`, `tags` (string array), `related_doc` (a vault note id —
+  see [related_doc](#related_doc-linking-memory-to-vault-notes) below),
+  `source_ref`, `confidence` (`low | medium | high`).
 - `set_agent_state` — upsert a keyed state value with optional `ttl_hours`.
   Key prefix must match `owner` (for example, `agent-a.*`). The `team.*`
   prefix requires `owner` to match `SCHIST_TEAM_OWNER`.
@@ -90,6 +91,59 @@ The `owner` field on write is enforced against the configured agent
 identity (see [Identity](#identity-schist_agent_id-vs-schist_allowed_agents)
 below). Writes without identity configured fail with `CONFIG_ERROR`; writes
 with a mismatched owner fail with `VALIDATION_ERROR`. Reads are unrestricted.
+
+## related_doc: linking memory to vault notes
+
+`agent_memory.related_doc` is the memory → vault back-reference
+(docs/data-model.md, decision D4): **a vault note id** such as
+`notes/fts5-sanitization.md` — the same id `create_note` returns and
+`search_notes` / `get_note` accept. Set it when a memory entry is about a
+specific note (e.g. the completion that graduated a lesson into the vault),
+so later readers can hop memory → note in one step.
+
+`add_memory` validates the **shape** of the id (relative `<dir>/….md` path,
+no `..`, no absolute paths, no dot-prefixed segments — the exact rule lives
+in `mcp-server/src/note-id.ts`, shared with the note tools) and rejects
+anything else with `VALIDATION_ERROR`. It deliberately does **not** check
+that the note exists: memory is the always-available "fuel station" and
+must stay writable when the vault is unreachable, so there is no foreign
+key, no cross-database lookup, and no filesystem access. A `related_doc`
+can therefore point at a note that was renamed, deleted, or never created —
+treat it as a hint, not a guarantee.
+
+`search_memory` returns `related_doc` on each entry, and `get_context`
+(depth `standard`/`full`) carries it in the `recentMemory` block: the
+owner's five most recent entries (id, date, entry_type, content snippet
+truncated to 100 Unicode code points with a trailing `…`, related_doc).
+The owner comes from the explicit `owner` argument (validated against the
+identity config; invalid → `VALIDATION_ERROR`) or, when omitted, from
+`SCHIST_AGENT_ID` — also validated, but an inconsistent env pair (e.g. an
+agent id missing from `SCHIST_ALLOWED_AGENTS`) degrades to an absent block
+rather than an error. When the memory DB is missing or unreadable the
+block is likewise simply absent — a broken fuel station never breaks vault
+context reads. At read time, stored `related_doc` values that fail the
+shape rule (legacy rows, foreign writers to the shared DB) are omitted
+from the block.
+
+## Memory vs. vault note: the decision boundary
+
+Both stores persist knowledge; they are not interchangeable
+(docs/data-model.md, D1/D4):
+
+| | `add_memory` | `create_note` |
+|---|---|---|
+| Cadence | frequent, cheap, in-the-moment | deliberate, curated |
+| Size | small (a decision, a blocker, a state change) | full document |
+| Lifetime | session-scoped audit trail | durable, cross-session |
+| Sync | strictly local (never leaves the machine) | git-backed, hub/spoke synced |
+| Review | none | vault conventions + ingest validation |
+
+Rule of thumb: write memory as you work (decisions made, blockers hit,
+current state); write a note when knowledge should outlive the session.
+When a memory entry keeps proving useful, **graduate** it into a vault note
+(the `/learn` and `/handoff` skills do exactly this) and stamp the
+graduating entry's `related_doc` with the new note id. The data layer never
+does this automatically — no dual writes in either direction.
 
 ## Identity: `SCHIST_AGENT_ID` vs `SCHIST_ALLOWED_AGENTS`
 
