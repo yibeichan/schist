@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "tables": [
+    "docs",
+    "concepts",
+    "edges",
+    "docs_fts",
+    "paper_metadata",
+    "concept_aliases"
+  ],
+  "requiredTables": [
+    "docs",
+    "paper_metadata",
+    "concept_aliases"
+  ],
+  "requiredDocsColumns": [
+    "id",
+    "title",
+    "date",
+    "status",
+    "tags",
+    "concepts",
+    "body",
+    "scope",
+    "source",
+    "confidence",
+    "file_ref"
+  ],
+  "rebuildSurvivors": [
+    "concept_aliases"
+  ]
+}
