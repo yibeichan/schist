@@ -6,7 +6,7 @@ import { spawn, spawnSync } from "child_process";
 import { createRequire } from "module";
 import { fileURLToPath } from "url";
 import { load as yamlLoad } from "js-yaml";
-import type { SearchResult, Note, Concept, Connection, MemoryEntry, AgentStateEntry, ConceptAlias } from "./types.js";
+import type { SearchResult, Note, Concept, Connection, MemoryEntry, RecentMemoryEntry, AgentStateEntry, ConceptAlias } from "./types.js";
 import { CONNECTION_RE, parseConnections as parseConnectionsSync } from "./markdown-parser.js";
 import { validateOwner } from "./agent-identity.js";
 
@@ -1002,9 +1002,13 @@ CREATE TABLE IF NOT EXISTS agent_state (
 );
 `;
 
-function openMemoryDb(): Database.Database {
-  const dbPath = process.env.SCHIST_MEMORY_DB ??
+function memoryDbPath(): string {
+  return process.env.SCHIST_MEMORY_DB ??
     path.join(os.homedir(), ".openclaw", "memory", "agent-state.db");
+}
+
+function openMemoryDb(): Database.Database {
+  const dbPath = memoryDbPath();
   const dir = path.dirname(dbPath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const db = new Database(dbPath);
@@ -1119,6 +1123,57 @@ export function searchMemory(opts: {
       const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
       return rows.map(rowToMemoryEntry);
     }
+  } finally {
+    db.close();
+  }
+}
+
+/** Default entry count for get_context's recentMemory block (D4). */
+export const RECENT_MEMORY_DEFAULT_LIMIT = 5;
+
+/**
+ * The owner's most recent agent_memory entries, for get_context's
+ * recentMemory block (slice C, docs/data-model.md D4). Unlike every other
+ * memory function this must NEVER create or heal the DB (readonly +
+ * fileMustExist — a vault context read should not scaffold ~/.openclaw/)
+ * and NEVER throws on availability problems: a missing file, unreadable
+ * file, non-database file, and a DB without the agent_memory table all
+ * return null so the caller degrades to an absent block. A reachable but
+ * empty table returns [] — "memory works, nothing recorded yet" is
+ * deliberately distinct from "memory unavailable". Newest first:
+ * created_at DESC with an id DESC tiebreaker (searchMemory's id ASC is a
+ * pagination-stability choice; recency wants the later insert first).
+ */
+export function getRecentMemory(
+  owner: string,
+  limit: number = RECENT_MEMORY_DEFAULT_LIMIT
+): RecentMemoryEntry[] | null {
+  let db: Database.Database;
+  try {
+    db = new Database(memoryDbPath(), { readonly: true, fileMustExist: true });
+  } catch {
+    return null;
+  }
+  try {
+    // Match openMemoryDb's lock patience — a writer holding the DB for a
+    // moment should delay this read, not blank the block.
+    db.pragma("busy_timeout = 5000");
+    const rows = db.prepare(`
+      SELECT id, date, entry_type, content, related_doc
+      FROM agent_memory
+      WHERE owner = ?
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `).all(owner, limit) as Record<string, unknown>[];
+    return rows.map((row) => ({
+      id: row.id as number,
+      date: row.date as string,
+      entry_type: row.entry_type as RecentMemoryEntry["entry_type"],
+      content: row.content as string,
+      ...(row.related_doc == null ? {} : { related_doc: row.related_doc as string }),
+    }));
+  } catch {
+    return null;
   } finally {
     db.close();
   }

@@ -6,7 +6,8 @@ export function makeReadTools(config: VaultConfig) {
       name: "get_context",
       description:
         "Get knowledge graph context summary. Defaults to 'minimal' (counts + last 3 notes). " +
-        "Pass depth='standard' for recent docs + hot concepts. " +
+        "Pass depth='standard' for recent docs + hot concepts + recentMemory (the calling agent's " +
+        "latest agent_memory entries; absent when no memory identity resolves or the memory DB is unavailable). " +
         'depth=\'full\' additionally returns tagCloud and REQUIRES verbose: "<reason ≥12 chars>"; ' +
         "without a valid reason the server downgrades to 'standard' and the response carries a " +
         "verboseNote hint. Call this first in any session.",
@@ -17,6 +18,10 @@ export function makeReadTools(config: VaultConfig) {
           verbose: {
             type: "string",
             description: 'Reason string (≥12 code points after trim) gating depth="full". Logged to server stderr for audit. Omit or use a non-"full" depth if not needed.',
+          },
+          owner: {
+            type: "string",
+            description: "Memory identity for the recentMemory block. Optional; validated like memory writes (SCHIST_ALLOWED_AGENTS allowlist, else must equal SCHIST_AGENT_ID). Falls back to SCHIST_AGENT_ID when omitted; without a resolvable owner the block is absent.",
           },
         },
       },
@@ -94,7 +99,7 @@ export function makeMemoryWriteTools(_config: VaultConfig) {
           content: { type: "string" },
           date: { type: "string" },
           tags: { type: "array", items: { type: "string" } },
-          related_doc: { type: "string" },
+          related_doc: { type: "string", description: "Vault note id this entry relates to (e.g. notes/topic.md). Shape-validated only — the note need not exist, so memory stays writable when the vault is unavailable." },
           source_ref: { type: "string" },
           confidence: { type: "string", enum: ["low", "medium", "high"] },
         },

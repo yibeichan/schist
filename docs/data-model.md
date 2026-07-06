@@ -1,12 +1,12 @@
 # schist data model — design doc (#130)
 
-Status: **agreed design (2026-07-04); slices A and B implemented (2026-07-06)** —
-D2's `schema/frontmatter-contract.json` + both-language conformance tests and
-D3's `schema/index-contract.json` (`INDEX_SCHEMA_VERSION` stamped via
-`user_version`, single-sourced required tables; fixes #339) are in; slice C is
-still pending. Implementation lands as three PR-sized slices (A → B → C
-below). This doc is the contract; each slice PR should link back here and
-update the status line.
+Status: **all three slices implemented (2026-07-06)** — D2's
+`schema/frontmatter-contract.json` + both-language conformance tests, D3's
+`schema/index-contract.json` (`INDEX_SCHEMA_VERSION` stamped via
+`user_version`, single-sourced required tables; fixed #339), and D4's memory
+contract (`related_doc` shape validation, `recentMemory` in `get_context`,
+memory-vs-note decision boundary) are in. This doc remains the contract for
+the shipped design; the slice table below records what landed where.
 
 ## Why now
 
