@@ -19,7 +19,7 @@ import * as os from "os";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { fileURLToPath } from "url";
-import { loadVaultConfig, create_note, PATCHABLE_FRONTMATTER_KEYS } from "../src/tools.js";
+import { loadVaultConfig, create_note, update_note, PATCHABLE_FRONTMATTER_KEYS } from "../src/tools.js";
 import { parseNote } from "../src/markdown-parser.js";
 
 const execFile = promisify(execFileCb);
@@ -37,9 +37,18 @@ type FieldDescriptor = {
   indexColumn: string | null;
 };
 
-function loadContract(): FieldDescriptor[] {
+type ContractDocument = {
+  schemaVersion: number;
+  fields: FieldDescriptor[];
+};
+
+function loadContractDocument(): ContractDocument {
   const contractPath = path.resolve(__dirname, "..", "..", "schema", "frontmatter-contract.json");
-  return JSON.parse(readFileSync(contractPath, "utf-8")) as FieldDescriptor[];
+  return JSON.parse(readFileSync(contractPath, "utf-8")) as ContractDocument;
+}
+
+function loadContract(): FieldDescriptor[] {
+  return loadContractDocument().fields;
 }
 
 /** Sorted set-difference report — makes drift failures name the exact fields. */
@@ -100,6 +109,7 @@ describe("frontmatter contract fixture", () => {
   test("is present and non-trivial", () => {
     // An emptied/mangled fixture must fail loudly, not vacuously pass the
     // set-equality checks below (same guard as the slug-parity fixture).
+    expect(loadContractDocument().schemaVersion).toBe(1);
     expect(contract.length).toBeGreaterThanOrEqual(20);
   });
 
@@ -112,7 +122,10 @@ describe("frontmatter contract fixture", () => {
     // Typos in enum-like descriptor values would silently drop a field from
     // the filtered sets both suites assert against — fail them here instead.
     const APPLIES_TO = new Set(["documents", "concepts", "papers"]);
-    const WRITTEN_BY = new Set(["create_note", "update_note"]);
+    // cli_add is documentation-only (see the contract's $comment): `schist add`
+    // writes frontmatter with none of the MCP normalizations and has no
+    // conformance suite of its own.
+    const WRITTEN_BY = new Set(["create_note", "update_note", "cli_add"]);
     const READ_BY = new Set(["ingest", "parseNote"]);
     const INVALID = new Set([
       "coerce-null", "coerce-int-or-null", "stringify", "stringify-scalar",
@@ -222,4 +235,43 @@ describe("update_note patchable key set matches the contract", () => {
       inCodeButNotInContract: [],
     });
   });
+});
+
+describe("security-frozen fields", () => {
+  // These writtenBy values are SECURITY guarantees, not bookkeeping: a
+  // patchable `scope` lets a path-authorized caller spoof graph
+  // read-visibility (ingest prefers frontmatter scope over the directory),
+  // and patchable `source`/`source_agent` forge provenance. Any edit that
+  // adds a writer to these descriptors — including a mechanical "fix" chasing
+  // a red set-diff elsewhere — must consciously delete this test.
+  test("scope/source/source_agent stay unwritable (scope-spoof / provenance-forgery guard)", () => {
+    const byField = new Map(loadContract().map((d) => [d.field, d]));
+    expect(byField.get("scope")?.writtenBy).toEqual([]);
+    expect(byField.get("source")?.writtenBy).toEqual([]);
+    // source_agent is stamped once at creation and never patchable after.
+    expect(byField.get("source_agent")?.writtenBy).toEqual(["create_note"]);
+  });
+
+  // Behavioral half: proves the running validation path enforces the freeze,
+  // so a refactor that keeps the exported PATCHABLE set but stops consulting
+  // it still fails here.
+  test.each(["scope", "source", "source_agent"])(
+    "update_note rejects a frontmatter_patch on '%s' with VALIDATION_ERROR",
+    async (field) => {
+      const vault = await makeTempVault();
+      const config = await loadVaultConfig(vault);
+      const created = (await create_note(
+        vault,
+        { owner: TEST_AGENT, title: `Freeze ${field}`, body: "body" },
+        config,
+      )) as { id: string };
+      const result = (await update_note(
+        vault,
+        { owner: TEST_AGENT, id: created.id, frontmatter_patch: { [field]: "spoofed" } },
+        config,
+      )) as { error?: string; message?: string };
+      expect(result.error).toBe("VALIDATION_ERROR");
+      expect(result.message).toContain(field);
+    },
+  );
 });

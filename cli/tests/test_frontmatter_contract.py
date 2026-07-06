@@ -28,9 +28,11 @@ added to the contract without breaking either suite.
 
 from __future__ import annotations
 
+import io
 import json
 import re
 import sqlite3
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -43,9 +45,13 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _contract() -> list[dict]:
+def _contract_document() -> dict:
     fixture = _repo_root() / "schema" / "frontmatter-contract.json"
     return json.loads(fixture.read_text(encoding="utf-8"))
+
+
+def _contract() -> list[dict]:
+    return _contract_document()["fields"]
 
 
 def _ingest_read_fields() -> set[str]:
@@ -73,6 +79,7 @@ def _docs_enum_fields() -> list[dict]:
 def test_contract_fixture_is_nontrivial() -> None:
     """An emptied/mangled fixture must fail loudly, not vacuously pass the
     set-equality checks below (same guard as the slug-parity fixture)."""
+    assert _contract_document()["schemaVersion"] == 1
     contract = _contract()
     assert len(contract) >= 20
     names = [d["field"] for d in contract]
@@ -83,7 +90,10 @@ def test_contract_descriptors_use_known_vocabulary() -> None:
     """Typos in enum-like descriptor values would silently drop a field from
     the filtered sets both suites assert against — fail them here instead."""
     applies_to = {"documents", "concepts", "papers"}
-    written_by = {"create_note", "update_note"}
+    # cli_add is documentation-only (see the contract's $comment): `schist add`
+    # writes frontmatter with none of the MCP normalizations and has no
+    # conformance suite of its own.
+    written_by = {"create_note", "update_note", "cli_add"}
     read_by = {"ingest", "parseNote"}
     invalid_policies = {
         "coerce-null", "coerce-int-or-null", "stringify", "stringify-scalar",
@@ -102,13 +112,30 @@ def test_contract_descriptors_use_known_vocabulary() -> None:
     assert not violations, "contract vocabulary violations: " + "; ".join(violations)
 
 
-_META_READ_RE = re.compile(r"\bmeta(?:\.get\(|\[)\s*['\"]([A-Za-z_]+)['\"]")
-_META_CONTAINS_RE = re.compile(r"['\"]([A-Za-z_]+)['\"]\s+in\s+meta\b")
-_VERIFICATION_READ_RE = re.compile(r"\bverification(?:\.get\(|\[)\s*['\"]([A-Za-z_]+)['\"]")
+# \w+ (not [a-z_]+): a digit-bearing field like s2_id must scan correctly —
+# a partial match would report the drift in a MISLEADING direction.
+_META_READ_RE = re.compile(r"\bmeta(?:\.get\(|\.pop\(|\.setdefault\(|\[)\s*['\"](\w+)['\"]")
+_META_CONTAINS_RE = re.compile(r"['\"](\w+)['\"]\s+in\s+meta\b")
+_VERIFICATION_READ_RE = re.compile(r"\bverification(?:\.get\(|\.pop\(|\.setdefault\(|\[)\s*['\"](\w+)['\"]")
+
+
+def _ingest_source_without_comments() -> str:
+    """ingest.py source with `#` comments blanked via tokenize, so a comment
+    mentioning e.g. meta.get('old_field') never counts as a live read.
+    Docstrings are NOT stripped — keep scannable field references out of them."""
+    src = Path(ingest_module.__file__).read_text(encoding="utf-8")
+    lines = src.splitlines(keepends=True)
+    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+        if tok.type == tokenize.COMMENT:
+            row, col = tok.start
+            line = lines[row - 1]
+            newline = "\n" if line.endswith("\n") else ""
+            lines[row - 1] = line[:col].rstrip() + newline
+    return "".join(lines)
 
 
 def test_ingest_read_set_matches_contract() -> None:
-    source = Path(ingest_module.__file__).read_text(encoding="utf-8")
+    source = _ingest_source_without_comments()
     scanned = set(_META_READ_RE.findall(source)) | set(_META_CONTAINS_RE.findall(source))
     contract_fields = {f for f in _ingest_read_fields() if "." not in f}
     missing = sorted(contract_fields - scanned)
@@ -122,7 +149,7 @@ def test_ingest_read_set_matches_contract() -> None:
 
 
 def test_verification_read_set_matches_contract() -> None:
-    source = Path(ingest_module.__file__).read_text(encoding="utf-8")
+    source = _ingest_source_without_comments()
     scanned = set(_VERIFICATION_READ_RE.findall(source))
     contract_fields = {
         f.split(".", 1)[1] for f in _ingest_read_fields() if f.startswith("verification.")
@@ -150,6 +177,49 @@ def test_paper_fields_constant_matches_contract() -> None:
     )
 
 
+def test_invalid_policy_map_is_pinned() -> None:
+    """Swapping a field's `invalid` between two LEGAL vocabulary values (e.g.
+    confidence coerce-null -> stringify) passes the vocabulary check while
+    silently reshuffling which behavioral tests run (the enum parametrization
+    below is contract-driven). Pin the full policy map so a policy change must
+    consciously touch this test together with the behavioral sample proving
+    the new policy."""
+    declared = {d["field"]: d["invalid"] for d in _contract() if "ingest" in d["readBy"]}
+    assert declared == {
+        "title": "fallback",
+        "date": "stringify",
+        "status": "coerce-null",
+        "tags": "drop-invalid-items",
+        "concepts": "drop-invalid-items",
+        "confidence": "coerce-null",
+        "file_ref": "coerce-null",
+        "scope": "fallback",
+        "source": "coerce-null",
+        "topic": "fallback",
+        "concept": "fallback",
+        "authors": "drop-invalid-items",
+        "year": "coerce-int-or-null",
+        "venue": "stringify-scalar",
+        "type": "stringify-scalar",
+        "doi": "stringify-scalar",
+        "arxiv_id": "stringify-scalar",
+        "pubmed_pmid": "stringify-scalar",
+        "bibtex_key": "stringify-scalar",
+        "url": "stringify-scalar",
+        "verification": "coerce-null",
+        "verification.verified_on": "stringify-scalar",
+        "verification.verified_by": "stringify-scalar",
+        "verification.verified_against": "drop-invalid-items",
+    }
+
+
+def test_enum_parametrization_is_not_vacuous() -> None:
+    """_docs_enum_fields drives parametrized behavioral tests below; if a type
+    or policy edit filtered everything out, those tests would vanish silently
+    (fewer collected tests, no failure)."""
+    assert len(_docs_enum_fields()) >= 2
+
+
 # ---------------------------------------------------------------------------
 # Behavioral: coercion policies against a real ingest run
 # ---------------------------------------------------------------------------
@@ -158,6 +228,8 @@ INVALID_NOTE_ID = "notes/2026-07-06-invalid-coercions.md"
 VALID_NOTE_ID = "notes/2026-07-06-valid-fields.md"
 TOPIC_NOTE_ID = "notes/2026-07-06-topic-fallback.md"
 FILENAME_NOTE_ID = "notes/2026-07-06-filename-fallback.md"
+NONSTRING_TITLE_NOTE_ID = "notes/2026-07-06-nonstring-title.md"
+NONSTRING_TITLE_TOPIC_NOTE_ID = "notes/2026-07-06-nonstring-title-topic.md"
 ROOT_NOTE_ID = "2026-07-06-root-scope.md"
 GOOD_PAPER_ID = "papers/2026-07-06-good-paper.md"
 BAD_PAPER_ID = "papers/2026-07-06-bad-paper.md"
@@ -205,15 +277,21 @@ def _vault_files() -> dict[str, str]:
         ),
         TOPIC_NOTE_ID: "---\ntopic: Topic Fallback Title\n---\n\nBody.\n",
         FILENAME_NOTE_ID: "---\nstatus: draft\n---\n\nBody.\n",
+        # Truthy NON-STRING title candidates: a list/dict title used to abort
+        # the entire rebuild with a sqlite3 binding error, an int landed with
+        # native affinity — both must fall through the fallback chain instead.
+        NONSTRING_TITLE_NOTE_ID: (
+            "---\ntitle: [not, a, string]\ntopic: Topic Wins\n---\n\nBody.\n"
+        ),
+        NONSTRING_TITLE_TOPIC_NOTE_ID: (
+            "---\ntitle: {k: v}\ntopic: 42\n---\n\nBody.\n"
+        ),
         ROOT_NOTE_ID: "---\ntitle: Root Scope\n---\n\nBody.\n",
         "concepts/messy-concept.md": (
             "---\nconcept: \"Messy   Concept\"\n---\n\nDescription paragraph.\n"
         ),
-        # Non-string concept as an int, not a list: a LIST concept value flows
-        # into the title fallback chain and today aborts the whole ingest with
-        # a sqlite3 binding error — a pre-existing bug, tracked separately.
         "concepts/stem-fallback.md": (
-            "---\nconcept: 123\n---\n\nDescription paragraph.\n"
+            "---\nconcept: [not-a-string]\n---\n\nDescription paragraph.\n"
         ),
         GOOD_PAPER_ID: (
             "---\n"
@@ -243,7 +321,7 @@ def _vault_files() -> dict[str, str]:
             "---\n\nBody.\n"
         ),
         FIELD_TRIGGERED_PAPER_ID: (
-            "---\ntitle: Field Triggered Paper\ndoi: 10.9/xyz\n---\n\nBody.\n"
+            "---\ntitle: Field Triggered Paper\ndoi: 10.9/xyz\nyear: true\n---\n\nBody.\n"
         ),
     }
 
@@ -334,6 +412,21 @@ def test_title_fallback_chain(indexed: sqlite3.Connection) -> None:
     assert _docs_value(indexed, "concepts/messy-concept.md", "title") == "Messy   Concept"
 
 
+def test_nonstring_title_candidates_fall_through_without_aborting(
+    indexed: sqlite3.Connection,
+) -> None:
+    """A list/dict `title:` used to abort the ENTIRE rebuild with a sqlite3
+    binding error (one bad note = permanent read outage, #296 family); the
+    fixture ingesting at all proves the crash is gone, and non-string
+    candidates must fall through the chain rather than store with native
+    affinity."""
+    assert _docs_value(indexed, NONSTRING_TITLE_NOTE_ID, "title") == "Topic Wins"
+    assert (
+        _docs_value(indexed, NONSTRING_TITLE_TOPIC_NOTE_ID, "title")
+        == "nonstring title topic"
+    )
+
+
 def test_scope_fallback_chain(indexed: sqlite3.Connection) -> None:
     assert _docs_value(indexed, VALID_NOTE_ID, "scope") == "custom-scope"
     # Empty frontmatter scope falls back to the parent directory ...
@@ -372,6 +465,10 @@ def test_verification_object_maps_to_verified_columns(indexed: sqlite3.Connectio
 
 def test_invalid_paper_values_coerce_to_null(indexed: sqlite3.Connection) -> None:
     assert _paper_value(indexed, BAD_PAPER_ID, "year") is None, "non-numeric year must be NULL"
+    # bool is an int subclass in Python: `year: true` must not store 1.
+    assert _paper_value(indexed, FIELD_TRIGGERED_PAPER_ID, "year") is None, (
+        "boolean year must coerce to NULL"
+    )
     assert _paper_value(indexed, BAD_PAPER_ID, "verified") == 0, (
         "non-object verification must read as unverified"
     )
@@ -388,3 +485,25 @@ def test_any_paper_field_triggers_paper_metadata_row(indexed: sqlite3.Connection
         "SELECT 1 FROM paper_metadata WHERE doc_id = ?", (TOPIC_NOTE_ID,)
     ).fetchone()
     assert row is None
+
+
+def test_index_columns_exist_in_materialized_schema(indexed: sqlite3.Connection) -> None:
+    """Every non-null indexColumn must name a real column in the schema
+    ingest materializes (schema.sql, via the fixture's real ingest run). A
+    typo — or a slice-B column rename that skips the contract — would
+    otherwise silently drop the field from behavioral enforcement while
+    documenting a nonexistent column."""
+    problems: list[str] = []
+    for d in _contract():
+        ref = d["indexColumn"]
+        if ref is None:
+            continue
+        table, _, column = ref.partition(".")
+        columns = {row[1] for row in indexed.execute(f"PRAGMA table_info({table})")}
+        if not columns:
+            problems.append(f"{d['field']}: indexColumn table '{table}' does not exist")
+        elif column not in columns:
+            problems.append(
+                f"{d['field']}: indexColumn '{ref}' not found (has: {sorted(columns)})"
+            )
+    assert not problems, "indexColumn drift vs cli/schist/schema.sql: " + "; ".join(problems)

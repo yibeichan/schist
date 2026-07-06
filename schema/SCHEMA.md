@@ -13,7 +13,7 @@ All knowledge in a schist vault is stored as markdown files with YAML frontmatte
 
 ### Frontmatter Fields
 
-> Enforced source of truth: [`schema/frontmatter-contract.json`](frontmatter-contract.json) — the fields the MCP write tools produce and ingest reads (with their invalid-value coercions) are pinned there and CI-checked in both languages (`mcp-server/tests/frontmatter-contract.test.ts`, `cli/tests/test_frontmatter_contract.py`). This table is the human spec; change the contract first.
+> Enforced source of truth: [`schema/frontmatter-contract.json`](frontmatter-contract.json) — the fields the MCP write tools produce and ingest reads (with their invalid-value coercions) are pinned there and CI-checked in both languages (`mcp-server/tests/frontmatter-contract.test.ts`, `cli/tests/test_frontmatter_contract.py`). This table is the human spec; change the contract first. `related` is read by neither parser (prose-only convention; typed relationships live in `## Connections`), so it is documented here only.
 
 | Field      | Type       | Required | Default   | Description |
 |------------|------------|----------|-----------|-------------|

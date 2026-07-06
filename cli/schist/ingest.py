@@ -16,6 +16,10 @@ CONNECTION_RE = re.compile(
     r'^-\s+(\S+):\s+(\S+)(?:\s+"([^"]*)")?(?:\s+—\s+(.*))?$'
 )
 
+# Frontmatter fields whose presence marks a note as a paper (copied into
+# paper_metadata). Pinned to schema/frontmatter-contract.json's
+# `appliesTo: papers` set by cli/tests/test_frontmatter_contract.py —
+# update the contract when this set changes.
 PAPER_FIELDS = {
     'authors',
     'year',
@@ -222,7 +226,8 @@ def _string_or_none(value) -> str | None:
 
 
 def _int_or_none(value) -> int | None:
-    if isinstance(value, int):
+    # bool is an int subclass: `year: true` must coerce to NULL, not store 1.
+    if isinstance(value, int) and not isinstance(value, bool):
         return value
     if isinstance(value, str) and value.isdigit():
         return int(value)
@@ -356,6 +361,13 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         meta = post.metadata
         body = post.content
 
+        # Frontmatter reads (here and in paper_metadata_from_frontmatter) must
+        # stay literal meta.get('<field>') / verification.get('<field>')
+        # expressions in THIS file — cli/tests/test_frontmatter_contract.py
+        # scans this source to pin the read set to
+        # schema/frontmatter-contract.json, and indirect or variable-key reads
+        # evade that check. Update the contract when adding a field here.
+
         # Normalize tags: strip # prefix
         raw_tags = meta.get('tags', [])
         if isinstance(raw_tags, list):
@@ -407,8 +419,21 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         # Determine if this is a concept file (in concepts/ dir or has 'concept' key)
         is_concept = 'concept' in meta or (rel.parts[0] == 'concepts' if len(rel.parts) > 1 else False)
 
-        # Title: explicit title > concept key > derive from filename
-        title = meta.get('title') or meta.get('topic') or meta.get('concept') or title_from_filename(rel.name)
+        # Title: explicit title > topic > concept key > derive from filename.
+        # Each candidate must be a NON-EMPTY STRING to be picked: a truthy
+        # non-string (title: [a, b], title: {k: v}) previously flowed into the
+        # docs INSERT and aborted the ENTIRE rebuild with a sqlite3 binding
+        # error — one bad note must never take down the index (#296 family) —
+        # while title: 42 landed with native affinity like the status case
+        # (#278). Non-string candidates fall through the chain instead.
+        title = next(
+            (
+                v
+                for v in (meta.get('title'), meta.get('topic'), meta.get('concept'))
+                if isinstance(v, str) and v
+            ),
+            title_from_filename(rel.name),
+        )
 
         # Status: type-guard like every other scalar field above. A non-string
         # value (status: 42, status: true, status: [draft]) would otherwise be

@@ -78,7 +78,10 @@ Key facts the design builds on:
 
 ### D2 — Document model: machine-readable frontmatter contract (slice A)
 
-Add `schema/frontmatter-contract.json`: one array of field descriptors —
+Add `schema/frontmatter-contract.json`: `{ "schemaVersion": 1, "$comment":
+"<add-a-field workflow + writer-scoping notes>", "fields": [...] }` —
+object-wrapped for parity with slice B's `index-contract.json` — with one
+descriptor per field, e.g.
 
 ```json
 { "field": "confidence", "type": "enum:low|medium|high",
