@@ -1,0 +1,252 @@
+[
+  {
+    "field": "title",
+    "type": "string",
+    "appliesTo": ["documents", "concepts"],
+    "writtenBy": ["create_note", "update_note"],
+    "readBy": ["ingest", "parseNote"],
+    "invalid": "fallback",
+    "indexColumn": "docs.title",
+    "notes": "Ingest fallback chain: title -> topic -> concept -> filename-derived title."
+  },
+  {
+    "field": "date",
+    "type": "string",
+    "appliesTo": ["documents"],
+    "writtenBy": ["create_note", "update_note"],
+    "readBy": ["ingest", "parseNote"],
+    "invalid": "stringify",
+    "indexColumn": "docs.date",
+    "notes": "ISO 8601 date. Ingest str()'s any non-null value (YAML date objects become 'YYYY-MM-DD'); TS round-trips coerce Date back to the date-only string so edits never rewrite it to a full ISO timestamp."
+  },
+  {
+    "field": "status",
+    "type": "string",
+    "appliesTo": ["documents"],
+    "writtenBy": ["create_note", "update_note"],
+    "readBy": ["ingest", "parseNote"],
+    "invalid": "coerce-null",
+    "indexColumn": "docs.status",
+    "notes": "Write side validates against the vault's configured statuses (#276); ingest only type-guards string so a non-string never lands with native SQLite affinity (#278)."
+  },
+  {
+    "field": "tags",
+    "type": "string[]",
+    "appliesTo": ["documents", "concepts"],
+    "writtenBy": ["create_note", "update_note"],
+    "readBy": ["ingest", "parseNote"],
+    "invalid": "drop-invalid-items",
+    "indexColumn": "docs.tags",
+    "notes": "Leading '#' stripped and items trimmed on both write and ingest. Non-list values yield no tags. Stored as a JSON array (also concepts.tags on concept nodes); empty -> NULL."
+  },
+  {
+    "field": "concepts",
+    "type": "string[]",
+    "appliesTo": ["documents"],
+    "writtenBy": ["create_note", "update_note"],
+    "readBy": ["ingest", "parseNote"],
+    "invalid": "drop-invalid-items",
+    "indexColumn": "docs.concepts",
+    "notes": "Slugs normalized with the shared rules pinned by schema/concept-slug-parity.json (#303/#318). Each slug creates an implicit 'references' edge on ingest. Stored as a JSON array; empty -> NULL."
+  },
+  {
+    "field": "confidence",
+    "type": "enum:low|medium|high",
+    "appliesTo": ["documents"],
+    "writtenBy": ["create_note", "update_note"],
+    "readBy": ["ingest", "parseNote"],
+    "invalid": "coerce-null",
+    "indexColumn": "docs.confidence",
+    "notes": "NULL means 'not declared' and is deliberately distinct from 'medium' (#69). Write side rejects off-enum values; ingest coerces them to NULL."
+  },
+  {
+    "field": "file_ref",
+    "type": "string",
+    "appliesTo": ["documents"],
+    "writtenBy": ["create_note", "update_note"],
+    "readBy": ["ingest", "parseNote"],
+    "invalid": "coerce-null",
+    "indexColumn": "docs.file_ref",
+    "notes": "Informative external-file pointer only; schist never stores, syncs, or validates the referenced file. Empty string or non-string -> NULL."
+  },
+  {
+    "field": "source_agent",
+    "type": "string",
+    "appliesTo": ["documents"],
+    "writtenBy": ["create_note"],
+    "readBy": ["parseNote"],
+    "invalid": null,
+    "indexColumn": null,
+    "notes": "Original authoring agent stamped by create_note. Deliberately NOT patchable (provenance must not be forgeable) and NOT read by ingest — docs.source is fed by the separate 'source' field, not this one."
+  },
+  {
+    "field": "scope",
+    "type": "string",
+    "appliesTo": ["documents"],
+    "writtenBy": [],
+    "readBy": ["ingest"],
+    "invalid": "fallback",
+    "indexColumn": "docs.scope",
+    "notes": "Deliberately not writable via MCP tools: frontmatter scope overrides the directory-derived scope, so a patchable scope would let a path-authorized caller spoof graph read-visibility. Ingest fallback chain: frontmatter -> parent directory -> 'global'."
+  },
+  {
+    "field": "source",
+    "type": "enum:human|agent",
+    "appliesTo": ["documents"],
+    "writtenBy": [],
+    "readBy": ["ingest"],
+    "invalid": "coerce-null",
+    "indexColumn": "docs.source",
+    "notes": "Content-origin marker, distinct from source_agent (which names the authoring agent). Off-enum values coerce to NULL. Not writable via MCP tools (provenance must not be forgeable)."
+  },
+  {
+    "field": "topic",
+    "type": "string",
+    "appliesTo": ["documents"],
+    "writtenBy": [],
+    "readBy": ["ingest"],
+    "invalid": "fallback",
+    "indexColumn": "docs.title",
+    "notes": "Legacy title fallback for hand-authored notes: used only when 'title' is absent or falsy."
+  },
+  {
+    "field": "concept",
+    "type": "string",
+    "appliesTo": ["concepts"],
+    "writtenBy": [],
+    "readBy": ["ingest"],
+    "invalid": "fallback",
+    "indexColumn": "concepts.slug",
+    "notes": "Presence marks the note as a concept node (as does living under concepts/). Value is slug-normalized; non-string falls back to the filename stem. Also third in the title fallback chain."
+  },
+  {
+    "field": "authors",
+    "type": "string[]",
+    "appliesTo": ["papers"],
+    "writtenBy": [],
+    "readBy": ["ingest"],
+    "invalid": "drop-invalid-items",
+    "indexColumn": "paper_metadata.authors",
+    "notes": "Citation-order author names. A bare string is wrapped into a one-element list; non-string list items are dropped. Stored as a JSON array; empty -> NULL."
+  },
+  {
+    "field": "year",
+    "type": "integer",
+    "appliesTo": ["papers"],
+    "writtenBy": [],
+    "readBy": ["ingest"],
+    "invalid": "coerce-int-or-null",
+    "indexColumn": "paper_metadata.year",
+    "notes": "Publication year, not note creation date. Digit-only strings coerce to int; anything else -> NULL."
+  },
+  {
+    "field": "venue",
+    "type": "string",
+    "appliesTo": ["papers"],
+    "writtenBy": [],
+    "readBy": ["ingest"],
+    "invalid": "stringify-scalar",
+    "indexColumn": "paper_metadata.venue",
+    "notes": "Journal, conference, publisher, archive, or dataset venue."
+  },
+  {
+    "field": "type",
+    "type": "string",
+    "appliesTo": ["papers"],
+    "writtenBy": [],
+    "readBy": ["ingest"],
+    "invalid": "stringify-scalar",
+    "indexColumn": "paper_metadata.paper_type",
+    "notes": "Local conventions: journal|preprint|conference|book|thesis|report|dataset. Not enforced by ingest — any scalar is stringified."
+  },
+  {
+    "field": "doi",
+    "type": "string",
+    "appliesTo": ["papers"],
+    "writtenBy": [],
+    "readBy": ["ingest"],
+    "invalid": "stringify-scalar",
+    "indexColumn": "paper_metadata.doi",
+    "notes": "DOI without a URL wrapper."
+  },
+  {
+    "field": "arxiv_id",
+    "type": "string",
+    "appliesTo": ["papers"],
+    "writtenBy": [],
+    "readBy": ["ingest"],
+    "invalid": "stringify-scalar",
+    "indexColumn": "paper_metadata.arxiv_id",
+    "notes": "Quote in YAML — bare 2004.00001 parses as a float and gets stringified."
+  },
+  {
+    "field": "pubmed_pmid",
+    "type": "string",
+    "appliesTo": ["papers"],
+    "writtenBy": [],
+    "readBy": ["ingest"],
+    "invalid": "stringify-scalar",
+    "indexColumn": "paper_metadata.pubmed_pmid",
+    "notes": "Bare YAML integers are stringified on ingest."
+  },
+  {
+    "field": "bibtex_key",
+    "type": "string",
+    "appliesTo": ["papers"],
+    "writtenBy": [],
+    "readBy": ["ingest"],
+    "invalid": "stringify-scalar",
+    "indexColumn": "paper_metadata.bibtex_key",
+    "notes": "Stable local BibTeX key."
+  },
+  {
+    "field": "url",
+    "type": "string",
+    "appliesTo": ["papers"],
+    "writtenBy": [],
+    "readBy": ["ingest"],
+    "invalid": "stringify-scalar",
+    "indexColumn": "paper_metadata.url",
+    "notes": "Canonical publisher, DOI, archive, or project URL."
+  },
+  {
+    "field": "verification",
+    "type": "object",
+    "appliesTo": ["papers"],
+    "writtenBy": [],
+    "readBy": ["ingest"],
+    "invalid": "coerce-null",
+    "indexColumn": "paper_metadata.verified",
+    "notes": "Verification record. paper_metadata.verified is 1 iff verification.verified_on is present. A non-object value is treated as absent (verified=0, all derived columns NULL). Presence of any top-level paper field — or a papers/ path — triggers the paper_metadata row."
+  },
+  {
+    "field": "verification.verified_on",
+    "type": "string",
+    "appliesTo": ["papers"],
+    "writtenBy": [],
+    "readBy": ["ingest"],
+    "invalid": "stringify-scalar",
+    "indexColumn": "paper_metadata.verified_date",
+    "notes": "Verification date. Its presence flips paper_metadata.verified to 1."
+  },
+  {
+    "field": "verification.verified_by",
+    "type": "string",
+    "appliesTo": ["papers"],
+    "writtenBy": [],
+    "readBy": ["ingest"],
+    "invalid": "stringify-scalar",
+    "indexColumn": "paper_metadata.verified_by",
+    "notes": "Agent or human that performed the verification."
+  },
+  {
+    "field": "verification.verified_against",
+    "type": "string[]",
+    "appliesTo": ["papers"],
+    "writtenBy": [],
+    "readBy": ["ingest"],
+    "invalid": "drop-invalid-items",
+    "indexColumn": "paper_metadata.verification_sources",
+    "notes": "Sources in decreasing authority (crossref:<doi>, pubmed:<pmid>, ...). Mapping items are flattened to 'key:value' strings; a bare string is wrapped. Stored as a JSON array; empty -> NULL."
+  }
+]

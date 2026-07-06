@@ -150,7 +150,10 @@ function validateNoteId(id: string, config: VaultConfig): ToolError | null {
 // let a path-authorized caller spoof graph read-visibility, since ingest
 // prefers frontmatter scope over the directory) and `source`/`source_agent`
 // (provenance must not be forgeable). Mirrors the fields create_note controls.
-const PATCHABLE_FRONTMATTER_KEYS = new Set([
+// Pinned by schema/frontmatter-contract.json (#130 slice A) — extend the
+// contract (and its Python conformance test) when adding a key here.
+/** @internal — exported for the schema/frontmatter-contract.json conformance test. */
+export const PATCHABLE_FRONTMATTER_KEYS = new Set([
   "title", "date", "status", "tags", "concepts", "confidence", "file_ref",
 ]);
 

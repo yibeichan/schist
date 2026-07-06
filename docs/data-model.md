@@ -1,8 +1,10 @@
 # schist data model — design doc (#130)
 
-Status: **agreed design, pre-implementation** (2026-07-04). Implementation
-lands as three PR-sized slices (A → B → C below). This doc is the contract;
-each slice PR should link back here and update the status line.
+Status: **agreed design (2026-07-04); slice A implemented (2026-07-06)** —
+D2's `schema/frontmatter-contract.json` + both-language conformance tests are
+in; slices B and C are still pending. Implementation lands as three PR-sized
+slices (A → B → C below). This doc is the contract; each slice PR should link
+back here and update the status line.
 
 ## Why now
 
