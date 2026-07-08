@@ -13,6 +13,7 @@
  * Also pins the #339 fix: `docs` is now in the required-tables set, so a DB
  * missing it rebuilds instead of failing on the first docs query.
  */
+import { jest } from "@jest/globals";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
@@ -69,6 +70,22 @@ async function useNoopSchistIngestBin(): Promise<string> {
   });
   process.env.SCHIST_INGEST_BIN = bin;
   return log;
+}
+
+/**
+ * Point SCHIST_INGEST_BIN at a fake that fails with a "database is locked"
+ * SQLITE_BUSY error — the observable behavior of a spawned ingest that races
+ * a live concurrent writer on a same-host WAL spoke (#354 parity).
+ */
+async function useLockedSchistIngestBin(): Promise<void> {
+  const dir = await makeBinDir();
+  const bin = path.join(dir, "schist-ingest-locked");
+  await fs.writeFile(
+    bin,
+    '#!/bin/sh\necho "sqlite3.OperationalError: database is locked" >&2\nexit 1\n',
+    { mode: 0o755 },
+  );
+  process.env.SCHIST_INGEST_BIN = bin;
 }
 
 /** Point SCHIST_INGEST_BIN at a fake that fails loudly if ever invoked. */
@@ -255,6 +272,30 @@ describe("SIGKILL-artifact heal — user_version=0 + empty docs (#350)", () => {
         /still stale after a schist-ingest rebuild[\s\S]*empty docs/,
       );
       expect((await fs.readFile(log, "utf-8")).trim().split("\n")).toHaveLength(1);
+    },
+    60_000,
+  );
+
+  test(
+    "transient 'database is locked' from the spawned ingest is served, not thrown (#354 parity)",
+    async () => {
+      const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await useLockedSchistIngestBin();
+        const vault = await makeVault();
+        await buildSigkillArtifact(vault);
+
+        // The version-0 + empty-docs shape is what a reader sees mid-ingest on
+        // a WAL spoke. Our heal rebuild races the live writer and the spawned
+        // ingest fails with SQLITE_BUSY. That must NOT throw the schema-drift
+        // skew error — serve the existing DB (empty docs → no results) while
+        // the concurrent writer finishes, and emit the "index busy" warning.
+        const res = sqliteReader.searchNotes(vault, "haystack");
+        expect(res).toEqual([]);
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("index busy"));
+      } finally {
+        warnSpy.mockRestore();
+      }
     },
     60_000,
   );
