@@ -1,4 +1,4 @@
-import { execFile as execFileCb } from "child_process";
+import { execFile as execFileCb, spawn } from "child_process";
 import { promisify } from "util";
 import { Mutex, withTimeout } from "async-mutex";
 import * as fs from "fs/promises";
@@ -33,24 +33,136 @@ export const writeMutex = withTimeout(new Mutex(), 10000, WRITE_TIMEOUT_ERROR);
 const GIT_OP_TIMEOUT_MS = Number(process.env.SCHIST_GIT_OP_TIMEOUT_MS) || 30000;
 const GIT_COMMIT_TIMEOUT_MS = Number(process.env.SCHIST_GIT_COMMIT_TIMEOUT_MS) || 120000;
 
-async function git(vaultRoot: string, args: string[], timeoutMs: number = GIT_OP_TIMEOUT_MS): Promise<string> {
+function isGitTimeout(e: unknown): boolean {
+  return e !== null && typeof e === "object" && (e as { error?: unknown }).error === "GIT_TIMEOUT";
+}
+
+/**
+ * `--end-of-options` (which stops git parsing later args as flags) was only
+ * added in git 2.24. On an HPC login node the user lands on a different host
+ * each session with whatever git module happens to be loaded — possibly an
+ * ancient system git — and `git checkout` is STRICT about unknown options, so
+ * an unconditional `--end-of-options` would break EVERY write with a cryptic
+ * "unknown option 'end-of-options'". We therefore gate the flag on the
+ * runtime git version and treat any parse failure / unknown version as OLD
+ * (omit the flag) — the safe default.
+ *
+ * The flag is only ever belt-and-suspenders: the guards that actually prevent
+ * option injection work on every git version and stay UNCONDITIONAL —
+ * `assertValidWriteBranch` (check-ref-format --branch + leading-dash reject)
+ * rejects option-like branch names, and the trailing `--` pathspec separator
+ * (universal, ancient) is kept on the checkout/add/rm calls. So on old git we
+ * degrade to "validation + trailing `--`"; on git ≥2.24 we keep the full
+ * hardening.
+ */
+export function parseGitMajorMinor(versionOutput: string): [number, number] | null {
+  // e.g. "git version 2.50.1 (Apple Git-155)" → [2, 50]
+  const m = /(\d+)\.(\d+)/.exec(versionOutput);
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2])];
+}
+
+// undefined = not yet detected; null = detected-but-unknown (treated as old).
+let gitVersionCache: [number, number] | null | undefined = undefined;
+
+/** Detect the runtime git major.minor once and cache it for the process. */
+async function getGitMajorMinor(): Promise<[number, number] | null> {
+  if (gitVersionCache !== undefined) return gitVersionCache;
   try {
-    const { stdout } = await execFile("git", args, { cwd: vaultRoot, timeout: timeoutMs });
-    return stdout.trim();
-  } catch (e: unknown) {
-    // execFile kills the child with SIGTERM on timeout and rejects with
-    // killed=true. Surface a typed, actionable error instead of a raw
-    // "Command failed" so the caller can distinguish a hang from a git error.
-    if (e !== null && typeof e === "object" && (e as { killed?: boolean }).killed) {
-      throw Object.assign(
-        new Error(
-          `git ${args[0]} timed out after ${timeoutMs}ms — the post-commit hook / schist-ingest may be stalled`,
-        ),
-        { error: "GIT_TIMEOUT" },
-      );
-    }
-    throw e;
+    const { stdout } = await execFile("git", ["--version"], { timeout: GIT_OP_TIMEOUT_MS });
+    gitVersionCache = parseGitMajorMinor(stdout);
+  } catch {
+    gitVersionCache = null; // git --version failed → assume old, omit the flag
   }
+  return gitVersionCache;
+}
+
+/**
+ * `["--end-of-options"]` when the runtime git is ≥2.24, otherwise `[]`.
+ * Spread into git argv immediately before the branch-name operand.
+ */
+export async function endOfOptionsArgs(): Promise<string[]> {
+  const v = await getGitMajorMinor();
+  if (!v) return [];
+  const [maj, min] = v;
+  return maj > 2 || (maj === 2 && min >= 24) ? ["--end-of-options"] : [];
+}
+
+/** @internal — test-only: force or reset the cached git version. */
+export function __setGitVersionCacheForTesting(v: [number, number] | null | undefined): void {
+  gitVersionCache = v;
+}
+
+async function git(vaultRoot: string, args: string[], timeoutMs: number = GIT_OP_TIMEOUT_MS): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    // detached:true puts git in its own process group so a timeout can kill
+    // the WHOLE group. `git commit` runs the post-commit hook (sh →
+    // schist-ingest) as children; execFile's built-in timeout only SIGTERMs
+    // the git pid, leaving the hook chain orphaned and still churning after
+    // the caller was told the operation timed out (#336). Mirrors tools.ts
+    // runCommand's kill strategy.
+    const child = spawn("git", args, {
+      cwd: vaultRoot,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const killGroup = (sig: NodeJS.Signals): void => {
+      if (child.pid === undefined) return;
+      try {
+        process.kill(-child.pid, sig);
+      } catch {
+        /* group already gone */
+      }
+    };
+    const timer = setTimeout(() => {
+      killGroup("SIGTERM");
+      // Escalate in case the hook traps/ignores SIGTERM. unref'd so a dead
+      // group doesn't hold the event loop open.
+      setTimeout(() => killGroup("SIGKILL"), 500).unref();
+      // Typed, actionable error instead of a raw "Command failed" so the
+      // caller can distinguish a hang from a git error.
+      finish(() =>
+        reject(
+          Object.assign(
+            new Error(
+              `git ${args[0]} timed out after ${timeoutMs}ms — the post-commit hook / schist-ingest may be stalled`,
+            ),
+            { error: "GIT_TIMEOUT" },
+          ),
+        ),
+      );
+    }, timeoutMs);
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf-8");
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf-8");
+    });
+    child.on("error", (err) => finish(() => reject(err)));
+    child.on("close", (code, signal) => {
+      if (code === 0) {
+        finish(() => resolve(stdout.trim()));
+      } else {
+        finish(() =>
+          reject(
+            Object.assign(
+              new Error(`Command failed: git ${args.join(" ")}\n${stderr}`),
+              { code, signal, stderr },
+            ),
+          ),
+        );
+      }
+    });
+  });
 }
 
 async function getWriteBranch(vaultRoot: string): Promise<string> {
@@ -85,11 +197,43 @@ async function getWriteBranch(vaultRoot: string): Promise<string> {
   }
 }
 
-async function ensureBranch(vaultRoot: string, branch: string): Promise<void> {
+/**
+ * write_branch flows from schist.yaml straight into git argv (#331). An
+ * option-like value such as "-f" passed the old ensureBranch (`git branch -f`
+ * with no name just lists branches, exit 0) and then `git checkout -f`
+ * force-checkouts the CURRENT branch, silently discarding uncommitted vault
+ * edits. Validate with git's own rules before the value is ever used, and
+ * fail loudly naming the bad value — a misconfigured write_branch must never
+ * degrade into "write somewhere else".
+ */
+async function assertValidWriteBranch(vaultRoot: string, branch: string): Promise<void> {
+  const invalid = {
+    error: "VALIDATION_ERROR",
+    message: `write_branch ${JSON.stringify(branch)} in schist.yaml is not a valid git branch name — fix write_branch before retrying this write`,
+  };
+  // Fast-reject option-like values ourselves; belt for the case where a git
+  // version parses the value below as a flag instead of a branch name.
+  if (branch.startsWith("-")) throw invalid;
   try {
-    await git(vaultRoot, ["rev-parse", "--verify", branch]);
-  } catch {
-    await git(vaultRoot, ["branch", branch]);
+    await git(vaultRoot, ["check-ref-format", "--branch", branch]);
+  } catch (e) {
+    if (isGitTimeout(e)) throw e;
+    throw invalid;
+  }
+}
+
+async function ensureBranch(vaultRoot: string, branch: string): Promise<void> {
+  await assertValidWriteBranch(vaultRoot, branch);
+  // --end-of-options (git ≥2.24 only, see endOfOptionsArgs): even if validation
+  // were ever bypassed, an option-like name can only be read as a branch name,
+  // never as a flag (#331).
+  const eoo = await endOfOptionsArgs();
+  try {
+    await git(vaultRoot, ["rev-parse", "--verify", ...eoo, branch]);
+  } catch (e) {
+    // A hung rev-parse is not "branch missing" — don't try to create on it.
+    if (isGitTimeout(e)) throw e;
+    await git(vaultRoot, ["branch", ...eoo, branch]);
   }
 }
 
@@ -117,6 +261,44 @@ function assertPathSafe(vaultRoot: string, relPath: string): void {
  * The vault root may itself be a symlink (env vars often point at one), so both
  * sides are realpath-resolved. New-file writes (lstat ENOENT) are allowed. #119.
  */
+/**
+ * Pre-mkdir containment guard (#335). withWriteLock must mkdir the note's
+ * parent chain BEFORE assertResolvesInside can run (that guard realpaths the
+ * parent, which has to exist) — but `fs.mkdir(..., { recursive: true })`
+ * FOLLOWS symlinks, so with a symlinked ancestor (`notes` → /outside) and a
+ * write to `notes/sub/n.md` the mkdir created `/outside/sub` before the
+ * post-mkdir guard ever rejected the write. Walk up from the target dir to
+ * the deepest EXISTING ancestor, realpath it, and require it to resolve
+ * inside the vault root; only then is the recursive mkdir safe. (A dangling
+ * symlink ancestor needs no extra handling: realpath skips it as
+ * non-existing, and the recursive mkdir itself then fails with ENOTDIR
+ * without creating anything — verified on node 20.)
+ */
+async function assertExistingAncestryInside(vaultRoot: string, absDir: string): Promise<void> {
+  const realRoot = await fs.realpath(vaultRoot);
+  let probe = absDir;
+  for (;;) {
+    let real: string;
+    try {
+      real = await fs.realpath(probe);
+    } catch {
+      const parent = path.dirname(probe);
+      if (parent === probe) {
+        // Ran out of ancestors without resolving one — containment can't be
+        // proven, so refuse. Unreachable in practice: assertPathSafe already
+        // pinned absDir lexically inside vaultRoot, which exists.
+        throw { error: "PATH_TRAVERSAL", message: "Cannot resolve any existing ancestor of the write path" };
+      }
+      probe = parent;
+      continue;
+    }
+    if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
+      throw { error: "PATH_TRAVERSAL", message: "Write path ancestor resolves outside vault root (symlinked dir?)" };
+    }
+    return;
+  }
+}
+
 async function assertResolvesInside(vaultRoot: string, relPath: string): Promise<void> {
   const realRoot = await fs.realpath(vaultRoot);
   const absPath = path.resolve(vaultRoot, relPath);
@@ -146,6 +328,13 @@ export type WriteResult = {
    */
   commitSha: string;
   committed: boolean;
+  /**
+   * Present when the commit LANDED but `git commit` was killed by
+   * GIT_COMMIT_TIMEOUT_MS while the synchronous post-commit hook
+   * (schist-ingest) was still running (#336). The write itself succeeded —
+   * only the index refresh may lag or need a re-ingest.
+   */
+  commitWarning?: string;
 };
 
 /**
@@ -183,9 +372,18 @@ async function withWriteLock(
   try {
     const branch = await getWriteBranch(vaultRoot);
     await ensureBranch(vaultRoot, branch);
-    await git(vaultRoot, ["checkout", branch]);
+    // Trailing "--": force the branch reading even if a file shares the name
+    // (universal, ancient). --end-of-options (git ≥2.24 only): an option-like
+    // branch can never be parsed as a flag — defense-in-depth behind
+    // assertValidWriteBranch (#331).
+    await git(vaultRoot, ["checkout", ...(await endOfOptionsArgs()), branch, "--"]);
 
     const absPath = path.resolve(vaultRoot, relPath);
+    // Containment check on the deepest EXISTING ancestor BEFORE mkdir — the
+    // recursive mkdir follows symlinked ancestors and would otherwise create
+    // real directories outside the vault for a write that the post-mkdir
+    // guard below is about to reject (#335).
+    await assertExistingAncestryInside(vaultRoot, path.dirname(absPath));
     await fs.mkdir(path.dirname(absPath), { recursive: true });
     // Authoritative symlink/containment guard, post-checkout — the only point
     // where on-disk symlink state matches the write branch (see
@@ -197,7 +395,7 @@ async function withWriteLock(
     await assertResolvesInside(vaultRoot, relPath);
     await fn(absPath);
 
-    await git(vaultRoot, ["add", relPath]);
+    await git(vaultRoot, ["add", "--", relPath]);
 
     // Dedup: skip commit if staged content matches HEAD. `git diff --cached
     // --quiet` exits 0 when there is no staged diff, 1 when there is. execFile
@@ -226,9 +424,45 @@ async function withWriteLock(
 
     // NEVER --no-verify — hard coded out. Larger timeout: commit runs the
     // synchronous post-commit ingest hook.
-    await git(vaultRoot, ["commit", "-m", commitMessage], GIT_COMMIT_TIMEOUT_MS);
+    //
+    // git updates the ref BEFORE running post-commit, so a timeout that fires
+    // during a slow hook kills a commit that already LANDED; reporting that
+    // as GIT_TIMEOUT tells the caller the write failed when it's on the
+    // branch (#336). Capture HEAD first and re-check it on timeout.
+    let preCommitHead: string | null = null;
+    try {
+      preCommitHead = await git(vaultRoot, ["rev-parse", "HEAD"]);
+    } catch {
+      // Unborn branch — any resolvable post-timeout HEAD means the commit landed.
+    }
+    let commitWarning: string | undefined;
+    try {
+      await git(vaultRoot, ["commit", "-m", commitMessage], GIT_COMMIT_TIMEOUT_MS);
+    } catch (e) {
+      if (!isGitTimeout(e)) throw e;
+      let headNow: string | null = null;
+      try {
+        headNow = await git(vaultRoot, ["rev-parse", "HEAD"]);
+      } catch {
+        // Still unborn / unreadable — treat as "commit did not land".
+      }
+      // A rev-parse FAILURE here (headNow === null) is deliberately treated as
+      // "did not land" — the conservative direction: we rethrow GIT_TIMEOUT
+      // rather than claim success we can't confirm. The false-negative (commit
+      // actually landed but HEAD was momentarily unreadable) is harmless for
+      // writeNote: a retry re-stages identical content and withWriteLock's
+      // dedup path returns committed:false without churning history.
+      if (headNow === null || headNow === preCommitHead) throw e;
+      commitWarning =
+        "committed; post-commit ingest still running or timed out — the index may lag this write until the next ingest";
+    }
     const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
-    return { path: relPath, commitSha: sha, committed: true };
+    return {
+      path: relPath,
+      commitSha: sha,
+      committed: true,
+      ...(commitWarning !== undefined ? { commitWarning } : {}),
+    };
   } finally {
     release();
   }
@@ -367,7 +601,9 @@ export async function deleteNote(
   try {
     const branch = await getWriteBranch(vaultRoot);
     await ensureBranch(vaultRoot, branch);
-    await git(vaultRoot, ["checkout", branch]);
+    // Same option-injection hardening as withWriteLock (#331); --end-of-options
+    // is git ≥2.24-gated, the trailing "--" is universal.
+    await git(vaultRoot, ["checkout", ...(await endOfOptionsArgs()), branch, "--"]);
 
     try {
       await git(vaultRoot, ["rm", "--quiet", "--", relPath]);
@@ -386,13 +622,49 @@ export async function deleteNote(
       // NEVER --no-verify — hard coded out (mirrors withWriteLock). Commit
       // runs the synchronous post-commit ingest hook, so it needs the larger
       // ceiling — the 30s default killed deletes on large vaults (#324).
-      await git(
-        vaultRoot,
-        ["commit", "-m", `feat(schist): delete ${title} — ${attribution(owner)}`],
-        GIT_COMMIT_TIMEOUT_MS,
-      );
+      //
+      // As in withWriteLock: the ref moves BEFORE post-commit runs, so a
+      // timeout during a slow hook can kill a commit that already landed.
+      // Without the HEAD re-check, that case fell through to the rollback
+      // below, whose `git restore --source=HEAD -- <path>` referenced the NEW
+      // HEAD (which no longer has the path), failed, and was swallowed —
+      // while the caller was told the delete failed (#336). Now the rollback
+      // only runs when the commit genuinely did not land, which is exactly
+      // when `--source=HEAD` is correct.
+      const preCommitHead = await git(vaultRoot, ["rev-parse", "HEAD"]);
+      let commitWarning: string | undefined;
+      try {
+        await git(
+          vaultRoot,
+          ["commit", "-m", `feat(schist): delete ${title} — ${attribution(owner)}`],
+          GIT_COMMIT_TIMEOUT_MS,
+        );
+      } catch (e) {
+        if (!isGitTimeout(e)) throw e;
+        let headNow: string | null = null;
+        try {
+          headNow = await git(vaultRoot, ["rev-parse", "HEAD"]);
+        } catch {
+          // Unreadable HEAD — treat as "commit did not land"; outer rollback runs.
+        }
+        // A rev-parse FAILURE here (headNow === null) is deliberately treated
+        // as "did not land" — the conservative direction: rethrow GIT_TIMEOUT
+        // and run the rollback rather than claim a success we can't confirm.
+        // The false-negative (delete actually committed but HEAD was
+        // momentarily unreadable) self-corrects: a retried deleteNote hits
+        // `git rm` on a now-untracked path and fails fast rather than
+        // double-deleting.
+        if (headNow === null || headNow === preCommitHead) throw e;
+        commitWarning =
+          "committed; post-commit ingest still running or timed out — the index may lag this delete until the next ingest";
+      }
       const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
-      return { path: relPath, commitSha: sha, committed: true };
+      return {
+        path: relPath,
+        commitSha: sha,
+        committed: true,
+        ...(commitWarning !== undefined ? { commitWarning } : {}),
+      };
     } catch (e) {
       // Roll back ONLY the paths this delete touched (the removed note + any
       // repaired linkers), NOT the whole tree. A `git reset --hard HEAD` here
