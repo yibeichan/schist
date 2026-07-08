@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 from pathlib import Path
 
 import frontmatter
@@ -243,10 +244,20 @@ def _string_or_none(value) -> str | None:
 
 def _int_or_none(value) -> int | None:
     # bool is an int subclass: `year: true` must coerce to NULL, not store 1.
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    if isinstance(value, str) and value.isdigit():
-        return int(value)
+    if isinstance(value, bool):
+        return None
+    # isdecimal, NOT isdigit: superscripts like "²" are isdigit()-True but
+    # int() rejects them (ValueError aborted the whole rebuild pre-#351);
+    # isdecimal() is False for them and True for exactly the digits int()
+    # parses (including e.g. Arabic-Indic "٢٠٢٠").
+    if isinstance(value, str) and value.isdecimal():
+        value = int(value)
+    if isinstance(value, int):
+        # SQLite INTEGER is signed 64-bit; a wider Python int raises
+        # OverflowError at bind time, which would savepoint-drop the WHOLE
+        # note — coerce out-of-range values to NULL like every other
+        # invalid year instead.
+        return value if -(2**63) <= value < 2**63 else None
     return None
 
 
@@ -352,9 +363,32 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
 
     conn.executescript(schema_path.read_text())
 
+    # All data INSERTs run in ONE explicit transaction (see the docstring
+    # above: rollback-on-failure + _run_ingest's partial-DB unlink). The
+    # explicit BEGIN matters now that each file opens a SAVEPOINT: a
+    # savepoint issued in autocommit mode starts its own transaction, so
+    # its RELEASE would COMMIT after every file instead of nesting.
+    conn.execute('BEGIN')
+
     doc_count = 0
     concept_count = 0
     edge_count = 0
+    # WARN-skipped files (surfaced in the summary line). WARNs themselves go
+    # to STDERR: every agent-driven ingest channel discards stdout
+    # (triggerIngestion spawns with stdio "ignore", runIngestSync pipes only
+    # stderr, the post-commit hook's stdout is dropped by git-writer), so a
+    # stdout-only WARN vanishes without trace.
+    skipped_count = 0
+
+    # rglob('*.md') follows symlinks — a *.md FILE symlink is yielded on
+    # every Python version, and on 3.12 patch releases predating the glob
+    # reimplementation backport rglob also RECURSES INTO symlinked
+    # directories (project floor is >=3.12, any patch) — so anything whose
+    # real path escapes the vault would be indexed (#342). is_symlink()
+    # alone can't catch the symlinked-dir case (files inside it are not
+    # themselves symlinks), hence the containment check on the resolved
+    # path.
+    vault_real = vault.resolve()
 
     for md_file in sorted(vault.rglob('*.md')):
         rel = md_file.relative_to(vault)
@@ -363,167 +397,228 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
             continue
 
         try:
+            resolved = md_file.resolve()
+        except OSError as e:
+            print(f'  WARN: skipping {rel} — unresolvable path: {e}', file=sys.stderr)
+            skipped_count += 1
+            continue
+        if not resolved.is_relative_to(vault_real):
+            print(f'  WARN: skipping {rel} — resolves outside the vault (symlink)', file=sys.stderr)
+            skipped_count += 1
+            continue
+        # The SKIP_DIRS filter above checks the symlink's OWN path, so a
+        # symlink like notes/leak.md -> ../.git/config would pass both it and
+        # the containment check while exposing excluded content (e.g. remote
+        # URLs with credentials) to the index — re-check the RESOLVED path.
+        if any(part in SKIP_DIRS for part in resolved.relative_to(vault_real).parts):
+            print(f'  WARN: skipping {rel} — resolves into an excluded directory (symlink)', file=sys.stderr)
+            skipped_count += 1
+            continue
+
+        # One SAVEPOINT per file (#351): any exception past this point —
+        # read, YAML parse, type-guarding, sqlite binding, paper/concept/
+        # edge processing — rolls back just this file's writes and the loop
+        # moves on. Previously only the read+parse phase was guarded, so an
+        # INSERT-phase exception rolled back the single transaction and
+        # _run_ingest deleted the partial DB: one bad note = a vault-wide
+        # read outage (#296 family).
+        conn.execute('SAVEPOINT file_sp')
+        try:
             raw_text = md_file.read_text(encoding='utf-8')
             patched_text = patch_frontmatter_flow_hashtags(raw_text)
             post = frontmatter.loads(patched_text)
-        except UnicodeDecodeError as e:
-            # A single non-UTF-8 .md file (binary attachment, non-UTF-8 editor,
-            # corruption) must never abort the whole index — that leaves the
-            # vault in a permanent read outage until the file is removed (#296).
-            print(f'  WARN: skipping {rel} — invalid UTF-8: {e}')
-            continue
-        except Exception as e:
-            print(f'  WARN: skipping {rel} — {type(e).__name__}: {e}')
-            continue
-        meta = post.metadata
-        body = post.content
+            meta = post.metadata
+            body = post.content
 
-        # Frontmatter reads (here and in paper_metadata_from_frontmatter) must
-        # stay literal meta.get('<field>') / verification.get('<field>')
-        # expressions in THIS file — cli/tests/test_frontmatter_contract.py
-        # scans this source to pin the read set to
-        # schema/frontmatter-contract.json, and indirect or variable-key reads
-        # evade that check. Update the contract when adding a field here.
+            # Per-file counters, folded into the totals only after RELEASE —
+            # a rolled-back file must not inflate the printed counts.
+            file_concepts = 0
+            file_edges = 0
 
-        # Normalize tags: strip # prefix
-        raw_tags = meta.get('tags', [])
-        if isinstance(raw_tags, list):
-            tags = [
-                tag
-                for t in raw_tags
-                if isinstance(t, str) and (tag := _normalize_tag(t))
-            ]
-        else:
-            tags = []
+            # Frontmatter reads (here and in paper_metadata_from_frontmatter) must
+            # stay literal meta.get('<field>') / verification.get('<field>')
+            # expressions in THIS file — cli/tests/test_frontmatter_contract.py
+            # scans this source to pin the read set to
+            # schema/frontmatter-contract.json, and indirect or variable-key reads
+            # evade that check. Update the contract when adding a field here.
 
-        tags_json = json.dumps(tags) if tags else None
+            # Normalize tags: strip # prefix
+            raw_tags = meta.get('tags', [])
+            if isinstance(raw_tags, list):
+                tags = [
+                    tag
+                    for t in raw_tags
+                    if isinstance(t, str) and (tag := _normalize_tag(t))
+                ]
+            else:
+                tags = []
 
-        # Concepts from frontmatter
-        raw_concepts = meta.get('concepts', [])
-        if isinstance(raw_concepts, list):
-            concepts = [
-                _normalize_concept_slug(c)
-                for c in raw_concepts
-                if isinstance(c, str) and c.strip()
-            ]
-        else:
-            concepts = []
-        concepts_json = json.dumps(concepts) if concepts else None
+            tags_json = json.dumps(tags) if tags else None
 
-        # Scope: explicit frontmatter > directory path > 'global'
-        raw_scope = meta.get('scope')
-        if isinstance(raw_scope, str) and raw_scope:
-            scope = raw_scope
-        elif len(rel.parts) > 1:
-            scope = rel.parent.as_posix()
-        else:
-            scope = 'global'
+            # Concepts from frontmatter
+            raw_concepts = meta.get('concepts', [])
+            if isinstance(raw_concepts, list):
+                concepts = [
+                    _normalize_concept_slug(c)
+                    for c in raw_concepts
+                    if isinstance(c, str) and c.strip()
+                ]
+            else:
+                concepts = []
+            concepts_json = json.dumps(concepts) if concepts else None
 
-        # Source: from frontmatter, defaults to None
-        raw_source = meta.get('source')
-        source = raw_source if raw_source in {"human", "agent"} else None
+            # Scope: explicit frontmatter > directory path > 'global'
+            raw_scope = meta.get('scope')
+            if isinstance(raw_scope, str) and raw_scope:
+                scope = raw_scope
+            elif len(rel.parts) > 1:
+                scope = rel.parent.as_posix()
+            else:
+                scope = 'global'
 
-        # Confidence: from frontmatter, validated against enum.
-        # NULL when not declared — distinguishes "agent didn't say" from
-        # "agent said medium" (don't default to medium here, see issue #69).
-        raw_confidence = meta.get('confidence')
-        confidence = raw_confidence if raw_confidence in {"low", "medium", "high"} else None
-        raw_file_ref = meta.get('file_ref')
-        file_ref = raw_file_ref if isinstance(raw_file_ref, str) and raw_file_ref else None
+            # Source: from frontmatter, defaults to None
+            raw_source = meta.get('source')
+            source = raw_source if raw_source in {"human", "agent"} else None
 
-        doc_id = str(rel)
+            # Confidence: from frontmatter, validated against enum.
+            # NULL when not declared — distinguishes "agent didn't say" from
+            # "agent said medium" (don't default to medium here, see issue #69).
+            raw_confidence = meta.get('confidence')
+            confidence = raw_confidence if raw_confidence in {"low", "medium", "high"} else None
+            raw_file_ref = meta.get('file_ref')
+            file_ref = raw_file_ref if isinstance(raw_file_ref, str) and raw_file_ref else None
 
-        # Determine if this is a concept file (in concepts/ dir or has 'concept' key)
-        is_concept = 'concept' in meta or (rel.parts[0] == 'concepts' if len(rel.parts) > 1 else False)
+            doc_id = str(rel)
 
-        # Title: explicit title > topic > concept key > derive from filename.
-        # Each candidate must be a NON-EMPTY STRING to be picked: a truthy
-        # non-string (title: [a, b], title: {k: v}) previously flowed into the
-        # docs INSERT and aborted the ENTIRE rebuild with a sqlite3 binding
-        # error — one bad note must never take down the index (#296 family) —
-        # while title: 42 landed with native affinity like the status case
-        # (#278). Non-string candidates fall through the chain instead.
-        title = next(
-            (
-                v
-                for v in (meta.get('title'), meta.get('topic'), meta.get('concept'))
-                if isinstance(v, str) and v
-            ),
-            title_from_filename(rel.name),
-        )
+            # Determine if this is a concept file (in concepts/ dir or has 'concept' key)
+            is_concept = 'concept' in meta or (rel.parts[0] == 'concepts' if len(rel.parts) > 1 else False)
 
-        # Status: type-guard like every other scalar field above. A non-string
-        # value (status: 42, status: true, status: [draft]) would otherwise be
-        # stored with SQLite's native affinity, so `WHERE status = 'draft'`
-        # silently misses it and TS readers treating status as string break.
-        # (#278; distinct from #276 which validates the string against
-        # config.statuses in create_note.)
-        raw_status = meta.get('status')
-        status = raw_status if isinstance(raw_status, str) else None
-
-        # Insert into docs
-        date_val = meta.get('date')
-        if date_val is not None:
-            date_val = str(date_val)
-        conn.execute(
-            'INSERT INTO docs (id, title, date, status, tags, concepts, body, scope, source, confidence, file_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (doc_id, title, date_val, status, tags_json, concepts_json, body, scope, source, confidence, file_ref),
-        )
-        doc_count += 1
-
-        paper_row = paper_metadata_from_frontmatter(meta, rel)
-        if paper_row is not None:
-            conn.execute(
-                """
-                INSERT INTO paper_metadata (
-                    doc_id, authors, year, venue, paper_type, doi, arxiv_id,
-                    pubmed_pmid, bibtex_key, verified, verified_by,
-                    verified_date, verification_sources, url
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (doc_id, *paper_row),
+            # Title: explicit title > topic > concept key > derive from filename.
+            # Each candidate must be a NON-EMPTY STRING to be picked: a truthy
+            # non-string (title: [a, b], title: {k: v}) previously flowed into the
+            # docs INSERT and aborted the ENTIRE rebuild with a sqlite3 binding
+            # error — one bad note must never take down the index (#296 family) —
+            # while title: 42 landed with native affinity like the status case
+            # (#278). Non-string candidates fall through the chain instead.
+            title = next(
+                (
+                    v
+                    for v in (meta.get('title'), meta.get('topic'), meta.get('concept'))
+                    if isinstance(v, str) and v
+                ),
+                title_from_filename(rel.name),
             )
 
-        # Insert concept record if this is a concept file
-        concept_slug = None
-        if is_concept:
-            slug = meta.get('concept', rel.stem)
-            slug = _normalize_concept_slug(slug if isinstance(slug, str) else rel.stem)
-            concept_slug = slug
-            desc = body.split('\n\n')[0].strip() if body else None
-            concept_tags = json.dumps(tags) if tags else None
-            conn.execute(
-                'INSERT OR IGNORE INTO concepts (slug, title, description, tags) VALUES (?, ?, ?, ?)',
-                (slug, title, desc, concept_tags),
-            )
-            concept_count += 1
+            # Status: type-guard like every other scalar field above. A non-string
+            # value (status: 42, status: true, status: [draft]) would otherwise be
+            # stored with SQLite's native affinity, so `WHERE status = 'draft'`
+            # silently misses it and TS readers treating status as string break.
+            # (#278; distinct from #276 which validates the string against
+            # config.statuses in create_note.)
+            raw_status = meta.get('status')
+            status = raw_status if isinstance(raw_status, str) else None
 
-        # Also insert concepts referenced in frontmatter
-        for c in concepts:
+            # Insert into docs
+            date_val = meta.get('date')
+            if date_val is not None:
+                date_val = str(date_val)
             conn.execute(
-                'INSERT OR IGNORE INTO concepts (slug, title) VALUES (?, ?)',
-                (c, c.replace('-', ' ').title()),
+                'INSERT INTO docs (id, title, date, status, tags, concepts, body, scope, source, confidence, file_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (doc_id, title, date_val, status, tags_json, concepts_json, body, scope, source, confidence, file_ref),
             )
-            # Don't double-count if already counted above
-            if not (is_concept and concept_slug is not None and c == concept_slug):
-                concept_count += 1
-            if not is_concept:
-                result = conn.execute(
-                    'INSERT OR IGNORE INTO edges (source, target, type, context) VALUES (?, ?, ?, ?)',
-                    (doc_id, c, 'references', None),
-                )
-                edge_count += result.rowcount
 
-        # Parse and insert edges
-        for edge in parse_connections(body):
-            try:
+            paper_row = paper_metadata_from_frontmatter(meta, rel)
+            if paper_row is not None:
                 conn.execute(
-                    'INSERT OR IGNORE INTO edges (source, target, type, context) VALUES (?, ?, ?, ?)',
-                    (doc_id, edge['target'], edge['type'], edge['context']),
+                    """
+                    INSERT INTO paper_metadata (
+                        doc_id, authors, year, venue, paper_type, doi, arxiv_id,
+                        pubmed_pmid, bibtex_key, verified, verified_by,
+                        verified_date, verification_sources, url
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (doc_id, *paper_row),
                 )
-                edge_count += 1
-            except sqlite3.IntegrityError:
-                pass
+
+            # Insert concept record if this is a concept file
+            concept_slug = None
+            if is_concept:
+                slug = meta.get('concept', rel.stem)
+                slug = _normalize_concept_slug(slug if isinstance(slug, str) else rel.stem)
+                concept_slug = slug
+                desc = body.split('\n\n')[0].strip() if body else None
+                concept_tags = json.dumps(tags) if tags else None
+                conn.execute(
+                    'INSERT OR IGNORE INTO concepts (slug, title, description, tags) VALUES (?, ?, ?, ?)',
+                    (slug, title, desc, concept_tags),
+                )
+                file_concepts += 1
+
+            # Also insert concepts referenced in frontmatter
+            for c in concepts:
+                conn.execute(
+                    'INSERT OR IGNORE INTO concepts (slug, title) VALUES (?, ?)',
+                    (c, c.replace('-', ' ').title()),
+                )
+                # Don't double-count if already counted above
+                if not (is_concept and concept_slug is not None and c == concept_slug):
+                    file_concepts += 1
+                if not is_concept:
+                    result = conn.execute(
+                        'INSERT OR IGNORE INTO edges (source, target, type, context) VALUES (?, ?, ?, ?)',
+                        (doc_id, c, 'references', None),
+                    )
+                    file_edges += result.rowcount
+
+            # Parse and insert edges
+            for edge in parse_connections(body):
+                try:
+                    conn.execute(
+                        'INSERT OR IGNORE INTO edges (source, target, type, context) VALUES (?, ?, ?, ?)',
+                        (doc_id, edge['target'], edge['type'], edge['context']),
+                    )
+                    file_edges += 1
+                except sqlite3.IntegrityError:
+                    pass
+
+            conn.execute('RELEASE SAVEPOINT file_sp')
+            doc_count += 1
+            concept_count += file_concepts
+            edge_count += file_edges
+        except Exception as e:
+            # Only CONTENT-shaped failures may be skipped per-file: bad
+            # YAML, invalid UTF-8 (#296 — a single corrupt note must never
+            # leave the vault in a permanent read outage), type/binding
+            # errors (ValueError/OverflowError/InterfaceError), constraint
+            # violations (IntegrityError), and unsupported-type binds
+            # (ProgrammingError on 3.12+, InterfaceError historically).
+            # ENVIRONMENTAL DB failures (disk full, I/O error, corruption —
+            # OperationalError and the rest of the DatabaseError family)
+            # must fail LOUD instead: WARN-skipping them would stamp a
+            # mostly-empty index as complete (user_version set), and
+            # readers would serve that truncation as authoritative long
+            # after the disk recovers. Re-raising keeps the pre-existing
+            # fail-and-unlink path in _run_ingest. This also keeps
+            # SQLITE_FULL/IOERR-class errors — whose automatic rollback can
+            # destroy the savepoint — away from the ROLLBACK below.
+            if isinstance(e, sqlite3.DatabaseError) and not isinstance(
+                e, (sqlite3.IntegrityError, sqlite3.ProgrammingError)
+            ):
+                raise
+            try:
+                conn.execute('ROLLBACK TO SAVEPOINT file_sp')
+                conn.execute('RELEASE SAVEPOINT file_sp')
+            except sqlite3.Error:
+                # The failure already destroyed the savepoint (automatic
+                # rollback). The transaction is gone; propagate the ORIGINAL
+                # error — not the cleanup's — so _run_ingest unlinks the DB.
+                raise e
+            if isinstance(e, UnicodeDecodeError):
+                print(f'  WARN: skipping {rel} — invalid UTF-8: {e}', file=sys.stderr)
+            else:
+                print(f'  WARN: skipping {rel} — {type(e).__name__}: {e}', file=sys.stderr)
+            skipped_count += 1
+            continue
 
     conn.execute(
         """
@@ -541,7 +636,10 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     # guarantees an int lands in the statement.
     conn.execute(f'PRAGMA user_version = {INDEX_SCHEMA_VERSION:d}')
     conn.commit()
-    print(f'Ingested: {doc_count} docs, {concept_count} concepts, {edge_count} edges')
+    summary = f'Ingested: {doc_count} docs, {concept_count} concepts, {edge_count} edges'
+    if skipped_count:
+        summary += f' ({skipped_count} skipped)'
+    print(summary)
 
 
 def main() -> None:
