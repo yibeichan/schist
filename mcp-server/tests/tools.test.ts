@@ -8,6 +8,7 @@ import { promisify } from "util";
 import { load as yamlLoadSync } from "js-yaml";
 import { loadVaultConfig, create_note, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, DEFAULT_DIRECTORIES_FALLBACK } from "../src/tools.js";
 import Database from "better-sqlite3";
+import { INDEX_SCHEMA_VERSION } from "../src/sqlite-reader.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -158,6 +159,11 @@ async function seedEdgesDb(vault: string, edges: Array<{ source: string; target:
   `);
   const ins = db.prepare("INSERT INTO edges (source, target, type) VALUES (?, ?, ?)");
   for (const e of edges) ins.run(e.source, e.target, e.type);
+  // Stamp the completed-index marker: these vaults carry a schist.yaml, so
+  // the reader's drift check engages, and an unstamped DB with an empty docs
+  // table is indistinguishable from a SIGKILLed ingest — which now heals via
+  // rebuild (#350) and would wipe the hand-seeded edges.
+  db.pragma(`user_version = ${INDEX_SCHEMA_VERSION}`);
   db.close();
 }
 

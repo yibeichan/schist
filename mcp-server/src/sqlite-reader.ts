@@ -373,7 +373,13 @@ function ensureSchemaCurrent(vaultRoot: string): void {
   //   - `user_version` is non-zero but not INDEX_SCHEMA_VERSION (#130 D3):
   //     the DB was completed by a different schema.sql generation. 0 is
   //     exempt — it means an ingest is in flight or the DB predates the
-  //     #244 marker.
+  //     #244 marker — UNLESS docs is also empty (#350): a SIGKILL during
+  //     ingest commits the schema (executescript auto-commits) but rolls
+  //     back the data transaction AND the version stamp, leaving valid
+  //     empty tables at user_version=0 that every other check accepts.
+  //     Mirrors Python get_db's disambiguation (cli/schist/sqlite_query.py,
+  //     #244): version 0 + empty docs = ingest never completed → rebuild;
+  //     version 0 + rows = genuine pre-marker DB → leave it alone.
   const checkMissing = (): string[] => {
     try {
       const db = new Database(dbPath, { readonly: true });
@@ -398,6 +404,17 @@ function ensureSchemaCurrent(vaultRoot: string): void {
         const version = db.pragma("user_version", { simple: true }) as number;
         if (version !== 0 && version !== INDEX_SCHEMA_VERSION) {
           missing.push(`user_version:${version} (expected ${INDEX_SCHEMA_VERSION})`);
+        } else if (version === 0 && tables.has("docs")) {
+          // #350 SIGKILL-artifact disambiguation. Gated on the docs table
+          // existing: if it's missing, the requiredTables check above has
+          // already flagged the DB, and probing it here would throw into the
+          // out-of-scope catch below, masking that finding.
+          const hasRows = db
+            .prepare("SELECT EXISTS(SELECT 1 FROM docs) AS present")
+            .get() as { present: number };
+          if (!hasRows.present) {
+            missing.push("user_version:0 with empty docs (ingest never completed)");
+          }
         }
         return missing;
       } finally {
