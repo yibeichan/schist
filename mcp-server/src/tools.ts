@@ -6,7 +6,7 @@ import { spawn } from "child_process";
 import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote, updateNote, deleteNote } from "./git-writer.js";
-import { buildNote, buildConnectionLine, parseNote, CONNECTION_RE, SLUG_WS_CHARS } from "./markdown-parser.js";
+import { buildNote, buildConnectionLine, parseNote, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
 import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse, ComposeBriefResponse, Note, SearchResult } from "./types.js";
@@ -1272,15 +1272,16 @@ export async function get_note(
 /**
  * #317: validate the connection-type vocabulary for a `## Connections`
  * section embedded in a raw body (i.e. NOT generated from structured
- * `connections`). Mirrors cli/schist/ingest.py's parse_connections filters
- * exactly, so only a line ingest would index as an edge can be rejected: it
- * must sit in the FIRST `## Connections` section, start with "- ", match
- * CONNECTION_RE, and not be a bracket reference. Everything else is skipped,
- * matching ingest's behavior for malformed lines.
+ * `connections`). Mirrors cli/schist/ingest.py's parse_connections: the same
+ * splitlines() line boundaries (splitLinesLikePython, NOT split("\n") — see
+ * #359), the same section tracking, the same CONNECTION_RE, and the same
+ * bracket-reference skip, so exactly the lines ingest would index as edges
+ * are the lines checked here. Anything else (malformed lines, non-edge lines)
+ * is skipped, matching ingest.
  */
 function validateBodyConnectionTypes(body: string, config: VaultConfig): ToolError | null {
   let inSection = false;
-  for (const rawLine of body.split("\n")) {
+  for (const rawLine of splitLinesLikePython(body)) {
     const stripped = rawLine.trim();
     if (stripped.startsWith("## Connections")) {
       inSection = true;
@@ -1685,7 +1686,12 @@ function stripConnectionsTo(content: string, targets: string[]): { content: stri
   const out: string[] = [];
   let inSection = false;
   let removed = 0;
-  for (const line of content.split("\n")) {
+  // splitLinesLikePython (not split("\n")): ingest indexed the edge across
+  // whatever splitlines() boundary separated it from the heading, so cascade
+  // repair must recognize the same boundaries or the dangling edge survives
+  // (#359). Reconstruction rejoins with "\n" — repair normalizes exotic line
+  // separators to LF, which is the canonical form create_note/buildNote emit.
+  for (const line of splitLinesLikePython(content)) {
     const stripped = line.trim();
     if (stripped.startsWith("## Connections")) {
       inSection = true;

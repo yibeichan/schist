@@ -429,6 +429,49 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     expect(entries).toEqual([]);
   }, 30000);
 
+  test("create_note catches a bogus type smuggled across a NEL (U+0085) separator — the split(\"\\n\") bypass (#359)", async () => {
+    // Python ingest's splitlines() breaks on U+0085, so it would index the
+    // bogus edge; the validator must split the same way or the #317 control is
+    // bypassable. `## Connections` and the edge sit on one \n-delimited line.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const res = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT, title: "NEL Smuggle",
+        body: "Text.\n\n## Connections\u0085- bogus-type: notes/x.md\n",
+      },
+      config
+    ) as { error: string; message: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toMatch(/connection type must be one of/);
+    expect(res.message).toContain('"bogus-type"');
+    const entries = await fs.readdir(path.join(vault, "notes")).catch(() => []);
+    expect(entries).toEqual([]);
+  }, 30000);
+
+  test("create_note catches a bogus edge smuggled after a valid one via CR on the same physical line (#359)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const res = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT, title: "CR Smuggle",
+        body: "## Connections\n- extends: notes/a.md\r- bogus-type: notes/b.md\n",
+      },
+      config
+    ) as { error: string; message: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toMatch(/connection type must be one of/);
+    expect(res.message).toContain('"bogus-type"');
+    const entries = await fs.readdir(path.join(vault, "notes")).catch(() => []);
+    expect(entries).toEqual([]);
+  }, 30000);
+
   test("create_note accepts a body `## Connections` section with vocabulary types; malformed and bracket lines are skipped like ingest (#317)", async () => {
     const vault = await makeTempVault();
     const config = await loadVaultConfig(vault);

@@ -33,10 +33,49 @@ export const CONNECTION_RE = new RegExp(
   `(?:${WS_CLASS}+"([^"]*)")?(?:${WS_CLASS}+—${WS_CLASS}+(.*))?$`
 );
 
+// Codepoints Python's str.splitlines() treats as line boundaries. This is a
+// STRICT SUBSET of SLUG_WS_CHARS — splitlines does NOT break on plain space,
+// tab, U+00A0, U+2000–200A, U+202F, U+205F, U+3000, or U+FEFF, and it excludes
+// U+001F — so it is defined independently here; do NOT reuse the slug class.
+// Python ingest's parse_connections iterates body.splitlines(); a TS reader
+// that split only on "\n" saw a heading + edge separated by e.g. NEL (U+0085)
+// as ONE line, so a bogus connection type smuggled across such a separator
+// bypassed the #317 vocabulary check while ingest still indexed the edge (#359).
+const LINE_BOUNDARY = new Set([
+  "\n", "\v", "\f", "\r",
+  "\u001c", "\u001d", "\u001e",
+  "\u0085", "\u2028", "\u2029",
+]);
+
+/**
+ * Split `text` on the same line boundaries as Python's str.splitlines()
+ * (NOT str.split("\n")), collapsing a CR+LF pair into a single break like
+ * splitlines does. Linear — one left-to-right index scan, no backtracking
+ * regex (see the O(n²) alternated-anchored-regex gotcha the slug code avoids).
+ * The trailing empty segment after a final boundary is dropped, matching
+ * splitlines(). Single-sourced here and imported by tools.ts so the read
+ * path (parseConnections), the write-time validator, and the delete-cascade
+ * repair all agree with ingest on where a line ends. #359.
+ */
+export function splitLinesLikePython(text: string): string[] {
+  const lines: string[] = [];
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (LINE_BOUNDARY.has(ch)) {
+      lines.push(text.slice(start, i));
+      if (ch === "\r" && text[i + 1] === "\n") i++;
+      start = i + 1;
+    }
+  }
+  if (start < text.length) lines.push(text.slice(start));
+  return lines;
+}
+
 export function parseConnections(body: string): Connection[] {
   const connections: Connection[] = [];
   let inSection = false;
-  for (const line of body.split("\n")) {
+  for (const line of splitLinesLikePython(body)) {
     const stripped = line.trim();
     if (stripped.startsWith("## Connections")) {
       inSection = true;
