@@ -373,7 +373,13 @@ function ensureSchemaCurrent(vaultRoot: string): void {
   //   - `user_version` is non-zero but not INDEX_SCHEMA_VERSION (#130 D3):
   //     the DB was completed by a different schema.sql generation. 0 is
   //     exempt — it means an ingest is in flight or the DB predates the
-  //     #244 marker.
+  //     #244 marker — UNLESS docs is also empty (#350): a SIGKILL during
+  //     ingest commits the schema (executescript auto-commits) but rolls
+  //     back the data transaction AND the version stamp, leaving valid
+  //     empty tables at user_version=0 that every other check accepts.
+  //     Mirrors Python get_db's disambiguation (cli/schist/sqlite_query.py,
+  //     #244): version 0 + empty docs = ingest never completed → rebuild;
+  //     version 0 + rows = genuine pre-marker DB → leave it alone.
   const checkMissing = (): string[] => {
     try {
       const db = new Database(dbPath, { readonly: true });
@@ -398,6 +404,17 @@ function ensureSchemaCurrent(vaultRoot: string): void {
         const version = db.pragma("user_version", { simple: true }) as number;
         if (version !== 0 && version !== INDEX_SCHEMA_VERSION) {
           missing.push(`user_version:${version} (expected ${INDEX_SCHEMA_VERSION})`);
+        } else if (version === 0 && tables.has("docs")) {
+          // #350 SIGKILL-artifact disambiguation. Gated on the docs table
+          // existing: if it's missing, the requiredTables check above has
+          // already flagged the DB, and probing it here would throw into the
+          // out-of-scope catch below, masking that finding.
+          const hasRows = db
+            .prepare("SELECT EXISTS(SELECT 1 FROM docs) AS present")
+            .get() as { present: number };
+          if (!hasRows.present) {
+            missing.push("user_version:0 with empty docs (ingest never completed)");
+          }
         }
         return missing;
       } finally {
@@ -413,7 +430,20 @@ function ensureSchemaCurrent(vaultRoot: string): void {
     return;
   }
 
-  runIngestSync(vaultRoot);
+  if (runIngestSync(vaultRoot).transientLock) {
+    // Transient write contention, not schema drift (#354 parity). The
+    // version-0 + empty-docs shape #350 heals is ALSO exactly what a reader
+    // sees mid-ingest on a same-host WAL spoke: Python ingest commits the
+    // schema first (executescript auto-commits) and the data + version stamp
+    // only at the very end, so the committed snapshot is version-0/empty
+    // until it finishes. Our rebuild then races the live writer and the
+    // spawned schist-ingest fails with SQLITE_BUSY. That is self-healing —
+    // the in-flight ingest will finish and restamp — so serve the existing
+    // DB now (results may be incomplete) rather than misframing it as fatal
+    // drift. The vault is deliberately NOT marked verified, so the next tool
+    // call re-probes once the writer releases the lock.
+    return;
+  }
 
   // Verify ingest actually fixed the staleness. Catches the deployment-skew
   // case — a newer mcp-server paired with an older installed schist-ingest:
@@ -436,7 +466,14 @@ function ensureSchemaCurrent(vaultRoot: string): void {
   verifiedVaults.add(vaultRoot);
 }
 
-function runIngestSync(vaultRoot: string): void {
+/**
+ * Rebuild the vault index by spawning schist-ingest. Returns
+ * `{ transientLock: true }` when the rebuild was skipped because the DB was
+ * locked by a concurrent writer (SQLITE_BUSY) — a self-healing condition the
+ * caller serves through rather than treats as schema drift (#354 parity).
+ * Every other failure (timeout, genuine ingest error) still throws.
+ */
+function runIngestSync(vaultRoot: string): { transientLock: boolean } {
   // Mirrors SCHIST_INGEST_BIN handling in tools.ts:schistCliBin. Duplicated
   // here (1 line) rather than imported to avoid a tools→reader→tools cycle.
   const ingestBin = process.env.SCHIST_INGEST_BIN?.trim() || "schist-ingest";
@@ -464,12 +501,26 @@ function runIngestSync(vaultRoot: string): void {
   }
   if (res.error || res.status !== 0) {
     const stderr = (res.stderr ?? "").toString().trim();
+    // SQLITE_BUSY / "database is locked" means a concurrent writer (a live
+    // Python ingest on a same-host WAL spoke) holds the DB. That ingest
+    // owns the rebuild and will restamp on completion, so this is transient,
+    // not schema drift — mirror #354's Python get_db (warn + serve existing)
+    // instead of throwing the skew error. Only the lock case is softened.
+    const combined = `${stderr}\n${res.error?.message ?? ""}`;
+    if (/database is locked|SQLITE_BUSY/i.test(combined)) {
+      console.warn(
+        "schist: vault index busy — another writer is rebuilding it; " +
+        "results may be incomplete, retry shortly.",
+      );
+      return { transientLock: true };
+    }
     throw new Error(
       `schist-ingest failed during schema-drift rebuild: ${
         res.error?.message ?? stderr ?? `exit ${res.status}`
       }`,
     );
   }
+  return { transientLock: false };
 }
 
 function openDb(vaultRoot: string, opts?: { readonly?: boolean }): Database.Database {
