@@ -175,6 +175,12 @@ def test_setup_sparse_checkout_calls_all_carry_timeouts():
     assert len(calls) == 3, "expected sparse-checkout init/set + checkout"
     for argv, timeout in calls:
         assert timeout is not None and timeout > 0, f"{argv} ran with no timeout"
+    # #354 review: the config ops (init/set) are lock-shaped → 30s; the final
+    # `git checkout` materializes the whole scope worktree (bulk I/O) → the
+    # 120s clone/commit ceiling, so a large NFS/Lustre vault doesn't fail it.
+    by_op = {argv[1]: timeout for argv, timeout in calls}
+    assert by_op["sparse-checkout"] == 30
+    assert by_op["checkout"] == 120
 
 
 def test_setup_sparse_checkout_returns_false_on_timeout():

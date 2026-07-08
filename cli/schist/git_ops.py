@@ -91,10 +91,14 @@ def setup_sparse_checkout(vault_path: str, scope: str) -> tuple[bool, str]:
             cwd=vault_path, check=True, capture_output=True, text=True,
             timeout=30,
         )
+        # This checkout materializes the entire scope worktree — bulk I/O, not
+        # a lock-shaped op — so it gets the 120s clone/commit ceiling, not the
+        # 30s config-op ceiling above. On a large vault over NFS/Lustre 30s is
+        # a deterministic hard failure of the documented re-clone recovery.
         result = subprocess.run(
             ['git', 'checkout'],
             cwd=vault_path, capture_output=True, text=True,
-            timeout=30,
+            timeout=120,
         )
         output = result.stdout + result.stderr
         return result.returncode == 0, output.strip()

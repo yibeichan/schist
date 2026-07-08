@@ -212,6 +212,16 @@ def hooks_reinstall(args, vault_path: str, db_path: str) -> None:
         _atomic_write_hook(path, body)
         written.append(name)
 
+    # Retrofit the .schist/ ignore onto spokes initialized before #309. New
+    # spokes get this at init (_build_spoke_in_staging); existing spokes only
+    # pass through here on upgrade, so this is their catch-up path. Idempotent.
+    if (target / ".git" / "info").exists() or (target / ".git").is_dir():
+        _ensure_ignore_lines(
+            target / ".git" / "info" / "exclude",
+            [".schist/", ".schist/spoke.yaml"],
+            comment="schist runtime state + spoke config (never pushed to hub)",
+        )
+
     if written:
         print(f"Reinstalled hooks: {', '.join(written)} (template v{HOOK_VERSION})")
     for name in skipped:
@@ -1240,7 +1250,7 @@ def _rebuild_index(vault_path: str, db_path: str) -> None:
             print(f"Warning: index rebuild skipped (backup failed): {e}", file=sys.stderr)
             return
 
-    from .sqlite_query import _run_ingest
+    from .sqlite_query import _is_db_locked_error, _run_ingest
 
     try:
         _run_ingest(vault_path, db_path)
@@ -1248,6 +1258,19 @@ def _rebuild_index(vault_path: str, db_path: str) -> None:
             _preserve_side_tables(backup, db)
             _unlink_db_with_wal(backup)
     except Exception as e:
+        # A locked-DB failure means another writer created and now owns a
+        # fresh DB at db_path after we moved the old one aside. Clobbering it
+        # with the stale backup would land that writer's commit in an
+        # unlinked inode and silently vanish its completed index (#330) — the
+        # same hazard the _run_ingest unlink-skip guards. Leave the live DB
+        # (and the backup, cleared by the next rebuild) untouched.
+        if backup and backup.exists() and _is_db_locked_error(e):
+            print(
+                f"Warning: index rebuild skipped — DB busy, another writer "
+                f"owns it; last-good backup left at {backup}: {e}",
+                file=sys.stderr,
+            )
+            return
         # Restore backup so user keeps old (stale) index rather than none.
         # Remove anything the failed ingest left at the live name first so
         # its -wal can't be replayed into the restored backup.

@@ -83,6 +83,14 @@ def get_db(vault_path: str, db_path: str | None = None) -> sqlite3.Connection:
             # fall back to, still propagates.
             if not _is_db_locked_error(e) or not os.path.exists(db_path):
                 raise
+            # Don't fall through silently: an empty/stale result during
+            # contention is indistinguishable from a genuinely empty vault
+            # without this. Tells the operator to retry rather than trust it.
+            print(
+                "Warning: index busy — another writer is rebuilding it; "
+                "results may be incomplete, retry shortly.",
+                file=sys.stderr,
+            )
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row

@@ -1316,3 +1316,110 @@ class TestSchistGitignore:
         text = path.read_text()
         assert "*.swp" in text
         assert ".schist/" in text.splitlines()
+
+
+def test_rebuild_index_leaves_live_db_on_lock_contention(tmp_path, monkeypatch):
+    """#354 review (MAJOR): after _rebuild_index moves the old index to
+    backup, a concurrent writer can create and own a fresh DB at db_path. If
+    our heal ingest then loses the lock race, the stale backup must NOT be
+    restored over the live DB — doing so lands the writer's commit in an
+    unlinked inode and vanishes its index (#330)."""
+    import sqlite3
+
+    from schist import sqlite_query as sq
+    from schist import sync as sync_mod
+
+    db_path = tmp_path / "schist.db"
+    stale = sqlite3.connect(db_path)
+    stale.execute("CREATE TABLE docs (id TEXT PRIMARY KEY)")
+    stale.execute("INSERT INTO docs VALUES ('stale')")
+    stale.commit()
+    stale.close()
+
+    def _writer_b_then_lock(vault_path, dbp):
+        # Concurrent writer B lands a fresh DB at db_path...
+        b = sqlite3.connect(dbp)
+        b.execute("CREATE TABLE docs (id TEXT PRIMARY KEY)")
+        b.execute("INSERT INTO docs VALUES ('b-fresh')")
+        b.commit()
+        b.close()
+        # ...and our heal ingest loses the race with a lock.
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(sq, "_run_ingest", _writer_b_then_lock)
+
+    sync_mod._rebuild_index(str(tmp_path / "vault"), str(db_path))
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = {r[0] for r in conn.execute("SELECT id FROM docs")}
+    finally:
+        conn.close()
+
+    # Live DB untouched; stale backup was NOT restored over it.
+    assert rows == {"b-fresh"}
+
+
+def test_rebuild_index_restores_backup_on_non_lock_failure(tmp_path, monkeypatch):
+    """Complement: a genuine (non-lock) ingest failure still restores the
+    stale backup so the user keeps an index rather than none."""
+    import sqlite3
+
+    from schist import sqlite_query as sq
+    from schist import sync as sync_mod
+
+    db_path = tmp_path / "schist.db"
+    stale = sqlite3.connect(db_path)
+    stale.execute("CREATE TABLE docs (id TEXT PRIMARY KEY)")
+    stale.execute("INSERT INTO docs VALUES ('stale')")
+    stale.commit()
+    stale.close()
+
+    def _boom(vault_path, dbp):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(sq, "_run_ingest", _boom)
+
+    sync_mod._rebuild_index(str(tmp_path / "vault"), str(db_path))
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = {r[0] for r in conn.execute("SELECT id FROM docs")}
+    finally:
+        conn.close()
+
+    assert rows == {"stale"}
+
+
+def test_hooks_reinstall_retrofits_schist_exclude(tmp_path):
+    """#354 review (MAJOR): spokes initialized before #309 only pass through
+    hooks_reinstall on upgrade — that is their catch-up path for the .schist/
+    exclude, so an existing spoke stops leaking schist.db into `git add -A`."""
+    from schist.sync import hooks_reinstall
+
+    target = tmp_path / "spoke"
+    (target / ".git" / "info").mkdir(parents=True)
+    (target / ".git" / "hooks").mkdir(parents=True)
+
+    hooks_reinstall(MagicMock(force=False), str(target), str(tmp_path / "db.sqlite"))
+
+    lines = [
+        line.strip()
+        for line in (target / ".git" / "info" / "exclude").read_text().splitlines()
+    ]
+    assert ".schist/" in lines
+
+
+def test_hooks_reinstall_exclude_retrofit_idempotent(tmp_path):
+    """Re-running the upgrade path never duplicates the exclude entries."""
+    from schist.sync import hooks_reinstall
+
+    target = tmp_path / "spoke"
+    (target / ".git" / "info").mkdir(parents=True)
+    (target / ".git" / "hooks").mkdir(parents=True)
+
+    hooks_reinstall(MagicMock(force=False), str(target), str(tmp_path / "db.sqlite"))
+    hooks_reinstall(MagicMock(force=False), str(target), str(tmp_path / "db.sqlite"))
+
+    lines = (target / ".git" / "info" / "exclude").read_text().splitlines()
+    assert lines.count(".schist/") == 1
