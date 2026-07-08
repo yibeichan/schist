@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 from pathlib import Path
 
 import frontmatter
@@ -238,14 +239,20 @@ def _string_or_none(value) -> str | None:
 
 def _int_or_none(value) -> int | None:
     # bool is an int subclass: `year: true` must coerce to NULL, not store 1.
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
+    if isinstance(value, bool):
+        return None
     # isdecimal, NOT isdigit: superscripts like "²" are isdigit()-True but
     # int() rejects them (ValueError aborted the whole rebuild pre-#351);
     # isdecimal() is False for them and True for exactly the digits int()
     # parses (including e.g. Arabic-Indic "٢٠٢٠").
     if isinstance(value, str) and value.isdecimal():
-        return int(value)
+        value = int(value)
+    if isinstance(value, int):
+        # SQLite INTEGER is signed 64-bit; a wider Python int raises
+        # OverflowError at bind time, which would savepoint-drop the WHOLE
+        # note — coerce out-of-range values to NULL like every other
+        # invalid year instead.
+        return value if -(2**63) <= value < 2**63 else None
     return None
 
 
@@ -361,6 +368,12 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     doc_count = 0
     concept_count = 0
     edge_count = 0
+    # WARN-skipped files (surfaced in the summary line). WARNs themselves go
+    # to STDERR: every agent-driven ingest channel discards stdout
+    # (triggerIngestion spawns with stdio "ignore", runIngestSync pipes only
+    # stderr, the post-commit hook's stdout is dropped by git-writer), so a
+    # stdout-only WARN vanishes without trace.
+    skipped_count = 0
 
     # rglob('*.md') follows symlinks — a *.md FILE symlink is yielded on
     # every Python version, and on 3.12 patch releases predating the glob
@@ -379,12 +392,22 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
             continue
 
         try:
-            contained = md_file.resolve().is_relative_to(vault_real)
+            resolved = md_file.resolve()
         except OSError as e:
-            print(f'  WARN: skipping {rel} — unresolvable path: {e}')
+            print(f'  WARN: skipping {rel} — unresolvable path: {e}', file=sys.stderr)
+            skipped_count += 1
             continue
-        if not contained:
-            print(f'  WARN: skipping {rel} — resolves outside the vault (symlink)')
+        if not resolved.is_relative_to(vault_real):
+            print(f'  WARN: skipping {rel} — resolves outside the vault (symlink)', file=sys.stderr)
+            skipped_count += 1
+            continue
+        # The SKIP_DIRS filter above checks the symlink's OWN path, so a
+        # symlink like notes/leak.md -> ../.git/config would pass both it and
+        # the containment check while exposing excluded content (e.g. remote
+        # URLs with credentials) to the index — re-check the RESOLVED path.
+        if any(part in SKIP_DIRS for part in resolved.relative_to(vault_real).parts):
+            print(f'  WARN: skipping {rel} — resolves into an excluded directory (symlink)', file=sys.stderr)
+            skipped_count += 1
             continue
 
         # One SAVEPOINT per file (#351): any exception past this point —
@@ -557,18 +580,39 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
             doc_count += 1
             concept_count += file_concepts
             edge_count += file_edges
-        except UnicodeDecodeError as e:
-            conn.execute('ROLLBACK TO SAVEPOINT file_sp')
-            conn.execute('RELEASE SAVEPOINT file_sp')
-            # A single non-UTF-8 .md file (binary attachment, non-UTF-8 editor,
-            # corruption) must never abort the whole index — that leaves the
-            # vault in a permanent read outage until the file is removed (#296).
-            print(f'  WARN: skipping {rel} — invalid UTF-8: {e}')
-            continue
         except Exception as e:
-            conn.execute('ROLLBACK TO SAVEPOINT file_sp')
-            conn.execute('RELEASE SAVEPOINT file_sp')
-            print(f'  WARN: skipping {rel} — {type(e).__name__}: {e}')
+            # Only CONTENT-shaped failures may be skipped per-file: bad
+            # YAML, invalid UTF-8 (#296 — a single corrupt note must never
+            # leave the vault in a permanent read outage), type/binding
+            # errors (ValueError/OverflowError/InterfaceError), constraint
+            # violations (IntegrityError), and unsupported-type binds
+            # (ProgrammingError on 3.12+, InterfaceError historically).
+            # ENVIRONMENTAL DB failures (disk full, I/O error, corruption —
+            # OperationalError and the rest of the DatabaseError family)
+            # must fail LOUD instead: WARN-skipping them would stamp a
+            # mostly-empty index as complete (user_version set), and
+            # readers would serve that truncation as authoritative long
+            # after the disk recovers. Re-raising keeps the pre-existing
+            # fail-and-unlink path in _run_ingest. This also keeps
+            # SQLITE_FULL/IOERR-class errors — whose automatic rollback can
+            # destroy the savepoint — away from the ROLLBACK below.
+            if isinstance(e, sqlite3.DatabaseError) and not isinstance(
+                e, (sqlite3.IntegrityError, sqlite3.ProgrammingError)
+            ):
+                raise
+            try:
+                conn.execute('ROLLBACK TO SAVEPOINT file_sp')
+                conn.execute('RELEASE SAVEPOINT file_sp')
+            except sqlite3.Error:
+                # The failure already destroyed the savepoint (automatic
+                # rollback). The transaction is gone; propagate the ORIGINAL
+                # error — not the cleanup's — so _run_ingest unlinks the DB.
+                raise e
+            if isinstance(e, UnicodeDecodeError):
+                print(f'  WARN: skipping {rel} — invalid UTF-8: {e}', file=sys.stderr)
+            else:
+                print(f'  WARN: skipping {rel} — {type(e).__name__}: {e}', file=sys.stderr)
+            skipped_count += 1
             continue
 
     conn.execute(
@@ -587,7 +631,10 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     # guarantees an int lands in the statement.
     conn.execute(f'PRAGMA user_version = {INDEX_SCHEMA_VERSION:d}')
     conn.commit()
-    print(f'Ingested: {doc_count} docs, {concept_count} concepts, {edge_count} edges')
+    summary = f'Ingested: {doc_count} docs, {concept_count} concepts, {edge_count} edges'
+    if skipped_count:
+        summary += f' ({skipped_count} skipped)'
+    print(summary)
 
 
 def main() -> None:
