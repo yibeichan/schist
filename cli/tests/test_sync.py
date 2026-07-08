@@ -1131,3 +1131,295 @@ class TestMoveDbWithWalAtomicity:
         finally:
             conn.close()
         assert after == before  # existing index left intact, not overwritten
+
+
+# ---------------------------------------------------------------------------
+# _run_git_cleanup timeouts (#321)
+# ---------------------------------------------------------------------------
+
+
+class TestRunGitCleanupTimeout:
+    def test_cleanup_commands_carry_timeout(self):
+        from schist.sync import _run_git_cleanup
+
+        calls = []
+
+        def _record(*args, **kwargs):
+            calls.append((args[0], kwargs.get("timeout")))
+            return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=_record):
+            _run_git_cleanup("/tmp/vault", ["merge", "--abort"])
+
+        assert calls, "expected a git subprocess call"
+        for argv, timeout in calls:
+            assert timeout is not None and timeout > 0, f"{argv} ran with no timeout"
+
+    def test_timeout_returns_failed_process_not_exception(self):
+        """A stalled abort must come back as a failed CompletedProcess so the
+        callers' existing returncode/stderr handling still applies."""
+        from schist.sync import _run_git_cleanup
+
+        def _stall(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout"))
+
+        with patch("subprocess.run", side_effect=_stall):
+            result = _run_git_cleanup("/tmp/vault", ["rebase", "--abort"])
+
+        assert result.returncode != 0
+        assert "timed out" in result.stderr
+
+    def test_stalled_abort_falls_back_to_rebase_quit(self, tmp_path, capsys):
+        """The abort-times-out path must reach the existing --quit fallback
+        instead of hanging or crashing."""
+        from schist.sync import _cleanup_rebase_state
+
+        def _abort_stalls_quit_succeeds(*args, **kwargs):
+            argv = args[0]
+            if "--abort" in argv:
+                raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=_abort_stalls_quit_succeeds):
+            _cleanup_rebase_state(str(tmp_path))  # must not sys.exit
+
+
+# ---------------------------------------------------------------------------
+# sync_push error classification (#321)
+# ---------------------------------------------------------------------------
+
+
+class TestPushErrorClassification:
+    @pytest.mark.parametrize("stderr", [
+        "fatal: unable to access 'https://pi.local/vault.git/': "
+        "Could not resolve host: pi.local",
+        "ssh: connect to host pi.local port 22: Connection refused\n"
+        "fatal: Could not read from remote repository.",
+        "ssh: connect to host pi.local port 22: Operation timed out",
+        "fatal: unable to access 'https://pi.local/vault.git/': "
+        "Failed to connect to pi.local port 443: No route to host",
+        "ssh: Could not resolve hostname schist-hub: "
+        "Temporary failure in name resolution",
+    ])
+    def test_network_stderr_is_classified_unreachable(self, stderr):
+        from schist.sync import _is_network_error
+
+        assert _is_network_error(stderr) is True
+
+    @pytest.mark.parametrize("stderr", [
+        "fatal: invalid refspec ''",
+        "fatal: You are not currently on a branch.",
+        "error: src refspec main does not match any\n"
+        "error: failed to push some refs to 'pi:vault.git'",
+        "fatal: bad object HEAD",
+    ])
+    def test_local_fatal_stderr_is_not_unreachable(self, stderr):
+        """#321: `fatal:` alone is not network evidence — git stamps it on
+        purely local failures (bad refspec, detached HEAD, corruption)."""
+        from schist.sync import _is_network_error
+
+        assert _is_network_error(stderr) is False
+
+    @patch("schist.sync.git_ops.push", return_value=(False, "fatal: invalid refspec ''"))
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_local_push_failure_surfaces_real_stderr(
+        self, mock_changes, mock_unpushed, mock_push, tmp_path, capsys
+    ):
+        """A local refspec error must NOT claim 'Hub unreachable' and must put
+        git's actual stderr front and center."""
+        from schist.sync import sync_push
+
+        vault = _make_spoke(tmp_path)
+        args = MagicMock()
+        with pytest.raises(SystemExit):
+            sync_push(args, vault, "db.sqlite")
+
+        err = capsys.readouterr().err
+        assert "unreachable" not in err.lower()
+        assert "Push failed" in err
+        assert "invalid refspec" in err
+
+    @patch("schist.sync.git_ops.push",
+           return_value=(False, "ssh: connect to host pi.local port 22: Connection refused"))
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_ssh_transport_failure_still_reported_unreachable(
+        self, mock_changes, mock_unpushed, mock_push, tmp_path, capsys
+    ):
+        from schist.sync import sync_push
+
+        vault = _make_spoke(tmp_path)
+        args = MagicMock()
+        with pytest.raises(SystemExit):
+            sync_push(args, vault, "db.sqlite")
+
+        err = capsys.readouterr().err
+        assert "unreachable" in err.lower()
+        assert "Connection refused" in err
+
+
+# ---------------------------------------------------------------------------
+# .schist/ gitignore coverage (#309)
+# ---------------------------------------------------------------------------
+
+
+class TestSchistGitignore:
+    @patch("schist.sync.git_ops.clone_shallow")
+    @patch("schist.sync.git_ops.setup_sparse_checkout", return_value=(True, ""))
+    @patch("schist.sync._rebuild_index")
+    def test_spoke_exclude_covers_schist_dir(
+        self, mock_ingest, mock_sparse, mock_clone, tmp_path
+    ):
+        """#309: the spoke's .git/info/exclude must ignore the whole .schist/
+        runtime dir (SQLite index + WAL), not just spoke.yaml."""
+        from schist.sync import init_spoke
+
+        dest = str(tmp_path / "spoke")
+        args = MagicMock(hub="git@pi:vault.git", scope="research/mario",
+                         identity="cluster-mario")
+
+        def create_at_arg(hub_url, dest_path, *a, **kw):
+            Path(dest_path).mkdir(parents=True, exist_ok=True)
+            (Path(dest_path) / ".git" / "info").mkdir(parents=True)
+            return True, ""
+        mock_clone.side_effect = create_at_arg
+
+        init_spoke(args, dest, str(tmp_path / "db.sqlite"))
+
+        lines = [
+            line.strip()
+            for line in (Path(dest) / ".git" / "info" / "exclude").read_text().splitlines()
+        ]
+        assert ".schist/" in lines
+        assert ".schist/spoke.yaml" in lines
+
+    def test_ensure_ignore_lines_idempotent(self, tmp_path):
+        from schist.sync import _ensure_ignore_lines
+
+        path = tmp_path / "exclude"
+        _ensure_ignore_lines(path, [".schist/", ".schist/spoke.yaml"], comment="schist")
+        first = path.read_text()
+
+        _ensure_ignore_lines(path, [".schist/", ".schist/spoke.yaml"], comment="schist")
+
+        assert path.read_text() == first
+        assert first.splitlines().count(".schist/") == 1
+
+    def test_ensure_ignore_lines_preserves_existing_content(self, tmp_path):
+        from schist.sync import _ensure_ignore_lines
+
+        path = tmp_path / "exclude"
+        path.write_text("*.swp\n")
+        _ensure_ignore_lines(path, [".schist/"])
+
+        text = path.read_text()
+        assert "*.swp" in text
+        assert ".schist/" in text.splitlines()
+
+
+def test_rebuild_index_leaves_live_db_on_lock_contention(tmp_path, monkeypatch):
+    """#354 review (MAJOR): after _rebuild_index moves the old index to
+    backup, a concurrent writer can create and own a fresh DB at db_path. If
+    our heal ingest then loses the lock race, the stale backup must NOT be
+    restored over the live DB — doing so lands the writer's commit in an
+    unlinked inode and vanishes its index (#330)."""
+    import sqlite3
+
+    from schist import sqlite_query as sq
+    from schist import sync as sync_mod
+
+    db_path = tmp_path / "schist.db"
+    stale = sqlite3.connect(db_path)
+    stale.execute("CREATE TABLE docs (id TEXT PRIMARY KEY)")
+    stale.execute("INSERT INTO docs VALUES ('stale')")
+    stale.commit()
+    stale.close()
+
+    def _writer_b_then_lock(vault_path, dbp):
+        # Concurrent writer B lands a fresh DB at db_path...
+        b = sqlite3.connect(dbp)
+        b.execute("CREATE TABLE docs (id TEXT PRIMARY KEY)")
+        b.execute("INSERT INTO docs VALUES ('b-fresh')")
+        b.commit()
+        b.close()
+        # ...and our heal ingest loses the race with a lock.
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(sq, "_run_ingest", _writer_b_then_lock)
+
+    sync_mod._rebuild_index(str(tmp_path / "vault"), str(db_path))
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = {r[0] for r in conn.execute("SELECT id FROM docs")}
+    finally:
+        conn.close()
+
+    # Live DB untouched; stale backup was NOT restored over it.
+    assert rows == {"b-fresh"}
+
+
+def test_rebuild_index_restores_backup_on_non_lock_failure(tmp_path, monkeypatch):
+    """Complement: a genuine (non-lock) ingest failure still restores the
+    stale backup so the user keeps an index rather than none."""
+    import sqlite3
+
+    from schist import sqlite_query as sq
+    from schist import sync as sync_mod
+
+    db_path = tmp_path / "schist.db"
+    stale = sqlite3.connect(db_path)
+    stale.execute("CREATE TABLE docs (id TEXT PRIMARY KEY)")
+    stale.execute("INSERT INTO docs VALUES ('stale')")
+    stale.commit()
+    stale.close()
+
+    def _boom(vault_path, dbp):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(sq, "_run_ingest", _boom)
+
+    sync_mod._rebuild_index(str(tmp_path / "vault"), str(db_path))
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = {r[0] for r in conn.execute("SELECT id FROM docs")}
+    finally:
+        conn.close()
+
+    assert rows == {"stale"}
+
+
+def test_hooks_reinstall_retrofits_schist_exclude(tmp_path):
+    """#354 review (MAJOR): spokes initialized before #309 only pass through
+    hooks_reinstall on upgrade — that is their catch-up path for the .schist/
+    exclude, so an existing spoke stops leaking schist.db into `git add -A`."""
+    from schist.sync import hooks_reinstall
+
+    target = tmp_path / "spoke"
+    (target / ".git" / "info").mkdir(parents=True)
+    (target / ".git" / "hooks").mkdir(parents=True)
+
+    hooks_reinstall(MagicMock(force=False), str(target), str(tmp_path / "db.sqlite"))
+
+    lines = [
+        line.strip()
+        for line in (target / ".git" / "info" / "exclude").read_text().splitlines()
+    ]
+    assert ".schist/" in lines
+
+
+def test_hooks_reinstall_exclude_retrofit_idempotent(tmp_path):
+    """Re-running the upgrade path never duplicates the exclude entries."""
+    from schist.sync import hooks_reinstall
+
+    target = tmp_path / "spoke"
+    (target / ".git" / "info").mkdir(parents=True)
+    (target / ".git" / "hooks").mkdir(parents=True)
+
+    hooks_reinstall(MagicMock(force=False), str(target), str(tmp_path / "db.sqlite"))
+    hooks_reinstall(MagicMock(force=False), str(target), str(tmp_path / "db.sqlite"))
+
+    lines = (target / ".git" / "info" / "exclude").read_text().splitlines()
+    assert lines.count(".schist/") == 1

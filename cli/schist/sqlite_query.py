@@ -69,11 +69,42 @@ def get_db(vault_path: str, db_path: str | None = None) -> sqlite3.Connection:
             conn.close()
 
     if needs_ingest:
-        _run_ingest(vault_path, db_path)
+        try:
+            _run_ingest(vault_path, db_path)
+        except sqlite3.OperationalError as e:
+            # Concurrent-writer race (#330): mid-ingest, another process's DB
+            # legitimately looks incomplete (user_version=0, empty docs), so
+            # this reader triggers a competing heal-ingest. If the writer's
+            # transaction outlasts the busy timeout, that ingest fails with
+            # "database is locked". That is contention, not corruption — fall
+            # through and open the existing DB (in WAL mode readers see the
+            # last committed snapshot; the owning writer completes the index).
+            # Any other OperationalError, or a locked error with no DB file to
+            # fall back to, still propagates.
+            if not _is_db_locked_error(e) or not os.path.exists(db_path):
+                raise
+            # Don't fall through silently: an empty/stale result during
+            # contention is indistinguishable from a genuinely empty vault
+            # without this. Tells the operator to retry rather than trust it.
+            print(
+                "Warning: index busy — another writer is rebuilding it; "
+                "results may be incomplete, retry shortly.",
+                file=sys.stderr,
+            )
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _is_db_locked_error(exc: BaseException) -> bool:
+    """True for SQLITE_BUSY/SQLITE_LOCKED contention errors.
+
+    sqlite3 maps both to OperationalError with "database is locked" /
+    "database table is locked" messages; there is no stable errno on the
+    exception across supported Python versions, so match on the message.
+    """
+    return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
 
 
 def _run_ingest(vault_path: str, db_path: str):
@@ -89,7 +120,15 @@ def _run_ingest(vault_path: str, db_path: str):
     from .ingest import ingest
     try:
         ingest(vault_path, db_path)
-    except Exception:
+    except Exception as e:
+        if _is_db_locked_error(e):
+            # SQLITE_BUSY/SQLITE_LOCKED (#330): another writer — typically a
+            # concurrent post-commit ingest — owns the DB right now. The file
+            # is NOT a broken artifact; unlinking it here would yank db+wal
+            # out from under that live writer (its rebuilt index would land
+            # in a deleted inode and the next reader would rebuild yet
+            # again). Leave the files alone and let the caller decide.
+            raise
         # Delete the -wal/-shm siblings too: in WAL mode (#254) the failed
         # ingest's data can live entirely in the -wal, and a surviving -wal
         # would be silently replayed into whatever DB file next appears at

@@ -108,6 +108,23 @@ class TestInitHub:
         assert acl.can_read("a", "research")
         assert acl.scope_convention == "flat"
 
+    def test_seed_commit_gitignores_schist_dir(self, tmp_path):
+        """#309: spokes clone the hub as their working tree, so the seed
+        commit must ship a .gitignore covering the .schist/ runtime dir
+        (SQLite index + WAL siblings) — cone-mode sparse checkout always
+        materializes root files, so every spoke inherits it."""
+        from schist.sync import init_hub
+
+        hub = tmp_path / "hub.git"
+        args = SimpleNamespace(name="v", participant=["alpha"])
+        init_hub(args, str(hub))
+
+        result = subprocess.run(
+            ["git", "show", "main:.gitignore"],
+            cwd=hub, capture_output=True, text=True, check=True,
+        )
+        assert ".schist/" in result.stdout.splitlines()
+
     def test_failed_init_leaves_no_hub_path(self, tmp_path, capsys, monkeypatch):
         """If init_hub fails partway, hub_path must not exist (no half-init).
 
