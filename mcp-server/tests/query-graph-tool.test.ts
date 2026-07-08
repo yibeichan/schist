@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from "@jest/globals";
 import * as os from "os";
 import * as path from "path";
 import * as fs from "fs/promises";
+import { execFileSync } from "child_process";
 import Database from "better-sqlite3";
 import { query_graph } from "../src/tools.js";
 import { resetCursorForTesting, issueCursor } from "../src/protocol/index.js";
@@ -454,6 +455,59 @@ describe("query_graph tool — subquery wrap is structurally safe against commen
   });
 });
 
+// ── concurrent-ingest staleness (#90 / #246) ───────────────────────────────
+
+describe("query_graph tool — cursor staleness on rebuild (#246)", () => {
+  // PR #241 threaded vaultGeneration through query_graph alongside
+  // search_notes; only search_notes had regression coverage. Mirrors
+  // tests/search-notes-tool.test.ts's canonical model.
+  function gitInitCommit(dir: string, message: string): void {
+    execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "Test User"], { cwd: dir });
+    execFileSync("git", ["commit", "--allow-empty", "-m", message], { cwd: dir, stdio: "ignore" });
+  }
+
+  it("returns CURSOR_STALE when vault is rebuilt between pages", async () => {
+    vaultRoot = await makeVault(10);
+    gitInitCommit(vaultRoot, "initial");
+
+    const r1 = await query_graph(vaultRoot, { sql: "SELECT id FROM docs", limit: 3 });
+    if (!("rows" in r1) || !r1.cursor) throw new Error("expected page-1 cursor");
+
+    // A commit rebuilds the vault index (HEAD moves), reordering OFFSET rows.
+    execFileSync("git", ["commit", "--allow-empty", "-m", "concurrent ingest"], {
+      cwd: vaultRoot,
+      stdio: "ignore",
+    });
+
+    const r2 = await query_graph(vaultRoot, {
+      sql: "SELECT id FROM docs",
+      limit: 3,
+      cursor: r1.cursor,
+    });
+    expect(r2).toMatchObject({ error: "CURSOR_STALE" });
+  });
+
+  it("accepts cursor when HEAD unchanged between pages", async () => {
+    vaultRoot = await makeVault(10);
+    gitInitCommit(vaultRoot, "initial");
+
+    const r1 = await query_graph(vaultRoot, { sql: "SELECT id FROM docs", limit: 3 });
+    if (!("rows" in r1) || !r1.cursor) throw new Error("expected page-1 cursor");
+
+    const r2 = await query_graph(vaultRoot, {
+      sql: "SELECT id FROM docs",
+      limit: 3,
+      cursor: r1.cursor,
+    });
+    if (!("rows" in r2)) throw new Error(`expected rows, got ${JSON.stringify(r2)}`);
+    expect(r2.rows.length).toBe(3);
+    const ids1 = new Set(r1.rows.map((r) => r[0] as string));
+    for (const row of r2.rows) expect(ids1.has(row[0] as string)).toBe(false);
+  });
+});
+
 // ── pagination math: caller LIMIT > effectiveLimit ─────────────────────────
 
 describe("query_graph tool — caller inner LIMIT crosses page boundaries correctly", () => {
@@ -511,6 +565,72 @@ describe("query_graph tool — resource hardening", () => {
       error: "QUERY_RESPONSE_TOO_LARGE",
       message: expect.stringContaining("byte budget"),
     });
+  });
+
+  // ── busy-timeout budget (#311 item 3) ────────────────────────────────────
+  // The readonly child derives its SQLite busy_timeout from the outer
+  // kill-timeout: max(1000, timeoutMs − 1000). A regression back to a
+  // hardcoded 5000 lets a lock-contended query burn its whole budget waiting
+  // on the lock (see #254 review). `SELECT timeout FROM pragma_busy_timeout`
+  // runs on the child's own connection AFTER it applies the pragma, so the
+  // value returned is exactly what the child received — no spawn interception.
+
+  it("readonly child receives busyTimeoutMs = timeoutMs − 1000 (#311)", async () => {
+    vaultRoot = await makeVault(1);
+    process.env.SCHIST_QUERY_GRAPH_TIMEOUT_MS = "7500";
+
+    const r = await query_graph(vaultRoot, {
+      sql: "SELECT timeout FROM pragma_busy_timeout",
+    });
+    if (!("rows" in r)) throw new Error(`expected rows: ${JSON.stringify(r)}`);
+    expect(r.rows[0][0]).toBe(6500);
+  });
+
+  it("readonly child receives the default budget 4000 when no timeout env is set (#311)", async () => {
+    vaultRoot = await makeVault(1);
+    // beforeEach cleared SCHIST_QUERY_GRAPH_TIMEOUT_MS → default 5000 − 1000.
+    const r = await query_graph(vaultRoot, {
+      sql: "SELECT timeout FROM pragma_busy_timeout",
+    });
+    if (!("rows" in r)) throw new Error(`expected rows: ${JSON.stringify(r)}`);
+    expect(r.rows[0][0]).toBe(4000);
+  });
+
+  it("busy-timeout budget is floored at 1000ms for very small outer timeouts (#311)", async () => {
+    vaultRoot = await makeVault(1);
+    // 1500 − 1000 = 500, below the 1s floor → max(1000, 500) = 1000.
+    process.env.SCHIST_QUERY_GRAPH_TIMEOUT_MS = "1500";
+
+    const r = await query_graph(vaultRoot, {
+      sql: "SELECT timeout FROM pragma_busy_timeout",
+    });
+    if (!("rows" in r)) throw new Error(`expected rows: ${JSON.stringify(r)}`);
+    expect(r.rows[0][0]).toBe(1000);
+  });
+
+  it("readonly child reads committed rows through a LIVE, un-checkpointed WAL (#311)", async () => {
+    // The existing WAL test (#254) closes the writer before querying, which
+    // checkpoints the -wal into the main file. Here the writer connection
+    // stays OPEN across the child's read, so the inserted row lives only in
+    // the -wal sibling — the readonly child must replay it.
+    vaultRoot = await makeVault(3);
+    const db = new Database(path.join(vaultRoot, ".schist", "schist.db"));
+    try {
+      expect(db.pragma("journal_mode = WAL", { simple: true })).toBe("wal");
+      db.prepare(`INSERT INTO docs (id, title) VALUES (?, ?)`).run(
+        "notes/wal-only.md",
+        "Wal Only",
+      );
+
+      const r = await query_graph(vaultRoot, {
+        sql: "SELECT id FROM docs ORDER BY id",
+      });
+      if (!("rows" in r)) throw new Error(`expected rows: ${JSON.stringify(r)}`);
+      expect(r.rows.length).toBe(4);
+      expect(r.rows.map((row) => row[0])).toContain("notes/wal-only.md");
+    } finally {
+      db.close();
+    }
   });
 
   it("interrupts CPU-heavy queries at the configured timeout", async () => {

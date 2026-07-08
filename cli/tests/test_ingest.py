@@ -479,6 +479,245 @@ def test_ingest_skips_invalid_utf8_file(tmp_path: Path) -> None:
     assert "Corrupt" not in titles
 
 
+def test_ingest_savepoint_isolates_insert_phase_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#351: an exception AFTER the read/parse phase (type-guarding, INSERTs,
+    paper/concept/edge processing) must skip only the offending file.
+
+    Previously only read_text+frontmatter.loads sat inside the per-file
+    guard; anything later rolled back the single transaction, `_run_ingest`
+    deleted the partial DB, and one bad note became a vault-wide outage.
+    """
+    import schist.ingest as ingest_mod
+    from schist.index_contract import INDEX_SCHEMA_VERSION
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-07-07-before.md",
+        "---\ntitle: Before Poison\ndate: 2026-07-07\nconcepts: [alpha]\n---\n\nBody.\n",
+    )
+    _write_note(
+        vault,
+        "2026-07-07-poison.md",
+        "---\ntitle: Poison\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+    _write_note(
+        vault,
+        "2026-07-07-zafter.md",
+        "---\ntitle: After Poison\ndate: 2026-07-07\nconcepts: [alpha]\n---\n\nBody.\n",
+    )
+
+    original = ingest_mod.paper_metadata_from_frontmatter
+
+    def _boom(meta, rel):
+        if rel.name == "2026-07-07-poison.md":
+            raise RuntimeError("synthetic INSERT-phase failure")
+        return original(meta, rel)
+
+    monkeypatch.setattr(ingest_mod, "paper_metadata_from_frontmatter", _boom)
+
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    # Must not raise — the caller (_run_ingest) would delete the DB.
+    ingest(str(vault), str(db))
+
+    assert db.exists()
+    conn = sqlite3.connect(db)
+    try:
+        titles = {row[0] for row in conn.execute("SELECT title FROM docs")}
+        # Completion marker proves the transaction committed despite the
+        # mid-loop failure.
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        alpha_edges = {
+            row[0]
+            for row in conn.execute(
+                "SELECT source FROM edges WHERE target = 'alpha' AND type = 'references'"
+            )
+        }
+    finally:
+        conn.close()
+
+    assert titles == {"Before Poison", "After Poison"}
+    assert version == INDEX_SCHEMA_VERSION
+    # Files on both sides of the poison file keep their side-table writes.
+    assert alpha_edges == {
+        "notes/2026-07-07-before.md",
+        "notes/2026-07-07-zafter.md",
+    }
+
+
+def test_ingest_superscript_year_coerces_to_null(tmp_path: Path) -> None:
+    """#351 trigger: `"²".isdigit()` is True but int("²") raises, so a
+    superscript year aborted the whole rebuild. isdecimal() rejects it
+    (year -> NULL) while still accepting every digit int() can parse,
+    including non-ASCII decimals like Arabic-Indic."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "papers").mkdir()
+    (vault / "papers" / "2026-07-07-superscript.md").write_text(
+        '---\ntitle: Superscript Year\nyear: "²"\n---\n\nBody.\n',
+        encoding="utf-8",
+    )
+    (vault / "papers" / "2026-07-07-arabic-indic.md").write_text(
+        '---\ntitle: Arabic Indic Year\nyear: "٢٠٢٠"\n---\n\nBody.\n',
+        encoding="utf-8",
+    )
+    _write_note(
+        vault,
+        "2026-07-07-sibling.md",
+        "---\ntitle: Sibling\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        titles = {row[0] for row in conn.execute("SELECT title FROM docs")}
+        years = dict(
+            conn.execute(
+                "SELECT d.title, pm.year FROM docs d "
+                "JOIN paper_metadata pm ON pm.doc_id = d.id"
+            )
+        )
+    finally:
+        conn.close()
+
+    assert titles == {"Superscript Year", "Arabic Indic Year", "Sibling"}
+    assert years["Superscript Year"] is None
+    assert years["Arabic Indic Year"] == 2020
+
+
+def test_ingest_skips_file_symlink_outside_vault(tmp_path: Path) -> None:
+    """#342: rglob('*.md') yields *.md FILE symlinks (all Python versions)
+    and read_text follows them — external content must not be indexed."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-07-07-inside.md",
+        "---\ntitle: Inside\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "secret.md").write_text(
+        "---\ntitle: External Secret\n---\n\nOutside the vault.\n",
+        encoding="utf-8",
+    )
+    (vault / "notes" / "escape.md").symlink_to(external / "secret.md")
+
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        titles = {row[0] for row in conn.execute("SELECT title FROM docs")}
+    finally:
+        conn.close()
+
+    assert titles == {"Inside"}
+
+
+def test_ingest_skips_symlinked_dir_outside_vault(tmp_path: Path) -> None:
+    """#342: on early Python 3.12 patch releases (the project floor is
+    >=3.12, any patch) rglob('*.md') RECURSES INTO symlinked directories,
+    so files under an external dir are yielded without themselves being
+    symlinks — only the resolved-path containment check catches them. On
+    3.13+ (and current 3.12.x, which backported the glob reimplementation)
+    rglob no longer follows directory symlinks and this passes trivially;
+    the file-symlink test above exercises the guard on every version."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-07-07-inside.md",
+        "---\ntitle: Inside\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "leaked.md").write_text(
+        "---\ntitle: Leaked Via Dir\n---\n\nOutside the vault.\n",
+        encoding="utf-8",
+    )
+    (vault / "linked-dir").symlink_to(external, target_is_directory=True)
+
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        titles = {row[0] for row in conn.execute("SELECT title FROM docs")}
+    finally:
+        conn.close()
+
+    assert titles == {"Inside"}
+
+
+def test_ingest_nonstring_title_and_topic_fall_back_to_filename(tmp_path: Path) -> None:
+    """#352 (d5d4595 follow-up): non-string title/topic candidates must fall
+    through to the filename-derived title without dropping the note or
+    aborting the rebuild (a list/dict title used to crash the whole ingest
+    with a sqlite3 binding error)."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-07-07-list-title.md",
+        "---\ntitle: [ai, ml]\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+    _write_note(
+        vault,
+        "2026-07-07-int-title.md",
+        "---\ntitle: 42\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+    _write_note(
+        vault,
+        "2026-07-07-dict-topic.md",
+        "---\ntopic: {key: val}\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+    # A well-formed sibling that must survive alongside the malformed notes.
+    _write_note(
+        vault,
+        "2026-07-07-sibling.md",
+        "---\ntitle: Sibling\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        titles = dict(conn.execute("SELECT id, title FROM docs"))
+    finally:
+        conn.close()
+
+    assert titles == {
+        "notes/2026-07-07-list-title.md": "list title",
+        "notes/2026-07-07-int-title.md": "int title",
+        "notes/2026-07-07-dict-topic.md": "dict topic",
+        "notes/2026-07-07-sibling.md": "Sibling",
+    }
+
+
 def test_ingest_drops_hash_only_tags(tmp_path: Path) -> None:
     """Hash-only tags strip to empty and should not be indexed."""
     from schist.ingest import ingest
@@ -1121,6 +1360,32 @@ def test_ingest_no_wal_env_keeps_rollback_journal(tmp_path: Path, monkeypatch) -
         conn.close()
 
 
+@pytest.mark.parametrize("value", ["0", "false", "no", "off"])
+def test_ingest_no_wal_falsy_values_keep_wal(tmp_path: Path, monkeypatch, value) -> None:
+    """#311: SCHIST_NO_WAL=0/false/no/off must NOT disable WAL — plain env
+    truthiness treated any non-empty string as an opt-out."""
+    from schist.ingest import ingest
+
+    monkeypatch.setenv("SCHIST_NO_WAL", value)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-07-07-flag.md",
+        "---\ntitle: Flag\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        conn.close()
+
+
 def test_normalize_concept_slug_matches_ts_whitespace_collapse() -> None:
     """#303: parity with mcp-server normalizeConceptSlug (`/\\s+/g` -> "-").
     A whitespace RUN must collapse to a single dash — `foo--bar` vs `foo-bar`
@@ -1182,3 +1447,173 @@ def test_ingest_sets_completion_marker_for_empty_vault(tmp_path: Path) -> None:
         )
     finally:
         conn.close()
+
+
+def test_ingest_reraises_environmental_db_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#353 review blocker: an environmental DB failure (disk full, I/O error)
+    mid-rebuild must fail LOUD, not be WARN-skipped like a bad note.
+
+    Otherwise the loop finishes, commits a mostly-empty index, stamps
+    user_version, and readers serve the truncation as authoritative long
+    after the disk recovers. The per-file guard re-raises
+    sqlite3.DatabaseError (except IntegrityError/ProgrammingError, which are
+    content-shaped) so the pre-existing fail-and-unlink path runs.
+    """
+    import schist.ingest as ingest_mod
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-07-07-ok.md",
+        "---\ntitle: Ok\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+    _write_note(
+        vault,
+        "2026-07-07-zsick.md",
+        "---\ntitle: Sick\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+
+    original = ingest_mod.paper_metadata_from_frontmatter
+
+    def _disk_full(meta, rel):
+        if rel.name == "2026-07-07-zsick.md":
+            raise sqlite3.OperationalError("database or disk is full")
+        return original(meta, rel)
+
+    monkeypatch.setattr(ingest_mod, "paper_metadata_from_frontmatter", _disk_full)
+
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(sqlite3.OperationalError):
+        ingest(str(vault), str(db))
+
+
+def test_run_ingest_unlinks_db_on_environmental_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#353 review blocker: the _run_ingest wrapper must delete the partial DB
+    on an environmental failure rather than leave a truncated index stamped
+    complete for readers to trust.
+    """
+    import schist.ingest as ingest_mod
+    from schist.sqlite_query import _run_ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-07-07-ok.md",
+        "---\ntitle: Ok\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+    _write_note(
+        vault,
+        "2026-07-07-zsick.md",
+        "---\ntitle: Sick\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+
+    original = ingest_mod.paper_metadata_from_frontmatter
+
+    def _disk_full(meta, rel):
+        if rel.name == "2026-07-07-zsick.md":
+            raise sqlite3.OperationalError("disk I/O error")
+        return original(meta, rel)
+
+    monkeypatch.setattr(ingest_mod, "paper_metadata_from_frontmatter", _disk_full)
+
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(sqlite3.OperationalError):
+        _run_ingest(str(vault), str(db))
+
+    # No truncated index left behind claiming to be complete.
+    assert not db.exists()
+
+
+def test_ingest_huge_year_coerces_to_null(tmp_path: Path) -> None:
+    """#353 review: a decimal year wider than signed 64-bit passes isdecimal()
+    and int() but overflows the SQLite bind. It must coerce to NULL (like the
+    superscript case), not savepoint-drop the whole note.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-07-07-huge-quoted.md",
+        "---\ntitle: Huge Quoted\ndate: 2026-07-07\n"
+        'year: "99999999999999999999999"\n---\n\nBody.\n',
+    )
+    _write_note(
+        vault,
+        "2026-07-07-huge-unquoted.md",
+        "---\ntitle: Huge Unquoted\ndate: 2026-07-07\n"
+        "year: 99999999999999999999999\n---\n\nBody.\n",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = dict(
+            conn.execute(
+                "SELECT d.title, pm.year FROM docs d "
+                "JOIN paper_metadata pm ON pm.doc_id = d.id "
+                "WHERE d.title IN ('Huge Quoted', 'Huge Unquoted')"
+            ).fetchall()
+        )
+    finally:
+        conn.close()
+
+    # Both notes indexed (not dropped); year coerced to NULL.
+    assert rows == {"Huge Quoted": None, "Huge Unquoted": None}
+
+
+def test_ingest_skips_symlink_target_under_skip_dir(tmp_path: Path) -> None:
+    """#353 review: a symlink whose resolved target is inside the vault but
+    under a SKIP_DIRS directory (.git/.schist) must be skipped. The SKIP_DIRS
+    filter checks the link's OWN path, and containment passes because the
+    target is inside the vault — so without the resolved-target check, .git
+    file contents (e.g. remote URLs with credentials) get indexed.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    (vault / "notes").mkdir(parents=True)
+    (vault / ".git").mkdir()
+    (vault / ".git" / "config.md").write_text(
+        "# secret\n\n[remote]\n  url = https://user:TOKEN@hub\n", encoding="utf-8"
+    )
+    _write_note(
+        vault,
+        "2026-07-07-real.md",
+        "---\ntitle: Real Note\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+    os.symlink(
+        vault / ".git" / "config.md", vault / "notes" / "leak.md"
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        titles = {row[0] for row in conn.execute("SELECT title FROM docs")}
+        bodies = [
+            row[0] for row in conn.execute("SELECT body FROM docs")
+        ]
+    finally:
+        conn.close()
+
+    assert "Real Note" in titles
+    # The .git file content is not indexed via the symlink.
+    assert not any("TOKEN@hub" in (b or "") for b in bodies)

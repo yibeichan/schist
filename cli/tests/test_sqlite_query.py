@@ -772,3 +772,109 @@ def test_raw_query_authorizer_removed_after_denial() -> None:
 
     names = conn.execute("SELECT name FROM sqlite_master").fetchall()
     assert names
+
+
+# ---------------------------------------------------------------------------
+# Heal-path vs concurrent-writer lock (#330)
+# ---------------------------------------------------------------------------
+
+
+def _lock_contending_ingest(vault_path: str, db_path: str) -> None:
+    """Stand-in for a real concurrent heal-ingest: try to take the write lock
+    with a short busy timeout while another connection holds it, producing a
+    genuine 'database is locked' OperationalError."""
+    b = sqlite3.connect(db_path, timeout=0.05)
+    try:
+        b.execute("BEGIN IMMEDIATE")
+    finally:
+        b.close()
+
+
+def test_run_ingest_locked_db_is_not_unlinked(tmp_path: Path) -> None:
+    """#330: SQLITE_BUSY means another writer owns the DB right now — the
+    failure path must NOT unlink the live db/wal out from under it."""
+    from schist.sqlite_query import _run_ingest
+
+    vault, db_path = _vault_db(tmp_path)
+    writer = sqlite3.connect(db_path)
+    _create_required_tables(writer)
+    writer.execute("INSERT INTO docs VALUES ('d1')")
+    writer.commit()
+    # Writer A holds the write lock, as a long ingest transaction would.
+    writer.execute("BEGIN IMMEDIATE")
+    writer.execute("INSERT INTO docs VALUES ('d2')")
+    try:
+        with patch("schist.ingest.ingest", side_effect=_lock_contending_ingest):
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                _run_ingest(str(vault), str(db_path))
+    finally:
+        writer.rollback()
+        writer.close()
+
+    assert db_path.exists(), "live DB unlinked under a concurrent writer"
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_run_ingest_non_lock_failure_still_unlinks_artifact(tmp_path: Path) -> None:
+    """Non-contention failures keep the existing behavior: the partial DB is
+    a broken artifact and must be removed so the next get_db() rebuilds."""
+    from schist.sqlite_query import _run_ingest
+
+    vault, db_path = _vault_db(tmp_path)
+    conn = sqlite3.connect(db_path)
+    _create_required_tables(conn)
+    conn.commit()
+    conn.close()
+
+    with patch("schist.ingest.ingest", side_effect=ValueError("boom")):
+        with pytest.raises(ValueError):
+            _run_ingest(str(vault), str(db_path))
+
+    assert not db_path.exists()
+
+
+def test_get_db_heal_path_survives_concurrent_ingest_lock(tmp_path: Path) -> None:
+    """#330 end-to-end: reader B sees a mid-ingest DB (user_version=0, empty
+    docs), triggers the heal ingest, which hits SQLITE_BUSY because writer A
+    holds the write lock. get_db must treat that as contention — keep the
+    file and return a usable connection — instead of propagating."""
+    vault, db_path = _vault_db(tmp_path)
+
+    writer = sqlite3.connect(db_path)
+    writer.execute("PRAGMA journal_mode=WAL")
+    _create_required_tables(writer)
+    writer.commit()
+    # Mid-ingest shape: user_version=0 + empty docs + write lock held.
+    writer.execute("BEGIN IMMEDIATE")
+    writer.execute("INSERT INTO docs VALUES ('mid-ingest')")
+    try:
+        with patch("schist.ingest.ingest", side_effect=_lock_contending_ingest):
+            db = get_db(str(vault), str(db_path))
+        # The returned connection is usable (WAL readers see the last
+        # committed snapshot while A's transaction is still open).
+        assert db.execute("SELECT COUNT(*) FROM docs").fetchone()[0] == 0
+        db.close()
+    finally:
+        writer.rollback()
+        writer.close()
+
+    assert db_path.exists()
+
+
+def test_get_db_heal_path_propagates_non_lock_operational_error(tmp_path: Path) -> None:
+    """Only lock contention is swallowed — real I/O failures still surface."""
+    vault, db_path = _vault_db(tmp_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA user_version = 0")
+    _create_required_tables(conn)
+    conn.commit()
+    conn.close()
+
+    with patch("schist.ingest.ingest",
+               side_effect=sqlite3.OperationalError("disk I/O error")):
+        with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+            get_db(str(vault), str(db_path))

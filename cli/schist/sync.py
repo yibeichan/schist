@@ -212,6 +212,16 @@ def hooks_reinstall(args, vault_path: str, db_path: str) -> None:
         _atomic_write_hook(path, body)
         written.append(name)
 
+    # Retrofit the .schist/ ignore onto spokes initialized before #309. New
+    # spokes get this at init (_build_spoke_in_staging); existing spokes only
+    # pass through here on upgrade, so this is their catch-up path. Idempotent.
+    if (target / ".git" / "info").exists() or (target / ".git").is_dir():
+        _ensure_ignore_lines(
+            target / ".git" / "info" / "exclude",
+            [".schist/", ".schist/spoke.yaml"],
+            comment="schist runtime state + spoke config (never pushed to hub)",
+        )
+
     if written:
         print(f"Reinstalled hooks: {', '.join(written)} (template v{HOOK_VERSION})")
     for name in skipped:
@@ -314,21 +324,70 @@ def _build_spoke_in_staging(
     config = SpokeConfig(hub=hub, identity=identity, scope=scope)
     save_spoke_config(str(staging), config)
 
-    exclude_path = staging / ".git" / "info" / "exclude"
-    exclude_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(exclude_path, "a") as f:
-        f.write(f"\n# schist spoke config (never pushed to hub)\n{'.schist/spoke.yaml'}\n")
+    # Ignore the whole .schist/ runtime dir (SQLite index, WAL siblings), not
+    # just spoke.yaml — otherwise `git status` shows the DB as untracked and a
+    # broad `git add` can push it to the hub (#309). The explicit spoke.yaml
+    # line is kept for clarity (it also documents WHY the dir is excluded).
+    _ensure_ignore_lines(
+        staging / ".git" / "info" / "exclude",
+        [".schist/", ".schist/spoke.yaml"],
+        comment="schist runtime state + spoke config (never pushed to hub)",
+    )
 
     _install_local_hooks(str(staging))
 
 
+def _ensure_ignore_lines(path: Path, lines: list[str], comment: str | None = None) -> None:
+    """Append each of `lines` to an ignore-style file unless already present.
+
+    Idempotent: re-running init (or a future re-init/repair path) never
+    duplicates entries (#309). Creates the file — and parent dirs — if missing;
+    preserves any user-added content.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing = path.read_text().splitlines()
+    except FileNotFoundError:
+        existing = []
+    present = {line.strip() for line in existing}
+    missing = [line for line in lines if line not in present]
+    if not missing:
+        return
+    with open(path, "a") as f:
+        if existing and existing[-1].strip():
+            f.write("\n")
+        if comment:
+            f.write(f"# {comment}\n")
+        for line in missing:
+            f.write(f"{line}\n")
+
+
 def _run_git_cleanup(vault_path: str, args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args],
-        cwd=vault_path,
-        capture_output=True,
-        text=True,
-    )
+    """Run a git state-cleanup command with a bounded wait (#321).
+
+    `rebase --abort` / `merge --abort` hit the same index/worktree locks that
+    stall every other git call on NFS, and an unbounded wait here hangs the
+    whole sync with no error. A timeout is reported as a failed
+    CompletedProcess so the callers' existing returncode/stderr handling
+    (fallback to `rebase --quit`, then the manual-fix message) still applies —
+    the same shape the #320 fallbacks use.
+    """
+    argv = ["git", *args]
+    try:
+        return subprocess.run(
+            argv,
+            cwd=vault_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            argv,
+            returncode=124,
+            stdout="",
+            stderr=f"git {' '.join(args)} timed out after 30s (NFS stall or a live git process?)",
+        )
 
 
 def _cleanup_rebase_state(vault_path: str) -> None:
@@ -531,6 +590,36 @@ def _print_conflict_recovery(
     )
 
 
+# Lowercased stderr substrings that indicate the push failed to REACH the hub
+# (DNS, TCP/ssh transport, HTTP transport, network timeouts). A bare `fatal:`
+# prefix is NOT network evidence — git stamps it on purely local failures too
+# (invalid refspec, detached HEAD, shallow-update rejection), and claiming
+# "Hub unreachable" for those sends the user debugging the wrong layer (#321).
+_NETWORK_ERROR_MARKERS = (
+    "could not resolve",                     # DNS (curl and ssh phrasings)
+    "temporary failure in name resolution",  # DNS (getaddrinfo)
+    "unable to access",                      # git http transport wrapper
+    "failed to connect",                     # curl
+    "couldn't connect",                      # curl
+    "connection",                            # refused / reset / closed / timed out
+    "timed out",
+    "network is unreachable",
+    "no route to host",
+)
+
+# ssh transport errors name the port ("connect to host pi port 22: ...").
+# Word-bounded so "support"/"report"/"exported" in unrelated stderr don't match.
+_NETWORK_PORT_RE = re.compile(r"\bport\b", re.IGNORECASE)
+
+
+def _is_network_error(output: str) -> bool:
+    """Heuristic: does this git-push stderr describe a network failure?"""
+    low = output.lower()
+    return any(marker in low for marker in _NETWORK_ERROR_MARKERS) or bool(
+        _NETWORK_PORT_RE.search(output)
+    )
+
+
 def sync_push(args, vault_path: str, db_path: str) -> None:
     """Push local changes to hub."""
     if not is_spoke(vault_path):
@@ -582,11 +671,13 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
     if not ok:
         if "REJECTED" in output.upper() or "rejected" in output:
             print(f"Push rejected by hub:\n{output}", file=sys.stderr)
-        elif "Could not resolve" in output or "fatal:" in output:
-            print(f"Hub unreachable — changes saved locally. Push when network available.", file=sys.stderr)
+        elif _is_network_error(output):
+            print("Hub unreachable — changes saved locally. Push when network available.", file=sys.stderr)
             print(f"  Detail: {output}", file=sys.stderr)
         else:
-            print(f"Push failed: {output}", file=sys.stderr)
+            # Local failure (bad refspec, detached HEAD, repo corruption, ...):
+            # the real stderr is the diagnosis — put it front and center (#321).
+            print(f"Push failed:\n{output}", file=sys.stderr)
         sys.exit(1)
 
     print("Pushed to hub.")
@@ -740,8 +831,14 @@ def _build_hub_in_staging(
             yaml.dump(vault_data, default_flow_style=False, sort_keys=False)
         )
 
+        # Spokes clone this repo as their working tree, and their runtime
+        # SQLite state lives under <spoke>/.schist/ — it must never be
+        # committed or pushed (#309). Cone-mode sparse checkout always
+        # materializes root-level files, so every spoke inherits this.
+        (seed / ".gitignore").write_text(".schist/\n")
+
         for cmd in (
-            ["git", "add", "vault.yaml"],
+            ["git", "add", "vault.yaml", ".gitignore"],
             ["git", "commit", "-m", f"init: seed vault {name}"],
             ["git", "push", "-u", "origin", "main"],
         ):
@@ -1153,7 +1250,7 @@ def _rebuild_index(vault_path: str, db_path: str) -> None:
             print(f"Warning: index rebuild skipped (backup failed): {e}", file=sys.stderr)
             return
 
-    from .sqlite_query import _run_ingest
+    from .sqlite_query import _is_db_locked_error, _run_ingest
 
     try:
         _run_ingest(vault_path, db_path)
@@ -1161,6 +1258,19 @@ def _rebuild_index(vault_path: str, db_path: str) -> None:
             _preserve_side_tables(backup, db)
             _unlink_db_with_wal(backup)
     except Exception as e:
+        # A locked-DB failure means another writer created and now owns a
+        # fresh DB at db_path after we moved the old one aside. Clobbering it
+        # with the stale backup would land that writer's commit in an
+        # unlinked inode and silently vanish its completed index (#330) — the
+        # same hazard the _run_ingest unlink-skip guards. Leave the live DB
+        # (and the backup, cleared by the next rebuild) untouched.
+        if backup and backup.exists() and _is_db_locked_error(e):
+            print(
+                f"Warning: index rebuild skipped — DB busy, another writer "
+                f"owns it; last-good backup left at {backup}: {e}",
+                file=sys.stderr,
+            )
+            return
         # Restore backup so user keeps old (stale) index rather than none.
         # Remove anything the failed ingest left at the live name first so
         # its -wal can't be replayed into the restored backup.

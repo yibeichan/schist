@@ -217,6 +217,17 @@ ls -la ~/schist-vault/.schist/schist.db
 > lives on a network filesystem, add `export SCHIST_NO_WAL=1` next to
 > `SCHIST_IDENTITY` in `~/.bashrc` (and in the container `%environment`
 > block below) to keep the rollback journal mode instead.
+>
+> **Already-running NFS/Lustre spokes (upgrading past #254):** export
+> `SCHIST_NO_WAL=1` **before your first post-upgrade ingest** (any commit,
+> `schist sync pull`, or index rebuild). The journal mode is persisted in the
+> DB file's header, so a single ingest without the variable flips
+> `schist.db` into WAL mode on disk — and it then stays WAL (unsafe across
+> hosts) until the next ingest that runs with the variable set. If an ingest
+> already ran without it, set the variable and either re-run any ingest or
+> simply delete `.schist/schist.db*` (the index is disposable and rebuilds).
+> Note that only "off" values disable it: `SCHIST_NO_WAL=0` / `false` /
+> `no` / `off` (or unset) mean WAL stays enabled.
 
 ### Option A: uv (recommended)
 
