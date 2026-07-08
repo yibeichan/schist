@@ -1450,6 +1450,7 @@ export async function create_note(
       id: relPath,
       path: relPath,
       commitSha: result.commitSha,
+      ...(result.commitWarning ? { commitWarning: result.commitWarning } : {}),
       ...(syncWarning !== undefined ? { syncWarning } : {}),
     };
   } catch (e: unknown) {
@@ -1550,6 +1551,7 @@ export async function add_connection(
       target: args.target,
       type: args.type,
       commitSha: result.commitSha,
+      ...(result.commitWarning ? { commitWarning: result.commitWarning } : {}),
       ...(syncWarning !== undefined ? { syncWarning } : {}),
     };
   } catch (e: unknown) {
@@ -1855,6 +1857,7 @@ export async function delete_note(
       deleted: true,
       commitSha: result.commitSha,
       repaired: repairs.map((r) => r.relPath),
+      ...(result.commitWarning ? { commitWarning: result.commitWarning } : {}),
       ...(indexWarning !== undefined ? { indexWarning } : {}),
       ...(syncWarning !== undefined ? { syncWarning } : {}),
     };
@@ -1998,6 +2001,7 @@ export async function update_note(
       id: args.id,
       updated: result.committed,
       commitSha: result.commitSha,
+      ...(result.commitWarning ? { commitWarning: result.commitWarning } : {}),
       ...(syncWarning !== undefined ? { syncWarning } : {}),
     };
   } catch (e: unknown) {

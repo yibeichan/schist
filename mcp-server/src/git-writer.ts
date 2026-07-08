@@ -336,7 +336,7 @@ async function withWriteLock(
     await assertResolvesInside(vaultRoot, relPath);
     await fn(absPath);
 
-    await git(vaultRoot, ["add", relPath]);
+    await git(vaultRoot, ["add", "--", relPath]);
 
     // Dedup: skip commit if staged content matches HEAD. `git diff --cached
     // --quiet` exits 0 when there is no staged diff, 1 when there is. execFile
@@ -387,6 +387,12 @@ async function withWriteLock(
       } catch {
         // Still unborn / unreadable — treat as "commit did not land".
       }
+      // A rev-parse FAILURE here (headNow === null) is deliberately treated as
+      // "did not land" — the conservative direction: we rethrow GIT_TIMEOUT
+      // rather than claim success we can't confirm. The false-negative (commit
+      // actually landed but HEAD was momentarily unreadable) is harmless for
+      // writeNote: a retry re-stages identical content and withWriteLock's
+      // dedup path returns committed:false without churning history.
       if (headNow === null || headNow === preCommitHead) throw e;
       commitWarning =
         "committed; post-commit ingest still running or timed out — the index may lag this write until the next ingest";
@@ -581,6 +587,13 @@ export async function deleteNote(
         } catch {
           // Unreadable HEAD — treat as "commit did not land"; outer rollback runs.
         }
+        // A rev-parse FAILURE here (headNow === null) is deliberately treated
+        // as "did not land" — the conservative direction: rethrow GIT_TIMEOUT
+        // and run the rollback rather than claim a success we can't confirm.
+        // The false-negative (delete actually committed but HEAD was
+        // momentarily unreadable) self-corrects: a retried deleteNote hits
+        // `git rm` on a now-untracked path and fails fast rather than
+        // double-deleting.
         if (headNow === null || headNow === preCommitHead) throw e;
         commitWarning =
           "committed; post-commit ingest still running or timed out — the index may lag this delete until the next ingest";

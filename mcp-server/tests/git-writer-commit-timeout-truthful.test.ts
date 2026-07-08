@@ -26,19 +26,26 @@ const execFile = promisify(execFileCb);
 const COMMIT_TIMEOUT_MS = 1500;
 const HOOK_SLEEP_S = 3;
 
+const TEST_AGENT = "test-agent";
+
 const createdDirs = new Set<string>();
 const savedOpTimeout = process.env.SCHIST_GIT_OP_TIMEOUT_MS;
 const savedCommitTimeout = process.env.SCHIST_GIT_COMMIT_TIMEOUT_MS;
+const savedAgentId = process.env.SCHIST_AGENT_ID;
 // Fast ops keep a roomy ceiling; only the commit ceiling is squeezed under
 // the hook's sleep so the timeout fires while the hook is still running.
 process.env.SCHIST_GIT_OP_TIMEOUT_MS = "20000";
 process.env.SCHIST_GIT_COMMIT_TIMEOUT_MS = String(COMMIT_TIMEOUT_MS);
+// tools.ts write handlers reject with CONFIG_ERROR unless an identity is set.
+process.env.SCHIST_AGENT_ID = TEST_AGENT;
 
 afterAll(async () => {
   if (savedOpTimeout === undefined) delete process.env.SCHIST_GIT_OP_TIMEOUT_MS;
   else process.env.SCHIST_GIT_OP_TIMEOUT_MS = savedOpTimeout;
   if (savedCommitTimeout === undefined) delete process.env.SCHIST_GIT_COMMIT_TIMEOUT_MS;
   else process.env.SCHIST_GIT_COMMIT_TIMEOUT_MS = savedCommitTimeout;
+  if (savedAgentId === undefined) delete process.env.SCHIST_AGENT_ID;
+  else process.env.SCHIST_AGENT_ID = savedAgentId;
   for (const dir of createdDirs) {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -55,7 +62,20 @@ async function makeTempVault(): Promise<string> {
   // Pin hooksPath per-repo so a machine-global core.hooksPath (husky-style)
   // can't silently skip the slow hook and pass the test vacuously.
   await execFile("git", ["config", "core.hooksPath", ".git/hooks"], { cwd: dir });
-  await fs.writeFile(path.join(dir, "schist.yaml"), "name: test\nwrite_branch: drafts\n");
+  // `directories` + `statuses` let create_note (via tools.ts) place notes and
+  // pass frontmatter validation.
+  await fs.writeFile(
+    path.join(dir, "schist.yaml"),
+    [
+      "name: test",
+      "write_branch: drafts",
+      "directories:",
+      "  - notes",
+      "statuses:",
+      "  - draft",
+      "",
+    ].join("\n"),
+  );
   await execFile("git", ["add", "."], { cwd: dir });
   await execFile("git", ["commit", "-m", "init"], { cwd: dir });
   return dir;
@@ -131,6 +151,27 @@ describe("truthful commit-timeout reporting (#336)", () => {
     // ...and the old GIT_TIMEOUT path's rollback did NOT resurrect the file
     // in the working tree.
     await expect(fs.access(path.join(vault, "notes", "doomed.md"))).rejects.toThrow();
+
+    await assertHookChainKilled(pidFile, marker);
+  }, 30000);
+
+  test("create_note tool handler forwards commitWarning to the MCP response (#336)", async () => {
+    // Guards the wiring: git-writer sets result.commitWarning, but unless the
+    // tool handler spreads it into its return object the MCP client never sees
+    // it. Exercises the real handler, not the git-writer unit.
+    const { create_note, loadVaultConfig } = await import("../src/tools.js");
+    const vault = await makeTempVault();
+    const { pidFile, marker } = await installSlowHook(vault);
+    const config = await loadVaultConfig(vault);
+
+    const result = (await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Slow Handler", body: "body" },
+      config,
+    )) as { commitSha?: string; commitWarning?: string };
+
+    expect(result.commitSha).toBeDefined();
+    expect(result.commitWarning).toMatch(/committed; post-commit ingest/);
 
     await assertHookChainKilled(pidFile, marker);
   }, 30000);
