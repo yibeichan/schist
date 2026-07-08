@@ -3,6 +3,7 @@ import * as os from "os";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import * as fs from "fs/promises";
+import { execFileSync } from "child_process";
 import Database from "better-sqlite3";
 import { list_concepts } from "../src/tools.js";
 import { resetCursorForTesting, issueCursor } from "../src/protocol/index.js";
@@ -321,6 +322,51 @@ describe("list_concepts tool — slug-ASC tiebreaker stability", () => {
       "concept-000", "concept-001", "concept-002",
       "concept-003", "concept-004", "concept-005",
     ]);
+  });
+});
+
+// ── concurrent-ingest staleness (#90 / #246) ───────────────────────────────
+
+describe("list_concepts tool — cursor staleness on rebuild (#246)", () => {
+  // PR #241 threaded vaultGeneration through list_concepts alongside
+  // search_notes; only search_notes had regression coverage. Mirrors
+  // tests/search-notes-tool.test.ts's canonical model.
+  function gitInitCommit(dir: string, message: string): void {
+    execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "Test User"], { cwd: dir });
+    execFileSync("git", ["commit", "--allow-empty", "-m", message], { cwd: dir, stdio: "ignore" });
+  }
+
+  it("returns CURSOR_STALE when vault is rebuilt between pages", async () => {
+    await seed(vaultRoot, 10);
+    gitInitCommit(vaultRoot, "initial");
+
+    const r1 = await list_concepts(vaultRoot, { limit: 3 });
+    if (!("concepts" in r1) || !r1.cursor) throw new Error("expected page-1 cursor");
+
+    // A commit rebuilds the vault index (HEAD moves), reordering OFFSET rows.
+    execFileSync("git", ["commit", "--allow-empty", "-m", "concurrent ingest"], {
+      cwd: vaultRoot,
+      stdio: "ignore",
+    });
+
+    const r2 = await list_concepts(vaultRoot, { limit: 3, cursor: r1.cursor });
+    expect(r2).toMatchObject({ error: "CURSOR_STALE" });
+  });
+
+  it("accepts cursor when HEAD unchanged between pages", async () => {
+    await seed(vaultRoot, 10);
+    gitInitCommit(vaultRoot, "initial");
+
+    const r1 = await list_concepts(vaultRoot, { limit: 3 });
+    if (!("concepts" in r1) || !r1.cursor) throw new Error("expected page-1 cursor");
+
+    const r2 = await list_concepts(vaultRoot, { limit: 3, cursor: r1.cursor });
+    if (!("concepts" in r2)) throw new Error(`expected concepts, got ${JSON.stringify(r2)}`);
+    expect(r2.concepts.length).toBe(3);
+    const slugs1 = new Set(r1.concepts.map((c) => c.slug));
+    for (const c of r2.concepts) expect(slugs1.has(c.slug)).toBe(false);
   });
 });
 

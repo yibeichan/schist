@@ -15,6 +15,7 @@
 import * as os from "os";
 import * as path from "path";
 import * as fs from "fs/promises";
+import Database from "better-sqlite3";
 import {
   addMemory,
   setAgentState,
@@ -171,6 +172,86 @@ describe("MCP tool layer (add_memory / set_agent_state / delete_agent_state)", (
     if (isErrorResult(result)) {
       expect(result.error).toBe("VALIDATION_ERROR");
       expect(result.message).toMatch(/not in SCHIST_ALLOWED_AGENTS/);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// add_concept_alias slug normalization (#338/#317): create/update/delete all
+// normalize concept slugs before they hit the index (#302/#303), so an alias
+// stored raw ("Neural Networks") could never match a concepts row and the next
+// ingest would garbage-collect it silently.
+// ---------------------------------------------------------------------------
+
+describe("add_concept_alias normalizes slugs before storage (#338/#317)", () => {
+  function isErrorResult(r: unknown): r is { error: string; message: string } {
+    return typeof r === "object" && r !== null && "error" in r;
+  }
+
+  async function seedAliasDb(vault: string): Promise<string> {
+    const schistDir = path.join(vault, ".schist");
+    await fs.mkdir(schistDir, { recursive: true });
+    const dbPath = path.join(schistDir, "schist.db");
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE concepts (slug TEXT PRIMARY KEY, name TEXT NOT NULL);
+      INSERT INTO concepts (slug, name) VALUES
+        ('neural-networks', 'Neural Networks'),
+        ('machine-learning', 'Machine Learning');
+      CREATE TABLE concept_aliases (
+        duplicate_slug  TEXT NOT NULL REFERENCES concepts(slug),
+        canonical_slug  TEXT NOT NULL REFERENCES concepts(slug),
+        reason          TEXT,
+        created_by      TEXT NOT NULL,
+        created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (duplicate_slug, canonical_slug)
+      );
+    `);
+    db.close();
+    return dbPath;
+  }
+
+  it("stores display-form input normalized so index lookups (and ingest GC) match", async () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    const dbPath = await seedAliasDb(tempDir);
+
+    // Display form + edge/multiple whitespace: exactly what create_note's
+    // `concepts` normalization would have collapsed before indexing.
+    const result = await add_concept_alias(tempDir, {
+      duplicate_slug: "Neural Networks",
+      canonical_slug: "  Machine   Learning ",
+      created_by: "sansan",
+    });
+
+    expect(isErrorResult(result)).toBe(false);
+    const alias = result as { duplicate_slug: string; canonical_slug: string };
+    expect(alias.duplicate_slug).toBe("neural-networks");
+    expect(alias.canonical_slug).toBe("machine-learning");
+
+    // Findable via the normalized slug — the form every other tool queries by.
+    const db = new Database(dbPath, { readonly: true });
+    const row = db
+      .prepare("SELECT canonical_slug FROM concept_aliases WHERE duplicate_slug = ?")
+      .get("neural-networks") as { canonical_slug: string } | undefined;
+    db.close();
+    expect(row).toBeDefined();
+    expect(row!.canonical_slug).toBe("machine-learning");
+  });
+
+  it("rejects a slug that normalizes to empty", async () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    await seedAliasDb(tempDir);
+
+    const result = await add_concept_alias(tempDir, {
+      duplicate_slug: "   ",
+      canonical_slug: "machine-learning",
+      created_by: "sansan",
+    });
+
+    expect(isErrorResult(result)).toBe(true);
+    if (isErrorResult(result)) {
+      expect(result.error).toBe("VALIDATION_ERROR");
+      expect(result.message).toMatch(/non-empty after normalization/);
     }
   });
 });

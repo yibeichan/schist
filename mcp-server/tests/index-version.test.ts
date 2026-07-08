@@ -13,6 +13,7 @@
  * Also pins the #339 fix: `docs` is now in the required-tables set, so a DB
  * missing it rebuilds instead of failing on the first docs query.
  */
+import { jest } from "@jest/globals";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
@@ -69,6 +70,22 @@ async function useNoopSchistIngestBin(): Promise<string> {
   });
   process.env.SCHIST_INGEST_BIN = bin;
   return log;
+}
+
+/**
+ * Point SCHIST_INGEST_BIN at a fake that fails with a "database is locked"
+ * SQLITE_BUSY error — the observable behavior of a spawned ingest that races
+ * a live concurrent writer on a same-host WAL spoke (#354 parity).
+ */
+async function useLockedSchistIngestBin(): Promise<void> {
+  const dir = await makeBinDir();
+  const bin = path.join(dir, "schist-ingest-locked");
+  await fs.writeFile(
+    bin,
+    '#!/bin/sh\necho "sqlite3.OperationalError: database is locked" >&2\nexit 1\n',
+    { mode: 0o755 },
+  );
+  process.env.SCHIST_INGEST_BIN = bin;
 }
 
 /** Point SCHIST_INGEST_BIN at a fake that fails loudly if ever invoked. */
@@ -199,6 +216,97 @@ describe("index schema version staleness (#130 D3)", () => {
     await useFailLoudSchistIngestBin();
     const vault = await makeVault();
     await buildDbAtVersion(vault, INDEX_SCHEMA_VERSION);
+
+    const res = sqliteReader.searchNotes(vault, "haystack");
+    expect(res.find((r) => r.id === "notes/hand-built.md")).toBeDefined();
+  });
+});
+
+describe("SIGKILL-artifact heal — user_version=0 + empty docs (#350)", () => {
+  /**
+   * Same shape as buildDbAtVersion(vault, 0) but WITHOUT the seed row: the
+   * exact artifact a SIGKILL during ingest leaves behind — executescript
+   * commits the schema, the data transaction (and its atomic version stamp)
+   * rolls back, so all tables exist, all columns are current, user_version
+   * is 0, and docs is empty.
+   */
+  async function buildSigkillArtifact(vault: string): Promise<string> {
+    const schemaSql = await fs.readFile(path.join(repoRoot, "cli", "schist", "schema.sql"), "utf-8");
+    const dbDir = path.join(vault, ".schist");
+    await fs.mkdir(dbDir, { recursive: true });
+    const dbPath = path.join(dbDir, "schist.db");
+    const db = new Database(dbPath);
+    db.exec(schemaSql);
+    db.pragma("user_version = 0");
+    db.close();
+    return dbPath;
+  }
+
+  test(
+    "user_version=0 with empty docs rebuilds on the first MCP read (mirrors Python get_db #244)",
+    async () => {
+      await useLocalSchistIngestBin();
+      const vault = await makeVault();
+      const dbPath = await buildSigkillArtifact(vault);
+
+      // Pre-#350 this silently returned [] on every tool call until some
+      // Python read healed the DB. Now the first TS read rebuilds.
+      const res = sqliteReader.searchNotes(vault, "haystack");
+      expect(res.find((r) => r.id === "notes/2026-07-06-version.md")).toBeDefined();
+      expect(readUserVersion(dbPath)).toBe(INDEX_SCHEMA_VERSION);
+    },
+    60_000,
+  );
+
+  test(
+    "SIGKILL artifact an old ingest cannot fix routes through the rebuild-once → recheck → typed-error machinery",
+    async () => {
+      const log = await useNoopSchistIngestBin();
+      const vault = await makeVault();
+      await buildSigkillArtifact(vault);
+
+      // The noop ingest leaves docs empty at version 0, so the recheck must
+      // fire the same actionable skew error as the version-mismatch path —
+      // exactly ONE rebuild attempt, no silent empty results, no loop.
+      expect(() => sqliteReader.searchNotes(vault, "haystack")).toThrow(
+        /still stale after a schist-ingest rebuild[\s\S]*empty docs/,
+      );
+      expect((await fs.readFile(log, "utf-8")).trim().split("\n")).toHaveLength(1);
+    },
+    60_000,
+  );
+
+  test(
+    "transient 'database is locked' from the spawned ingest is served, not thrown (#354 parity)",
+    async () => {
+      const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await useLockedSchistIngestBin();
+        const vault = await makeVault();
+        await buildSigkillArtifact(vault);
+
+        // The version-0 + empty-docs shape is what a reader sees mid-ingest on
+        // a WAL spoke. Our heal rebuild races the live writer and the spawned
+        // ingest fails with SQLITE_BUSY. That must NOT throw the schema-drift
+        // skew error — serve the existing DB (empty docs → no results) while
+        // the concurrent writer finishes, and emit the "index busy" warning.
+        const res = sqliteReader.searchNotes(vault, "haystack");
+        expect(res).toEqual([]);
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("index busy"));
+      } finally {
+        warnSpy.mockRestore();
+      }
+    },
+    60_000,
+  );
+
+  test("user_version=0 WITH rows (genuine pre-marker DB) is left alone, exactly as Python does", async () => {
+    // Distinct from the exemption test above: this pins that the #350 probe
+    // keys on docs emptiness, not on version 0 alone. Any rebuild attempt
+    // hits the fail-loud bin and throws.
+    await useFailLoudSchistIngestBin();
+    const vault = await makeVault();
+    await buildDbAtVersion(vault, 0);
 
     const res = sqliteReader.searchNotes(vault, "haystack");
     expect(res.find((r) => r.id === "notes/hand-built.md")).toBeDefined();
