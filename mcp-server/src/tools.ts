@@ -6,7 +6,7 @@ import { spawn } from "child_process";
 import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote, updateNote, deleteNote } from "./git-writer.js";
-import { buildNote, buildConnectionLine, parseNote, CONNECTION_RE } from "./markdown-parser.js";
+import { buildNote, buildConnectionLine, parseNote, CONNECTION_RE, SLUG_WS_CHARS } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
 import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse, ComposeBriefResponse, Note, SearchResult } from "./types.js";
@@ -86,25 +86,45 @@ function loadCanonicalDirectories(): readonly string[] {
   return _canonicalDirsCache;
 }
 
-function slugify(title: string): string {
-  return (
+// #338: title slugs must be byte-identical across languages — the slug is
+// embedded in the note id (filename), and cli/schist/markdown_io.py's slugify
+// is the other producer. Native \s membership drifts between engines (see
+// SLUG_WS_CHARS in markdown-parser.ts), so a title containing e.g. U+0085
+// yielded note id `a-b` from Python but `ab` from TS. Both languages now use
+// the explicit whitespace union; schema/title-slug-parity.json pins them.
+const TITLE_NON_SLUG_RUN = new RegExp(`[^a-z0-9${SLUG_WS_CHARS}-]+`, "g");
+const TITLE_WS_RUN = new RegExp(`[${SLUG_WS_CHARS}]+`, "g");
+
+/** Linear edge-dash strip — index scan, never `^-+|-+$` (an anchored
+ * alternated regex backtracks quadratically over interior runs; see
+ * trimSlugWs). */
+function trimDashes(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && value[start] === "-") start++;
+  while (end > start && value[end - 1] === "-") end--;
+  return start === 0 && end === value.length ? value : value.slice(start, end);
+}
+
+/** @internal — exported for the schema/title-slug-parity.json fixture test.
+ * Mirrors cli/schist/markdown_io.py's slugify byte-for-byte (#338). */
+export function titleSlug(title: string): string {
+  return trimDashes(
     title
       .toLowerCase()
-      .replace(/[^a-z0-9\s-]/g, "")
-      .replace(/\s+/g, "-")
+      .replace(TITLE_NON_SLUG_RUN, "")
+      .replace(TITLE_WS_RUN, "-")
       .replace(/-+/g, "-")
-      .trim() || "untitled"
   );
+}
+
+function slugify(title: string): string {
+  return titleSlug(title) || "untitled";
 }
 
 /** Returns the raw slug without the "untitled" fallback — used to detect empty-slug titles */
 function rawSlug(title: string): string {
-  return title
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .trim();
+  return titleSlug(title);
 }
 
 function today(): string {
@@ -1249,6 +1269,40 @@ export async function get_note(
   }
 }
 
+/**
+ * #317: validate the connection-type vocabulary for a `## Connections`
+ * section embedded in a raw body (i.e. NOT generated from structured
+ * `connections`). Mirrors cli/schist/ingest.py's parse_connections filters
+ * exactly, so only a line ingest would index as an edge can be rejected: it
+ * must sit in the FIRST `## Connections` section, start with "- ", match
+ * CONNECTION_RE, and not be a bracket reference. Everything else is skipped,
+ * matching ingest's behavior for malformed lines.
+ */
+function validateBodyConnectionTypes(body: string, config: VaultConfig): ToolError | null {
+  let inSection = false;
+  for (const rawLine of body.split("\n")) {
+    const stripped = rawLine.trim();
+    if (stripped.startsWith("## Connections")) {
+      inSection = true;
+      continue;
+    }
+    if (inSection && stripped.startsWith("## ")) break;
+    if (!inSection || !stripped.startsWith("- ")) continue;
+    const m = stripped.match(CONNECTION_RE);
+    if (!m) continue; // malformed line — ingest skips it
+    if (m[2].startsWith("[")) continue; // bracket reference — ingest skips it
+    if (!config.connectionTypes.includes(m[1])) {
+      return {
+        error: "VALIDATION_ERROR",
+        message:
+          `connection type must be one of: ${config.connectionTypes.join(", ")} ` +
+          `(got "${m[1]}" in body line "${stripped}")`,
+      } satisfies ToolError;
+    }
+  }
+  return null;
+}
+
 export async function create_note(
   vaultRoot: string,
   args: {
@@ -1302,6 +1356,16 @@ export async function create_note(
         message: `status must be one of: ${config.statuses.join(", ")} (got "${status}")`,
       } satisfies ToolError;
     }
+    // #317: a non-array `connections` (object, string) previously fell
+    // through to the for-of below — `{}` threw TypeError (surfaced as a
+    // misleading GIT_ERROR) and a string iterated per-character. Shape-check
+    // first so both come back as typed validation failures.
+    if (args.connections !== undefined && !Array.isArray(args.connections)) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: "connections must be an array of { target, type, context? } objects",
+      } satisfies ToolError;
+    }
     // #304: connections carry a controlled type vocabulary (vault.yaml
     // connection_types); unchecked strings silently drift the graph taxonomy
     // and a type with whitespace/newlines produces `## Connections` lines
@@ -1313,6 +1377,15 @@ export async function create_note(
           message: `connection type must be one of: ${config.connectionTypes.join(", ")} (got "${conn.type}")`,
         } satisfies ToolError;
       }
+    }
+    // #317: the #304 loop above only covers STRUCTURED connections. buildNote
+    // rewrites the `## Connections` section only when structured connections
+    // are passed; with none (or an empty array) a section written literally
+    // in `body` reaches disk verbatim and ingest indexes its edges with
+    // out-of-vocabulary types. Validate at the same write boundary.
+    if (args.connections === undefined || args.connections.length === 0) {
+      const bodyConnError = validateBodyConnectionTypes(args.body, config);
+      if (bodyConnError !== null) return bodyConnError;
     }
     const directory = args.directory ?? "notes";
     if (directory.includes("..") || path.isAbsolute(directory)) {
@@ -1572,17 +1645,11 @@ function noteRefTokens(id: string): string[] {
 }
 
 // Explicit whitespace set shared verbatim with cli/schist/ingest.py's
-// _normalize_concept_slug. JS's \s and Python's \s disagree at the edges —
-// JS adds U+FEFF (ZWNBSP), Python adds U+001C–U+001F (C0 separators) and
-// U+0085 (NEL) — exactly the cross-language drift family that caused #303.
-// This is the UNION of both engines' sets (30 codepoints, all BMP single
-// code units), so either language's notion of whitespace becomes a slug
-// separator. schema/concept-slug-parity.json pins both implementations to
-// the same table. #318.
-const SLUG_WS_CHARS =
-  "\t\n\v\f\r\u001c\u001d\u001e\u001f \u0085\u00a0\u1680" +
-  "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007" +
-  "\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
+// _normalize_concept_slug — the UNION of both engines' \s sets, so either
+// language's notion of whitespace becomes a slug separator (#303/#318).
+// Single-sourced in markdown-parser.ts since #338 extended it to title
+// slugs and connection lines. schema/concept-slug-parity.json pins both
+// implementations to the same table.
 const SLUG_WS_SET = new Set(SLUG_WS_CHARS);
 // None of the members are regex metacharacters, so they can sit in a class raw.
 const SLUG_WS_RUN = new RegExp(`[${SLUG_WS_CHARS}]+`, "g");
@@ -1912,6 +1979,14 @@ export async function update_note(
     }
     const patchError = validateFrontmatterPatch(args.frontmatter_patch, config);
     if (patchError !== null) return patchError;
+
+    // #317: update_note never passes structured connections to buildNote, so
+    // a replaced body carries its `## Connections` section to disk verbatim —
+    // the same vocabulary bypass as create_note's raw-body path.
+    if (args.body !== undefined) {
+      const bodyConnError = validateBodyConnectionTypes(args.body, config);
+      if (bodyConnError !== null) return bodyConnError;
+    }
 
     const idError = validateNoteId(args.id, config);
     if (idError !== null) return idError;
@@ -2743,7 +2818,20 @@ export async function add_concept_alias(
 ): Promise<unknown> {
   try {
     const createdBy = validateOwner(args.created_by);
-    return sqliteReader.addConceptAlias(vaultRoot, args.duplicate_slug, args.canonical_slug, args.reason, createdBy);
+    // #338/#317: create/update/delete normalize concept slugs before they hit
+    // the index (#302/#303), so an alias stored raw ("Neural Networks") can
+    // never match a concepts row — the FK insert fails at best, and at worst
+    // the next ingest garbage-collects the orphan row silently. Normalize
+    // both sides at the same boundary the other write tools use.
+    const duplicateSlug = normalizeConceptSlug(args.duplicate_slug);
+    const canonicalSlug = normalizeConceptSlug(args.canonical_slug);
+    if (duplicateSlug === "" || canonicalSlug === "") {
+      return {
+        error: "VALIDATION_ERROR",
+        message: "duplicate_slug and canonical_slug must be non-empty after normalization",
+      } satisfies ToolError;
+    }
+    return sqliteReader.addConceptAlias(vaultRoot, duplicateSlug, canonicalSlug, args.reason, createdBy);
   } catch (e: unknown) {
     return normalizeError(e, "VALIDATION_ERROR");
   }

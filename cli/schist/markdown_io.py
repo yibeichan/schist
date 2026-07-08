@@ -4,13 +4,35 @@ import re
 
 import frontmatter
 
+# Explicit whitespace set shared verbatim with ingest.py's _SLUG_WS_CHARS and
+# mcp-server's SLUG_WS_CHARS (markdown-parser.ts): the UNION of Python's and
+# JS's \s (30 codepoints). Native \s drifts between engines — Python adds
+# U+001C–U+001F (C0 separators) and U+0085 (NEL), JS adds U+FEFF (ZWNBSP) —
+# so under native \s a title containing e.g. U+0085 slugged to note id `a-b`
+# from Python but `ab` from TS (#338). schema/title-slug-parity.json pins
+# both implementations to the same table, like #318 did for concept slugs.
+SLUG_WS_CHARS = (
+    '\t\n\x0b\x0c\r\x1c\x1d\x1e\x1f \x85\xa0\u1680'
+    '\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007'
+    '\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'
+)
+_NON_SLUG_RE = re.compile(f'[^a-z0-9{re.escape(SLUG_WS_CHARS)}-]')
+_SLUG_WS_RUN_RE = re.compile(f'[{re.escape(SLUG_WS_CHARS)}]+')
+_DASH_RUN_RE = re.compile(r'-+')
+
 
 def slugify(title: str) -> str:
-    """Lowercase, spaces to hyphens, strip non-alphanum except hyphens."""
-    s = title.lower().strip()
-    s = re.sub(r'[^a-z0-9\s-]', '', s)
-    s = re.sub(r'[\s]+', '-', s)
-    s = re.sub(r'-+', '-', s)
+    """Lowercase, whitespace to hyphens, strip non-alphanum except hyphens.
+
+    Mirrors mcp-server tools.ts titleSlug byte-for-byte (#338). Edge dashes
+    are stripped with str.strip — LINEAR — never an anchored alternated
+    regex (`^-+|-+$` backtracks quadratically over interior runs; see
+    ingest.py's _SLUG_WS_RUN comment).
+    """
+    s = title.lower()
+    s = _NON_SLUG_RE.sub('', s)
+    s = _SLUG_WS_RUN_RE.sub('-', s)
+    s = _DASH_RUN_RE.sub('-', s)
     return s.strip('-')
 
 

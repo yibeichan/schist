@@ -23,9 +23,8 @@ except ImportError:  # pragma: no cover — running as a bare script (a legacy
 
 SKIP_DIRS = {'.git', '.schist'}
 HASHTAG_AT_START_RE = re.compile(r'^#[^\s,\]\}]+')
-CONNECTION_RE = re.compile(
-    r'^-\s+(\S+):\s+(\S+)(?:\s+"([^"]*)")?(?:\s+—\s+(.*))?$'
-)
+# CONNECTION_RE is defined below _SLUG_WS_CHARS — it is built from the same
+# explicit whitespace class (#338).
 
 # Frontmatter fields whose presence marks a note as a paper (copied into
 # paper_metadata). Pinned to schema/frontmatter-contract.json's
@@ -63,6 +62,20 @@ _SLUG_WS_CHARS = (
 # (20s on a 100k-space concept string; reachable from agent-supplied
 # frontmatter, and ingest runs after every write).
 _SLUG_WS_RUN = re.compile(f'[{re.escape(_SLUG_WS_CHARS)}]+')
+
+# Connection lines use the same explicit whitespace union: native \s / \S
+# membership differs between Python and JS (see _SLUG_WS_CHARS above), so the
+# two languages' CONNECTION_REs parsed divergent codepoints differently —
+# e.g. a NEL (U+0085) separator produced an edge under Python's \s but not
+# under JS's (#338). `\s` becomes the explicit class, `\S` its negation;
+# semantics are otherwise identical. schema/connection-line-parity.json pins
+# this regex against mcp-server/src/markdown-parser.ts's CONNECTION_RE.
+_WS_CLASS = f'[{re.escape(_SLUG_WS_CHARS)}]'
+_NON_WS_CLASS = f'[^{re.escape(_SLUG_WS_CHARS)}]'
+CONNECTION_RE = re.compile(
+    f'^-{_WS_CLASS}+({_NON_WS_CLASS}+):{_WS_CLASS}+({_NON_WS_CLASS}+)'
+    f'(?:{_WS_CLASS}+"([^"]*)")?(?:{_WS_CLASS}+—{_WS_CLASS}+(.*))?$'
+)
 
 
 def _normalize_concept_slug(value: str) -> str:

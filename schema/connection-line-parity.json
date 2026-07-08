@@ -1,0 +1,213 @@
+[
+  {
+    "name": "plain edge",
+    "line": "- extends: other-note",
+    "expected": {
+      "type": "extends",
+      "target": "other-note",
+      "context": null
+    }
+  },
+  {
+    "name": "quoted context",
+    "line": "- supports: note-b \"because reasons\"",
+    "expected": {
+      "type": "supports",
+      "target": "note-b",
+      "context": "because reasons"
+    }
+  },
+  {
+    "name": "em-dash context",
+    "line": "- extends: note-b \u2014 trailing context",
+    "expected": {
+      "type": "extends",
+      "target": "note-b",
+      "context": "trailing context"
+    }
+  },
+  {
+    "name": "tab separators",
+    "line": "-\textends:\tnote-b",
+    "expected": {
+      "type": "extends",
+      "target": "note-b",
+      "context": null
+    }
+  },
+  {
+    "name": "NBSP separators",
+    "line": "-\u00a0extends:\u00a0note-b",
+    "expected": {
+      "type": "extends",
+      "target": "note-b",
+      "context": null
+    }
+  },
+  {
+    "name": "NEL U+0085 separator (Python-only under backslash-s)",
+    "line": "-\u0085extends:\u0085note-b",
+    "expected": {
+      "type": "extends",
+      "target": "note-b",
+      "context": null
+    }
+  },
+  {
+    "name": "NEL inside the type token splits it: no match",
+    "line": "- exte\u0085nds: note-b",
+    "expected": null
+  },
+  {
+    "name": "ZWNBSP U+FEFF separator (JS-only under backslash-s)",
+    "line": "- extends:\ufeffnote-b",
+    "expected": {
+      "type": "extends",
+      "target": "note-b",
+      "context": null
+    }
+  },
+  {
+    "name": "ZWNBSP inside the target splits it: no match",
+    "line": "- extends: note\ufeffb",
+    "expected": null
+  },
+  {
+    "name": "C0 file separator U+001C (Python-only under backslash-s)",
+    "line": "-\u001cextends:\u001cnote-b",
+    "expected": {
+      "type": "extends",
+      "target": "note-b",
+      "context": null
+    }
+  },
+  {
+    "name": "line separator U+2028",
+    "line": "-\u2028extends: note-b",
+    "expected": {
+      "type": "extends",
+      "target": "note-b",
+      "context": null
+    }
+  },
+  {
+    "name": "paragraph separator U+2029 before quoted context",
+    "line": "- extends: note-b\u2029\"ctx\"",
+    "expected": {
+      "type": "extends",
+      "target": "note-b",
+      "context": "ctx"
+    }
+  },
+  {
+    "name": "ideographic space U+3000",
+    "line": "-\u3000extends:\u3000note-b",
+    "expected": {
+      "type": "extends",
+      "target": "note-b",
+      "context": null
+    }
+  },
+  {
+    "name": "narrow no-break space U+202F",
+    "line": "-\u202fextends: note-b",
+    "expected": {
+      "type": "extends",
+      "target": "note-b",
+      "context": null
+    }
+  },
+  {
+    "name": "Ogham space mark U+1680",
+    "line": "-\u1680extends: note-b",
+    "expected": {
+      "type": "extends",
+      "target": "note-b",
+      "context": null
+    }
+  },
+  {
+    "name": "medium mathematical space U+205F",
+    "line": "-\u205fextends: note-b",
+    "expected": {
+      "type": "extends",
+      "target": "note-b",
+      "context": null
+    }
+  },
+  {
+    "name": "VT and FF separators",
+    "line": "-\u000bextends:\fnote-b",
+    "expected": {
+      "type": "extends",
+      "target": "note-b",
+      "context": null
+    }
+  },
+  {
+    "name": "en/thin/hair space run U+2000-200A",
+    "line": "-\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200aextends:\u2009note-b",
+    "expected": {
+      "type": "extends",
+      "target": "note-b",
+      "context": null
+    }
+  },
+  {
+    "name": "zero-width space U+200B is NOT a separator",
+    "line": "-\u200bextends: note-b",
+    "expected": null
+  },
+  {
+    "name": "no leading dash",
+    "line": "extends: note-b",
+    "expected": null
+  },
+  {
+    "name": "missing target",
+    "line": "- extends:",
+    "expected": null
+  },
+  {
+    "name": "no colon",
+    "line": "- extends note-b",
+    "expected": null
+  },
+  {
+    "name": "single-token bracket target still matches (parsers skip it AFTER the regex)",
+    "line": "- see: [Moltbook]",
+    "expected": {
+      "type": "see",
+      "target": "[Moltbook]",
+      "context": null
+    }
+  },
+  {
+    "name": "multi-token bracket reference does not match",
+    "line": "- ref: [Moltbook, Jan 2026]",
+    "expected": null
+  },
+  {
+    "name": "trailing space defeats the anchored match",
+    "line": "- extends: note-b ",
+    "expected": null
+  },
+  {
+    "name": "unknown type still matches at the regex level (vocabulary is checked elsewhere)",
+    "line": "- bogus-type: x",
+    "expected": {
+      "type": "bogus-type",
+      "target": "x",
+      "context": null
+    }
+  },
+  {
+    "name": "empty quoted context collapses to null via the or-chain",
+    "line": "- extends: note-b \"\"",
+    "expected": {
+      "type": "extends",
+      "target": "note-b",
+      "context": null
+    }
+  }
+]

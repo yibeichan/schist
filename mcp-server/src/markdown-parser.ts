@@ -1,8 +1,37 @@
 import matter from "gray-matter";
 import type { Connection } from "./types.js";
 
-/** Shared regex for connection lines — exported so sqlite-reader doesn't duplicate it. */
-export const CONNECTION_RE = /^-\s+(\S+):\s+(\S+)(?:\s+"([^"]*)")?(?:\s+—\s+(.*))?$/;
+// Explicit whitespace set shared verbatim with cli/schist/ingest.py's
+// _SLUG_WS_CHARS and cli/schist/markdown_io.py's SLUG_WS_CHARS. JS's \s and
+// Python's \s disagree at the edges — JS adds U+FEFF (ZWNBSP), Python adds
+// U+001C–U+001F (C0 separators) and U+0085 (NEL) — exactly the cross-language
+// drift family behind #303/#318/#338. This is the UNION of both engines' sets
+// (30 codepoints, all BMP single code units), so either language's notion of
+// whitespace behaves identically in slugs and connection lines. Single-sourced
+// here (the lowest-level module); tools.ts imports it for slug normalization.
+export const SLUG_WS_CHARS =
+  "\t\n\v\f\r\u001c\u001d\u001e\u001f \u0085\u00a0\u1680" +
+  "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007" +
+  "\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
+
+// None of the members are regex metacharacters, so they can sit in a class raw.
+const WS_CLASS = `[${SLUG_WS_CHARS}]`;
+const NON_WS_CLASS = `[^${SLUG_WS_CHARS}]`;
+
+/**
+ * Shared regex for connection lines — exported so sqlite-reader doesn't
+ * duplicate it. Built from the explicit whitespace union (`\s` → WS_CLASS,
+ * `\S` → its negation): native \s / \S membership drifts between JS and
+ * Python, so the two languages' CONNECTION_REs parsed divergent codepoints
+ * differently — e.g. a NEL (U+0085) separator produced an edge under
+ * Python's \s but not under JS's (#338). Semantics are otherwise identical.
+ * schema/connection-line-parity.json pins this against
+ * cli/schist/ingest.py's CONNECTION_RE.
+ */
+export const CONNECTION_RE = new RegExp(
+  `^-${WS_CLASS}+(${NON_WS_CLASS}+):${WS_CLASS}+(${NON_WS_CLASS}+)` +
+  `(?:${WS_CLASS}+"([^"]*)")?(?:${WS_CLASS}+—${WS_CLASS}+(.*))?$`
+);
 
 export function parseConnections(body: string): Connection[] {
   const connections: Connection[] = [];
