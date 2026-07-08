@@ -77,20 +77,34 @@ def setup_sparse_checkout(vault_path: str, scope: str) -> tuple[bool, str]:
     and other root configs are always available.
     """
     try:
+        # All three are local index/worktree operations, but each can hang
+        # indefinitely on a stale index.lock or an NFS stall (#345) — the
+        # spoke-init path then blocks forever with no error. Bound them like
+        # every other git call in this module.
         subprocess.run(
             ['git', 'sparse-checkout', 'init', '--cone'],
             cwd=vault_path, check=True, capture_output=True, text=True,
+            timeout=30,
         )
         subprocess.run(
             ['git', 'sparse-checkout', 'set', scope],
             cwd=vault_path, check=True, capture_output=True, text=True,
+            timeout=30,
         )
+        # This checkout materializes the entire scope worktree — bulk I/O, not
+        # a lock-shaped op — so it gets the 120s clone/commit ceiling, not the
+        # 30s config-op ceiling above. On a large vault over NFS/Lustre 30s is
+        # a deterministic hard failure of the documented re-clone recovery.
         result = subprocess.run(
             ['git', 'checkout'],
             cwd=vault_path, capture_output=True, text=True,
+            timeout=120,
         )
         output = result.stdout + result.stderr
         return result.returncode == 0, output.strip()
+    except subprocess.TimeoutExpired as e:
+        cmd = ' '.join(e.cmd) if isinstance(e.cmd, list) else str(e.cmd)
+        return False, f"{cmd} timed out after {e.timeout}s (stale index.lock or NFS stall?)"
     except subprocess.CalledProcessError as e:
         return False, (e.stdout or '') + (e.stderr or '')
 
@@ -115,19 +129,29 @@ def pull_rebase(vault_path: str) -> tuple[bool, str]:
         )
         output = result.stdout + result.stderr
         if result.returncode != 0:
-            # Abort the failed rebase to restore clean state
-            subprocess.run(
-                ['git', 'rebase', '--abort'],
-                cwd=vault_path, capture_output=True, text=True,
-            )
+            # Abort the failed rebase to restore clean state. Best-effort and
+            # bounded (#321): if the abort itself stalls (NFS, stale lock),
+            # surface the original pull error — sync's cleanup_stale_git_state
+            # clears leftover rebase state on the next run.
+            try:
+                subprocess.run(
+                    ['git', 'rebase', '--abort'],
+                    cwd=vault_path, capture_output=True, text=True, timeout=30,
+                )
+            except subprocess.TimeoutExpired:
+                output += "\n(rebase --abort also timed out after 30s; rerun sync to clean up)"
             return False, output.strip()
         return True, output.strip()
     except subprocess.TimeoutExpired:
-        # Abort any in-progress rebase to restore clean state
-        subprocess.run(
-            ['git', 'rebase', '--abort'],
-            cwd=vault_path, capture_output=True, text=True,
-        )
+        # Abort any in-progress rebase to restore clean state (bounded, #321).
+        try:
+            subprocess.run(
+                ['git', 'rebase', '--abort'],
+                cwd=vault_path, capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return False, ("Pull timed out after 60s "
+                           "(rebase --abort also timed out; rerun sync to clean up)")
         return False, "Pull timed out after 60s"
     except subprocess.CalledProcessError as e:
         return False, (e.stdout or '') + (e.stderr or '')

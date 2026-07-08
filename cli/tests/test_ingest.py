@@ -1296,6 +1296,32 @@ def test_ingest_no_wal_env_keeps_rollback_journal(tmp_path: Path, monkeypatch) -
         conn.close()
 
 
+@pytest.mark.parametrize("value", ["0", "false", "no", "off"])
+def test_ingest_no_wal_falsy_values_keep_wal(tmp_path: Path, monkeypatch, value) -> None:
+    """#311: SCHIST_NO_WAL=0/false/no/off must NOT disable WAL — plain env
+    truthiness treated any non-empty string as an opt-out."""
+    from schist.ingest import ingest
+
+    monkeypatch.setenv("SCHIST_NO_WAL", value)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-07-07-flag.md",
+        "---\ntitle: Flag\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        conn.close()
+
+
 def test_normalize_concept_slug_matches_ts_whitespace_collapse() -> None:
     """#303: parity with mcp-server normalizeConceptSlug (`/\\s+/g` -> "-").
     A whitespace RUN must collapse to a single dash — `foo--bar` vs `foo-bar`
