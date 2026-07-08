@@ -86,3 +86,32 @@ describe("deleteNote commit timeout ceiling (#324)", () => {
     ).rejects.toThrow();
   }, 30000);
 });
+
+describe("withWriteLock commit timeout ceiling (#346)", () => {
+  test("write survives a post-commit hook slower than the fast-op ceiling", async () => {
+    const { writeNote } = await import("../src/git-writer.js");
+    const vault = await makeTempVault();
+
+    // Same slow-hook setup as the deleteNote test above: the hook outlives
+    // GIT_OP_TIMEOUT_MS but not GIT_COMMIT_TIMEOUT_MS, and drops a marker so
+    // a config-skipped hook can't make the test pass vacuously.
+    const marker = path.join(vault, ".git", "hook-ran");
+    const hookPath = path.join(vault, ".git", "hooks", "post-commit");
+    await fs.writeFile(hookPath, `#!/bin/sh\nsleep ${HOOK_SLEEP_S}\ntouch "${marker}"\n`);
+    await fs.chmod(hookPath, 0o755);
+
+    const result = await writeNote(
+      vault,
+      "notes/slow-hook.md",
+      "---\ntitle: Slow Hook\n---\nBody\n",
+      "Slow Hook",
+    );
+    expect(result.committed).toBe(true);
+    // The hook finished within the commit ceiling — no timeout, no warning.
+    expect(result.commitWarning).toBeUndefined();
+    await expect(fs.access(marker)).resolves.toBeUndefined(); // hook really ran, past its sleep
+
+    // The write really landed on the write branch.
+    await execFile("git", ["cat-file", "-e", "drafts:notes/slow-hook.md"], { cwd: vault });
+  }, 30000);
+});
