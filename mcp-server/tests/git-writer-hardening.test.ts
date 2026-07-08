@@ -15,7 +15,12 @@
  * the write. Now: the deepest EXISTING ancestor is realpath-validated first,
  * so the write fails with PATH_TRAVERSAL and nothing is created outside.
  */
-import { writeNote } from "../src/git-writer.js";
+import {
+  writeNote,
+  endOfOptionsArgs,
+  parseGitMajorMinor,
+  __setGitVersionCacheForTesting,
+} from "../src/git-writer.js";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
@@ -125,5 +130,62 @@ describe("mkdir ancestry containment (#335)", () => {
     const result = await writeNote(vault, "notes/a/b/deep.md", "---\ntitle: Deep\n---\nBody\n");
     expect(result.committed).toBe(true);
     await execFile("git", ["cat-file", "-e", "drafts:notes/a/b/deep.md"], { cwd: vault });
+  });
+});
+
+describe("--end-of-options gated on runtime git version (#355 deploy fix)", () => {
+  // `--end-of-options` requires git ≥2.24; older git (common on HPC login
+  // nodes) rejects it and breaks every write. The flag is belt-and-suspenders
+  // behind validation + the universal trailing `--`, so it must be OMITTED on
+  // old / unknown git.
+  afterEach(() => {
+    __setGitVersionCacheForTesting(undefined); // restore real detection
+  });
+
+  test("parseGitMajorMinor extracts major.minor from git --version output", () => {
+    expect(parseGitMajorMinor("git version 2.50.1 (Apple Git-155)")).toEqual([2, 50]);
+    expect(parseGitMajorMinor("git version 2.24.0")).toEqual([2, 24]);
+    expect(parseGitMajorMinor("git version 1.8.3.1")).toEqual([1, 8]);
+    expect(parseGitMajorMinor("git version 3.0.0")).toEqual([3, 0]);
+    expect(parseGitMajorMinor("not a version string")).toBeNull();
+  });
+
+  test("flag IS present when detected git ≥2.24", async () => {
+    __setGitVersionCacheForTesting([2, 24]);
+    expect(await endOfOptionsArgs()).toEqual(["--end-of-options"]);
+    __setGitVersionCacheForTesting([2, 50]);
+    expect(await endOfOptionsArgs()).toEqual(["--end-of-options"]);
+    __setGitVersionCacheForTesting([3, 0]);
+    expect(await endOfOptionsArgs()).toEqual(["--end-of-options"]);
+  });
+
+  test("flag is ABSENT when detected git <2.24 or unknown", async () => {
+    __setGitVersionCacheForTesting([2, 23]);
+    expect(await endOfOptionsArgs()).toEqual([]);
+    __setGitVersionCacheForTesting([1, 8]);
+    expect(await endOfOptionsArgs()).toEqual([]);
+    // Detection failure / unparseable → treated as old, the safe default.
+    __setGitVersionCacheForTesting(null);
+    expect(await endOfOptionsArgs()).toEqual([]);
+  });
+
+  test("write still succeeds on the <2.24 path (validation + trailing -- only)", async () => {
+    // Force the old-git code path even though the test host runs modern git:
+    // the write must land using only the universal guards.
+    __setGitVersionCacheForTesting([2, 20]);
+    const vault = await makeTempVault();
+    const result = await writeNote(vault, "notes/old-git.md", "---\ntitle: Old Git\n---\nBody\n");
+    expect(result.committed).toBe(true);
+    await execFile("git", ["cat-file", "-e", "drafts:notes/old-git.md"], { cwd: vault });
+  });
+
+  test("write_branch validation still rejects option-like names on the <2.24 path", async () => {
+    // The real injection guard is version-independent: even without the flag,
+    // a "-f" write_branch is rejected before it reaches git argv.
+    __setGitVersionCacheForTesting([2, 20]);
+    const vault = await makeTempVault("-f");
+    await expect(
+      writeNote(vault, "notes/n.md", "---\ntitle: N\n---\nBody\n"),
+    ).rejects.toMatchObject({ error: "VALIDATION_ERROR" });
   });
 });

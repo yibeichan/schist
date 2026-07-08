@@ -37,6 +37,62 @@ function isGitTimeout(e: unknown): boolean {
   return e !== null && typeof e === "object" && (e as { error?: unknown }).error === "GIT_TIMEOUT";
 }
 
+/**
+ * `--end-of-options` (which stops git parsing later args as flags) was only
+ * added in git 2.24. On an HPC login node the user lands on a different host
+ * each session with whatever git module happens to be loaded — possibly an
+ * ancient system git — and `git checkout` is STRICT about unknown options, so
+ * an unconditional `--end-of-options` would break EVERY write with a cryptic
+ * "unknown option 'end-of-options'". We therefore gate the flag on the
+ * runtime git version and treat any parse failure / unknown version as OLD
+ * (omit the flag) — the safe default.
+ *
+ * The flag is only ever belt-and-suspenders: the guards that actually prevent
+ * option injection work on every git version and stay UNCONDITIONAL —
+ * `assertValidWriteBranch` (check-ref-format --branch + leading-dash reject)
+ * rejects option-like branch names, and the trailing `--` pathspec separator
+ * (universal, ancient) is kept on the checkout/add/rm calls. So on old git we
+ * degrade to "validation + trailing `--`"; on git ≥2.24 we keep the full
+ * hardening.
+ */
+export function parseGitMajorMinor(versionOutput: string): [number, number] | null {
+  // e.g. "git version 2.50.1 (Apple Git-155)" → [2, 50]
+  const m = /(\d+)\.(\d+)/.exec(versionOutput);
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2])];
+}
+
+// undefined = not yet detected; null = detected-but-unknown (treated as old).
+let gitVersionCache: [number, number] | null | undefined = undefined;
+
+/** Detect the runtime git major.minor once and cache it for the process. */
+async function getGitMajorMinor(): Promise<[number, number] | null> {
+  if (gitVersionCache !== undefined) return gitVersionCache;
+  try {
+    const { stdout } = await execFile("git", ["--version"], { timeout: GIT_OP_TIMEOUT_MS });
+    gitVersionCache = parseGitMajorMinor(stdout);
+  } catch {
+    gitVersionCache = null; // git --version failed → assume old, omit the flag
+  }
+  return gitVersionCache;
+}
+
+/**
+ * `["--end-of-options"]` when the runtime git is ≥2.24, otherwise `[]`.
+ * Spread into git argv immediately before the branch-name operand.
+ */
+export async function endOfOptionsArgs(): Promise<string[]> {
+  const v = await getGitMajorMinor();
+  if (!v) return [];
+  const [maj, min] = v;
+  return maj > 2 || (maj === 2 && min >= 24) ? ["--end-of-options"] : [];
+}
+
+/** @internal — test-only: force or reset the cached git version. */
+export function __setGitVersionCacheForTesting(v: [number, number] | null | undefined): void {
+  gitVersionCache = v;
+}
+
 async function git(vaultRoot: string, args: string[], timeoutMs: number = GIT_OP_TIMEOUT_MS): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
     // detached:true puts git in its own process group so a timeout can kill
@@ -168,14 +224,16 @@ async function assertValidWriteBranch(vaultRoot: string, branch: string): Promis
 
 async function ensureBranch(vaultRoot: string, branch: string): Promise<void> {
   await assertValidWriteBranch(vaultRoot, branch);
+  // --end-of-options (git ≥2.24 only, see endOfOptionsArgs): even if validation
+  // were ever bypassed, an option-like name can only be read as a branch name,
+  // never as a flag (#331).
+  const eoo = await endOfOptionsArgs();
   try {
-    // --end-of-options: even if validation were ever bypassed, an option-like
-    // name can only be read as a branch name here, never as a flag (#331).
-    await git(vaultRoot, ["rev-parse", "--verify", "--end-of-options", branch]);
+    await git(vaultRoot, ["rev-parse", "--verify", ...eoo, branch]);
   } catch (e) {
     // A hung rev-parse is not "branch missing" — don't try to create on it.
     if (isGitTimeout(e)) throw e;
-    await git(vaultRoot, ["branch", "--end-of-options", branch]);
+    await git(vaultRoot, ["branch", ...eoo, branch]);
   }
 }
 
@@ -314,10 +372,11 @@ async function withWriteLock(
   try {
     const branch = await getWriteBranch(vaultRoot);
     await ensureBranch(vaultRoot, branch);
-    // Trailing "--": force the branch reading even if a file shares the name;
-    // --end-of-options: an option-like branch can never be parsed as a flag
-    // (defense-in-depth behind assertValidWriteBranch, #331).
-    await git(vaultRoot, ["checkout", "--end-of-options", branch, "--"]);
+    // Trailing "--": force the branch reading even if a file shares the name
+    // (universal, ancient). --end-of-options (git ≥2.24 only): an option-like
+    // branch can never be parsed as a flag — defense-in-depth behind
+    // assertValidWriteBranch (#331).
+    await git(vaultRoot, ["checkout", ...(await endOfOptionsArgs()), branch, "--"]);
 
     const absPath = path.resolve(vaultRoot, relPath);
     // Containment check on the deepest EXISTING ancestor BEFORE mkdir — the
@@ -542,8 +601,9 @@ export async function deleteNote(
   try {
     const branch = await getWriteBranch(vaultRoot);
     await ensureBranch(vaultRoot, branch);
-    // Same option-injection hardening as withWriteLock (#331).
-    await git(vaultRoot, ["checkout", "--end-of-options", branch, "--"]);
+    // Same option-injection hardening as withWriteLock (#331); --end-of-options
+    // is git ≥2.24-gated, the trailing "--" is universal.
+    await git(vaultRoot, ["checkout", ...(await endOfOptionsArgs()), branch, "--"]);
 
     try {
       await git(vaultRoot, ["rm", "--quiet", "--", relPath]);
