@@ -11,6 +11,11 @@ from pathlib import Path
 import frontmatter
 
 try:
+    from .env_utils import env_flag
+except ImportError:  # pragma: no cover — bare-script mode, same as below.
+    from env_utils import env_flag
+
+try:
     from .index_contract import INDEX_SCHEMA_VERSION
 except ImportError:  # pragma: no cover — running as a bare script (a legacy
     # `.schist/ingest.py` hook copy, see sync.py's POST_COMMIT_HOOK). The
@@ -333,7 +338,7 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     # Must run BEFORE executescript so the DROP/CREATE phase never touches
     # WAL mode on such deployments; journal_mode requires autocommit, which
     # holds here (fresh connection, no open transaction). See #254.
-    mode = 'DELETE' if os.environ.get('SCHIST_NO_WAL') else 'WAL'
+    mode = 'DELETE' if env_flag('SCHIST_NO_WAL') else 'WAL'
     conn.execute(f'PRAGMA journal_mode={mode}')
 
     # Completion marker AND schema version in one value (#244, #130 D3):

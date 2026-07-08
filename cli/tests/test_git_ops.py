@@ -152,3 +152,99 @@ def test_global_scope_targets_skips_stalled_dir(tmp_path):
         targets = git_ops._global_scope_targets(str(tmp_path))
 
     assert targets == []
+
+
+# ---------------------------------------------------------------------------
+# setup_sparse_checkout (#345)
+# ---------------------------------------------------------------------------
+
+
+def test_setup_sparse_checkout_calls_all_carry_timeouts():
+    """#345: init --cone, set <scope>, and checkout must all be bounded —
+    each can hang forever on a stale index.lock or NFS stall."""
+    calls = []
+
+    def _record(*args, **kwargs):
+        calls.append((args[0], kwargs.get("timeout")))
+        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+    with patch("schist.git_ops.subprocess.run", side_effect=_record):
+        ok, _ = git_ops.setup_sparse_checkout("/tmp/vault", "research")
+
+    assert ok is True
+    assert len(calls) == 3, "expected sparse-checkout init/set + checkout"
+    for argv, timeout in calls:
+        assert timeout is not None and timeout > 0, f"{argv} ran with no timeout"
+
+
+def test_setup_sparse_checkout_returns_false_on_timeout():
+    """A stalled first call surfaces as (False, message), never an exception."""
+    with patch("schist.git_ops.subprocess.run",
+               side_effect=lambda *a, **k: _timeout(a[0], k)):
+        ok, msg = git_ops.setup_sparse_checkout("/tmp/vault", "research")
+
+    assert ok is False
+    assert "timed out" in msg
+
+
+def test_setup_sparse_checkout_timeout_mid_sequence():
+    """Timeout on the final `git checkout` (after sparse-checkout succeeded)
+    takes the same clean (False, message) path."""
+    def _checkout_stalls(*args, **kwargs):
+        argv = args[0]
+        if argv[1] == "checkout":
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    with patch("schist.git_ops.subprocess.run", side_effect=_checkout_stalls):
+        ok, msg = git_ops.setup_sparse_checkout("/tmp/vault", "research")
+
+    assert ok is False
+    assert "timed out" in msg
+
+
+# ---------------------------------------------------------------------------
+# pull_rebase cleanup-abort bounds (#321)
+# ---------------------------------------------------------------------------
+
+
+def test_pull_rebase_abort_bounded_and_abort_timeout_keeps_pull_error():
+    """#321: the best-effort `rebase --abort` after a failed pull carries a
+    timeout, and its own stall must not mask the original pull failure."""
+    abort_calls = []
+
+    def _pull_fails_abort_stalls(*args, **kwargs):
+        argv = args[0]
+        if argv[1] == "branch":
+            return subprocess.CompletedProcess(argv, 0, stdout="main\n", stderr="")
+        if argv[1] == "pull":
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="", stderr="CONFLICT (content): Merge conflict in a.md"
+            )
+        abort_calls.append((argv, kwargs.get("timeout")))
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
+
+    with patch("schist.git_ops.subprocess.run", side_effect=_pull_fails_abort_stalls):
+        ok, msg = git_ops.pull_rebase("/tmp/vault")
+
+    assert ok is False
+    assert "CONFLICT" in msg
+    assert abort_calls, "expected a rebase --abort attempt"
+    argv, timeout = abort_calls[0]
+    assert argv[1:3] == ["rebase", "--abort"]
+    assert timeout is not None and timeout > 0
+
+
+def test_pull_rebase_timeout_then_abort_timeout_does_not_raise():
+    """Pull stalls AND the cleanup abort stalls — still a clean (False, msg)."""
+    def _all_stall_except_branch(*args, **kwargs):
+        argv = args[0]
+        if argv[1] == "branch":
+            return subprocess.CompletedProcess(argv, 0, stdout="main\n", stderr="")
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
+
+    with patch("schist.git_ops.subprocess.run", side_effect=_all_stall_except_branch):
+        ok, msg = git_ops.pull_rebase("/tmp/vault")
+
+    assert ok is False
+    assert "timed out" in msg
