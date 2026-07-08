@@ -413,6 +413,179 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     expect(content).not.toContain("Neural Networks");
     expect(content).not.toContain("foo  bar");
   }, 30000);
+
+  test("create_note rejects an out-of-vocabulary type smuggled via a body `## Connections` section (#317)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const res = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT, title: "Body Smuggle",
+        body: "Text.\n\n## Connections\n\n- bogus-type: notes/x.md\n",
+      },
+      config
+    ) as { error: string; message: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toMatch(/connection type must be one of/);
+    expect(res.message).toContain('"bogus-type"');
+    expect(res.message).toContain("- bogus-type: notes/x.md");
+    const entries = await fs.readdir(path.join(vault, "notes")).catch(() => []);
+    expect(entries).toEqual([]);
+  }, 30000);
+
+  test("create_note catches a bogus type smuggled across a NEL (U+0085) separator — the split(\"\\n\") bypass (#359)", async () => {
+    // Python ingest's splitlines() breaks on U+0085, so it would index the
+    // bogus edge; the validator must split the same way or the #317 control is
+    // bypassable. `## Connections` and the edge sit on one \n-delimited line.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const res = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT, title: "NEL Smuggle",
+        body: "Text.\n\n## Connections\u0085- bogus-type: notes/x.md\n",
+      },
+      config
+    ) as { error: string; message: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toMatch(/connection type must be one of/);
+    expect(res.message).toContain('"bogus-type"');
+    const entries = await fs.readdir(path.join(vault, "notes")).catch(() => []);
+    expect(entries).toEqual([]);
+  }, 30000);
+
+  test("create_note catches a bogus edge smuggled after a valid one via CR on the same physical line (#359)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const res = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT, title: "CR Smuggle",
+        body: "## Connections\n- extends: notes/a.md\r- bogus-type: notes/b.md\n",
+      },
+      config
+    ) as { error: string; message: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toMatch(/connection type must be one of/);
+    expect(res.message).toContain('"bogus-type"');
+    const entries = await fs.readdir(path.join(vault, "notes")).catch(() => []);
+    expect(entries).toEqual([]);
+  }, 30000);
+
+  test("create_note accepts a body `## Connections` section with vocabulary types; malformed and bracket lines are skipped like ingest (#317)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const created = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT, title: "Body Edges OK",
+        body: [
+          "Text.",
+          "",
+          "## Connections",
+          "",
+          "- extends: notes/a.md",
+          "- supports: notes/b.md \"why\"",
+          "- not a connection line",
+          "- see: [Moltbook]", // bracket ref: ingest skips it, so no type check
+          "",
+        ].join("\n"),
+      },
+      config
+    ) as { id?: string; error?: string };
+
+    expect(created.error).toBeUndefined();
+    expect(created.id).toBeDefined();
+  }, 30000);
+
+  test("create_note ignores body `## Connections` content when structured connections regenerate the section (#317)", async () => {
+    // buildNote REPLACES the body's section with the (already-validated)
+    // structured connections, so nothing unvalidated reaches disk.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const created = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT, title: "Regenerated Section",
+        body: "Text.\n\n## Connections\n\n- bogus-type: notes/x.md\n",
+        connections: [{ target: "notes/a.md", type: "extends" }],
+      },
+      config
+    ) as { id: string; error?: string };
+
+    expect(created.error).toBeUndefined();
+    const content = await fs.readFile(path.join(vault, created.id), "utf-8");
+    expect(content).toContain("- extends: notes/a.md");
+    expect(content).not.toContain("bogus-type");
+  }, 30000);
+
+  test("update_note rejects an out-of-vocabulary type smuggled via a body `## Connections` section (#317)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const created = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Update Smuggle", body: "Original.\n" },
+      config
+    ) as { id: string };
+
+    const res = await update_note(
+      vault,
+      {
+        owner: TEST_AGENT, id: created.id,
+        body: "Edited.\n\n## Connections\n\n- bogus-type: notes/x.md\n",
+      },
+      config
+    ) as { error: string; message: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toMatch(/connection type must be one of/);
+    // Note untouched.
+    const content = await fs.readFile(path.join(vault, created.id), "utf-8");
+    expect(content).toContain("Original.");
+    expect(content).not.toContain("bogus-type");
+  }, 30000);
+
+  test("create_note rejects a non-array connections object with a typed VALIDATION_ERROR, not GIT_ERROR (#317)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const res = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT, title: "Bad Shape", body: "x",
+        connections: {} as unknown as Array<{ target: string; type: string }>,
+      },
+      config
+    ) as { error: string; message: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toMatch(/connections must be an array/);
+  }, 30000);
+
+  test("create_note rejects a string connections value (would otherwise iterate per-character) (#317)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const res = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT, title: "Bad Shape String", body: "x",
+        connections: "extends" as unknown as Array<{ target: string; type: string }>,
+      },
+      config
+    ) as { error: string; message: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toMatch(/connections must be an array/);
+  }, 30000);
 });
 
 // ---------------------------------------------------------------------------

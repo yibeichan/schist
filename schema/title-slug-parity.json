@@ -1,0 +1,152 @@
+[
+  {
+    "name": "plain title",
+    "input": "Hello World",
+    "slug": "hello-world"
+  },
+  {
+    "name": "punctuation stripped",
+    "input": "Hello, World!",
+    "slug": "hello-world"
+  },
+  {
+    "name": "edge whitespace stripped",
+    "input": "  Padded Title  ",
+    "slug": "padded-title"
+  },
+  {
+    "name": "interior space run collapses to ONE dash",
+    "input": "a   b",
+    "slug": "a-b"
+  },
+  {
+    "name": "tabs and newlines are separators",
+    "input": "a\t\nb",
+    "slug": "a-b"
+  },
+  {
+    "name": "hyphen surrounded by spaces collapses",
+    "input": "foo - bar",
+    "slug": "foo-bar"
+  },
+  {
+    "name": "edge hyphens stripped",
+    "input": "-foo-",
+    "slug": "foo"
+  },
+  {
+    "name": "digits kept",
+    "input": "Plan 9 From 2026",
+    "slug": "plan-9-from-2026"
+  },
+  {
+    "name": "underscore deleted, not a separator",
+    "input": "snake_case",
+    "slug": "snakecase"
+  },
+  {
+    "name": "non-ASCII letters deleted",
+    "input": "Caf\u00e9 Notes",
+    "slug": "caf-notes"
+  },
+  {
+    "name": "capital sharp S lowers then deletes",
+    "input": "GRO\u1e9e",
+    "slug": "gro"
+  },
+  {
+    "name": "NEL U+0085 is a separator (Python-only under backslash-s)",
+    "input": "a\u0085b",
+    "slug": "a-b"
+  },
+  {
+    "name": "C0 separators U+001C-001F (Python-only under backslash-s)",
+    "input": "a\u001cb\u001dc\u001ed\u001fe",
+    "slug": "a-b-c-d-e"
+  },
+  {
+    "name": "ZWNBSP U+FEFF is a separator (JS-only under backslash-s)",
+    "input": "a\ufeffb",
+    "slug": "a-b"
+  },
+  {
+    "name": "vertical tab U+000B",
+    "input": "a\u000bb",
+    "slug": "a-b"
+  },
+  {
+    "name": "form feed U+000C",
+    "input": "a\fb",
+    "slug": "a-b"
+  },
+  {
+    "name": "NBSP U+00A0",
+    "input": "a\u00a0b",
+    "slug": "a-b"
+  },
+  {
+    "name": "Ogham space mark U+1680",
+    "input": "a\u1680b",
+    "slug": "a-b"
+  },
+  {
+    "name": "en/em/thin space run U+2000-200A",
+    "input": "a\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200ab",
+    "slug": "a-b"
+  },
+  {
+    "name": "line separator U+2028",
+    "input": "a\u2028b",
+    "slug": "a-b"
+  },
+  {
+    "name": "paragraph separator U+2029",
+    "input": "a\u2029b",
+    "slug": "a-b"
+  },
+  {
+    "name": "narrow no-break space U+202F",
+    "input": "a\u202fb",
+    "slug": "a-b"
+  },
+  {
+    "name": "medium mathematical space U+205F",
+    "input": "a\u205fb",
+    "slug": "a-b"
+  },
+  {
+    "name": "ideographic space U+3000",
+    "input": "a\u3000b",
+    "slug": "a-b"
+  },
+  {
+    "name": "divergent codepoints at the edges strip cleanly",
+    "input": "\ufeff\u0085foo\u3000\u001c",
+    "slug": "foo"
+  },
+  {
+    "name": "zero-width space U+200B is NOT a separator (deleted)",
+    "input": "a\u200bb",
+    "slug": "ab"
+  },
+  {
+    "name": "empty string",
+    "input": "",
+    "slug": ""
+  },
+  {
+    "name": "punctuation-only becomes empty",
+    "input": "!!!",
+    "slug": ""
+  },
+  {
+    "name": "whitespace-only becomes empty",
+    "input": " \t\ufeff\u3000 ",
+    "slug": ""
+  },
+  {
+    "name": "hyphens-only becomes empty",
+    "input": "---",
+    "slug": ""
+  }
+]

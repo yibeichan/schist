@@ -1,0 +1,432 @@
+{
+  "lines": [
+    {
+      "name": "plain edge",
+      "line": "- extends: other-note",
+      "expected": {
+        "type": "extends",
+        "target": "other-note",
+        "context": null
+      }
+    },
+    {
+      "name": "quoted context",
+      "line": "- supports: note-b \"because reasons\"",
+      "expected": {
+        "type": "supports",
+        "target": "note-b",
+        "context": "because reasons"
+      }
+    },
+    {
+      "name": "em-dash context",
+      "line": "- extends: note-b \u2014 trailing context",
+      "expected": {
+        "type": "extends",
+        "target": "note-b",
+        "context": "trailing context"
+      }
+    },
+    {
+      "name": "tab separators",
+      "line": "-\textends:\tnote-b",
+      "expected": {
+        "type": "extends",
+        "target": "note-b",
+        "context": null
+      }
+    },
+    {
+      "name": "NBSP separators",
+      "line": "-\u00a0extends:\u00a0note-b",
+      "expected": {
+        "type": "extends",
+        "target": "note-b",
+        "context": null
+      }
+    },
+    {
+      "name": "NEL U+0085 separator (Python-only under backslash-s)",
+      "line": "-\u0085extends:\u0085note-b",
+      "expected": {
+        "type": "extends",
+        "target": "note-b",
+        "context": null
+      }
+    },
+    {
+      "name": "NEL inside the type token splits it: no match",
+      "line": "- exte\u0085nds: note-b",
+      "expected": null
+    },
+    {
+      "name": "ZWNBSP U+FEFF separator (JS-only under backslash-s)",
+      "line": "- extends:\ufeffnote-b",
+      "expected": {
+        "type": "extends",
+        "target": "note-b",
+        "context": null
+      }
+    },
+    {
+      "name": "ZWNBSP inside the target splits it: no match",
+      "line": "- extends: note\ufeffb",
+      "expected": null
+    },
+    {
+      "name": "C0 file separator U+001C (Python-only under backslash-s)",
+      "line": "-\u001cextends:\u001cnote-b",
+      "expected": {
+        "type": "extends",
+        "target": "note-b",
+        "context": null
+      }
+    },
+    {
+      "name": "line separator U+2028",
+      "line": "-\u2028extends: note-b",
+      "expected": {
+        "type": "extends",
+        "target": "note-b",
+        "context": null
+      }
+    },
+    {
+      "name": "paragraph separator U+2029 before quoted context",
+      "line": "- extends: note-b\u2029\"ctx\"",
+      "expected": {
+        "type": "extends",
+        "target": "note-b",
+        "context": "ctx"
+      }
+    },
+    {
+      "name": "ideographic space U+3000",
+      "line": "-\u3000extends:\u3000note-b",
+      "expected": {
+        "type": "extends",
+        "target": "note-b",
+        "context": null
+      }
+    },
+    {
+      "name": "narrow no-break space U+202F",
+      "line": "-\u202fextends: note-b",
+      "expected": {
+        "type": "extends",
+        "target": "note-b",
+        "context": null
+      }
+    },
+    {
+      "name": "Ogham space mark U+1680",
+      "line": "-\u1680extends: note-b",
+      "expected": {
+        "type": "extends",
+        "target": "note-b",
+        "context": null
+      }
+    },
+    {
+      "name": "medium mathematical space U+205F",
+      "line": "-\u205fextends: note-b",
+      "expected": {
+        "type": "extends",
+        "target": "note-b",
+        "context": null
+      }
+    },
+    {
+      "name": "VT and FF separators",
+      "line": "-\u000bextends:\fnote-b",
+      "expected": {
+        "type": "extends",
+        "target": "note-b",
+        "context": null
+      }
+    },
+    {
+      "name": "en/thin/hair space run U+2000-200A",
+      "line": "-\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200aextends:\u2009note-b",
+      "expected": {
+        "type": "extends",
+        "target": "note-b",
+        "context": null
+      }
+    },
+    {
+      "name": "zero-width space U+200B is NOT a separator",
+      "line": "-\u200bextends: note-b",
+      "expected": null
+    },
+    {
+      "name": "no leading dash",
+      "line": "extends: note-b",
+      "expected": null
+    },
+    {
+      "name": "missing target",
+      "line": "- extends:",
+      "expected": null
+    },
+    {
+      "name": "no colon",
+      "line": "- extends note-b",
+      "expected": null
+    },
+    {
+      "name": "single-token bracket target still matches (parsers skip it AFTER the regex)",
+      "line": "- see: [Moltbook]",
+      "expected": {
+        "type": "see",
+        "target": "[Moltbook]",
+        "context": null
+      }
+    },
+    {
+      "name": "multi-token bracket reference does not match",
+      "line": "- ref: [Moltbook, Jan 2026]",
+      "expected": null
+    },
+    {
+      "name": "trailing space defeats the anchored match",
+      "line": "- extends: note-b ",
+      "expected": null
+    },
+    {
+      "name": "unknown type still matches at the regex level (vocabulary is checked elsewhere)",
+      "line": "- bogus-type: x",
+      "expected": {
+        "type": "bogus-type",
+        "target": "x",
+        "context": null
+      }
+    },
+    {
+      "name": "empty quoted context collapses to null via the or-chain",
+      "line": "- extends: note-b \"\"",
+      "expected": {
+        "type": "extends",
+        "target": "note-b",
+        "context": null
+      }
+    }
+  ],
+  "bodies": [
+    {
+      "name": "LF boundary (baseline)",
+      "body": "## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "CR boundary",
+      "body": "## Connections\r- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "CRLF pair is a single boundary",
+      "body": "## Connections\r\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "VT U+000B boundary",
+      "body": "## Connections\u000b- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "FF U+000C boundary",
+      "body": "## Connections\f- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "FS U+001C boundary",
+      "body": "## Connections\u001c- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "GS U+001D boundary",
+      "body": "## Connections\u001d- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "RS U+001E boundary",
+      "body": "## Connections\u001e- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "NEL U+0085 boundary",
+      "body": "## Connections\u0085- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "LS U+2028 boundary",
+      "body": "## Connections\u2028- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "PS U+2029 boundary",
+      "body": "## Connections\u2029- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "plain space is NOT a splitlines boundary",
+      "body": "## Connections - extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "tab is NOT a splitlines boundary",
+      "body": "## Connections\t- extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "US U+001F is NOT a splitlines boundary",
+      "body": "## Connections\u001f- extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "NBSP U+00A0 is NOT a splitlines boundary",
+      "body": "## Connections\u00a0- extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "en quad U+2000 is NOT a splitlines boundary",
+      "body": "## Connections\u2000- extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "ideographic space U+3000 is NOT a splitlines boundary",
+      "body": "## Connections\u3000- extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "ZWNBSP U+FEFF is NOT a splitlines boundary",
+      "body": "## Connections\ufeff- extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "MMSP U+205F is NOT a splitlines boundary",
+      "body": "## Connections\u205f- extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "NNBSP U+202F is NOT a splitlines boundary",
+      "body": "## Connections\u202f- extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "bogus-type edge smuggled after a valid one via CR on the same physical line",
+      "body": "## Connections\n- extends: note-a\r- supports: note-b",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "supports",
+          "target": "note-b",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "section ends at the next ## heading (NEL-separated)",
+      "body": "## Connections\u0085- extends: note-a\u0085## Other\u0085- supports: note-b",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "quoted context survives an NEL boundary",
+      "body": "## Connections\u0085- extends: note-a \"why\"",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": "why"
+        }
+      ]
+    },
+    {
+      "name": "intro paragraph before an LS-separated section",
+      "body": "Intro.\u2028\u2028## Connections\u2028- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    }
+  ]
+}

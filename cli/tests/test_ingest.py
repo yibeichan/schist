@@ -146,6 +146,70 @@ def test_concept_slug_normalization_is_linear_on_huge_whitespace() -> None:
     assert time.perf_counter() - t0 < 5.0  # linear is ~4 ms; huge margin for CI
 
 
+def _connection_parity_fixture() -> dict:
+    fixture = _repo_root() / "schema" / "connection-line-parity.json"
+    return json.loads(fixture.read_text(encoding="utf-8"))
+
+
+def _connection_line_parity_cases() -> list[dict]:
+    return _connection_parity_fixture()["lines"]
+
+
+def _connection_body_parity_cases() -> list[dict]:
+    return _connection_parity_fixture()["bodies"]
+
+
+def test_connection_line_parity_fixture_is_nontrivial() -> None:
+    """An emptied/mangled fixture must fail loudly, not skip-collect green."""
+    assert len(_connection_line_parity_cases()) >= 15
+    assert len(_connection_body_parity_cases()) >= 15
+
+
+@pytest.mark.parametrize(
+    "case", _connection_line_parity_cases(), ids=lambda c: c["name"]
+)
+def test_connection_re_matches_shared_parity_cases(case: dict) -> None:
+    """Python CONNECTION_RE and TS CONNECTION_RE (markdown-parser.ts) must
+    agree on every line — Python's parse builds the index while TS's parse
+    drives delete_note's cascade and write-time validation, so any skew
+    silently diverges the graph from what the tools believe is in it (#338).
+    The shared fixture is the single source of truth."""
+    from schist.ingest import CONNECTION_RE
+
+    m = CONNECTION_RE.match(case["line"])
+    expected = case["expected"]
+    if expected is None:
+        assert m is None
+    else:
+        assert m is not None
+        conn_type, target, quoted_ctx, dash_ctx = m.groups()
+        assert conn_type == expected["type"]
+        assert target == expected["target"]
+        # Same or-chain parse_connections uses (TS mirrors with ||).
+        assert (quoted_ctx or dash_ctx or None) == expected["context"]
+
+
+@pytest.mark.parametrize(
+    "case", _connection_body_parity_cases(), ids=lambda c: c["name"]
+)
+def test_parse_connections_matches_shared_body_parity_cases(case: dict) -> None:
+    """Python parse_connections and TS parseConnections/validateBodyConnectionTypes
+    must agree on WHERE a line ends, not just on the per-line regex. Python
+    ingest iterates body.splitlines() (breaks on CR/VT/FF/FS/GS/RS/NEL/LS/PS,
+    not just \\n); a TS reader that split only on \\n let a bogus connection
+    type smuggled across such a separator bypass the #317 vocabulary check
+    while ingest still indexed the edge (#359). These whole-body cases pin the
+    splitters together across languages."""
+    from schist.ingest import parse_connections
+
+    edges = parse_connections(case["body"])
+    got = [
+        {"type": e["type"], "target": e["target"], "context": e["context"]}
+        for e in edges
+    ]
+    assert got == case["edges"]
+
+
 def test_ingest_deduplicates_implicit_concept_edges(tmp_path: Path) -> None:
     """Frontmatter concepts emit one references edge per unique source/target/type."""
     from schist.ingest import ingest
