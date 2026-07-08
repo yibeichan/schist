@@ -1357,3 +1357,173 @@ def test_ingest_sets_completion_marker_for_empty_vault(tmp_path: Path) -> None:
         )
     finally:
         conn.close()
+
+
+def test_ingest_reraises_environmental_db_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#353 review blocker: an environmental DB failure (disk full, I/O error)
+    mid-rebuild must fail LOUD, not be WARN-skipped like a bad note.
+
+    Otherwise the loop finishes, commits a mostly-empty index, stamps
+    user_version, and readers serve the truncation as authoritative long
+    after the disk recovers. The per-file guard re-raises
+    sqlite3.DatabaseError (except IntegrityError/ProgrammingError, which are
+    content-shaped) so the pre-existing fail-and-unlink path runs.
+    """
+    import schist.ingest as ingest_mod
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-07-07-ok.md",
+        "---\ntitle: Ok\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+    _write_note(
+        vault,
+        "2026-07-07-zsick.md",
+        "---\ntitle: Sick\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+
+    original = ingest_mod.paper_metadata_from_frontmatter
+
+    def _disk_full(meta, rel):
+        if rel.name == "2026-07-07-zsick.md":
+            raise sqlite3.OperationalError("database or disk is full")
+        return original(meta, rel)
+
+    monkeypatch.setattr(ingest_mod, "paper_metadata_from_frontmatter", _disk_full)
+
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(sqlite3.OperationalError):
+        ingest(str(vault), str(db))
+
+
+def test_run_ingest_unlinks_db_on_environmental_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#353 review blocker: the _run_ingest wrapper must delete the partial DB
+    on an environmental failure rather than leave a truncated index stamped
+    complete for readers to trust.
+    """
+    import schist.ingest as ingest_mod
+    from schist.sqlite_query import _run_ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-07-07-ok.md",
+        "---\ntitle: Ok\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+    _write_note(
+        vault,
+        "2026-07-07-zsick.md",
+        "---\ntitle: Sick\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+
+    original = ingest_mod.paper_metadata_from_frontmatter
+
+    def _disk_full(meta, rel):
+        if rel.name == "2026-07-07-zsick.md":
+            raise sqlite3.OperationalError("disk I/O error")
+        return original(meta, rel)
+
+    monkeypatch.setattr(ingest_mod, "paper_metadata_from_frontmatter", _disk_full)
+
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(sqlite3.OperationalError):
+        _run_ingest(str(vault), str(db))
+
+    # No truncated index left behind claiming to be complete.
+    assert not db.exists()
+
+
+def test_ingest_huge_year_coerces_to_null(tmp_path: Path) -> None:
+    """#353 review: a decimal year wider than signed 64-bit passes isdecimal()
+    and int() but overflows the SQLite bind. It must coerce to NULL (like the
+    superscript case), not savepoint-drop the whole note.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write_note(
+        vault,
+        "2026-07-07-huge-quoted.md",
+        "---\ntitle: Huge Quoted\ndate: 2026-07-07\n"
+        'year: "99999999999999999999999"\n---\n\nBody.\n',
+    )
+    _write_note(
+        vault,
+        "2026-07-07-huge-unquoted.md",
+        "---\ntitle: Huge Unquoted\ndate: 2026-07-07\n"
+        "year: 99999999999999999999999\n---\n\nBody.\n",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = dict(
+            conn.execute(
+                "SELECT d.title, pm.year FROM docs d "
+                "JOIN paper_metadata pm ON pm.doc_id = d.id "
+                "WHERE d.title IN ('Huge Quoted', 'Huge Unquoted')"
+            ).fetchall()
+        )
+    finally:
+        conn.close()
+
+    # Both notes indexed (not dropped); year coerced to NULL.
+    assert rows == {"Huge Quoted": None, "Huge Unquoted": None}
+
+
+def test_ingest_skips_symlink_target_under_skip_dir(tmp_path: Path) -> None:
+    """#353 review: a symlink whose resolved target is inside the vault but
+    under a SKIP_DIRS directory (.git/.schist) must be skipped. The SKIP_DIRS
+    filter checks the link's OWN path, and containment passes because the
+    target is inside the vault — so without the resolved-target check, .git
+    file contents (e.g. remote URLs with credentials) get indexed.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    (vault / "notes").mkdir(parents=True)
+    (vault / ".git").mkdir()
+    (vault / ".git" / "config.md").write_text(
+        "# secret\n\n[remote]\n  url = https://user:TOKEN@hub\n", encoding="utf-8"
+    )
+    _write_note(
+        vault,
+        "2026-07-07-real.md",
+        "---\ntitle: Real Note\ndate: 2026-07-07\n---\n\nBody.\n",
+    )
+    os.symlink(
+        vault / ".git" / "config.md", vault / "notes" / "leak.md"
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        titles = {row[0] for row in conn.execute("SELECT title FROM docs")}
+        bodies = [
+            row[0] for row in conn.execute("SELECT body FROM docs")
+        ]
+    finally:
+        conn.close()
+
+    assert "Real Note" in titles
+    # The .git file content is not indexed via the symlink.
+    assert not any("TOKEN@hub" in (b or "") for b in bodies)
