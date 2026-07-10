@@ -263,6 +263,53 @@ export function buildConnectionLine(conn: Connection): string {
   return line;
 }
 
+/**
+ * Insert `line` into `content`'s `## Connections` section, creating the
+ * section at EOF when no heading line exists. Scans splitLinesLikePython
+ * boundaries — the SAME splitter parseConnections and ingest read with —
+ * never an insert regex anchored on a bare "\n". The old regex required
+ * `## Connections\n` literally, so a CRLF heading (`## Connections\r\n`,
+ * core.autocrlf / Windows checkout) matched nothing, String.replace returned
+ * the content unchanged, writeNote deduped the no-op, and add_connection
+ * reported success while the edge was silently dropped (#366) — the same
+ * shape as the missing-trailing-newline drop (#295). The heading gate is a
+ * line-scan, not a substring test, so a mid-line prose mention of
+ * "## Connections" gets a real section instead of an edge outside any
+ * section. Output is always "\n"-joined with a single trailing newline,
+ * healing CRLF and exotic separators on write like stripConnectionsTo does.
+ *
+ * Byte-identical to the CLI's markdown_io.insert_connection_line;
+ * schema/connection-append-parity.json pins both, like #318/#338 did for
+ * slugs.
+ */
+export function insertConnectionLine(content: string, line: string): string {
+  const lines = splitLinesLikePython(content);
+  let sectionFound = false;
+  let inSection = false;
+  let insertIdx: number | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const stripped = lines[i].trim();
+    if (!sectionFound && stripped.startsWith("## Connections")) {
+      sectionFound = true;
+      inSection = true;
+      continue;
+    }
+    if (inSection && stripped.startsWith("## ")) {
+      insertIdx = i;
+      break;
+    }
+  }
+  if (!sectionFound) {
+    return content.trimEnd() + "\n\n## Connections\n\n" + line + "\n";
+  }
+  if (insertIdx === null) {
+    lines.push(line);
+  } else {
+    lines.splice(insertIdx, 0, line);
+  }
+  return lines.join("\n") + "\n";
+}
+
 export function buildNote(
   metadata: Record<string, unknown>,
   body: string,

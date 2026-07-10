@@ -1,0 +1,86 @@
+[
+  {
+    "name": "golden path: insert before the next heading",
+    "content": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n\n## Notes\nBody.\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n\n- extends: notes/b.md\n## Notes\nBody.\n"
+  },
+  {
+    "name": "section at EOF: append at end",
+    "content": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n- extends: notes/b.md\n"
+  },
+  {
+    "name": "no trailing newline (#295): edge lands, output regains trailing newline",
+    "content": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n- extends: notes/b.md\n"
+  },
+  {
+    "name": "no Connections section: created at EOF",
+    "content": "---\ntitle: A\n---\nBody.\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\nBody.\n\n## Connections\n\n- extends: notes/b.md\n"
+  },
+  {
+    "name": "CRLF note (#366): heading matches, output normalized to LF",
+    "content": "---\r\ntitle: A\r\n---\r\n\r\n## Connections\r\n\r\n- supports: notes/x.md\r\n\r\n## Notes\r\nBody.\r\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n\n- extends: notes/b.md\n## Notes\nBody.\n"
+  },
+  {
+    "name": "CR-only note (classic Mac): heading matches, output normalized to LF",
+    "content": "## Connections\r- supports: notes/x.md\r## Notes\rBody.\r",
+    "line": "- extends: notes/b.md",
+    "expected": "## Connections\n- supports: notes/x.md\n- extends: notes/b.md\n## Notes\nBody.\n"
+  },
+  {
+    "name": "NEL-separated note (#365): edge lands inside the section",
+    "content": "## Connections\u0085- supports: notes/x.md\u0085## Notes\u0085Body.\n",
+    "line": "- extends: notes/b.md",
+    "expected": "## Connections\n- supports: notes/x.md\n- extends: notes/b.md\n## Notes\nBody.\n"
+  },
+  {
+    "name": "U+2028 line-separator note (#365): edge lands inside the section",
+    "content": "## Connections\u2028- supports: notes/x.md\u2028## Notes\u2028Body.",
+    "line": "- extends: notes/b.md",
+    "expected": "## Connections\n- supports: notes/x.md\n- extends: notes/b.md\n## Notes\nBody.\n"
+  },
+  {
+    "name": "vertical-tab and form-feed separators (#365): edge lands inside the section",
+    "content": "## Connections\u000b- supports: notes/x.md\f## Notes\u000bBody.",
+    "line": "- extends: notes/b.md",
+    "expected": "## Connections\n- supports: notes/x.md\n- extends: notes/b.md\n## Notes\nBody.\n"
+  },
+  {
+    "name": "prose mention of ## Connections mid-line is not a heading: real section created at EOF",
+    "content": "See the ## Connections spec.\n",
+    "line": "- extends: notes/b.md",
+    "expected": "See the ## Connections spec.\n\n## Connections\n\n- extends: notes/b.md\n"
+  },
+  {
+    "name": "indented heading is honored, like both readers honor it",
+    "content": "  ## Connections\n- supports: notes/x.md\n## Notes\n",
+    "line": "- extends: notes/b.md",
+    "expected": "  ## Connections\n- supports: notes/x.md\n- extends: notes/b.md\n## Notes\n"
+  },
+  {
+    "name": "blank lines before the next heading: insert after them, still inside the section",
+    "content": "## Connections\n- supports: notes/x.md\n\n\n## Notes\n",
+    "line": "- extends: notes/b.md",
+    "expected": "## Connections\n- supports: notes/x.md\n\n\n- extends: notes/b.md\n## Notes\n"
+  },
+  {
+    "name": "empty content: section created after the documented leading blank pair",
+    "content": "",
+    "line": "- extends: notes/b.md",
+    "expected": "\n\n## Connections\n\n- extends: notes/b.md\n"
+  },
+  {
+    "name": "line with quoted context payload is inserted verbatim",
+    "content": "## Connections\n",
+    "line": "- refutes: notes/c.md \"disagrees on mechanism\"",
+    "expected": "## Connections\n- refutes: notes/c.md \"disagrees on mechanism\"\n"
+  }
+]
