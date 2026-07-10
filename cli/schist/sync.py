@@ -659,6 +659,11 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
             if not ok:
                 print(f"Error: commit failed: {output}", file=sys.stderr)
                 sys.exit(1)
+            if output.startswith(git_ops.HOOK_STALL_WARNING_PREFIX):
+                # The commit landed despite the stalled hook (#364) — warn
+                # and continue to the push; exiting here (the old False path)
+                # stranded an already-landed commit unpushed.
+                print(f"Warning: {output}", file=sys.stderr)
             print(f"Committed {n} file{'s' if n != 1 else ''}")
 
     # Push
