@@ -254,6 +254,39 @@ describe("search_memory tool — snippet vs full content", () => {
   });
 });
 
+describe("search_memory tool — related_doc shape guard (untrusted rows)", () => {
+  it("omits related_doc values that fail the note-id shape rule at read time", async () => {
+    // Seed via the sqlite-reader layer, which (deliberately) does not shape-
+    // validate — mimicking legacy rows written before add_memory's validation
+    // and rows planted by other software in the shared per-machine DB. The
+    // same rows must be treated identically to get_context's recentMemory
+    // read path (get-context-tool.test.ts untrusted-rows test).
+    const prev = process.env.SCHIST_AGENT_ID;
+    process.env.SCHIST_AGENT_ID = "sansan";
+    try {
+      addMemory({ owner: "sansan", entry_type: "decision", content: "junk empty", related_doc: "" });
+      addMemory({ owner: "sansan", entry_type: "decision", content: "junk dotfile", related_doc: ".git/config" });
+      addMemory({ owner: "sansan", entry_type: "decision", content: "junk traversal", related_doc: "../x.md" });
+      addMemory({ owner: "sansan", entry_type: "decision", content: "good ref", related_doc: "notes/legit.md" });
+    } finally {
+      if (prev === undefined) delete process.env.SCHIST_AGENT_ID;
+      else process.env.SCHIST_AGENT_ID = prev;
+    }
+    const r = await search_memory(VAULT_ROOT, { owner: "sansan", limit: 50 } as never);
+    if (!("entries" in r)) throw new Error("expected entries");
+    expect(r.entries.length).toBe(4);
+    for (const entry of r.entries) {
+      if (entry.content === "good ref") {
+        expect(entry.related_doc).toBe("notes/legit.md");
+      } else {
+        // Key omitted entirely — a present-but-junk key would still read as
+        // "this entry has a back-reference" to consumers.
+        expect(entry).not.toHaveProperty("related_doc");
+      }
+    }
+  });
+});
+
 describe("search_memory tool — pagination + cursor issuance", () => {
   it("returns a cursor when results are capped and rows.length === limit", async () => {
     seed("sansan", 10);
