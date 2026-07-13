@@ -1683,6 +1683,16 @@ function stripConnectionsTo(content: string, targets: string[]): { content: stri
   // repair must recognize the same boundaries or the dangling edge survives
   // (#359). Reconstruction rejoins with "\n" — repair normalizes exotic line
   // separators to LF, which is the canonical form create_note/buildNote emit.
+  // splitLinesLikePython keeps no trailing empty segment, so join("\n") on
+  // its output drops the source's terminal newline at BOTH exits below —
+  // cascade repairs then wrote notes without a trailing "\n" (#382; the
+  // push("") special case only healed the emptied-section shape). Repair is
+  // normalizing (see above), so every non-empty result gets the canonical
+  // LF terminator, matching insertConnectionLine's contract.
+  const finalize = (lines: string[]): string => {
+    const s = lines.join("\n");
+    return s === "" || s.endsWith("\n") ? s : s + "\n";
+  };
   for (const line of splitLinesLikePython(content)) {
     const stripped = line.trim();
     if (stripped.startsWith("## Connections")) {
@@ -1704,7 +1714,7 @@ function stripConnectionsTo(content: string, targets: string[]): { content: stri
     }
     out.push(line);
   }
-  if (removed === 0) return { content: out.join("\n"), removed };
+  if (removed === 0) return { content: finalize(out), removed };
 
   const cleaned: string[] = [];
   for (let i = 0; i < out.length; i++) {
@@ -1722,8 +1732,8 @@ function stripConnectionsTo(content: string, targets: string[]): { content: stri
       // Push a single "" either way: as the blank separator before the next
       // section (j < out.length), or — when Connections was the last section
       // (j >= out.length) — as the terminal element that join("\n") turns back
-      // into the file's trailing newline. Omitting it here stripped the final
-      // newline from cascade-deleted notes (#280).
+      // into the file's trailing newline (#280; finalize below now also
+      // guarantees the terminator for every other shape).
       cleaned.push("");
       i = j - 1;
       continue;
@@ -1732,7 +1742,7 @@ function stripConnectionsTo(content: string, targets: string[]): { content: stri
     cleaned.push(out[i]);
   }
 
-  return { content: cleaned.join("\n"), removed };
+  return { content: finalize(cleaned), removed };
 }
 
 /**
