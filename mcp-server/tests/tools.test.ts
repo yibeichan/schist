@@ -1135,7 +1135,7 @@ describe("sync_status + sync_retry (#135)", () => {
       "2026-06-02T12:00:00.000Z push exited with code 1\n",
     );
 
-    const result = await sync_status(vault) as Record<string, unknown>;
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
 
     expect(result.is_spoke).toBe(true);
     expect(typeof result.spoke_head).toBe("string");
@@ -1161,7 +1161,7 @@ describe("sync_status + sync_retry (#135)", () => {
     const origPath = process.env.PATH;
     process.env.PATH = `${stubDir}:${origPath}`;
     try {
-      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "push-only" }) as Record<string, unknown>;
+      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "push-only" }) as unknown as Record<string, unknown>;
       expect(result.ok).toBe(true);
       expect(result.cleared_last_sync_error).toBe(true);
       await expect(fs.access(sentinelPath)).rejects.toBeDefined();
@@ -1185,7 +1185,7 @@ describe("sync_status + sync_retry (#135)", () => {
     const origPath = process.env.PATH;
     process.env.PATH = `${stubDir}:${origPath}`;
     try {
-      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "push-only" }) as Record<string, unknown>;
+      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "push-only" }) as unknown as Record<string, unknown>;
       expect(result.ok).toBe(true);
       expect(result.cleared_last_sync_error).toBe(true);
       await expect(fs.access(sentinelPath)).rejects.toBeDefined();
@@ -1205,7 +1205,7 @@ describe("sync_status + sync_retry (#135)", () => {
     const origPath = process.env.PATH;
     process.env.PATH = `${stubDir}:${origPath}`;
     try {
-      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as Record<string, unknown>;
+      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as unknown as Record<string, unknown>;
       expect(result.ok).toBe(true);
       const lines = (await fs.readFile(logPath, "utf-8")).trim().split("\n");
       expect(lines).toEqual([
@@ -1231,7 +1231,7 @@ describe("sync_status + sync_retry (#135)", () => {
     const origPath = process.env.PATH;
     process.env.PATH = `${stubDir}:${origPath}`;
     try {
-      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "push-only" }) as Record<string, unknown>;
+      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "push-only" }) as unknown as Record<string, unknown>;
       expect(result.ok).toBe(false);
       expect(result.retriable).toBe(false);
       expect(result.reason).toBe("ACL violation");
@@ -1256,7 +1256,7 @@ describe("sync_status + sync_retry (#135)", () => {
     const origPath = process.env.PATH;
     process.env.PATH = `${stubDir}:${origPath}`;
     try {
-      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as Record<string, unknown>;
+      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as unknown as Record<string, unknown>;
       expect(result.ok).toBe(false);
       expect(result.retriable).toBe(false);
       expect(result.reason).toBe("Rebase conflict");
@@ -1288,7 +1288,7 @@ describe("sync_status + sync_retry (#135)", () => {
         if (exists) break;
         await new Promise((r) => setTimeout(r, 25));
       }
-      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "push-only" }) as Record<string, unknown>;
+      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "push-only" }) as unknown as Record<string, unknown>;
       expect(result.ok).toBe(true);
       expect(result.awaited_in_flight).toBe(true);
       const count = (await fs.readFile(countFile, "utf-8")).split("\n").filter(Boolean).length;

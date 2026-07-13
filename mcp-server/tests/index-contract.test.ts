@@ -163,7 +163,7 @@ describe("schemaSqlDigest pins the materialized DDL", () => {
 
 describe("loadIndexContract fallback paths (the only paths production npm installs exercise)", () => {
   let tmpDir: string;
-  let warnSpy: ReturnType<typeof jest.spyOn<typeof console, "warn">>;
+  let warnSpy: jest.SpiedFunction<typeof console.warn>;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(path.join(os.tmpdir(), "schist-contract-"));
