@@ -1270,16 +1270,14 @@ export async function get_note(
 }
 
 /**
- * #317: validate the connection-type vocabulary for a `## Connections`
- * section embedded in a raw body (i.e. NOT generated from structured
- * `connections`). Mirrors cli/schist/ingest.py's parse_connections: the same
+ * Yields each `## Connections` edge line in a raw body that ingest would
+ * index. Mirrors cli/schist/ingest.py's parse_connections: the same
  * splitlines() line boundaries (splitLinesLikePython, NOT split("\n") — see
  * #359), the same section tracking, the same CONNECTION_RE, and the same
- * bracket-reference skip, so exactly the lines ingest would index as edges
- * are the lines checked here. Anything else (malformed lines, non-edge lines)
- * is skipped, matching ingest.
+ * bracket-reference skip. Anything else (malformed lines, non-edge lines)
+ * is skipped, matching ingest. Lines are yielded trimmed.
  */
-function validateBodyConnectionTypes(body: string, config: VaultConfig): ToolError | null {
+function* bodyConnectionEdgeLines(body: string): Generator<{ line: string; type: string }> {
   let inSection = false;
   for (const rawLine of splitLinesLikePython(body)) {
     const stripped = rawLine.trim();
@@ -1292,14 +1290,38 @@ function validateBodyConnectionTypes(body: string, config: VaultConfig): ToolErr
     const m = stripped.match(CONNECTION_RE);
     if (!m) continue; // malformed line — ingest skips it
     if (m[2].startsWith("[")) continue; // bracket reference — ingest skips it
-    if (!config.connectionTypes.includes(m[1])) {
-      return {
-        error: "VALIDATION_ERROR",
-        message:
-          `connection type must be one of: ${config.connectionTypes.join(", ")} ` +
-          `(got "${m[1]}" in body line "${stripped}")`,
-      } satisfies ToolError;
-    }
+    yield { line: stripped, type: m[1] };
+  }
+}
+
+/**
+ * #317: validate the connection-type vocabulary for a `## Connections`
+ * section embedded in a raw body (i.e. NOT generated from structured
+ * `connections`). Exactly the lines ingest would index as edges are the
+ * lines checked here (see bodyConnectionEdgeLines).
+ *
+ * #363: `grandfathered` (trimmed connection lines already present in the
+ * note's current on-disk body) exempts pre-existing edges from the
+ * vocabulary check. A note authored before the vocabulary existed (or via
+ * the Python CLI, or a direct git edit) may carry an out-of-vocabulary
+ * type; without the exemption, every full-body update_note — even one
+ * touching unrelated prose — would hard-fail until that line is fixed.
+ * Only lines NOT in the current body are new edges and stay hard errors.
+ */
+function validateBodyConnectionTypes(
+  body: string,
+  config: VaultConfig,
+  grandfathered?: ReadonlySet<string>
+): ToolError | null {
+  for (const { line, type } of bodyConnectionEdgeLines(body)) {
+    if (config.connectionTypes.includes(type)) continue;
+    if (grandfathered?.has(line)) continue; // pre-existing edge — #363
+    return {
+      error: "VALIDATION_ERROR",
+      message:
+        `connection type must be one of: ${config.connectionTypes.join(", ")} ` +
+        `(got "${type}" in body line "${line}")`,
+    } satisfies ToolError;
   }
   return null;
 }
@@ -1989,14 +2011,6 @@ export async function update_note(
     const patchError = validateFrontmatterPatch(args.frontmatter_patch, config);
     if (patchError !== null) return patchError;
 
-    // #317: update_note never passes structured connections to buildNote, so
-    // a replaced body carries its `## Connections` section to disk verbatim —
-    // the same vocabulary bypass as create_note's raw-body path.
-    if (args.body !== undefined) {
-      const bodyConnError = validateBodyConnectionTypes(args.body, config);
-      if (bodyConnError !== null) return bodyConnError;
-    }
-
     const idError = validateNoteId(args.id, config);
     if (idError !== null) return idError;
 
@@ -2012,6 +2026,26 @@ export async function update_note(
       existing = await fs.readFile(filePath, "utf-8");
     } catch {
       return { error: "NOT_FOUND", message: `Note not found: ${args.id}` } satisfies ToolError;
+    }
+
+    // #317: update_note never passes structured connections to buildNote, so
+    // a replaced body carries its `## Connections` section to disk verbatim —
+    // the same vocabulary bypass as create_note's raw-body path.
+    //
+    // #363: unlike create_note, GRANDFATHER edges already present in the
+    // current on-disk body (trimmed exact-line match). This check runs after
+    // the read above (it needs the current body), so a bad body against a
+    // missing note now reports NOT_FOUND first. The grandfather set comes
+    // from the pre-lock read — same staleness window the commit subject
+    // already accepts; the transform still validates nothing in-lock, so a
+    // racing rewrite can at worst re-allow a line that was on disk moments
+    // ago, never a line that was never on disk.
+    if (args.body !== undefined) {
+      const grandfathered = new Set(
+        Array.from(bodyConnectionEdgeLines(parseNote(existing).body), (e) => e.line)
+      );
+      const bodyConnError = validateBodyConnectionTypes(args.body, config, grandfathered);
+      if (bodyConnError !== null) return bodyConnError;
     }
 
     // Resolve symlinks: validateNoteId + the lexical guard above are purely
