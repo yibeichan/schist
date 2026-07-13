@@ -113,7 +113,20 @@ def load_index_contract(path: Path | None = None) -> dict:
     ``console.warn`` in the TS ``loadIndexContract``).
     """
     if path is None:
-        path = Path(__file__).resolve().parents[2] / 'schema' / 'index-contract.json'
+        here = Path(__file__).resolve()
+        root = here.parents[2]
+        # Prefer the checkout's canonical schema/index-contract.json ONLY
+        # when this module actually lives at <root>/cli/schist/ — i.e. it IS
+        # the repo checkout. For a bare-script sibling copy (hook deployment
+        # under <vault>/.schist/), parents[2] is an arbitrary directory, and
+        # resolving ../schema from there silently adopted whatever unrelated
+        # index-contract.json happened to live at that path — wrong version
+        # stamped after every commit, permanent rebuild loop, with doctor
+        # blessing the deployment (#380). Outside a checkout the baked
+        # mirror IS the contract.
+        if here != root / 'cli' / 'schist' / here.name:
+            return INDEX_CONTRACT_FALLBACK
+        path = root / 'schema' / 'index-contract.json'
     try:
         text = path.read_text(encoding='utf-8')
     except OSError:

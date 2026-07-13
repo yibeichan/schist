@@ -304,3 +304,40 @@ def test_loader_rejects_non_hex_digest(tmp_path: Path, capsys) -> None:
     contract = load_index_contract(f)
     assert contract == INDEX_CONTRACT_FALLBACK
     assert "malformed" in capsys.readouterr().err
+
+
+def test_sibling_copy_ignores_unrelated_schema_json(tmp_path: Path) -> None:
+    """#380: a bare-script sibling copy (hook deployment at <vault>/.schist/)
+    resolved parents[2]/schema/index-contract.json from an arbitrary
+    directory and silently adopted an unrelated repo's contract — wrong
+    user_version stamped after every commit, permanent rebuild loop, doctor
+    blessing it. Outside the repo checkout the baked mirror must win."""
+    import shutil
+    import subprocess
+    import sys
+
+    import schist.index_contract as ic_mod
+
+    sib_dir = tmp_path / "vault" / ".schist"
+    sib_dir.mkdir(parents=True)
+    shutil.copy(Path(ic_mod.__file__), sib_dir / "index_contract.py")
+    # parents[2] of the sibling module is tmp_path — plant a VALID but
+    # foreign contract exactly where the old resolution looked.
+    foreign = dict(INDEX_CONTRACT_FALLBACK)
+    foreign["schemaVersion"] = 999
+    schema_dir = tmp_path / "schema"
+    schema_dir.mkdir()
+    (schema_dir / "index-contract.json").write_text(json.dumps(foreign))
+
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, sys.argv[1]); "
+         "import index_contract; print(index_contract.INDEX_SCHEMA_VERSION)",
+         str(sib_dir)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert out.returncode == 0, out.stderr
+    assert int(out.stdout.strip()) == INDEX_CONTRACT_FALLBACK["schemaVersion"]
+    # And silently: adopting the mirror in a bare deployment is the NORMAL
+    # state, not a warning.
+    assert "WARN" not in out.stderr
