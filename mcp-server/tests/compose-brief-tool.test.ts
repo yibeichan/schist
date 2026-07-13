@@ -299,7 +299,7 @@ describe("compose_brief tool", () => {
 describe("compose_brief cluster fixes (#236/#237/#238/#259)", () => {
   it("strips FTS5 <b> highlight markers from topic-search annotations (#236)", async () => {
     const result = await compose_brief(vaultRoot, { topic: "paper catalog metadata" });
-    if ("error" in (result as Record<string, unknown>)) throw new Error(JSON.stringify(result));
+    if ("error" in result) throw new Error(JSON.stringify(result));
     const brief = result as Exclude<Awaited<ReturnType<typeof compose_brief>>, { error: string }>;
 
     expect(brief.markdown).toContain("`research/topic.md`");
@@ -318,7 +318,7 @@ describe("compose_brief cluster fixes (#236/#237/#238/#259)", () => {
   it("signals when recent git history is unavailable instead of claiming none found (#238)", async () => {
     await fs.rm(path.join(vaultRoot, ".git"), { recursive: true, force: true });
     const result = await compose_brief(vaultRoot, { topic: "paper catalog metadata" });
-    if ("error" in (result as Record<string, unknown>)) throw new Error(JSON.stringify(result));
+    if ("error" in result) throw new Error(JSON.stringify(result));
     const brief = result as Exclude<Awaited<ReturnType<typeof compose_brief>>, { error: string }>;
 
     expect(brief.recent_paths).toEqual([]);
@@ -333,7 +333,7 @@ describe("compose_brief cluster fixes (#236/#237/#238/#259)", () => {
     await fs.rm(path.join(vaultRoot, ".git"), { recursive: true, force: true });
     execFileSync("git", ["init"], { cwd: vaultRoot, stdio: "ignore" });
     const result = await compose_brief(vaultRoot, { topic: "paper catalog metadata" });
-    if ("error" in (result as Record<string, unknown>)) throw new Error(JSON.stringify(result));
+    if ("error" in result) throw new Error(JSON.stringify(result));
     const brief = result as Exclude<Awaited<ReturnType<typeof compose_brief>>, { error: string }>;
 
     expect(brief.recent_paths).toEqual([]);
@@ -347,7 +347,7 @@ describe("compose_brief cluster fixes (#236/#237/#238/#259)", () => {
       scope: ["ops"],
       related_notes: ["decisions/pinned.md"],
     });
-    if ("error" in (result as Record<string, unknown>)) throw new Error(JSON.stringify(result));
+    if ("error" in result) throw new Error(JSON.stringify(result));
     const brief = result as Exclude<Awaited<ReturnType<typeof compose_brief>>, { error: string }>;
 
     const ids = brief.related_notes.map((note) => note.id);

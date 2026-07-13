@@ -101,5 +101,9 @@ jobs:
       - name: Type-check (tsc build)
         run: npm run build
 
+      # Must run after the build step: tests/ and scripts/ import from dist/.
+      - name: Type-check tests
+        run: npx tsc -p tsconfig.test.json --noEmit
+
       - name: Run jest
         run: npm test
