@@ -214,8 +214,22 @@ async function assertValidWriteBranch(vaultRoot: string, branch: string): Promis
   // Fast-reject option-like values ourselves; belt for the case where a git
   // version parses the value below as a flag instead of a branch name.
   if (branch.startsWith("-")) throw invalid;
+  // Validate the FULL ref form, not `--branch <name>` (#370):
+  //  - `--branch` needs git ≥1.8.2; on the older gits common on HPC login
+  //    nodes it exits non-zero ("unknown option") and the catch below turned
+  //    EVERY write into a VALIDATION_ERROR blaming a perfectly valid
+  //    write_branch. The full-ref form is original git syntax. The same
+  //    old-git concern is why --end-of-options is version-gated
+  //    (endOfOptionsArgs), and this path must not quietly require a NEWER
+  //    git than that gated one.
+  //  - `--branch` also NORMALIZES: `@{-1}` resolves to the previously
+  //    checked-out branch and validates THAT, so a dynamic ref sneaks
+  //    through as a write_branch value and rev-parses to whatever branch
+  //    happens to be in reflog history. The full-ref form rejects `@{`
+  //    outright (check-ref-format rule 8) — write_branch must be a literal
+  //    branch name.
   try {
-    await git(vaultRoot, ["check-ref-format", "--branch", branch]);
+    await git(vaultRoot, ["check-ref-format", `refs/heads/${branch}`]);
   } catch (e) {
     if (isGitTimeout(e)) throw e;
     throw invalid;
