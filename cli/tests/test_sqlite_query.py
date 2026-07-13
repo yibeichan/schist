@@ -878,3 +878,51 @@ def test_get_db_heal_path_propagates_non_lock_operational_error(tmp_path: Path) 
                side_effect=sqlite3.OperationalError("disk I/O error")):
         with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
             get_db(str(vault), str(db_path))
+
+
+def test_get_db_heal_path_raises_on_pre_ddl_db_under_lock(tmp_path: Path) -> None:
+    """#360 corner 1: a first-ingest race leaves a pre-DDL file (WAL header,
+    zero tables) on disk while the writer holds the lock. Falling through
+    would hand the caller a table-less connection that crashes later with
+    'no such table' — worse than the honest locked error, which must win."""
+    vault, db_path = _vault_db(tmp_path)
+
+    writer = sqlite3.connect(db_path)
+    writer.execute("PRAGMA journal_mode=WAL")  # materializes the header page
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        with patch("schist.ingest.ingest", side_effect=_lock_contending_ingest):
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                get_db(str(vault), str(db_path))
+    finally:
+        writer.rollback()
+        writer.close()
+
+    assert db_path.exists(), "contention must not unlink the writer's file"
+
+
+def test_get_db_heal_path_raises_on_foreign_generation_db_under_lock(
+    tmp_path: Path,
+) -> None:
+    """#360 corner 2: during a migration race the on-disk DB carries another
+    schema generation. Generations are unordered identities, so a non-zero
+    mismatch has no shape guarantees — re-raise the locked error instead of
+    silently serving wrong-generation results."""
+    vault, db_path = _vault_db(tmp_path)
+
+    writer = sqlite3.connect(db_path)
+    writer.execute("PRAGMA journal_mode=WAL")
+    _create_required_tables(writer)
+    writer.execute(f"PRAGMA user_version = {INDEX_SCHEMA_VERSION + 98}")
+    writer.execute("INSERT INTO docs VALUES ('old-gen')")
+    writer.commit()
+    writer.execute("BEGIN IMMEDIATE")
+    writer.execute("INSERT INTO docs VALUES ('old-gen-2')")
+    try:
+        with patch("schist.ingest.ingest", side_effect=_lock_contending_ingest):
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                get_db(str(vault), str(db_path))
+    finally:
+        writer.rollback()
+        writer.close()
+
