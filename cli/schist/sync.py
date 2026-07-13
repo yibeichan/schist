@@ -659,6 +659,11 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
             if not ok:
                 print(f"Error: commit failed: {output}", file=sys.stderr)
                 sys.exit(1)
+            if output.startswith(git_ops.HOOK_STALL_WARNING_PREFIX):
+                # The commit landed despite the stalled hook (#364) — warn
+                # and continue to the push; exiting here (the old False path)
+                # stranded an already-landed commit unpushed.
+                print(f"Warning: {output}", file=sys.stderr)
             print(f"Committed {n} file{'s' if n != 1 else ''}")
 
     # Push
@@ -771,10 +776,18 @@ def _build_hub_in_staging(
     """
     # 1. Create bare repo at the staging path
     staging.mkdir(parents=True)
-    result = subprocess.run(
-        ["git", "init", "--bare", "--initial-branch=main", str(staging)],
-        capture_output=True, text=True,
-    )
+    # Every subprocess in the init paths is bounded (#371, same sweep as
+    # #314/#345): on NFS-mounted targets these calls otherwise block
+    # indefinitely with no output and no Ctrl-C-able foreground child, and
+    # the staged partial build is never cleaned up because the caller's
+    # except clause is never reached.
+    try:
+        result = subprocess.run(
+            ["git", "init", "--bare", "--initial-branch=main", str(staging)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        raise _InitError("git init --bare timed out after 60s (NFS stall?)")
     if result.returncode != 0:
         raise _InitError(f"git init --bare failed: {result.stderr.strip()}")
 
@@ -787,11 +800,18 @@ def _build_hub_in_staging(
     # 3. Sanity-check: schist must be importable for the hook to work at
     #    push time. This runs in the current shell's env, which may differ
     #    from the sshd env the hook actually runs under — warn, don't fail.
-    check = subprocess.run(
-        ["python3", "-c", "import schist.pre_receive"],
-        capture_output=True, text=True,
-    )
-    if check.returncode != 0:
+    # Bounded like every other init subprocess (#371). This check is
+    # warn-don't-fail, so a hung python3 (network-mounted venv) degrades to
+    # the same warning path instead of wedging the whole init.
+    try:
+        check = subprocess.run(
+            ["python3", "-c", "import schist.pre_receive"],
+            capture_output=True, text=True, timeout=60,
+        )
+        check_failed = check.returncode != 0
+    except subprocess.TimeoutExpired:
+        check_failed = True
+    if check_failed:
         print(
             "Warning: `python3 -c 'import schist.pre_receive'` failed on this host.\n"
             "  The pre-receive hook will reject all pushes until the schist\n"
@@ -817,7 +837,25 @@ def _build_hub_in_staging(
         env["SCHIST_IDENTITY"] = participants[0]
 
         def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
-            return subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
+            # TimeoutExpired → _InitError so the caller's cleanup path runs;
+            # the raw exception would escape init_hub's except clause (#371).
+            # The seed `git push` executes the just-installed pre-receive hook
+            # (cold python3 + `import schist` + ACL machinery) — the same
+            # legitimately-slow hook workload that gives git_ops.commit()'s
+            # hook-running tier COMMIT_TIMEOUT=120 instead of the 30-60s
+            # lock-shaped tier. 60s here would turn a slow-but-working NFS
+            # init into a deterministic hard failure where the step-3 probe
+            # deliberately only warns.
+            timeout = 120 if cmd[:2] == ["git", "push"] else 60
+            try:
+                return subprocess.run(
+                    cmd, cwd=cwd, env=env, capture_output=True, text=True,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                raise _InitError(
+                    f"{' '.join(cmd)} timed out after {timeout}s (NFS stall?)"
+                )
 
         for cmd in (
             ["git", "init", "--initial-branch=main"],
@@ -970,10 +1008,15 @@ def _build_standalone_in_staging(
     """
     staging.mkdir(parents=True)
 
-    result = subprocess.run(
-        ["git", "init", "--initial-branch=main", str(staging)],
-        capture_output=True, text=True,
-    )
+    # Bounded like the hub-init subprocesses (#371): an NFS stall here hung
+    # `schist init` forever with the partial staging dir never cleaned up.
+    try:
+        result = subprocess.run(
+            ["git", "init", "--initial-branch=main", str(staging)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        raise _InitError("git init timed out after 60s (NFS stall?)")
     if result.returncode != 0:
         raise _InitError(f"git init failed: {result.stderr.strip()}")
 
@@ -998,7 +1041,14 @@ def _build_standalone_in_staging(
     env.setdefault("GIT_COMMITTER_EMAIL", "schist@local")
 
     def run(cmd: list[str]) -> subprocess.CompletedProcess:
-        return subprocess.run(cmd, cwd=staging, env=env, capture_output=True, text=True)
+        # TimeoutExpired → _InitError so init_standalone's cleanup runs (#371).
+        try:
+            return subprocess.run(
+                cmd, cwd=staging, env=env, capture_output=True, text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            raise _InitError(f"{' '.join(cmd)} timed out after 60s (NFS stall?)")
 
     # Seed commit runs BEFORE installing hooks so the commit is unaffected by
     # the pre-commit secret scanner (benign here, but keeps intent explicit).

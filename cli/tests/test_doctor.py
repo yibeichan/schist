@@ -398,6 +398,77 @@ class TestCheckIngestAvailableStaleHandCopy:
         assert r.status == "WARN"
         assert "user_version=1" in r.message
 
+    def test_warn_when_sibling_index_contract_declares_stale_version(self, tmp_path):
+        """#357: a sibling that EXISTS but declares an old schemaVersion is
+        the same rebuild-loop trigger as a missing sibling — the hook copy
+        restamps the old version after every commit while installed readers
+        expect the new one. The presence check alone gave a false PASS."""
+        vault = self._vault_with_copy(tmp_path, with_sibling=True)
+        sibling = tmp_path / ".schist" / "index_contract.py"
+        current = sibling.read_text()
+        assert "'schemaVersion': 1," in current  # fixture guard: bump me on v2
+        sibling.write_text(
+            current.replace("'schemaVersion': 1,", "'schemaVersion': 999,")
+        )
+        with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
+            r = check_ingest_available(str(vault))
+        assert r.status == "WARN"
+        assert "declares schema v999" in r.message
+        assert r.fix is not None and "Refresh" in r.fix
+
+    def test_warn_when_354_window_copy_lacks_env_utils_sibling(self, tmp_path):
+        """#369: the #354 revision of ingest.py imports env_utils with no
+        inline fallback — without an env_utils.py sibling the post-commit
+        hook dies with ModuleNotFoundError on every commit, and doctor said
+        PASS throughout."""
+        window_copy = (
+            "#!/usr/bin/env python3\n"
+            "try:\n"
+            "    from .env_utils import env_flag\n"
+            "except ImportError:\n"
+            "    from env_utils import env_flag\n"
+            "from index_contract import INDEX_SCHEMA_VERSION\n"
+        )
+        vault = self._vault_with_copy(
+            tmp_path, with_sibling=True, script_text=window_copy
+        )
+        with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
+            r = check_ingest_available(str(vault))
+        assert r.status == "WARN"
+        assert "env_utils" in r.message
+        assert r.fix is not None and "env_utils.py" in r.fix
+
+    def test_pass_when_354_window_copy_has_env_utils_sibling(self, tmp_path):
+        """The #354-window copy WITH the env_utils.py sibling works — no WARN."""
+        window_copy = (
+            "#!/usr/bin/env python3\n"
+            "try:\n"
+            "    from .env_utils import env_flag\n"
+            "except ImportError:\n"
+            "    from env_utils import env_flag\n"
+            "from index_contract import INDEX_SCHEMA_VERSION\n"
+        )
+        vault = self._vault_with_copy(
+            tmp_path, with_sibling=True, script_text=window_copy
+        )
+        src = self._cli_schist_dir()
+        (tmp_path / ".schist" / "env_utils.py").write_text(
+            (src / "env_utils.py").read_text()
+        )
+        with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
+            r = check_ingest_available(str(vault))
+        assert r.status == "PASS", r.message
+
+    def test_pass_when_current_copy_lacks_env_utils_sibling(self, tmp_path):
+        """The CURRENT ingest.py defines the env_flag fallback inline, so a
+        copy without the env_utils.py sibling is self-contained — doctor must
+        not nag deployments that don't need the file."""
+        vault = self._vault_with_copy(tmp_path, with_sibling=True)
+        assert not (tmp_path / ".schist" / "env_utils.py").exists()
+        with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
+            r = check_ingest_available(str(vault))
+        assert r.status == "PASS", r.message
+
 
 class TestCheckSpoke:
     def test_no_path(self):

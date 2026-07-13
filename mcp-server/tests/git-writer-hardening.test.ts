@@ -88,6 +88,46 @@ describe("write_branch validation (#331)", () => {
     });
   });
 
+  test.each(["HEAD", "@"])(
+    "write_branch %p is rejected — it rev-parses to the CURRENT branch, so accepting it silently writes wherever HEAD points (#370 review)",
+    async (alias) => {
+      const vault = await makeTempVault(alias);
+      await expect(
+        writeNote(vault, "notes/n.md", "---\ntitle: N\n---\nBody\n"),
+      ).rejects.toMatchObject({
+        error: "VALIDATION_ERROR",
+        message: expect.stringContaining(alias),
+      });
+      // Nothing landed on the checked-out branch.
+      await expect(
+        execFile("git", ["cat-file", "-e", "HEAD:notes/n.md"], { cwd: vault }),
+      ).rejects.toThrow();
+    },
+  );
+
+  test("write_branch @{-1} (dynamic ref) is rejected even when the reflog can resolve it (#370)", async () => {
+    const vault = await makeTempVault("@{-1}");
+    // Give the reflog a previous branch so @{-1} RESOLVES. The old
+    // `check-ref-format --branch` NORMALIZED the value against exactly this
+    // state — it validated the resolved branch's name and exited 0, letting
+    // a dynamic ref through as a literal write_branch. The full-ref form
+    // rejects `@{` unconditionally.
+    await execFile("git", ["checkout", "-b", "previous"], { cwd: vault });
+    await execFile("git", ["checkout", "-"], { cwd: vault });
+
+    await expect(
+      writeNote(vault, "notes/n.md", "---\ntitle: N\n---\nBody\n"),
+    ).rejects.toMatchObject({
+      error: "VALIDATION_ERROR",
+      message: expect.stringContaining("@{-1}"),
+    });
+    // The resolved branch was never written to either.
+    const { stdout } = await execFile(
+      "git", ["ls-tree", "--name-only", "previous"], { cwd: vault },
+    );
+    expect(stdout).not.toContain("notes");
+  });
+
   test("a valid non-default write_branch still works", async () => {
     const vault = await makeTempVault("scratch/drafts");
     const result = await writeNote(vault, "notes/ok.md", "---\ntitle: OK\n---\nBody\n");

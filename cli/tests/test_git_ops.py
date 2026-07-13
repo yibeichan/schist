@@ -1,51 +1,188 @@
 """Tests for schist.git_ops.
 
-Focused on the subprocess-timeout hardening (#256): commit() must not hang
-forever when the synchronous post-commit ingest hook stalls, and a timeout
-must surface as a clean (False, message) tuple rather than an exception.
+Focused on the subprocess-timeout hardening (#256) and its #364 refinement:
+commit() must not hang forever when the synchronous post-commit ingest hook
+stalls, a timeout must surface as a clean tuple rather than an exception —
+and a hook stall AFTER the branch ref moved must report (True, warning),
+never a false failure, with the whole hook process group killed rather than
+orphaned (mirrors git-writer.ts #336/#355).
 """
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
+import time
 from unittest.mock import patch
 
 from schist import git_ops
 
 
-def _fake_run_timeout_on_commit(*args, **kwargs):
-    """Let `git add` succeed; raise TimeoutExpired on `git commit`."""
-    argv = args[0]
-    if len(argv) >= 2 and argv[1] == "commit":
-        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
-    return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+class _FakeProc:
+    """Stand-in for the Popen'd `git commit`: succeed, stall, or stall-once."""
+
+    def __init__(self, timeout_on_first: bool = False, record: list | None = None):
+        self.pid = 424242
+        self.returncode = 0
+        self._timeout_on_first = timeout_on_first
+        self._calls = 0
+        self._record = record if record is not None else []
+
+    def communicate(self, timeout=None):
+        self._calls += 1
+        self._record.append(timeout)
+        if self._timeout_on_first and self._calls == 1:
+            raise subprocess.TimeoutExpired(cmd=["git", "commit"], timeout=timeout)
+        return "", ""
 
 
 def test_commit_passes_timeout_to_subprocess():
-    """Both git add and git commit must be invoked with a timeout kwarg."""
-    calls = []
+    """git add / rev-parse (run) and git commit (communicate) are all bounded."""
+    run_calls = []
+    communicate_timeouts: list = []
 
     def _record(*args, **kwargs):
-        calls.append((args[0], kwargs.get("timeout")))
-        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+        run_calls.append((args[0], kwargs.get("timeout")))
+        return subprocess.CompletedProcess(args[0], 0, stdout="abc123\n", stderr="")
 
-    with patch("schist.git_ops.subprocess.run", side_effect=_record):
+    with patch("schist.git_ops.subprocess.run", side_effect=_record), \
+         patch("schist.git_ops.subprocess.Popen",
+               return_value=_FakeProc(record=communicate_timeouts)):
         ok, _ = git_ops.commit("/tmp/vault", "msg")
 
     assert ok is True
     # Every git invocation carried a positive timeout — none unbounded.
-    assert calls, "expected git subprocess calls"
-    for argv, timeout in calls:
+    assert run_calls, "expected git subprocess calls"
+    for argv, timeout in run_calls:
         assert timeout is not None and timeout > 0, f"{argv} ran with no timeout"
+    assert communicate_timeouts == [git_ops.COMMIT_TIMEOUT]
 
 
 def test_commit_returns_false_on_timeout_without_raising():
-    """A stalled commit returns (False, human message), never propagates."""
-    with patch("schist.git_ops.subprocess.run", side_effect=_fake_run_timeout_on_commit):
+    """A stalled commit whose ref did NOT move returns (False, message), never
+    propagates — and SIGKILLs the whole process group, not just git."""
+    killed = []
+
+    def _same_head(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 0, stdout="samesha\n", stderr="")
+
+    with patch("schist.git_ops.subprocess.run", side_effect=_same_head), \
+         patch("schist.git_ops.subprocess.Popen",
+               return_value=_FakeProc(timeout_on_first=True)), \
+         patch("schist.git_ops.os.killpg",
+               side_effect=lambda pgid, sig: killed.append((pgid, sig))):
         ok, msg = git_ops.commit("/tmp/vault", "msg")
 
     assert ok is False
     assert "timed out" in msg
+    assert killed == [(424242, signal.SIGKILL)]
+
+
+def test_commit_true_when_ref_moved_but_hook_stalled():
+    """#364: git updates the branch ref BEFORE the post-commit hook runs, so a
+    hook stall fires the timeout on a commit that already landed. Returning
+    False made `schist add`/`link` report an error — and sync push retry —
+    for a write that succeeded."""
+    heads = iter(["oldsha\n", "newsha\n"])
+
+    def _run(*args, **kwargs):
+        argv = args[0]
+        if argv[1] == "rev-parse":
+            return subprocess.CompletedProcess(argv, 0, stdout=next(heads), stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    with patch("schist.git_ops.subprocess.run", side_effect=_run), \
+         patch("schist.git_ops.subprocess.Popen",
+               return_value=_FakeProc(timeout_on_first=True)), \
+         patch("schist.git_ops.os.killpg", side_effect=lambda pgid, sig: None):
+        ok, msg = git_ops.commit("/tmp/vault", "msg")
+
+    assert ok is True
+    assert "index may lag" in msg
+    # Callers (commands.py add/link, sync.py push) surface the warning by
+    # matching this prefix — the message must keep starting with it.
+    assert msg.startswith(git_ops.HOOK_STALL_WARNING_PREFIX)
+
+
+# ---------------------------------------------------------------------------
+# commit() against a real repo with real hooks (#364 end-to-end)
+# ---------------------------------------------------------------------------
+
+
+def _init_repo(path) -> None:
+    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
+    for k, v in (("user.email", "test@test"), ("user.name", "test")):
+        subprocess.run(["git", "-C", str(path), "config", k, v],
+                       check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-q", "--allow-empty",
+                    "-m", "seed", "--no-verify"], check=True, capture_output=True)
+
+
+def _head(path) -> str:
+    return subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _write_hook(path, name: str, body: str) -> None:
+    hook = path / ".git" / "hooks" / name
+    hook.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    hook.chmod(0o755)
+
+
+def test_commit_real_stalled_post_commit_hook_reports_success_and_kills_chain(
+    tmp_path, monkeypatch
+) -> None:
+    """The empirical #364 repro as a regression test: a post-commit hook that
+    outlives the timeout must yield (True, warning) because the commit landed,
+    return promptly (the old run() reap blocked on the pipe the orphan held
+    open for the hook's FULL runtime), and leave no orphaned hook process."""
+    _init_repo(tmp_path)
+    _write_hook(tmp_path, "post-commit", "echo $$ > hookpid\nsleep 8\n")
+    (tmp_path / "note.md").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setattr(git_ops, "COMMIT_TIMEOUT", 1)
+
+    pre = _head(tmp_path)
+    t0 = time.monotonic()
+    ok, msg = git_ops.commit(str(tmp_path), "test commit")
+    elapsed = time.monotonic() - t0
+
+    assert ok is True
+    assert "index may lag" in msg
+    assert _head(tmp_path) != pre, "commit should have landed before the stall"
+    assert elapsed < 6, f"reap blocked on the orphan's pipe for {elapsed:.1f}s"
+
+    # The hook chain was killed with the group — poll briefly for the SIGKILL
+    # to land and the reparented sh to be reaped.
+    hook_pid = int((tmp_path / "hookpid").read_text().strip())
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            os.kill(hook_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(hook_pid, signal.SIGKILL)  # don't leak it past the test
+        raise AssertionError("stalled hook survived commit()'s group kill")
+
+
+def test_commit_real_stalled_pre_commit_hook_is_a_true_failure(
+    tmp_path, monkeypatch
+) -> None:
+    """A stall BEFORE the ref moves (pre-commit) is a genuine failure: HEAD
+    unchanged, so the re-check must NOT flip it to success."""
+    _init_repo(tmp_path)
+    _write_hook(tmp_path, "pre-commit", "sleep 8\n")
+    (tmp_path / "note.md").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setattr(git_ops, "COMMIT_TIMEOUT", 1)
+
+    pre = _head(tmp_path)
+    ok, msg = git_ops.commit(str(tmp_path), "test commit")
+
+    assert ok is False
+    assert "timed out" in msg
+    assert _head(tmp_path) == pre
 
 
 def _timeout(argv, kwargs):
