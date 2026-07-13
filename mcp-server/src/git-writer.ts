@@ -214,6 +214,18 @@ async function assertValidWriteBranch(vaultRoot: string, branch: string): Promis
   // Fast-reject option-like values ourselves; belt for the case where a git
   // version parses the value below as a flag instead of a branch name.
   if (branch.startsWith("-")) throw invalid;
+  // Ref-namespace prefixes are lexically valid branch names but resolve
+  // through git's ref DWIM to OTHER refs when those exist: "refs/heads/foo",
+  // "heads/foo", "tags/v1", "remotes/origin/main" all make the later
+  // checkout detach HEAD onto the DWIM target while the write still reports
+  // committed:true — the next checkout then strands that commit reflog-only
+  // (#381). Nobody means a literal branch named "refs/heads/foo"; reject the
+  // whole namespace-shaped class. assertAttachedToWriteBranch is the
+  // behavioral backstop for DWIM forms no blocklist anticipates.
+  const first = branch.split("/", 1)[0];
+  if (first === "refs" || first === "heads" || first === "tags" || first === "remotes") {
+    throw invalid;
+  }
   // "HEAD" and "@" are LEXICALLY valid as refs/heads/<x> below but are not
   // branch names: both rev-parse to the current branch, so ensureBranch's
   // checkout becomes an attached no-op and the note silently commits to
@@ -252,11 +264,44 @@ async function ensureBranch(vaultRoot: string, branch: string): Promise<void> {
   // never as a flag (#331).
   const eoo = await endOfOptionsArgs();
   try {
-    await git(vaultRoot, ["rev-parse", "--verify", ...eoo, branch]);
+    // Full-ref form, no DWIM (#381): bare `rev-parse --verify <branch>`
+    // resolves through the ref search order, so an existing TAG of the same
+    // name (write_branch "v1", tag v1) satisfied the check, no local branch
+    // was created, and the later checkout detached onto the tag. Only an
+    // actual local branch may skip creation.
+    await git(vaultRoot, ["rev-parse", "--verify", ...eoo, `refs/heads/${branch}`]);
   } catch (e) {
     // A hung rev-parse is not "branch missing" — don't try to create on it.
     if (isGitTimeout(e)) throw e;
     await git(vaultRoot, ["branch", ...eoo, branch]);
+  }
+}
+
+/**
+ * Post-checkout backstop for #381: whatever form slipped past validation and
+ * however `git checkout <branch>` DWIM-resolved it, refuse to write unless
+ * HEAD is attached to exactly refs/heads/<branch>. A detached HEAD here means
+ * the commit would land on no branch and become reflog-only garbage after the
+ * next checkout — silent data loss reported as committed:true.
+ */
+async function assertAttachedToWriteBranch(vaultRoot: string, branch: string): Promise<void> {
+  let ref: string;
+  try {
+    // --quiet: detached HEAD exits 1 without noise; we map it below.
+    ref = await git(vaultRoot, ["symbolic-ref", "--quiet", "HEAD"]);
+  } catch (e) {
+    if (isGitTimeout(e)) throw e;
+    ref = "";
+  }
+  if (ref !== `refs/heads/${branch}`) {
+    throw {
+      error: "VALIDATION_ERROR",
+      message:
+        `write_branch ${JSON.stringify(branch)} in schist.yaml resolved to ` +
+        `${ref === "" ? "a detached HEAD" : JSON.stringify(ref)} instead of ` +
+        `"refs/heads/${branch}" — refusing to write (the commit would not land ` +
+        `on the write branch). Fix write_branch before retrying this write`,
+    };
   }
 }
 
@@ -400,6 +445,7 @@ async function withWriteLock(
     // branch can never be parsed as a flag — defense-in-depth behind
     // assertValidWriteBranch (#331).
     await git(vaultRoot, ["checkout", ...(await endOfOptionsArgs()), branch, "--"]);
+    await assertAttachedToWriteBranch(vaultRoot, branch);
 
     const absPath = path.resolve(vaultRoot, relPath);
     // Containment check on the deepest EXISTING ancestor BEFORE mkdir — the
@@ -627,6 +673,7 @@ export async function deleteNote(
     // Same option-injection hardening as withWriteLock (#331); --end-of-options
     // is git ≥2.24-gated, the trailing "--" is universal.
     await git(vaultRoot, ["checkout", ...(await endOfOptionsArgs()), branch, "--"]);
+    await assertAttachedToWriteBranch(vaultRoot, branch);
 
     try {
       await git(vaultRoot, ["rm", "--quiet", "--", relPath]);
