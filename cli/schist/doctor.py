@@ -320,23 +320,59 @@ def check_ingest_available(vault_path: Optional[str]) -> CheckResult:
         # expect the new one, so every read triggers a full rebuild — a
         # silent ping-pong with no error anywhere.
         issues = []
-        if not (vault_script.parent / "index_contract.py").exists():
+        sibling_contract = vault_script.parent / "index_contract.py"
+        if not sibling_contract.exists():
             issues.append("missing sibling index_contract.py")
+        else:
+            # #357: a sibling that EXISTS but declares an old schemaVersion is
+            # the exact rebuild-loop trigger the missing-sibling check guards
+            # against — the hook copy stamps the old version after every
+            # commit while this installed CLI's readers expect the new one.
+            # The sibling's baked-in mirror is authoritative in bare-script
+            # deployments (no repo checkout, so load_index_contract falls
+            # back to it); read the declared version out of that literal.
+            try:
+                m = re.search(
+                    r"'schemaVersion':\s*(\d+)",
+                    sibling_contract.read_text(encoding="utf-8"),
+                )
+            except (OSError, UnicodeDecodeError):
+                m = None
+            if m and int(m.group(1)) != INDEX_SCHEMA_VERSION:
+                issues.append(
+                    f"sibling index_contract.py declares schema v{m.group(1)} "
+                    f"but this installed schist expects v{INDEX_SCHEMA_VERSION}"
+                )
         try:
             script_text = vault_script.read_text()
         except (OSError, UnicodeDecodeError):
             script_text = ""
         if re.search(r"PRAGMA user_version = 1\b", script_text):
             issues.append("stamps a hardcoded user_version=1 (pre-index-contract copy)")
+        # #369: the #354 revision of ingest.py imports env_utils with no inline
+        # fallback, so a copy from that window breaks the post-commit hook with
+        # ModuleNotFoundError on every commit unless env_utils.py was copied
+        # alongside. Current copies define the env_flag fallback inline and
+        # need no sibling — only flag the fallback-less window.
+        if (
+            "from env_utils import" in script_text
+            and "def env_flag" not in script_text
+            and not (vault_script.parent / "env_utils.py").exists()
+        ):
+            issues.append(
+                "imports env_utils with no inline fallback and no sibling "
+                "env_utils.py (#369) — the post-commit hook fails on every commit"
+            )
         if issues:
             return CheckResult(
                 "WARN", "Ingest",
                 f"{vault_script} is a stale hand-provisioned copy: {'; '.join(issues)}",
                 "Refresh the copy from cli/schist/ (ingest.py + index_contract.py + "
-                "schema.sql), or delete it so the hook falls back to the installed "
-                "schist-ingest. After the next index-schema bump a stale copy causes "
-                "a silent rebuild loop: the post-commit hook restamps the old "
-                "version, and every read rebuilds the whole index again.",
+                "env_utils.py + schema.sql), or delete it so the hook falls back to "
+                "the installed schist-ingest. After the next index-schema bump a "
+                "stale copy causes a silent rebuild loop: the post-commit hook "
+                "restamps the old version, and every read rebuilds the whole index "
+                "again.",
             )
         return CheckResult("PASS", "Ingest", str(vault_script))
 

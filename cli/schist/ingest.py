@@ -14,7 +14,22 @@ import frontmatter
 try:
     from .env_utils import env_flag
 except ImportError:  # pragma: no cover — bare-script mode, same as below.
-    from env_utils import env_flag
+    try:
+        from env_utils import env_flag
+    except ImportError:
+        # Bare-script copy with no env_utils.py sibling (#369): every
+        # pre-#354 deployment is in this state after refreshing just
+        # ingest.py, and a hard failure here breaks ingest on EVERY commit
+        # with only a buried hook traceback. Unlike index_contract (where a
+        # missing sibling must fail loudly — a guessed version re-mints the
+        # #339 drift), env_flag has one correct behavior, so inline it.
+        # cli/tests/test_ingest.py pins this byte-for-byte against
+        # env_utils.env_flag semantics.
+        def env_flag(name: str) -> bool:
+            value = os.environ.get(name)
+            if value is None:
+                return False
+            return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 try:
     from .index_contract import INDEX_SCHEMA_VERSION
