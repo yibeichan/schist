@@ -114,6 +114,31 @@ git remote add github https://github.com/yibeichan/schist-vault.git
 
 The mirror is read-only from the spokes' perspective. It exists as a backup and for browsing. Spokes never push to or pull from GitHub directly -- the Pi hub is the single source of truth.
 
+### Upgrading an existing hub: root `.gitignore` retrofit (one-time)
+
+Since #309, `schist init --hub` seeds a root `.gitignore` containing
+`.schist/`, so the runtime SQLite state (`.schist/schist.db` and its WAL
+siblings) is never committed by a broad `git add`. **Hubs seeded before #309
+never gain this file automatically** (#362): spoke *clones* are retrofitted by
+`schist hooks reinstall` (which writes `.git/info/exclude`, #354), but that is
+per-clone — only a tracked root `.gitignore` protects every working copy of
+the vault. `schist doctor` warns about this via its `Root .gitignore` check.
+
+To retrofit, commit a root `.gitignore` containing `.schist/`. Per the vault
+ACL, root writes require the hub operator's machine identity
+(`SCHIST_IDENTITY=pi` for this topology — spokes only have scoped write
+grants):
+
+```bash
+# On the Pi, in a working clone of the hub (not the bare repo):
+printf '.schist/\n' >> .gitignore
+git add .gitignore
+git commit -m "chore: ignore .schist/ runtime state (pre-#309 hub retrofit)"
+SCHIST_IDENTITY=pi git push
+```
+
+Spokes pick up the tracked `.gitignore` on their next `schist sync pull`.
+
 ## 3. Hub Setup (Option B -- GitHub)
 
 Skip the Pi hub entirely. Spokes clone directly from:
