@@ -336,3 +336,93 @@ class TestInitHub:
 
         captured = capsys.readouterr()
         assert "deprecated" in captured.err.lower()
+
+
+class TestInitSubprocessTimeouts:
+    """#371: every subprocess in the init paths must be bounded, and a
+    timeout must surface as clean cleanup — an NFS stall otherwise hung
+    `schist hub init` / `schist init` forever, and a raw TimeoutExpired
+    escaping the _InitError/OSError except clause left the staging dir
+    behind."""
+
+    def test_hub_init_all_subprocess_calls_carry_timeouts(self, tmp_path, monkeypatch):
+        import schist.sync as sync_mod
+
+        real_run = sync_mod.subprocess.run
+        calls: list[tuple[list, object]] = []
+
+        def record(cmd, *a, **kw):
+            calls.append((cmd, kw.get("timeout")))
+            return real_run(cmd, *a, **kw)
+
+        monkeypatch.setattr(sync_mod.subprocess, "run", record)
+        args = SimpleNamespace(name="vault", participant=["alpha"])
+        sync_mod.init_hub(args, str(tmp_path / "hub.git"))
+
+        assert calls, "expected subprocess calls during hub init"
+        for cmd, timeout in calls:
+            assert timeout is not None and timeout > 0, f"{cmd} ran with no timeout"
+        # The seed push runs the pre-receive hook (cold python + import
+        # schist), so it gets the hook-running 120s tier like
+        # git_ops.COMMIT_TIMEOUT — not the 60s lock-shaped tier.
+        push_timeouts = [t for cmd, t in calls if cmd[:2] == ["git", "push"]]
+        assert push_timeouts == [120]
+
+    def test_standalone_init_all_subprocess_calls_carry_timeouts(self, tmp_path, monkeypatch):
+        import schist.sync as sync_mod
+
+        real_run = sync_mod.subprocess.run
+        calls: list[tuple[list, object]] = []
+
+        def record(cmd, *a, **kw):
+            calls.append((cmd, kw.get("timeout")))
+            return real_run(cmd, *a, **kw)
+
+        monkeypatch.setattr(sync_mod.subprocess, "run", record)
+        args = SimpleNamespace(name="vault", identity="local", path=str(tmp_path / "v"))
+        sync_mod.init_standalone(args)
+
+        assert calls, "expected subprocess calls during standalone init"
+        for cmd, timeout in calls:
+            assert timeout is not None and timeout > 0, f"{cmd} ran with no timeout"
+
+    def test_hub_init_timeout_cleans_staging_and_reports(self, tmp_path, monkeypatch, capsys):
+        """A stalled subprocess must land in init_hub's cleanup path — clean
+        error, no hub_path, no staging litter — not a raw TimeoutExpired."""
+        import schist.sync as sync_mod
+
+        real_run = sync_mod.subprocess.run
+
+        def stall_on_seed_push(cmd, *a, **kw):
+            if cmd[:2] == ["git", "push"]:
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=kw.get("timeout"))
+            return real_run(cmd, *a, **kw)
+
+        monkeypatch.setattr(sync_mod.subprocess, "run", stall_on_seed_push)
+        hub = tmp_path / "hub.git"
+        args = SimpleNamespace(name="vault", participant=["alpha"])
+        with pytest.raises(SystemExit):
+            sync_mod.init_hub(args, str(hub))
+
+        assert "timed out" in capsys.readouterr().err
+        assert not hub.exists()
+        assert not list(tmp_path.glob(".hub.git.init-*"))
+
+    def test_standalone_init_timeout_cleans_staging_and_reports(self, tmp_path, monkeypatch, capsys):
+        import schist.sync as sync_mod
+
+        real_run = sync_mod.subprocess.run
+
+        def stall_on_commit(cmd, *a, **kw):
+            if cmd[:2] == ["git", "commit"]:
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=kw.get("timeout"))
+            return real_run(cmd, *a, **kw)
+
+        monkeypatch.setattr(sync_mod.subprocess, "run", stall_on_commit)
+        target = tmp_path / "v"
+        args = SimpleNamespace(name="vault", identity="local", path=str(target))
+        with pytest.raises(SystemExit):
+            sync_mod.init_standalone(args)
+
+        assert "timed out" in capsys.readouterr().err
+        assert not target.exists()
