@@ -88,6 +88,23 @@ describe("write_branch validation (#331)", () => {
     });
   });
 
+  test.each(["HEAD", "@"])(
+    "write_branch %p is rejected — it rev-parses to the CURRENT branch, so accepting it silently writes wherever HEAD points (#370 review)",
+    async (alias) => {
+      const vault = await makeTempVault(alias);
+      await expect(
+        writeNote(vault, "notes/n.md", "---\ntitle: N\n---\nBody\n"),
+      ).rejects.toMatchObject({
+        error: "VALIDATION_ERROR",
+        message: expect.stringContaining(alias),
+      });
+      // Nothing landed on the checked-out branch.
+      await expect(
+        execFile("git", ["cat-file", "-e", "HEAD:notes/n.md"], { cwd: vault }),
+      ).rejects.toThrow();
+    },
+  );
+
   test("write_branch @{-1} (dynamic ref) is rejected even when the reflog can resolve it (#370)", async () => {
     const vault = await makeTempVault("@{-1}");
     // Give the reflog a previous branch so @{-1} RESOLVES. The old

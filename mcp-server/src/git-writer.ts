@@ -214,6 +214,15 @@ async function assertValidWriteBranch(vaultRoot: string, branch: string): Promis
   // Fast-reject option-like values ourselves; belt for the case where a git
   // version parses the value below as a flag instead of a branch name.
   if (branch.startsWith("-")) throw invalid;
+  // "HEAD" and "@" are LEXICALLY valid as refs/heads/<x> below but are not
+  // branch names: both rev-parse to the current branch, so ensureBranch's
+  // checkout becomes an attached no-op and the note silently commits to
+  // whatever branch is checked out — the exact "write somewhere else"
+  // degradation this function exists to prevent. git's own --branch mode
+  // (strbuf_check_branch_ref) special-cases HEAD beyond the full-ref rules
+  // for the same reason; mirror it, and close the "@" alias hole the old
+  // form left open. Verified end-to-end in git-writer-hardening.test.ts.
+  if (branch === "HEAD" || branch === "@") throw invalid;
   // Validate the FULL ref form, not `--branch <name>` (#370):
   //  - `--branch` needs git ≥1.8.2; on the older gits common on HPC login
   //    nodes it exits non-zero ("unknown option") and the catch below turned
