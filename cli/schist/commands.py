@@ -38,6 +38,10 @@ def add(args, vault_path: str, db_path: str):
     ok, output = git_ops.commit(vault_path, f'add: {rel_path}', [rel_path])
     if not ok:
         print(f'Warning: git commit failed: {output}', file=sys.stderr)
+    elif output.startswith(git_ops.HOOK_STALL_WARNING_PREFIX):
+        # The commit landed (#364) — succeed, but tell the user the index
+        # may lag the write.
+        print(f'Warning: {output}', file=sys.stderr)
 
     print(rel_path)
 
@@ -54,6 +58,8 @@ def link(args, vault_path: str, db_path: str):
     ok, output = git_ops.commit(vault_path, f'link: {args.source} -{args.link_type}-> {args.target}', [args.source])
     if not ok:
         print(f'Warning: git commit failed: {output}', file=sys.stderr)
+    elif output.startswith(git_ops.HOOK_STALL_WARNING_PREFIX):
+        print(f'Warning: {output}', file=sys.stderr)
 
     print(f'Linked: {args.source} -{args.link_type}-> {args.target}')
 

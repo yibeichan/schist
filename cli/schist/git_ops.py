@@ -1,6 +1,8 @@
 """Git operations for vault commits."""
 
+import os
 from pathlib import Path
+import signal
 import subprocess
 
 import yaml
@@ -10,6 +12,31 @@ GLOBAL_SCOPE_FALLBACK_DIRS = [
     "notes", "papers", "concepts",
     "research", "decisions", "ops", "projects", "logs",
 ]
+
+# `git commit` runs the synchronous post-commit hook (schist-ingest), so it
+# needs a generous ceiling — but it MUST have one. Without it a stalled ingest
+# hangs `schist add`/`link`/`sync push` forever with no way out but kill
+# (#256). Mirrors clone/pull/push, which all set one. Module-level so tests
+# can shrink it instead of stalling a real hook for two minutes.
+COMMIT_TIMEOUT = 120
+
+# Prefix of the success-with-warning message commit() returns when the branch
+# ref moved but the stalled post-commit hook had to be killed (#364). Callers
+# match on this to surface the ingest-lag warning WITHOUT treating the commit
+# as failed (truthful reporting, same contract as git-writer.ts commitWarning).
+HOOK_STALL_WARNING_PREFIX = "committed, but the post-commit hook stalled"
+
+
+def _head_sha(vault_path: str) -> str:
+    """Best-effort HEAD sha; '' on failure, timeout, or an unborn branch."""
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=vault_path, capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return ''
+    return result.stdout.strip() if result.returncode == 0 else ''
 
 
 def commit(vault_path: str, message: str, files: list[str] | None = None) -> tuple[bool, str]:
@@ -21,20 +48,58 @@ def commit(vault_path: str, message: str, files: list[str] | None = None) -> tup
             cwd=vault_path, check=True, capture_output=True, text=True,
             timeout=60,
         )
-        # `git commit` runs the synchronous post-commit hook (schist-ingest),
-        # so it needs a generous ceiling — but it MUST have one. Without it a
-        # stalled ingest hangs `schist add`/`link`/`sync push` forever with no
-        # way out but kill (#256). Mirrors clone/pull/push, which all set one.
-        result = subprocess.run(
+        # HEAD before the commit: git updates the branch ref BEFORE running
+        # the post-commit hook, so a hook stall fires the timeout on a commit
+        # that already landed. Comparing HEAD afterwards separates "commit
+        # failed" from "commit landed, hook stalled" — returning False for
+        # the latter made callers report an error (or sync retry) for a
+        # write that succeeded (#364; mirrors git-writer.ts #336/#355).
+        pre_head = _head_sha(vault_path)
+        # start_new_session puts git AND its hook chain (sh → schist-ingest)
+        # in a fresh process group so the timeout can kill the whole tree.
+        # subprocess.run's timeout SIGKILLs only git itself: the orphaned
+        # hook kept running (it can hold the SQLite write lock) and held the
+        # stdout/stderr pipes open, so run()'s post-kill reap blocked for
+        # the hook's full runtime ON TOP of the timeout (#364). Mirrors the
+        # TS side's detached:true + process.kill(-pid) from #355.
+        proc = subprocess.Popen(
             ['git', 'commit', '-m', message],
-            cwd=vault_path, capture_output=True, text=True,
-            timeout=120,
+            cwd=vault_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
         )
-        output = result.stdout + result.stderr
-        return result.returncode == 0, output.strip()
-    except subprocess.TimeoutExpired as e:
-        cmd = e.cmd[1] if isinstance(e.cmd, list) and len(e.cmd) > 1 else 'command'
-        return False, f"git {cmd} timed out after {e.timeout}s (post-commit ingest may be stalled)"
+        try:
+            stdout, stderr = proc.communicate(timeout=COMMIT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            try:
+                # start_new_session=True makes the child a session leader, so
+                # its pid IS the process-group id.
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                # Reap; bounded in case a double-forked survivor outside the
+                # group still holds a pipe open.
+                proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            post_head = _head_sha(vault_path)
+            if post_head and post_head != pre_head:
+                return True, (
+                    f"{HOOK_STALL_WARNING_PREFIX} past {COMMIT_TIMEOUT}s "
+                    f"and was killed — the index may lag this write until "
+                    f"the next ingest"
+                )
+            return False, (
+                f"git commit timed out after {COMMIT_TIMEOUT}s "
+                f"(post-commit ingest may be stalled)"
+            )
+        output = stdout + stderr
+        return proc.returncode == 0, output.strip()
+    except subprocess.TimeoutExpired:
+        # Only `git add` still reaches here (commit handles its own timeout
+        # above); no hook runs on add — the usual culprits are an NFS stall
+        # or a stale index.lock, same as stage_scope_files.
+        return False, "git add timed out after 60s (NFS stall or stale index lock?)"
     except subprocess.CalledProcessError as e:
         return False, (e.stdout or '') + (e.stderr or '')
 
