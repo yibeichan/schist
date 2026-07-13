@@ -2488,6 +2488,48 @@ describe("delete_note", () => {
     expect(after).toContain("## Connections");
     expect(after).not.toContain(`extends: ${target.id}`);
     expect(after).toContain(`supports: ${other.id}`);
+    // #382: the surviving-lines path rejoins splitlines() output, which
+    // carries no terminal empty segment — the repaired note must still end
+    // with the canonical trailing newline.
+    expect(after.endsWith("\n")).toBe(true);
+    expect(after).not.toMatch(/\n\n$/);
+  }, 30000);
+
+  it("cascade keeps the trailing newline when a section follows the emptied Connections (#382)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const target = await create_note(
+      vault, { owner: TEST_AGENT, title: "Target Tail", body: "b", directory: "notes" }, config,
+    ) as { id: string };
+    const linker = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT,
+        title: "Linker Tail",
+        body: "b",
+        directory: "notes",
+        connections: [{ target: target.id, type: "extends" }],
+      },
+      config,
+    ) as { id: string };
+    // Append a section AFTER ## Connections so the emptied-section special
+    // case pushes its "" as a mid-file separator, not as the terminal
+    // element — pre-#382 the rejoin then dropped the file's newline.
+    const linkerPath = path.join(vault, linker.id);
+    const orig = await fs.readFile(linkerPath, "utf-8");
+    await fs.writeFile(linkerPath, orig + "\n## Notes\n\ntrailing text\n");
+    await seedEdgesDb(vault, [{ source: linker.id, target: target.id, type: "extends" }]);
+
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: target.id, cascade: true }, config) as {
+      deleted: boolean; repaired: string[];
+    };
+    expect(res.deleted).toBe(true);
+    expect(res.repaired).toContain(linker.id);
+    const after = await fs.readFile(linkerPath, "utf-8");
+    expect(after).toContain("trailing text");
+    expect(after).not.toContain(`extends: ${target.id}`);
+    expect(after.endsWith("\n")).toBe(true);
+    expect(after).not.toMatch(/\n\n$/);
   }, 30000);
 
   it("cascade strips a bare-slug connection to a concept note (#7)", async () => {
