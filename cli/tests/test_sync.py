@@ -604,11 +604,12 @@ class TestSyncPush:
         assert ["git", "merge", "--abort"] in calls
         assert "Aborting leftover merge state" in capsys.readouterr().err
 
+    @patch("schist.sync.git_ops.ignored_scope_files", return_value=[])
     @patch("schist.sync.git_ops.has_unpushed_commits", return_value=False)
     @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
     @patch("subprocess.run")
     def test_push_force_removes_lock_before_merge_abort(
-        self, mock_run, mock_changes, mock_unpushed, tmp_path, capsys
+        self, mock_run, mock_changes, mock_unpushed, mock_ignored, tmp_path, capsys
     ):
         from schist.sync import sync_push
 

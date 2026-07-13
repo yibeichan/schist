@@ -391,3 +391,81 @@ def test_pull_rebase_timeout_then_abort_timeout_does_not_raise():
 
     assert ok is False
     assert "timed out" in msg
+
+
+# ---------------------------------------------------------------------------
+# .gitignore vs scope content (#361)
+# ---------------------------------------------------------------------------
+
+
+def _commit_all(path, msg: str) -> None:
+    subprocess.run(["git", "-C", str(path), "add", "-A", "-f"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", msg,
+                    "--no-verify"], check=True, capture_output=True)
+
+
+def test_stage_scope_files_fails_loudly_on_ignored_scope_files(tmp_path) -> None:
+    """#361: `git add -- research/` skips .gitignore-matched notes with exit 0
+    and no output — the guard must turn that silent drop into a hard error
+    that names the files."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("research/secret*.md\n", encoding="utf-8")
+    _commit_all(tmp_path, "hub gitignore")
+
+    (tmp_path / "research").mkdir()
+    (tmp_path / "research" / "secret-plan.md").write_text("hidden\n", encoding="utf-8")
+    (tmp_path / "research" / "normal.md").write_text("visible\n", encoding="utf-8")
+
+    ok, msg = git_ops.stage_scope_files(str(tmp_path), "research")
+
+    assert ok is False
+    assert "research/secret-plan.md" in msg
+    assert "never reach the hub" in msg
+    # The visible note still staged — nothing is lost once the operator
+    # fixes the .gitignore and the next push picks everything up.
+    staged = subprocess.run(
+        ["git", "-C", str(tmp_path), "diff", "--cached", "--name-only"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    assert "research/normal.md" in staged
+
+
+def test_stage_scope_files_ok_when_ignores_do_not_touch_scope(tmp_path) -> None:
+    """The expected vault .gitignore (`.schist/`, #354) matches nothing under
+    a content scope — the guard must not fire on it."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".schist/\n", encoding="utf-8")
+    _commit_all(tmp_path, "hub gitignore")
+
+    (tmp_path / ".schist").mkdir()
+    (tmp_path / ".schist" / "schist.db").write_text("x", encoding="utf-8")
+    (tmp_path / "research").mkdir()
+    (tmp_path / "research" / "note.md").write_text("ok\n", encoding="utf-8")
+
+    ok, msg = git_ops.stage_scope_files(str(tmp_path), "research")
+    assert ok is True, msg
+
+
+def test_ignored_scope_files_detects_ignored_only_change(tmp_path) -> None:
+    """#361 permanent-drop corner: when the ignored note is the ONLY change,
+    `git status --porcelain` is empty (has_uncommitted_changes -> False), so
+    sync_push consults this guard directly to avoid no-opping forever."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("research/secret*.md\n", encoding="utf-8")
+    _commit_all(tmp_path, "hub gitignore")
+
+    (tmp_path / "research").mkdir()
+    (tmp_path / "research" / "secret-only.md").write_text("hidden\n", encoding="utf-8")
+
+    assert git_ops.has_uncommitted_changes(str(tmp_path)) is False
+    assert git_ops.ignored_scope_files(str(tmp_path), "research") == [
+        "research/secret-only.md"
+    ]
+
+
+def test_ignored_scope_files_empty_on_probe_timeout() -> None:
+    """Availability over strictness: a stalled probe must not block sync."""
+    with patch("schist.git_ops.subprocess.run",
+               side_effect=lambda *a, **k: _timeout(a[0], k)):
+        assert git_ops.ignored_scope_files("/tmp/vault", "research") == []
