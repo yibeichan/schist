@@ -49,7 +49,7 @@ function isGitTimeout(e: unknown): boolean {
  *
  * The flag is only ever belt-and-suspenders: the guards that actually prevent
  * option injection work on every git version and stay UNCONDITIONAL —
- * `assertValidWriteBranch` (check-ref-format --branch + leading-dash reject)
+ * `assertValidWriteBranch` (full-ref check-ref-format + leading-dash reject)
  * rejects option-like branch names, and the trailing `--` pathspec separator
  * (universal, ancient) is kept on the checkout/add/rm calls. So on old git we
  * degrade to "validation + trailing `--`"; on git ≥2.24 we keep the full
@@ -214,8 +214,31 @@ async function assertValidWriteBranch(vaultRoot: string, branch: string): Promis
   // Fast-reject option-like values ourselves; belt for the case where a git
   // version parses the value below as a flag instead of a branch name.
   if (branch.startsWith("-")) throw invalid;
+  // "HEAD" and "@" are LEXICALLY valid as refs/heads/<x> below but are not
+  // branch names: both rev-parse to the current branch, so ensureBranch's
+  // checkout becomes an attached no-op and the note silently commits to
+  // whatever branch is checked out — the exact "write somewhere else"
+  // degradation this function exists to prevent. git's own --branch mode
+  // (strbuf_check_branch_ref) special-cases HEAD beyond the full-ref rules
+  // for the same reason; mirror it, and close the "@" alias hole the old
+  // form left open. Verified end-to-end in git-writer-hardening.test.ts.
+  if (branch === "HEAD" || branch === "@") throw invalid;
+  // Validate the FULL ref form, not `--branch <name>` (#370):
+  //  - `--branch` needs git ≥1.8.2; on the older gits common on HPC login
+  //    nodes it exits non-zero ("unknown option") and the catch below turned
+  //    EVERY write into a VALIDATION_ERROR blaming a perfectly valid
+  //    write_branch. The full-ref form is original git syntax. The same
+  //    old-git concern is why --end-of-options is version-gated
+  //    (endOfOptionsArgs), and this path must not quietly require a NEWER
+  //    git than that gated one.
+  //  - `--branch` also NORMALIZES: `@{-1}` resolves to the previously
+  //    checked-out branch and validates THAT, so a dynamic ref sneaks
+  //    through as a write_branch value and rev-parses to whatever branch
+  //    happens to be in reflog history. The full-ref form rejects `@{`
+  //    outright (check-ref-format rule 8) — write_branch must be a literal
+  //    branch name.
   try {
-    await git(vaultRoot, ["check-ref-format", "--branch", branch]);
+    await git(vaultRoot, ["check-ref-format", `refs/heads/${branch}`]);
   } catch (e) {
     if (isGitTimeout(e)) throw e;
     throw invalid;
