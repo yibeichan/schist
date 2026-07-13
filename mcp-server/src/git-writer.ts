@@ -49,7 +49,7 @@ function isGitTimeout(e: unknown): boolean {
  *
  * The flag is only ever belt-and-suspenders: the guards that actually prevent
  * option injection work on every git version and stay UNCONDITIONAL —
- * `assertValidWriteBranch` (check-ref-format --branch + leading-dash reject)
+ * `assertValidWriteBranch` (full-ref check-ref-format + leading-dash reject)
  * rejects option-like branch names, and the trailing `--` pathspec separator
  * (universal, ancient) is kept on the checkout/add/rm calls. So on old git we
  * degrade to "validation + trailing `--`"; on git ≥2.24 we keep the full
