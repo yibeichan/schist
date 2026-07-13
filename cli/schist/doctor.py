@@ -333,12 +333,21 @@ def check_ingest_available(vault_path: Optional[str]) -> CheckResult:
             # back to it); read the declared version out of that literal.
             try:
                 m = re.search(
-                    r"'schemaVersion':\s*(\d+)",
+                    r"[\"']schemaVersion[\"']\s*:\s*(\d+)",
                     sibling_contract.read_text(encoding="utf-8"),
                 )
             except (OSError, UnicodeDecodeError):
                 m = None
-            if m and int(m.group(1)) != INDEX_SCHEMA_VERSION:
+            if m is None:
+                # A sibling whose declared version can't be read is exactly
+                # as suspect as a mismatched one — treating no-match as fine
+                # let a hand-edited copy pass while the runtime stamped
+                # something else entirely (#380).
+                issues.append(
+                    "cannot determine the schemaVersion its baked-in mirror "
+                    "declares (hand-edited or truncated copy?)"
+                )
+            elif int(m.group(1)) != INDEX_SCHEMA_VERSION:
                 issues.append(
                     f"sibling index_contract.py declares schema v{m.group(1)} "
                     f"but this installed schist expects v{INDEX_SCHEMA_VERSION}"
