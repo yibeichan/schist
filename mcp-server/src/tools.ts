@@ -6,7 +6,7 @@ import { spawn } from "child_process";
 import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote, updateNote, deleteNote } from "./git-writer.js";
-import { buildNote, buildConnectionLine, parseNote, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython } from "./markdown-parser.js";
+import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
 import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse, ComposeBriefResponse, Note, SearchResult } from "./types.js";
@@ -1590,21 +1590,11 @@ export async function add_connection(
     const conn = { target: args.target, type: args.type, context: args.context };
     const connLine = buildConnectionLine(conn);
 
-    let newContent: string;
-    if (content.includes("## Connections")) {
-      // The insertion regex's `(?:.*\n)*?` only matches lines that end in \n.
-      // If the source's last line has no trailing newline (hand-edited notes,
-      // parseNote round-trips), the regex matches nothing and `String.replace`
-      // returns the content unchanged — writeNote skips the commit but the tool
-      // still reports success, silently dropping the edge (#295). Guarantee a
-      // terminal newline first so the section body is always matchable.
-      const normalized = content.endsWith("\n") ? content : content + "\n";
-      newContent = normalized.replace(/(## Connections\n(?:.*\n)*?)(\n## |\s*$)/, (match, section, after) => {
-        return section.trimEnd() + "\n" + connLine + "\n" + after;
-      });
-    } else {
-      newContent = content.trimEnd() + "\n\n## Connections\n\n" + connLine + "\n";
-    }
+    // Line-scan insert shared with the CLI's append_connection (parity pinned
+    // by schema/connection-append-parity.json). The former regex here anchored
+    // on a bare `## Connections\n`, so a CRLF note silently dropped the edge
+    // while reporting success (#366) — see insertConnectionLine's contract.
+    const newContent = insertConnectionLine(content, connLine);
 
     const result = await writeNote(
       vaultRoot,
