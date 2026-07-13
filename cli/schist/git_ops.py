@@ -295,26 +295,79 @@ def stage_scope_files(vault_path: str, scope: str) -> tuple[bool, str]:
     schist.yaml) are NOT staged — spokes should not modify those.
     """
     try:
-        if scope == "global":
-            targets = _global_scope_targets(vault_path)
-            if not targets:
-                return True, ""
-            add_args = ['git', 'add', '--'] + targets
-        else:
-            add_args = ['git', 'add', '--', scope.rstrip('/') + '/']
+        targets = _scope_targets(vault_path, scope)
+        if not targets:
+            return True, ""
 
         # timeout matches commit()'s git add (#256/#314): staging is the same
         # index-write operation and stalls the same way on NFS lock contention.
         result = subprocess.run(
-            add_args,
+            ['git', 'add', '--'] + targets,
             cwd=vault_path, capture_output=True, text=True, timeout=60,
         )
         output = result.stdout + result.stderr
-        return result.returncode == 0, output.strip()
+        if result.returncode != 0:
+            return False, output.strip()
+
+        # Directory pathspecs honor .gitignore with exit 0 and no output
+        # (unlike explicit-file pathspecs, which git refuses loudly), so a
+        # hub-committed .gitignore matching scope content makes `git add`
+        # above silently skip those notes — they'd never reach the hub
+        # (#361). Fail loudly instead: the error lands in stderr, which the
+        # background-push sentinel records and sync_status surfaces.
+        ignored = ignored_scope_files(vault_path, scope)
+        if ignored:
+            shown = ', '.join(ignored[:10])
+            if len(ignored) > 10:
+                shown += f", … and {len(ignored) - 10} more"
+            return False, (
+                f"{len(ignored)} file(s) under scope '{scope}' are excluded "
+                f"by .gitignore and would silently never reach the hub: "
+                f"{shown}. Fix the vault .gitignore (hub-owned; see vault "
+                f"root) or move the files out of the scope."
+            )
+        return True, output.strip()
     except subprocess.TimeoutExpired:
         return False, 'git add timed out after 60s (NFS stall or stale index lock?)'
     except subprocess.CalledProcessError as e:
         return False, (e.stdout or '') + (e.stderr or '')
+
+
+def _scope_targets(vault_path: str, scope: str) -> list[str]:
+    """Pathspecs a scope stages — shared by staging and the ignore guard so
+    the two can't drift apart."""
+    if scope == "global":
+        return _global_scope_targets(vault_path)
+    return [scope.rstrip('/') + '/']
+
+
+def ignored_scope_files(vault_path: str, scope: str) -> list[str]:
+    """On-disk files under the scope that .gitignore rules exclude (#361).
+
+    These are files a spoke wrote in good faith that `git add` skips with
+    exit 0 — and that `git status --porcelain` omits, so an ignored-only
+    change also never triggers the sync auto-commit. Callers treat a
+    non-empty result as a hard staging error.
+
+    Probe failures (timeout, git error) return [] — availability over
+    strictness: the guard is a data-loss tripwire, not a gate the sync
+    path should die behind when git itself is stalling.
+    """
+    targets = _scope_targets(vault_path, scope)
+    if not targets:
+        return []
+    try:
+        result = subprocess.run(
+            ['git', 'status', '--porcelain', '--ignored=matching', '--'] + targets,
+            cwd=vault_path, capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return []
+    if result.returncode != 0:
+        return []
+    return [
+        line[3:] for line in result.stdout.splitlines() if line.startswith('!! ')
+    ]
 
 
 def _global_scope_dirs() -> list[str]:

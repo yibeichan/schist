@@ -629,8 +629,14 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
     config = load_spoke_config(vault_path)
     cleanup_stale_git_state(vault_path, force=_force_enabled(args))
 
-    # Auto-commit if there are uncommitted changes
-    if git_ops.has_uncommitted_changes(vault_path):
+    # Auto-commit if there are uncommitted changes. The ignore guard runs
+    # even when git sees nothing to commit: `git status --porcelain` omits
+    # ignored files, so a spoke whose ONLY change is .gitignore-suppressed
+    # would otherwise no-op here forever — the permanent silent-drop corner
+    # of #361 (stage_scope_files reports the actual error).
+    if git_ops.has_uncommitted_changes(vault_path) or git_ops.ignored_scope_files(
+        vault_path, config.scope
+    ):
         ok, output = git_ops.stage_scope_files(vault_path, config.scope)
         if not ok:
             print(f"Error: failed to stage scope '{config.scope}': {output}", file=sys.stderr)
