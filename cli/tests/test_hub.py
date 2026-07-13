@@ -362,6 +362,11 @@ class TestInitSubprocessTimeouts:
         assert calls, "expected subprocess calls during hub init"
         for cmd, timeout in calls:
             assert timeout is not None and timeout > 0, f"{cmd} ran with no timeout"
+        # The seed push runs the pre-receive hook (cold python + import
+        # schist), so it gets the hook-running 120s tier like
+        # git_ops.COMMIT_TIMEOUT — not the 60s lock-shaped tier.
+        push_timeouts = [t for cmd, t in calls if cmd[:2] == ["git", "push"]]
+        assert push_timeouts == [120]
 
     def test_standalone_init_all_subprocess_calls_carry_timeouts(self, tmp_path, monkeypatch):
         import schist.sync as sync_mod

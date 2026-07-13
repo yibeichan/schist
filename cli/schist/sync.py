@@ -839,14 +839,22 @@ def _build_hub_in_staging(
         def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
             # TimeoutExpired → _InitError so the caller's cleanup path runs;
             # the raw exception would escape init_hub's except clause (#371).
+            # The seed `git push` executes the just-installed pre-receive hook
+            # (cold python3 + `import schist` + ACL machinery) — the same
+            # legitimately-slow hook workload that gives git_ops.commit()'s
+            # hook-running tier COMMIT_TIMEOUT=120 instead of the 30-60s
+            # lock-shaped tier. 60s here would turn a slow-but-working NFS
+            # init into a deterministic hard failure where the step-3 probe
+            # deliberately only warns.
+            timeout = 120 if cmd[:2] == ["git", "push"] else 60
             try:
                 return subprocess.run(
                     cmd, cwd=cwd, env=env, capture_output=True, text=True,
-                    timeout=60,
+                    timeout=timeout,
                 )
             except subprocess.TimeoutExpired:
                 raise _InitError(
-                    f"{' '.join(cmd)} timed out after 60s (NFS stall?)"
+                    f"{' '.join(cmd)} timed out after {timeout}s (NFS stall?)"
                 )
 
         for cmd in (
