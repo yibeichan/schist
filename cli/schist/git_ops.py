@@ -357,8 +357,11 @@ def ignored_scope_files(vault_path: str, scope: str) -> list[str]:
     if not targets:
         return []
     try:
+        # quotePath=off: porcelain v1 C-quotes non-ASCII paths ("s\303\251…"),
+        # which would land garbled in the user-facing error message.
         result = subprocess.run(
-            ['git', 'status', '--porcelain', '--ignored=matching', '--'] + targets,
+            ['git', '-c', 'core.quotePath=off', 'status', '--porcelain',
+             '--ignored=matching', '--'] + targets,
             cwd=vault_path, capture_output=True, text=True, timeout=30,
         )
     except subprocess.TimeoutExpired:
