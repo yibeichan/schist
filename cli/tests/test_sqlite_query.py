@@ -926,3 +926,61 @@ def test_get_db_heal_path_raises_on_foreign_generation_db_under_lock(
         writer.rollback()
         writer.close()
 
+
+
+def test_locked_fallthrough_probe_accepts_current_and_mid_ingest(
+    tmp_path: Path,
+) -> None:
+    """Probe unit semantics: current generation and the version-0 mid-ingest
+    state pass; a foreign generation and a missing required table do not."""
+    from schist.sqlite_query import _locked_fallthrough_db_usable
+
+    vault, db_path = _vault_db(tmp_path)
+    conn = sqlite3.connect(db_path)
+    _create_required_tables(conn)
+    conn.execute(f"PRAGMA user_version = {INDEX_SCHEMA_VERSION}")
+    conn.commit()
+    conn.close()
+    assert _locked_fallthrough_db_usable(str(db_path)) is True
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA user_version = 0")
+    conn.commit()
+    conn.close()
+    assert _locked_fallthrough_db_usable(str(db_path)) is True
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(f"PRAGMA user_version = {INDEX_SCHEMA_VERSION + 1}")
+    conn.commit()
+    conn.close()
+    assert _locked_fallthrough_db_usable(str(db_path)) is False
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(f"PRAGMA user_version = {INDEX_SCHEMA_VERSION}")
+    conn.execute("DROP TABLE docs")
+    conn.commit()
+    conn.close()
+    assert _locked_fallthrough_db_usable(str(db_path)) is False
+
+
+def test_locked_fallthrough_probe_unusable_under_exclusive_lock(
+    tmp_path: Path,
+) -> None:
+    """Rollback-journal EXCLUSIVE locking blocks even the probe's reads —
+    that must map to 'unusable' (immediately, not after a busy wait), so the
+    caller sees the honest locked error."""
+    from schist.sqlite_query import _locked_fallthrough_db_usable
+
+    vault, db_path = _vault_db(tmp_path)
+    writer = sqlite3.connect(db_path)
+    _create_required_tables(writer)
+    writer.execute(f"PRAGMA user_version = {INDEX_SCHEMA_VERSION}")
+    writer.commit()
+    writer.execute("PRAGMA locking_mode = EXCLUSIVE")
+    writer.execute("BEGIN EXCLUSIVE")
+    writer.execute("INSERT INTO docs VALUES ('locked')")
+    try:
+        assert _locked_fallthrough_db_usable(str(db_path)) is False
+    finally:
+        writer.rollback()
+        writer.close()

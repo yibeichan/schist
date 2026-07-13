@@ -107,6 +107,15 @@ def get_db(vault_path: str, db_path: str | None = None) -> sqlite3.Connection:
                 "results may be incomplete, retry shortly.",
                 file=sys.stderr,
             )
+            # mode=rw, not the default rwc: if the competing writer's ingest
+            # fails non-locked and unlinks the file between the probe and
+            # here, a plain connect would silently recreate an empty DB —
+            # the exact table-less symptom the probe exists to prevent.
+            conn = sqlite3.connect(
+                Path(db_path).resolve().as_uri() + "?mode=rw", uri=True
+            )
+            conn.row_factory = sqlite3.Row
+            return conn
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -123,8 +132,11 @@ def _locked_fallthrough_db_usable(db_path: str) -> bool:
     lock makes the reads themselves raise, which correctly reports unusable.
     """
     try:
+        # timeout=0: fail immediately instead of stacking Python's default
+        # 5 s busy wait on top of the failed ingest's own busy wait when a
+        # rollback-journal EXCLUSIVE lock blocks even the read.
         probe = sqlite3.connect(
-            Path(db_path).resolve().as_uri() + "?mode=ro", uri=True
+            Path(db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=0
         )
         try:
             table_names = {
