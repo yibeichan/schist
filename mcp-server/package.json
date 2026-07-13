@@ -44,6 +44,7 @@
   "jest": {
     "preset": "ts-jest/presets/default-esm",
     "testEnvironment": "node",
+    "globalSetup": "<rootDir>/tests/global-setup.cjs",
     "extensionsToTreatAsEsm": [
       ".ts"
     ],

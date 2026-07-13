@@ -20,6 +20,7 @@ import * as os from "os";
 import { fileURLToPath } from "url";
 import Database from "better-sqlite3";
 import * as sqliteReader from "../src/sqlite-reader.js";
+import { localIngestWrapperScript } from "./local-ingest-bin.js";
 import { INDEX_SCHEMA_VERSION, resetSchemaCacheForTesting } from "../src/sqlite-reader.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -39,20 +40,7 @@ async function makeBinDir(): Promise<string> {
 async function useLocalSchistIngestBin(): Promise<void> {
   const dir = await makeBinDir();
   const bin = path.join(dir, "schist-ingest-local");
-  const python = path.join(repoRoot, "cli", ".venv", "bin", "python");
-  const cliDir = path.join(repoRoot, "cli");
-  await fs.writeFile(
-    bin,
-    [
-      "#!/bin/sh",
-      `if [ -x ${JSON.stringify(python)} ]; then`,
-      `  PYTHONPATH=${JSON.stringify(cliDir)} exec ${JSON.stringify(python)} -m schist.ingest "$@"`,
-      "fi",
-      `cd ${JSON.stringify(cliDir)} && exec uv run --with . python -m schist.ingest "$@"`,
-      "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
+  await fs.writeFile(bin, localIngestWrapperScript(repoRoot), { mode: 0o755 });
   process.env.SCHIST_INGEST_BIN = bin;
 }
 
