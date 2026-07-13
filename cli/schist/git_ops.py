@@ -50,7 +50,9 @@ def run_group_killable(
 
     On timeout: group-killed, reaped (bounded, in case a double-forked
     survivor outside the group holds a pipe open), then TimeoutExpired is
-    re-raised so callers keep their existing handling.
+    re-raised so callers keep their existing handling. Unlike plain run(),
+    the re-raised exception carries NO partial output (.output/.stderr are
+    None) — callers migrating from run() must not read them.
     """
     proc = subprocess.Popen(
         cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
