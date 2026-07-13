@@ -301,6 +301,65 @@ def check_hooks_path(vault_path: Optional[str]) -> CheckResult:
     return CheckResult("PASS", "Hooks path", "uses default .git/hooks/")
 
 
+# Lines that plainly ignore the .schist/ runtime dir. Deliberately simple —
+# exact `.schist/` / `.schist`, optionally root-anchored — NOT full gitignore
+# semantics. An exotic pattern that happens to cover .schist/ still warns:
+# false-warn is preferred over false-pass here.
+_SCHIST_IGNORE_LINES = {".schist", ".schist/", "/.schist", "/.schist/"}
+
+
+def check_root_gitignore(vault_path: Optional[str]) -> CheckResult:
+    """Warn when the vault root's tracked .gitignore does not cover .schist/.
+
+    #309 added `.schist/` to the root .gitignore of the hub SEED commit, so
+    only vaults initialized after it get one. Already-seeded hubs (and their
+    clones) never gain it automatically (#362): spoke working copies are
+    retrofitted via `schist hooks reinstall` (.git/info/exclude, #354), but
+    that is per-clone — only the tracked .gitignore protects every working
+    copy of the vault, including the hub operator's own. Without it,
+    `git status` shows the SQLite index as untracked and a broad `git add`
+    can commit it.
+
+    Applies to both hub and spoke vault roots. WARN, never FAIL: a retrofitted
+    spoke's own working copy is already covered by .git/info/exclude.
+    """
+    label = "Root .gitignore"
+    if not vault_path:
+        return CheckResult("SKIP", label, "skipped (no vault)")
+    if not (Path(vault_path) / ".git").exists():
+        return CheckResult("SKIP", label, "skipped (not a git repo)")
+
+    fix = (
+        "Add a `.schist/` line to the vault root .gitignore and commit it. "
+        "The root file is hub-owned on hub/spoke deployments: per the vault "
+        "ACL, commit and push it with the hub operator's machine identity "
+        "(e.g. SCHIST_IDENTITY=pi; see docs/hub-spoke-pi-orcd-dragonfly.md)."
+    )
+    gitignore = Path(vault_path) / ".gitignore"
+    try:
+        text = gitignore.read_text()
+    except FileNotFoundError:
+        return CheckResult(
+            "WARN", label,
+            "no .gitignore at the vault root — .schist/ (runtime SQLite "
+            "state) is not ignored; expected a line `.schist/`",
+            fix,
+        )
+    except (OSError, UnicodeDecodeError) as e:
+        # Unreadable is as suspect as missing — prefer false-warn.
+        return CheckResult("WARN", label, f"cannot read {gitignore}: {e}", fix)
+
+    if any(line.strip() in _SCHIST_IGNORE_LINES for line in text.splitlines()):
+        return CheckResult("PASS", label, ".gitignore ignores .schist/")
+
+    return CheckResult(
+        "WARN", label,
+        ".gitignore has no line ignoring .schist/ (runtime SQLite state); "
+        "expected a line `.schist/`",
+        fix,
+    )
+
+
 def check_ingest_available(vault_path: Optional[str]) -> CheckResult:
     if not vault_path:
         return CheckResult("SKIP", "Ingest", "skipped (no vault)")
@@ -1160,6 +1219,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_post_commit_hook(vault_path),
         check_hooks_freshness(vault_path),
         check_hooks_path(vault_path),
+        check_root_gitignore(vault_path),
         check_ingest_available(vault_path),
         check_spoke(vault_path),
         check_spoke_identity_env(vault_path),

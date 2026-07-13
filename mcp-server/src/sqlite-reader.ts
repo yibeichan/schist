@@ -1257,6 +1257,17 @@ export function getRecentMemory(
 }
 
 function rowToMemoryEntry(row: Record<string, unknown>): MemoryEntry {
+  // Rows are UNTRUSTED, same as getRecentMemory above: the memory DB is a
+  // shared per-machine file that other software can write, and rows may
+  // predate add_memory's related_doc validation. Apply the same read-time
+  // shape guard so search_memory and get_context present one consistent view
+  // of the same entry — a malformed back-reference (".git/config", "../x.md")
+  // is omitted, never returned verbatim.
+  const relatedDoc = row.related_doc;
+  const relatedDocOk =
+    typeof relatedDoc === "string" &&
+    relatedDoc.length > 0 &&
+    noteIdShapeError(relatedDoc) === null;
   return {
     id: row.id as number,
     owner: row.owner as string,
@@ -1264,7 +1275,7 @@ function rowToMemoryEntry(row: Record<string, unknown>): MemoryEntry {
     entry_type: row.entry_type as MemoryEntry["entry_type"],
     content: row.content as string,
     tags: row.tags ? JSON.parse(row.tags as string) : [],
-    related_doc: row.related_doc == null ? undefined : (row.related_doc as string),
+    ...(relatedDocOk ? { related_doc: relatedDoc } : {}),
     source_ref: row.source_ref == null ? undefined : (row.source_ref as string),
     confidence: row.confidence as MemoryEntry["confidence"],
     created_at: row.created_at as string,
