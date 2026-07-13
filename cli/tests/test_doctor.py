@@ -21,6 +21,7 @@ from schist.doctor import (
     check_node,
     check_post_commit_hook,
     check_python,
+    check_root_gitignore,
     check_schist_yaml,
     check_spoke_identity_env,
     check_skill_tool_references,
@@ -316,6 +317,70 @@ class TestCheckHooksPath:
         checks will FAIL appropriately for the missing .git/)."""
         r = check_hooks_path(str(tmp_path))
         assert r.status == "SKIP"
+
+
+class TestCheckRootGitignore:
+    """Issue #362 — hubs seeded before #309 never gain the root .gitignore
+    that excludes .schist/, so a broad `git add` in any working copy can
+    commit the SQLite index. WARN (never FAIL): retrofitted spokes are
+    already covered per-clone by .git/info/exclude (#354)."""
+
+    def _vault(self, tmp_path: Path) -> Path:
+        (tmp_path / ".git").mkdir()
+        return tmp_path
+
+    def test_no_path(self):
+        r = check_root_gitignore(None)
+        assert r.status == "SKIP"
+
+    def test_not_a_git_repo(self, tmp_path):
+        r = check_root_gitignore(str(tmp_path))
+        assert r.status == "SKIP"
+
+    def test_missing_gitignore_warns(self, tmp_path):
+        vault = self._vault(tmp_path)
+        r = check_root_gitignore(str(vault))
+        assert r.status == "WARN"
+        assert r.label == "Root .gitignore"
+        # The warning must state the expected line.
+        assert ".schist/" in r.message
+        assert r.fix is not None
+        assert ".schist/" in r.fix
+
+    def test_gitignore_without_schist_line_warns(self, tmp_path):
+        vault = self._vault(tmp_path)
+        (vault / ".gitignore").write_text("*.pyc\nnode_modules/\n")
+        r = check_root_gitignore(str(vault))
+        assert r.status == "WARN"
+        assert ".schist/" in r.message
+        assert r.fix is not None
+
+    def test_gitignore_with_schist_line_passes(self, tmp_path):
+        vault = self._vault(tmp_path)
+        # The exact content _build_seed_vault writes (sync.py).
+        (vault / ".gitignore").write_text(".schist/\n")
+        r = check_root_gitignore(str(vault))
+        assert r.status == "PASS"
+
+    @pytest.mark.parametrize("line", [".schist", "/.schist/", "/.schist",
+                                      "  .schist/  "])
+    def test_equivalent_ignore_forms_pass(self, tmp_path, line):
+        vault = self._vault(tmp_path)
+        (vault / ".gitignore").write_text(f"*.pyc\n{line}\n")
+        r = check_root_gitignore(str(vault))
+        assert r.status == "PASS"
+
+    @pytest.mark.parametrize("line", [
+        "# .schist/",       # comment, not a pattern
+        "!.schist/",        # negation re-INCLUDES it
+        ".schist/schist.db",  # narrower than the whole dir
+        "notes/.schist/",   # different path
+    ])
+    def test_lookalike_lines_still_warn(self, tmp_path, line):
+        vault = self._vault(tmp_path)
+        (vault / ".gitignore").write_text(f"{line}\n")
+        r = check_root_gitignore(str(vault))
+        assert r.status == "WARN"
 
 
 class TestCheckIngestAvailable:
