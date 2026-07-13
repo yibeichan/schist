@@ -229,3 +229,93 @@ describe("--end-of-options gated on runtime git version (#355 deploy fix)", () =
     ).rejects.toMatchObject({ error: "VALIDATION_ERROR" });
   });
 });
+
+describe("write_branch ref-DWIM detach (#381)", () => {
+  // Each of these is lexically a valid branch name, but git's ref search
+  // order resolves it to ANOTHER ref when one exists — the checkout then
+  // detached HEAD and the "committed" note became reflog-only after the
+  // next write. The namespace-shaped class is rejected outright.
+  test.each([
+    ["refs/heads/foo", async (vault: string) => {
+      await execFile("git", ["branch", "foo"], { cwd: vault });
+    }],
+    ["heads/foo", async (vault: string) => {
+      await execFile("git", ["branch", "foo"], { cwd: vault });
+    }],
+    ["tags/v1", async (vault: string) => {
+      await execFile("git", ["tag", "v1"], { cwd: vault });
+    }],
+    ["remotes/origin/main", async (vault: string) => {
+      await execFile(
+        "git", ["update-ref", "refs/remotes/origin/main", "HEAD"], { cwd: vault },
+      );
+    }],
+  ] as Array<[string, (vault: string) => Promise<void>]>)(
+    "write_branch %p is rejected instead of detaching HEAD onto the DWIM target",
+    async (badBranch, seedRef) => {
+      const vault = await makeTempVault(badBranch);
+      await seedRef(vault);
+      const before = (
+        await execFile("git", ["rev-list", "--all"], { cwd: vault })
+      ).stdout;
+
+      await expect(
+        writeNote(vault, "notes/n.md", "---\ntitle: N\n---\nBody\n"),
+      ).rejects.toMatchObject({
+        error: "VALIDATION_ERROR",
+        message: expect.stringContaining(badBranch),
+      });
+
+      // HEAD is still an attached symbolic ref and no commit was stranded.
+      const { stdout: head } = await execFile(
+        "git", ["symbolic-ref", "HEAD"], { cwd: vault },
+      );
+      expect(head.trim()).toMatch(/^refs\/heads\//);
+      const after = (
+        await execFile("git", ["rev-list", "--all"], { cwd: vault })
+      ).stdout;
+      expect(after).toBe(before);
+    },
+  );
+
+  test("write_branch colliding with an existing tag creates the real branch and stays attached", async () => {
+    // Pre-#381 the bare `rev-parse --verify v1` DWIMed to the TAG, skipped
+    // branch creation, and the checkout detached onto the tag — every write
+    // reported committed:true onto no branch at all.
+    const vault = await makeTempVault("v1");
+    await execFile("git", ["tag", "v1"], { cwd: vault });
+
+    const result = await writeNote(vault, "notes/n.md", "---\ntitle: N\n---\nBody\n");
+    expect(result.committed).toBe(true);
+
+    const { stdout: head } = await execFile(
+      "git", ["symbolic-ref", "HEAD"], { cwd: vault },
+    );
+    expect(head.trim()).toBe("refs/heads/v1");
+    // The note landed on the BRANCH (full ref — no DWIM in the assertion
+    // either), and the returned sha is reachable from it.
+    await execFile(
+      "git", ["cat-file", "-e", "refs/heads/v1:notes/n.md"], { cwd: vault },
+    );
+    const { stdout: reachable } = await execFile(
+      "git", ["branch", "--contains", result.commitSha as string], { cwd: vault },
+    );
+    expect(reachable).toContain("v1");
+  });
+
+  test("write_branch ambiguous between existing branch and tag lands on the branch", async () => {
+    const vault = await makeTempVault("v2");
+    await execFile("git", ["branch", "v2"], { cwd: vault });
+    await execFile("git", ["tag", "v2"], { cwd: vault });
+
+    const result = await writeNote(vault, "notes/n.md", "---\ntitle: N\n---\nBody\n");
+    expect(result.committed).toBe(true);
+    const { stdout: head } = await execFile(
+      "git", ["symbolic-ref", "HEAD"], { cwd: vault },
+    );
+    expect(head.trim()).toBe("refs/heads/v2");
+    await execFile(
+      "git", ["cat-file", "-e", "refs/heads/v2:notes/n.md"], { cwd: vault },
+    );
+  });
+});
