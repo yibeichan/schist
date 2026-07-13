@@ -49,6 +49,49 @@ def write_note(path: str, fm: dict, body: str):
         f.write(frontmatter.dumps(post) + '\n')
 
 
+def insert_connection_line(content: str, line: str) -> str:
+    """Insert a connection line into content's ## Connections section.
+
+    Splits with splitlines() — the SAME boundaries ingest.py:parse_connections
+    reads with — never split('\\n'). split('\\n') left splitlines-only
+    separators (\\v, \\f, NEL, U+2028/U+2029 — which universal-newline reads
+    do NOT translate, unlike \\r/\\r\\n) fused into one giant "line", so the
+    heading was "found" but the next `## ` break wasn't, and the new edge was
+    appended after the following section — where parse_connections silently
+    ignores it (#365). The section gate is the same line-scan the readers use
+    (not a substring test): a mid-line prose mention of "## Connections" is
+    not a heading, so the edge gets a real section instead of landing outside
+    any section. Output is always '\\n'-joined with a single trailing newline,
+    healing exotic separators on write the way the TS repair paths do.
+
+    Byte-identical to mcp-server markdown-parser.ts insertConnectionLine;
+    schema/connection-append-parity.json pins both, like #318/#338 did for
+    slugs.
+    """
+    lines = content.splitlines()
+    section_found = False
+    in_section = False
+    insert_idx = None
+    for i, ln in enumerate(lines):
+        stripped = ln.strip()
+        if not section_found and stripped.startswith('## Connections'):
+            section_found = True
+            in_section = True
+            continue
+        if in_section and stripped.startswith('## '):
+            insert_idx = i
+            break
+    if not section_found:
+        # Create section at end. Blank line after the heading matches the
+        # MCP server's create-path shape so both writers mint one format.
+        return content.rstrip() + '\n\n## Connections\n\n' + line + '\n'
+    if insert_idx is None:
+        lines.append(line)
+    else:
+        lines.insert(insert_idx, line)
+    return '\n'.join(lines) + '\n'
+
+
 def append_connection(path: str, connection_type: str, target: str, context: str | None = None):
     """Append a connection line to the ## Connections section (creating it if needed)."""
     with open(path, 'r', encoding='utf-8') as f:
@@ -59,27 +102,5 @@ def append_connection(path: str, connection_type: str, target: str, context: str
     else:
         line = f'- {connection_type}: {target}'
 
-    if '## Connections' in content:
-        # Find the section and append before the next ## or end of file
-        lines = content.split('\n')
-        insert_idx = None
-        in_section = False
-        for i, ln in enumerate(lines):
-            if ln.strip().startswith('## Connections'):
-                in_section = True
-                continue
-            if in_section and ln.strip().startswith('## '):
-                insert_idx = i
-                break
-        if insert_idx is None:
-            # Append at end
-            lines.append(line)
-        else:
-            lines.insert(insert_idx, line)
-        content = '\n'.join(lines)
-    else:
-        # Create section at end
-        content = content.rstrip() + '\n\n## Connections\n' + line + '\n'
-
     with open(path, 'w', encoding='utf-8') as f:
-        f.write(content)
+        f.write(insert_connection_line(content, line))

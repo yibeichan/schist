@@ -2040,7 +2040,7 @@ describe("add_connection source validation", () => {
 // update_note (#119)
 // ---------------------------------------------------------------------------
 
-describe("add_connection append path (#295)", () => {
+describe("add_connection append path (#295/#366)", () => {
   it("appends an edge when the existing Connections section has no trailing newline", async () => {
     const vault = await makeTempVault();
     const rel = "notes/2026-07-01-no-newline.md";
@@ -2070,6 +2070,39 @@ describe("add_connection append path (#295)", () => {
     expect(after).toContain("- supports: notes/new.md"); // the new edge landed
     expect(after).toContain("- extends: notes/other.md"); // the existing one survived
     expect(after.endsWith("\n")).toBe(true);
+  }, 30000);
+
+  it("appends an edge into a CRLF-line-ending note without silent drop (#366)", async () => {
+    const vault = await makeTempVault();
+    const rel = "notes/2026-07-10-crlf.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    // Windows checkout / core.autocrlf=true note: every line ends \r\n. The
+    // old insert regex anchored on a bare `## Connections\n`, so the \r
+    // blocked the match, String.replace returned the content unchanged,
+    // writeNote deduped the no-op, and the tool reported a commitSha while
+    // the edge never reached disk or the index.
+    await fs.writeFile(
+      path.join(vault, rel),
+      "---\r\ntitle: CRLF\r\n---\r\n\r\n## Connections\r\n\r\n- extends: notes/other.md\r\n",
+      "utf-8",
+    );
+    await execFile("git", ["add", "."], { cwd: vault });
+    await execFile("git", ["commit", "-m", "crlf fixture"], { cwd: vault });
+
+    const res = await add_connection(vault, {
+      owner: TEST_AGENT,
+      source: rel,
+      target: "notes/new.md",
+      type: "supports",
+    }, await loadVaultConfig(vault)) as { commitSha?: string; error?: string };
+
+    expect(res.error).toBeUndefined();
+    expect(res.commitSha).toBeDefined();
+
+    const after = await fs.readFile(path.join(vault, rel), "utf-8");
+    expect(after).toContain("- supports: notes/new.md"); // the new edge landed
+    expect(after).toContain("- extends: notes/other.md"); // the existing one survived
+    expect(after).not.toContain("\r"); // healed to LF, matching every other writer
   }, 30000);
 });
 
