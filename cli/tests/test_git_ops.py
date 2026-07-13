@@ -16,6 +16,8 @@ import subprocess
 import time
 from unittest.mock import patch
 
+import pytest
+
 from schist import git_ops
 
 
@@ -469,3 +471,78 @@ def test_ignored_scope_files_empty_on_probe_timeout() -> None:
     with patch("schist.git_ops.subprocess.run",
                side_effect=lambda *a, **k: _timeout(a[0], k)):
         assert git_ops.ignored_scope_files("/tmp/vault", "research") == []
+
+
+# ---------------------------------------------------------------------------
+# push() vs stalled pre-receive hook chain (#379)
+# ---------------------------------------------------------------------------
+
+
+def test_push_real_stalled_pre_receive_hook_kills_chain(
+    tmp_path, monkeypatch
+) -> None:
+    """The empirical #379 repro as a regression test: a pre-receive hook that
+    outlives PUSH_TIMEOUT must not leave git-receive-pack + the hook chain
+    orphaned — plain run(timeout=) killed only the push client."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)],
+                   check=True, capture_output=True)
+    hook = origin / "hooks" / "pre-receive"
+    hook.write_text(f"#!/bin/sh\necho $$ > {tmp_path}/hookpid\nsleep 60\n",
+                    encoding="utf-8")
+    hook.chmod(0o755)
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _init_repo(vault)
+    subprocess.run(["git", "-C", str(vault), "remote", "add", "origin",
+                    str(origin)], check=True, capture_output=True)
+    (vault / "note.md").write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(vault), "add", "note.md"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(vault), "commit", "-q", "-m", "n",
+                    "--no-verify"], check=True, capture_output=True)
+    monkeypatch.setattr(git_ops, "PUSH_TIMEOUT", 1)
+
+    t0 = time.monotonic()
+    ok, msg = git_ops.push(str(vault))
+    elapsed = time.monotonic() - t0
+
+    assert ok is False
+    assert "timed out after 1s" in msg
+    assert elapsed < 8, f"push reap blocked for {elapsed:.1f}s"
+
+    hook_pid = int((tmp_path / "hookpid").read_text().strip())
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            os.kill(hook_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(hook_pid, signal.SIGKILL)  # don't leak it past the test
+        raise AssertionError("stalled pre-receive hook survived push()'s group kill")
+
+
+def test_run_group_killable_takes_grandchildren_with_the_group(tmp_path) -> None:
+    """The shared helper's contract: on timeout the WHOLE process group dies,
+    not just the direct child — the seed-push path (#379) relies on this via
+    sync._build_hub_in_staging's run() closure."""
+    pidfile = tmp_path / "grandchild"
+    with pytest.raises(subprocess.TimeoutExpired):
+        git_ops.run_group_killable(
+            ["/bin/sh", "-c", f"sleep 60 & echo $! > {pidfile}; wait"],
+            cwd=str(tmp_path), timeout=1,
+        )
+    grandchild = int(pidfile.read_text().strip())
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            os.kill(grandchild, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(grandchild, signal.SIGKILL)
+        raise AssertionError("grandchild survived the group kill")

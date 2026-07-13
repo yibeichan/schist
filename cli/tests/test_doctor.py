@@ -416,6 +416,37 @@ class TestCheckIngestAvailableStaleHandCopy:
         assert "declares schema v999" in r.message
         assert r.fix is not None and "Refresh" in r.fix
 
+    def test_warn_when_sibling_declares_stale_version_double_quoted(self, tmp_path):
+        """#380: the version-literal scan matched only single quotes, so a
+        hand-edited sibling with a double-quoted literal sailed past the
+        #357 check entirely."""
+        vault = self._vault_with_copy(tmp_path, with_sibling=True)
+        sibling = tmp_path / ".schist" / "index_contract.py"
+        current = sibling.read_text()
+        assert "'schemaVersion': 1," in current  # fixture guard: bump me on v2
+        sibling.write_text(
+            current.replace("'schemaVersion': 1,", '"schemaVersion": 999,')
+        )
+        with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
+            r = check_ingest_available(str(vault))
+        assert r.status == "WARN"
+        assert "declares schema v999" in r.message
+
+    def test_warn_when_sibling_version_is_undeterminable(self, tmp_path):
+        """#380: no version literal at all was treated as no-issue — a
+        rewritten/truncated sibling passed while the runtime stamped
+        something doctor never saw."""
+        vault = self._vault_with_copy(tmp_path, with_sibling=True)
+        sibling = tmp_path / ".schist" / "index_contract.py"
+        current = sibling.read_text()
+        sibling.write_text(
+            current.replace("'schemaVersion': 1,", "'somethingElse': 1,")
+        )
+        with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
+            r = check_ingest_available(str(vault))
+        assert r.status == "WARN"
+        assert "cannot determine" in r.message
+
     def test_warn_when_354_window_copy_lacks_env_utils_sibling(self, tmp_path):
         """#369: the #354 revision of ingest.py imports env_utils with no
         inline fallback — without an env_utils.py sibling the post-commit
