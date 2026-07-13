@@ -1617,3 +1617,76 @@ def test_ingest_skips_symlink_target_under_skip_dir(tmp_path: Path) -> None:
     assert "Real Note" in titles
     # The .git file content is not indexed via the symlink.
     assert not any("TOKEN@hub" in (b or "") for b in bodies)
+
+
+# ---------------------------------------------------------------------------
+# Bare-script env_flag fallback (#369)
+# ---------------------------------------------------------------------------
+
+
+def test_bare_script_imports_without_env_utils_sibling(tmp_path: Path) -> None:
+    """#369: a bare-script hook copy (ingest.py + index_contract.py +
+    schema.sql, NO env_utils.py) must import — the #354 revision raised
+    ModuleNotFoundError here, breaking ingest on every commit for every
+    deployment that refreshed only the documented three files."""
+    src = _repo_root() / "cli" / "schist"
+    for name in ("ingest.py", "index_contract.py", "schema.sql"):
+        shutil.copy(src / name, tmp_path / name)
+
+    probe = (
+        "import sys; sys.path.insert(0, sys.argv[1])\n"
+        "import ingest\n"
+        "print('IMPORT_OK')\n"
+    )
+    r = subprocess.run(
+        [sys.executable, "-c", probe, str(tmp_path)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "IMPORT_OK" in r.stdout
+
+
+def test_bare_script_env_flag_fallback_matches_env_utils(tmp_path: Path) -> None:
+    """The inline fallback must be semantically identical to
+    env_utils.env_flag — a drifted copy re-creates the #311 strict-bool bug
+    (SCHIST_NO_WAL=false flipping journal modes) on exactly the deployments
+    that can't see it."""
+    from schist.env_utils import env_flag as canonical
+
+    src = _repo_root() / "cli" / "schist"
+    for name in ("ingest.py", "index_contract.py", "schema.sql"):
+        shutil.copy(src / name, tmp_path / name)
+
+    cases = [None, "", "0", "false", "FALSE", " no ", "off", "1", "true",
+             "yes", " x ", "00", "off-ish"]
+    probe = (
+        "import json, os, sys; sys.path.insert(0, sys.argv[1])\n"
+        "import ingest\n"
+        "out = []\n"
+        "for i, v in enumerate(json.loads(sys.argv[2])):\n"
+        "    name = f'SCHIST_TEST_FLAG_{i}'\n"
+        "    if v is None: os.environ.pop(name, None)\n"
+        "    else: os.environ[name] = v\n"
+        "    out.append(ingest.env_flag(name))\n"
+        "print(json.dumps(out))\n"
+    )
+    r = subprocess.run(
+        [sys.executable, "-c", probe, str(tmp_path), json.dumps(cases)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, r.stderr
+    got = json.loads(r.stdout.strip().splitlines()[-1])
+
+    expected = []
+    for i, v in enumerate(cases):
+        name = f"SCHIST_TEST_FLAG_{i}"
+        old = os.environ.pop(name, None)
+        try:
+            if v is not None:
+                os.environ[name] = v
+            expected.append(canonical(name))
+        finally:
+            os.environ.pop(name, None)
+            if old is not None:
+                os.environ[name] = old
+    assert got == expected
