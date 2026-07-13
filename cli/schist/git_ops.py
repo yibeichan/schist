@@ -26,6 +26,54 @@ COMMIT_TIMEOUT = 120
 # as failed (truthful reporting, same contract as git-writer.ts commitWarning).
 HOOK_STALL_WARNING_PREFIX = "committed, but the post-commit hook stalled"
 
+# `git push` to a local/file remote runs receive-pack and its pre-receive
+# hook chain as local children of the push. Same shape as COMMIT_TIMEOUT:
+# generous (cold python3 + import schist in the hook), but present, and
+# module-level so tests can shrink it.
+PUSH_TIMEOUT = 60
+
+
+def run_group_killable(
+    cmd: list[str],
+    cwd,
+    timeout: float,
+    env: dict | None = None,
+) -> subprocess.CompletedProcess:
+    """subprocess.run(capture_output=True, text=True) whose timeout kills the
+    child's WHOLE process group.
+
+    Plain run(timeout=) SIGKILLs only the direct child. For multi-process git
+    transports that leaves the rest of the tree alive and reparented to init —
+    a timed-out `git push` orphans git-receive-pack blocked in waitpid on a
+    pre-receive hook that has no reason to exit (#379; same mechanism the
+    #364/#368 commit fix closed for the post-commit hook chain).
+
+    On timeout: group-killed, reaped (bounded, in case a double-forked
+    survivor outside the group holds a pipe open), then TimeoutExpired is
+    re-raised so callers keep their existing handling. Unlike plain run(),
+    the re-raised exception carries NO partial output (.output/.stderr are
+    None) — callers migrating from run() must not read them.
+    """
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            # start_new_session=True makes the child a session leader, so its
+            # pid IS the process-group id.
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        raise subprocess.TimeoutExpired(cmd, timeout)
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
 
 def _head_sha(vault_path: str) -> str:
     """Best-effort HEAD sha; '' on failure, timeout, or an unborn branch."""
@@ -55,33 +103,19 @@ def commit(vault_path: str, message: str, files: list[str] | None = None) -> tup
         # the latter made callers report an error (or sync retry) for a
         # write that succeeded (#364; mirrors git-writer.ts #336/#355).
         pre_head = _head_sha(vault_path)
-        # start_new_session puts git AND its hook chain (sh → schist-ingest)
-        # in a fresh process group so the timeout can kill the whole tree.
-        # subprocess.run's timeout SIGKILLs only git itself: the orphaned
-        # hook kept running (it can hold the SQLite write lock) and held the
-        # stdout/stderr pipes open, so run()'s post-kill reap blocked for
-        # the hook's full runtime ON TOP of the timeout (#364). Mirrors the
-        # TS side's detached:true + process.kill(-pid) from #355.
-        proc = subprocess.Popen(
-            ['git', 'commit', '-m', message],
-            cwd=vault_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=True,
-        )
+        # Group-killable so the timeout takes the whole hook chain (sh →
+        # schist-ingest) with it — the orphaned hook kept running (it can
+        # hold the SQLite write lock) and held the stdout/stderr pipes open,
+        # so run()'s post-kill reap blocked for the hook's full runtime ON
+        # TOP of the timeout (#364). Mirrors the TS side's detached:true +
+        # process.kill(-pid) from #355. Pattern shared with push (#379) via
+        # run_group_killable.
         try:
-            stdout, stderr = proc.communicate(timeout=COMMIT_TIMEOUT)
+            result = run_group_killable(
+                ['git', 'commit', '-m', message],
+                cwd=vault_path, timeout=COMMIT_TIMEOUT,
+            )
         except subprocess.TimeoutExpired:
-            try:
-                # start_new_session=True makes the child a session leader, so
-                # its pid IS the process-group id.
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            try:
-                # Reap; bounded in case a double-forked survivor outside the
-                # group still holds a pipe open.
-                proc.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
             post_head = _head_sha(vault_path)
             if post_head and post_head != pre_head:
                 return True, (
@@ -93,8 +127,8 @@ def commit(vault_path: str, message: str, files: list[str] | None = None) -> tup
                 f"git commit timed out after {COMMIT_TIMEOUT}s "
                 f"(post-commit ingest may be stalled)"
             )
-        output = stdout + stderr
-        return proc.returncode == 0, output.strip()
+        output = result.stdout + result.stderr
+        return result.returncode == 0, output.strip()
     except subprocess.TimeoutExpired:
         # Only `git add` still reaches here (commit handles its own timeout
         # above); no hook runs on add — the usual culprits are an NFS stall
@@ -235,14 +269,18 @@ def push(vault_path: str) -> tuple[bool, str]:
                 "if a previous sync --force left HEAD detached, reattach with "
                 "'git checkout <branch>' in the vault"
             )
-        result = subprocess.run(
+        # Group-killable (#379): on a local/file remote the push runs
+        # git-receive-pack and the pre-receive hook chain as local children;
+        # plain run(timeout=) killed only the push client and left
+        # receive-pack blocked in waitpid on a hook with no reason to exit.
+        result = run_group_killable(
             ['git', 'push', 'origin', branch],
-            cwd=vault_path, capture_output=True, text=True, timeout=60,
+            cwd=vault_path, timeout=PUSH_TIMEOUT,
         )
         output = result.stdout + result.stderr
         return result.returncode == 0, output.strip()
     except subprocess.TimeoutExpired:
-        return False, "Push timed out after 60s"
+        return False, f"Push timed out after {PUSH_TIMEOUT}s"
     except subprocess.CalledProcessError as e:
         return False, (e.stdout or '') + (e.stderr or '')
 

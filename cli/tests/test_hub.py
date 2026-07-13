@@ -152,6 +152,14 @@ class TestInitHub:
 
         monkeypatch.setattr(sync_mod.subprocess, "run", fake_run)
 
+        # The seed-repo commands route through git_ops.run_group_killable
+        # (#379) — fail them the same way.
+        def fake_rgk(cmd, *a, **kw):
+            call_count["n"] += 1
+            return type("R", (), {"returncode": 1, "stdout": "", "stderr": "simulated failure"})()
+
+        monkeypatch.setattr(sync_mod.git_ops, "run_group_killable", fake_rgk)
+
         args = SimpleNamespace(name="vault", participant=["alpha"])
         with pytest.raises(SystemExit):
             init_hub(args, str(hub))
@@ -356,6 +364,17 @@ class TestInitSubprocessTimeouts:
             return real_run(cmd, *a, **kw)
 
         monkeypatch.setattr(sync_mod.subprocess, "run", record)
+
+        # Seed-repo commands (including the push) route through
+        # git_ops.run_group_killable (#379); its timeout is part of the
+        # same every-call-is-bounded contract.
+        real_rgk = sync_mod.git_ops.run_group_killable
+
+        def record_rgk(cmd, *a, **kw):
+            calls.append((cmd, kw.get("timeout")))
+            return real_rgk(cmd, *a, **kw)
+
+        monkeypatch.setattr(sync_mod.git_ops, "run_group_killable", record_rgk)
         args = SimpleNamespace(name="vault", participant=["alpha"])
         sync_mod.init_hub(args, str(tmp_path / "hub.git"))
 
@@ -391,14 +410,14 @@ class TestInitSubprocessTimeouts:
         error, no hub_path, no staging litter — not a raw TimeoutExpired."""
         import schist.sync as sync_mod
 
-        real_run = sync_mod.subprocess.run
+        real_rgk = sync_mod.git_ops.run_group_killable
 
         def stall_on_seed_push(cmd, *a, **kw):
             if cmd[:2] == ["git", "push"]:
                 raise subprocess.TimeoutExpired(cmd=cmd, timeout=kw.get("timeout"))
-            return real_run(cmd, *a, **kw)
+            return real_rgk(cmd, *a, **kw)
 
-        monkeypatch.setattr(sync_mod.subprocess, "run", stall_on_seed_push)
+        monkeypatch.setattr(sync_mod.git_ops, "run_group_killable", stall_on_seed_push)
         hub = tmp_path / "hub.git"
         args = SimpleNamespace(name="vault", participant=["alpha"])
         with pytest.raises(SystemExit):

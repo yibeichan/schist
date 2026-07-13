@@ -22,6 +22,13 @@ from .spoke_config import SpokeConfig, is_spoke, load_spoke_config, save_spoke_c
 # in sync with the argparse default in __main__.py (which imports it).
 _SCOPE_PREFIX_LEGACY_DEFAULT = "research"
 
+# The init-path seed `git push` executes the just-installed pre-receive hook
+# (cold python3 + `import schist` + ACL machinery) — the same legitimately-
+# slow workload that gives git_ops.commit()'s hook-running tier
+# COMMIT_TIMEOUT=120 instead of the 30-60s lock-shaped tier. Module-level so
+# tests can shrink it instead of stalling a real hook for two minutes.
+SEED_PUSH_TIMEOUT = 120
+
 
 class _InitError(Exception):
     """Raised by init_* build steps so the outer function can clean up staging."""
@@ -845,18 +852,18 @@ def _build_hub_in_staging(
         def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
             # TimeoutExpired → _InitError so the caller's cleanup path runs;
             # the raw exception would escape init_hub's except clause (#371).
-            # The seed `git push` executes the just-installed pre-receive hook
-            # (cold python3 + `import schist` + ACL machinery) — the same
-            # legitimately-slow hook workload that gives git_ops.commit()'s
-            # hook-running tier COMMIT_TIMEOUT=120 instead of the 30-60s
-            # lock-shaped tier. 60s here would turn a slow-but-working NFS
-            # init into a deterministic hard failure where the step-3 probe
+            # SEED_PUSH_TIMEOUT (not 60) for the push: hook-running tier, see
+            # the constant. 60s here would turn a slow-but-working NFS init
+            # into a deterministic hard failure where the step-3 probe
             # deliberately only warns.
-            timeout = 120 if cmd[:2] == ["git", "push"] else 60
+            timeout = SEED_PUSH_TIMEOUT if cmd[:2] == ["git", "push"] else 60
             try:
-                return subprocess.run(
-                    cmd, cwd=cwd, env=env, capture_output=True, text=True,
-                    timeout=timeout,
+                # Group-killable (#379): the seed push runs git-receive-pack
+                # + the just-installed pre-receive hook as local children;
+                # plain run(timeout=) killed only the push client and left
+                # that chain orphaned on init timeout.
+                return git_ops.run_group_killable(
+                    cmd, cwd=cwd, env=env, timeout=timeout,
                 )
             except subprocess.TimeoutExpired:
                 raise _InitError(
