@@ -553,6 +553,127 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     expect(content).not.toContain("bogus-type");
   }, 30000);
 
+  test("update_note grandfathers a pre-existing out-of-vocabulary edge on an unrelated prose edit (#363)", async () => {
+    // A note authored before the vocabulary existed (hand-written fixture,
+    // bypassing create_note's validation) carries a legacy type. A full-body
+    // edit that keeps that line verbatim must not be blocked.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const rel = "notes/2026-07-13-legacy-edge.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, rel),
+      "---\ntitle: Legacy Edge\n---\n\nOriginal prose.\n\n## Connections\n\n- legacy-type: notes/x.md\n",
+      "utf-8",
+    );
+
+    const res = await update_note(
+      vault,
+      {
+        owner: TEST_AGENT, id: rel,
+        body: "Edited prose.\n\n## Connections\n\n- legacy-type: notes/x.md\n",
+      },
+      config
+    ) as { updated?: boolean; error?: string };
+
+    expect(res.error).toBeUndefined();
+    expect(res.updated).toBe(true);
+    const content = await fs.readFile(path.join(vault, rel), "utf-8");
+    expect(content).toContain("Edited prose.");
+    expect(content).toContain("- legacy-type: notes/x.md");
+  }, 30000);
+
+  test("update_note still rejects a NEW out-of-vocabulary edge even alongside a grandfathered one (#363)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const rel = "notes/2026-07-13-new-bad-edge.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    const original =
+      "---\ntitle: New Bad Edge\n---\n\nProse.\n\n## Connections\n\n- legacy-type: notes/x.md\n";
+    await fs.writeFile(path.join(vault, rel), original, "utf-8");
+
+    const res = await update_note(
+      vault,
+      {
+        owner: TEST_AGENT, id: rel,
+        body:
+          "Prose.\n\n## Connections\n\n- legacy-type: notes/x.md\n- another-bogus: notes/y.md\n",
+      },
+      config
+    ) as { error: string; message: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toMatch(/connection type must be one of/);
+    // Same error shape as today, naming the offending NEW line only.
+    expect(res.message).toContain('"another-bogus"');
+    expect(res.message).toContain("- another-bogus: notes/y.md");
+    // Note untouched.
+    expect(await fs.readFile(path.join(vault, rel), "utf-8")).toBe(original);
+  }, 30000);
+
+  test("update_note grandfathering is per-line: an exact duplicate passes, a DIFFERENT bad line fails (#363)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const rel = "notes/2026-07-13-dup-vs-new.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    const original =
+      "---\ntitle: Dup Vs New\n---\n\nProse.\n\n## Connections\n\n- legacy-type: notes/x.md\n";
+    await fs.writeFile(path.join(vault, rel), original, "utf-8");
+
+    // Exact duplicate of the grandfathered line: allowed (acceptable — it
+    // introduces no line that wasn't already on disk).
+    const dup = await update_note(
+      vault,
+      {
+        owner: TEST_AGENT, id: rel,
+        body:
+          "Prose.\n\n## Connections\n\n- legacy-type: notes/x.md\n- legacy-type: notes/x.md\n",
+      },
+      config
+    ) as { updated?: boolean; error?: string };
+    expect(dup.error).toBeUndefined();
+    expect(dup.updated).toBe(true);
+
+    // Same legacy TYPE but a different target is a different line — a new
+    // bad edge, so it keeps the hard error.
+    const diff = await update_note(
+      vault,
+      {
+        owner: TEST_AGENT, id: rel,
+        body: "Prose.\n\n## Connections\n\n- legacy-type: notes/other.md\n",
+      },
+      config
+    ) as { error: string; message: string };
+    expect(diff.error).toBe("VALIDATION_ERROR");
+    expect(diff.message).toContain("- legacy-type: notes/other.md");
+  }, 30000);
+
+  test("update_note grandfather matching trims lines, so indentation changes alone don't fail (#363)", async () => {
+    // The comparison is trimmed-exact-line, mirroring how ingest itself trims
+    // before matching CONNECTION_RE — re-indenting the section is not a new edge.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const rel = "notes/2026-07-13-indent-edge.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, rel),
+      "---\ntitle: Indent Edge\n---\n\nProse.\n\n## Connections\n\n- legacy-type: notes/x.md\n",
+      "utf-8",
+    );
+
+    const res = await update_note(
+      vault,
+      {
+        owner: TEST_AGENT, id: rel,
+        body: "Prose.\n\n## Connections\n\n  - legacy-type: notes/x.md\n",
+      },
+      config
+    ) as { updated?: boolean; error?: string };
+
+    expect(res.error).toBeUndefined();
+    expect(res.updated).toBe(true);
+  }, 30000);
+
   test("create_note rejects a non-array connections object with a typed VALIDATION_ERROR, not GIT_ERROR (#317)", async () => {
     const vault = await makeTempVault();
     const config = await loadVaultConfig(vault);
