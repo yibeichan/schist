@@ -593,15 +593,24 @@ function truncateOutput(s: string, cap = 12_000): string {
 async function runCommand(
   command: string,
   args: string[],
-  opts: { cwd: string; timeoutMs: number; env?: NodeJS.ProcessEnv; capture?: boolean }
+  opts: { cwd: string; timeoutMs: number; env?: NodeJS.ProcessEnv; capture?: boolean; stdin?: string }
 ): Promise<SyncCommandOutcome> {
   return await new Promise<SyncCommandOutcome>((resolve) => {
     const child = spawn(command, args, {
       cwd: opts.cwd,
       env: opts.env ?? process.env,
       detached: true,
-      stdio: opts.capture ? ["ignore", "pipe", "pipe"] : "ignore",
+      stdio: [
+        opts.stdin !== undefined ? "pipe" : "ignore",
+        ...(opts.capture ? (["pipe", "pipe"] as const) : (["ignore", "ignore"] as const)),
+      ],
     });
+    if (opts.stdin !== undefined) {
+      // EPIPE if the child exits before consuming stdin (e.g. usage error) —
+      // swallow it; the exit-code path already reports the failure.
+      child.stdin?.on("error", () => { /* ignored */ });
+      child.stdin?.end(opts.stdin);
+    }
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -986,10 +995,68 @@ function isJunkBasename(filePath: string): boolean {
   // Ignored *directories* surface from the porcelain probe with a trailing
   // slash; their basename is then "" which matches nothing — directories are
   // never junk-skipped. Mirrors cli/schist/git_ops.py _is_junk_basename.
+  // A basename match is only a CANDIDATE — confirmedJunk must attribute the
+  // exclusion to a junk-shaped .gitignore pattern before it stops blocking.
   const base = filePath.slice(filePath.lastIndexOf("/") + 1);
   return IGNORE_GUARD_JUNK_BASENAMES.some((pattern) =>
     pattern === "*~" ? base.endsWith("~") : base === pattern,
   );
+}
+
+// True when a .gitignore PATTERN is itself a junk-allowlist entry. Strips
+// the anchoring prefix (a leading "/" or "**/") and any trailing "/", then
+// requires exact equality: "*~" and "**/.DS_Store" are junk-shaped;
+// "secret*" and "research/.DS_Store" are not. Mirrors
+// cli/schist/git_ops.py _is_junk_shaped_pattern.
+function isJunkShapedPattern(pattern: string): boolean {
+  let p = pattern;
+  if (p.startsWith("**/")) p = p.slice(3);
+  else if (p.startsWith("/")) p = p.slice(1);
+  p = p.replace(/\/+$/, "");
+  return (IGNORE_GUARD_JUNK_BASENAMES as readonly string[]).includes(p);
+}
+
+/**
+ * Subset of junk-basename candidates whose exclusion `git check-ignore
+ * --verbose` attributes to a junk-shaped .gitignore pattern (#388 review).
+ * Mirrors cli/schist/git_ops.py _confirmed_junk: classification is by
+ * CAUSE, not name — `secret*` matching `secret-plan~` is a content rule
+ * silently eating a note, so that file must keep counting as blocking.
+ *
+ * On probe failure the unconfirmed candidates stay BLOCKING (returns an
+ * empty set) — the opposite of the porcelain probe's availability-over-
+ * strictness stance, because by this point ignored files are KNOWN to
+ * exist and guessing "junk" is exactly the silent drop being guarded.
+ */
+async function confirmedJunk(vaultRoot: string, candidates: string[]): Promise<Set<string>> {
+  if (candidates.length === 0) return new Set();
+  // -z: NUL-separated <source> <linenum> <pattern> <pathname> records —
+  // nothing is C-quoted. git only accepts -z with --stdin, so candidates
+  // go on stdin (NUL-terminated) rather than argv. Exit 0 = >=1 path
+  // ignored (expected: porcelain said ALL are); 1 = none; 128 = error.
+  // runCommand treats non-zero as !ok, which correctly confirms nothing
+  // for both failure shapes.
+  const probe = await runCommand(
+    "git",
+    ["check-ignore", "--verbose", "--stdin", "-z"],
+    {
+      cwd: vaultRoot,
+      timeoutMs: SYNC_STATUS_TIMEOUT_MS,
+      env: process.env,
+      capture: true,
+      stdin: candidates.join("\0") + "\0",
+    },
+  );
+  if (!probe.ok) return new Set();
+  const fields = (probe.stdout ?? "").split("\0");
+  const confirmed = new Set<string>();
+  // The trailing NUL leaves a final "" element; walk whole 4-field records.
+  for (let i = 0; i + 3 < fields.length; i += 4) {
+    const pattern = fields[i + 2];
+    const pathname = fields[i + 3];
+    if (isJunkShapedPattern(pattern)) confirmed.add(pathname);
+  }
+  return new Set(candidates.filter((c) => confirmed.has(c)));
 }
 
 /** Pathspecs the spoke's scope stages — mirrors cli/schist/git_ops.py
@@ -1015,11 +1082,11 @@ async function spokeScopeTargets(vaultRoot: string): Promise<string[]> {
 
 /**
  * #388: the same ignored-files probe the CLI ignore guard runs
- * (cli/schist/git_ops.py ignored_scope_files), minus the junk allowlist.
+ * (cli/schist/git_ops.py ignored_scope_files), minus confirmed junk.
  * Non-empty means `schist sync push` would hard-fail (#361) even though
  * plain `git status --porcelain` — and thus clean_working_tree — omits
- * ignored files entirely. Probe failures return [] (availability over
- * strictness, same as the CLI guard).
+ * ignored files entirely. Porcelain-probe failures return []
+ * (availability over strictness, same as the CLI guard).
  */
 async function blockingIgnoredScopeFiles(vaultRoot: string): Promise<string[]> {
   const targets = await spokeScopeTargets(vaultRoot);
@@ -1032,11 +1099,15 @@ async function blockingIgnoredScopeFiles(vaultRoot: string): Promise<string[]> {
     SYNC_STATUS_TIMEOUT_MS,
   );
   if (!probe.ok) return [];
-  return (probe.stdout ?? "")
+  const ignored = (probe.stdout ?? "")
     .split(/\r?\n/)
     .filter((line) => line.startsWith("!! "))
-    .map((line) => line.slice(3))
-    .filter((p) => !isJunkBasename(p));
+    .map((line) => line.slice(3));
+  // Two-step junk classification, same as the CLI guard: basename shape
+  // only nominates a candidate; the exclusion must also be attributed to a
+  // junk-shaped pattern. Common path (no junk-looking files) pays nothing.
+  const confirmed = await confirmedJunk(vaultRoot, ignored.filter(isJunkBasename));
+  return ignored.filter((p) => !confirmed.has(p));
 }
 
 export async function sync_status(vaultRoot: string): Promise<SyncStatusResponse | ToolError> {

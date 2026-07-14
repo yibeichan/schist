@@ -566,6 +566,96 @@ def test_junk_only_ignored_does_not_trigger_auto_commit(tmp_path) -> None:
     )
 
 
+def test_junk_lookalike_excluded_by_content_rule_stays_blocking(tmp_path) -> None:
+    """#388 review regression: junk classification must be by CAUSE, not
+    name. `secret*` (a content-targeting rule — the #361 threat model)
+    excluding `research/secret-plan~` must hard-fail even though the
+    basename matches the `*~` allowlist entry."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("secret*\n", encoding="utf-8")
+    _commit_all(tmp_path, "hub gitignore")
+
+    (tmp_path / "research").mkdir()
+    (tmp_path / "research" / "secret-plan~").write_text("a real note\n", encoding="utf-8")
+
+    blocking, junk = git_ops.ignored_scope_files(str(tmp_path), "research")
+    assert blocking == ["research/secret-plan~"]
+    assert junk == []
+
+    ok, msg = git_ops.stage_scope_files(str(tmp_path), "research")
+    assert ok is False
+    assert "research/secret-plan~" in msg
+    assert "never reach the hub" in msg
+
+
+def test_tilde_backup_excluded_by_tilde_rule_is_junk(tmp_path) -> None:
+    """The companion positive case: `*~` excluding `note.md~` IS junk —
+    warn, skip, and stage the visible note."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("*~\n", encoding="utf-8")
+    _commit_all(tmp_path, "hub gitignore")
+
+    (tmp_path / "research").mkdir()
+    (tmp_path / "research" / "note.md~").write_text("backup\n", encoding="utf-8")
+    (tmp_path / "research" / "note.md").write_text("visible\n", encoding="utf-8")
+
+    ok, msg = git_ops.stage_scope_files(str(tmp_path), "research")
+
+    assert ok is True
+    assert msg.startswith(git_ops.JUNK_SKIP_WARNING_PREFIX)
+    assert "research/note.md~" in msg
+    staged = subprocess.run(
+        ["git", "-C", str(tmp_path), "diff", "--cached", "--name-only"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    assert "research/note.md" in staged
+
+
+def test_anchored_junk_patterns_still_confirm_junk(tmp_path) -> None:
+    """`**/.DS_Store` and `/Thumbs.db` are junk-shaped after prefix
+    normalization; a path-qualified content-ish rule like
+    `research/desktop.ini` is NOT (the admin targeted a specific path —
+    stay loud)."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(
+        "**/.DS_Store\nresearch/desktop.ini\n", encoding="utf-8"
+    )
+    _commit_all(tmp_path, "hub gitignore")
+
+    (tmp_path / "research").mkdir()
+    (tmp_path / "research" / ".DS_Store").write_text("finder\n", encoding="utf-8")
+    (tmp_path / "research" / "desktop.ini").write_text("x\n", encoding="utf-8")
+
+    blocking, junk = git_ops.ignored_scope_files(str(tmp_path), "research")
+    assert blocking == ["research/desktop.ini"]
+    assert junk == ["research/.DS_Store"]
+
+
+def test_check_ignore_failure_keeps_candidates_blocking(tmp_path) -> None:
+    """#388: if the check-ignore attribution probe fails, junk candidates
+    must fall back to BLOCKING (loud) — ignored files are already KNOWN to
+    exist, so guessing 'junk' would be a silent drop."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".DS_Store\n", encoding="utf-8")
+    _commit_all(tmp_path, "hub gitignore")
+
+    (tmp_path / "research").mkdir()
+    (tmp_path / "research" / ".DS_Store").write_text("finder\n", encoding="utf-8")
+
+    real_run = subprocess.run
+
+    def stall_check_ignore(cmd, **kwargs):
+        if "check-ignore" in cmd:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+        return real_run(cmd, **kwargs)
+
+    with patch("schist.git_ops.subprocess.run", side_effect=stall_check_ignore):
+        blocking, junk = git_ops.ignored_scope_files(str(tmp_path), "research")
+
+    assert blocking == ["research/.DS_Store"]
+    assert junk == []
+
+
 # ---------------------------------------------------------------------------
 # push() vs stalled pre-receive hook chain (#379)
 # ---------------------------------------------------------------------------

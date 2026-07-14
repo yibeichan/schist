@@ -139,6 +139,14 @@ SCHIST_IDENTITY=pi git push
 
 Spokes pick up the tracked `.gitignore` on their next `schist sync pull`.
 
+> **Upgrade both halves together (#388):** the sync-push ignore guard's
+> junk-file allowlist lives in the CLI, and the MCP `sync_status` tool's
+> `blocked_by_ignored` field runs the same probe on the MCP side. A new MCP
+> server paired with a pre-#388 CLI (or vice versa) makes the two disagree —
+> e.g. `sync_status` reports no block while the old CLI guard still
+> hard-fails on a `.DS_Store`. Upgrade `schist` (CLI) and rebuild
+> `mcp-server/dist/` in the same step so the ignore-guard behavior agrees.
+
 ## 3. Hub Setup (Option B -- GitHub)
 
 Skip the Pi hub entirely. Spokes clone directly from:

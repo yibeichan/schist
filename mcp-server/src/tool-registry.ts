@@ -34,7 +34,7 @@ export function makeReadTools(config: VaultConfig) {
       description:
         "Read spoke/hub sync state. Fetches with a bounded timeout, reports ahead/behind counts, working-tree cleanliness, and any last background sync error. " +
         "Also reports `blocked_by_ignored` + `blocking_ignored_paths` (capped at 10): whether `schist sync push` would hard-fail on .gitignore-excluded files under the spoke scope — " +
-        "a condition `clean_working_tree` cannot show because plain `git status` omits ignored files. Junk files (.DS_Store, Thumbs.db, desktop.ini, *~ backups) are exempt on both sides. " +
+        "a condition `clean_working_tree` cannot show because plain `git status` omits ignored files. Junk files (.DS_Store, Thumbs.db, desktop.ini, *~ backups) excluded by a junk-targeting ignore rule are exempt on both sides. " +
         "Does not require owner identity.",
       inputSchema: {
         type: "object" as const,

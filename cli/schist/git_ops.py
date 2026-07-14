@@ -40,12 +40,77 @@ def _is_junk_basename(path: str) -> bool:
     Ignored *directories* surface from the porcelain probe with a trailing
     slash; their basename is then '' which matches nothing — directories are
     never junk-skipped.
+
+    A basename match alone is only a CANDIDATE: `research/secret-plan~`
+    matches `*~` by name but may have been excluded by a content-targeting
+    rule like `secret*` — exactly the #361 threat model. _confirmed_junk
+    attributes the exclusion to its actual .gitignore pattern before
+    anything is skipped.
     """
     base = path.rsplit('/', 1)[-1]
     return any(
         fnmatch.fnmatchcase(base, pattern)
         for pattern in IGNORE_GUARD_JUNK_BASENAMES
     )
+
+
+def _is_junk_shaped_pattern(pattern: str) -> bool:
+    """True when a .gitignore PATTERN is itself a junk-allowlist entry.
+
+    Normalizes the anchoring prefix (`/` or `**/`) and any trailing `/`,
+    then requires exact textual equality with an allowlist entry: `*~` and
+    `**/.DS_Store` are junk-shaped; `secret*` and `research/.DS_Store` are
+    not — anything an admin wrote to target content stays blocking.
+    """
+    if pattern.startswith('**/'):
+        pattern = pattern[3:]
+    elif pattern.startswith('/'):
+        pattern = pattern[1:]
+    return pattern.rstrip('/') in IGNORE_GUARD_JUNK_BASENAMES
+
+
+def _confirmed_junk(vault_path: str, candidates: list[str]) -> set:
+    """Subset of junk-basename candidates whose exclusion git attributes to
+    a junk-shaped .gitignore pattern (#388 review).
+
+    Classification must be by CAUSE, not name: `git check-ignore --verbose`
+    names the pattern that excluded each path, and only allowlist-shaped
+    patterns confirm a skip. `secret*` matching `secret-plan~` is a content
+    rule silently eating a note — that file stays blocking.
+
+    On probe failure (timeout, exit != 0, or a candidate git won't
+    attribute), unconfirmed candidates stay BLOCKING — deliberately the
+    OPPOSITE of the porcelain probe's availability-over-strictness stance.
+    By this point we already KNOW ignored files exist; guessing "junk" on a
+    broken probe is exactly the silent drop this guard exists to prevent.
+    """
+    if not candidates:
+        return set()
+    try:
+        # -z: NUL-separated <source> <linenum> <pattern> <pathname> records —
+        # nothing is C-quoted, so no un-escaping needed for odd filenames.
+        # git only accepts -z together with --stdin, so candidates go on
+        # stdin (NUL-terminated) rather than argv.
+        result = subprocess.run(
+            ['git', 'check-ignore', '--verbose', '--stdin', '-z'],
+            cwd=vault_path, capture_output=True, text=True, timeout=30,
+            input='\0'.join(candidates) + '\0',
+        )
+    except subprocess.TimeoutExpired:
+        return set()
+    # check-ignore exits 0 when >=1 path is ignored (expected here: the
+    # porcelain probe said ALL candidates are), 1 when none are, 128 on
+    # error. Anything but 0 confirms nothing.
+    if result.returncode != 0:
+        return set()
+    fields = result.stdout.split('\0')
+    confirmed = set()
+    # The trailing NUL leaves a final '' element; walk whole 4-field records.
+    for i in range(0, len(fields) - 3, 4):
+        _source, _linenum, pattern, pathname = fields[i:i + 4]
+        if _is_junk_shaped_pattern(pattern):
+            confirmed.add(pathname)
+    return confirmed & set(candidates)
 
 # `git commit` runs the synchronous post-commit hook (schist-ingest), so it
 # needs a generous ceiling — but it MUST have one. Without it a stalled ingest
@@ -433,14 +498,18 @@ def ignored_scope_files(vault_path: str, scope: str) -> tuple[list[str], list[st
     ignored-only change also never triggers the sync auto-commit. Callers
     treat a non-empty ``blocking`` list as a hard staging error.
 
-    ``junk`` are IGNORE_GUARD_JUNK_BASENAMES matches (#388) — OS/editor
-    litter that carries no vault content. Callers warn about them and
-    proceed; hard-failing on a Finder-created .DS_Store would brick every
-    sync on the spoke.
+    ``junk`` are files that BOTH match IGNORE_GUARD_JUNK_BASENAMES by
+    basename AND were excluded by a junk-shaped .gitignore pattern
+    (_confirmed_junk, #388) — OS/editor litter that carries no vault
+    content. Callers warn about them and proceed; hard-failing on a
+    Finder-created .DS_Store would brick every sync on the spoke. A file
+    that merely LOOKS junky but was excluded by a content rule (`secret*`
+    eating `secret-plan~`) stays blocking.
 
-    Probe failures (timeout, git error) return ([], []) — availability over
-    strictness: the guard is a data-loss tripwire, not a gate the sync
-    path should die behind when git itself is stalling.
+    Porcelain-probe failures (timeout, git error) return ([], []) —
+    availability over strictness: the guard is a data-loss tripwire, not a
+    gate the sync path should die behind when git itself is stalling.
+    (_confirmed_junk takes the opposite stance on ITS probe; see there.)
     """
     targets = _scope_targets(vault_path, scope)
     if not targets:
@@ -460,8 +529,14 @@ def ignored_scope_files(vault_path: str, scope: str) -> tuple[list[str], list[st
     ignored = [
         line[3:] for line in result.stdout.splitlines() if line.startswith('!! ')
     ]
-    blocking = [f for f in ignored if not _is_junk_basename(f)]
-    junk = [f for f in ignored if _is_junk_basename(f)]
+    # Two-step junk classification: basename shape is only a candidate
+    # filter; the exclusion must also be ATTRIBUTED to a junk-shaped
+    # .gitignore pattern. Common path (no junk-looking files) never pays
+    # for the extra check-ignore call.
+    candidates = [f for f in ignored if _is_junk_basename(f)]
+    confirmed = _confirmed_junk(vault_path, candidates)
+    blocking = [f for f in ignored if f not in confirmed]
+    junk = [f for f in ignored if f in confirmed]
     return blocking, junk
 
 

@@ -1300,6 +1300,36 @@ describe("sync_status + sync_retry (#135)", () => {
     expect(result.blocking_ignored_paths).toEqual([]);
   }, 10000);
 
+  test("sync_status blocks a junk-lookalike excluded by a content rule (#388 review)", async () => {
+    // Cause-based classification regression test: `secret*` is a
+    // content-targeting rule (the #361 threat model). `secret-plan~` matches
+    // the `*~` allowlist entry by NAME, but the CLI guard attributes the
+    // exclusion to `secret*` and hard-fails — sync_status must agree.
+    const vault = await makeTempSpokeVault(); // scope: notes
+    await fs.appendFile(path.join(vault, ".gitignore"), "secret*\n");
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, "notes", "secret-plan~"), "a real note\n");
+
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
+
+    expect(result.blocked_by_ignored).toBe(true);
+    expect(result.blocking_ignored_paths).toEqual(["notes/secret-plan~"]);
+  }, 10000);
+
+  test("sync_status treats a tilde backup excluded by the *~ rule as junk (#388 review)", async () => {
+    // Companion positive case: same basename shape, but the exclusion is
+    // attributed to the junk-shaped `*~` pattern → confirmed junk, no block.
+    const vault = await makeTempSpokeVault(); // scope: notes
+    await fs.appendFile(path.join(vault, ".gitignore"), "*~\n");
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, "notes", "note.md~"), "backup\n");
+
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
+
+    expect(result.blocked_by_ignored).toBe(false);
+    expect(result.blocking_ignored_paths).toEqual([]);
+  }, 10000);
+
   test("junk allowlist stays textually identical to cli/schist/git_ops.py (#388)", () => {
     // Same cross-language pinning idea as the default.yaml drift test: the
     // TS probe and the Python guard must agree on what blocks a push.
