@@ -604,7 +604,7 @@ class TestSyncPush:
         assert ["git", "merge", "--abort"] in calls
         assert "Aborting leftover merge state" in capsys.readouterr().err
 
-    @patch("schist.sync.git_ops.ignored_scope_files", return_value=[])
+    @patch("schist.sync.git_ops.ignored_scope_files", return_value=([], []))
     @patch("schist.sync.git_ops.has_unpushed_commits", return_value=False)
     @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
     @patch("subprocess.run")
@@ -632,6 +632,35 @@ class TestSyncPush:
         err = capsys.readouterr().err
         assert "Removing stale git index.lock" in err
         assert "Aborting leftover merge state" in err
+
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=False)
+    @patch("schist.sync.git_ops.stage_scope_files")
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=True)
+    @patch("subprocess.run")
+    def test_push_surfaces_junk_skip_warning_and_proceeds(
+        self, mock_run, mock_changes, mock_stage, mock_unpushed, tmp_path, capsys
+    ):
+        """#388: stage_scope_files' junk-skip warning reaches stderr, but the
+        push flow keeps going instead of hard-failing like the #361 guard."""
+        from schist import git_ops
+        from schist.sync import sync_push
+
+        vault = _make_spoke(tmp_path)
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mock_stage.return_value = (True, (
+            f"{git_ops.JUNK_SKIP_WARNING_PREFIX} under scope 'research/mario' "
+            f"(OS/editor litter, never syncs to the hub): "
+            f"research/mario/.DS_Store. Delete the file(s) to silence this "
+            f"warning."
+        ))
+        args = MagicMock(force=False)
+
+        sync_push(args, vault, "db.sqlite")
+
+        captured = capsys.readouterr()
+        assert git_ops.JUNK_SKIP_WARNING_PREFIX in captured.err
+        assert "research/mario/.DS_Store" in captured.err
+        assert "Nothing to push" in captured.out
 
     @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
     @patch("subprocess.run")

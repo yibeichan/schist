@@ -96,6 +96,18 @@ export interface SyncStatusResponse {
     contents: string;
   } | null;
   clean_working_tree: boolean;
+  /** #388: true when `schist sync push` would hard-fail on .gitignore-excluded
+   *  files under the spoke scope (the #361 ignore guard). `clean_working_tree`
+   *  can't show this — plain `git status --porcelain` omits ignored files.
+   *  Confirmed junk doesn't count: a junk-allowlisted basename (.DS_Store
+   *  etc.) whose exclusion git attributes to a junk-shaped ignore rule is
+   *  warned about and skipped by the CLI guard. Always false for non-spoke
+   *  vaults, and false when the porcelain probe itself fails (availability
+   *  over strictness, same as the CLI). */
+  blocked_by_ignored: boolean;
+  /** The offending ignored (non-junk) paths, capped at 10. Empty when
+   *  blocked_by_ignored is false. */
+  blocking_ignored_paths: string[];
   hub_error?: string;
 }
 

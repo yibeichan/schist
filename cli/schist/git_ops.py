@@ -1,5 +1,6 @@
 """Git operations for vault commits."""
 
+import fnmatch
 import os
 from pathlib import Path
 import signal
@@ -12,6 +13,104 @@ GLOBAL_SCOPE_FALLBACK_DIRS = [
     "notes", "papers", "concepts",
     "research", "decisions", "ops", "projects", "logs",
 ]
+
+# Basename patterns of OS/editor litter (Finder metadata, Explorer thumbnails,
+# editor backups). This exists because the #361 ignore guard hard-fails sync
+# push on ANY .gitignore-excluded file under scope — but ignoring junk like
+# `.DS_Store` is the most likely reason a hub admin ever edits the ignore
+# file, and hard-failing on a Finder-created `research/.DS_Store` would brick
+# EVERY sync on that spoke until the junk is hand-deleted (#388). Junk carries
+# no vault content, so silently never syncing it loses nothing: files whose
+# basename matches are warned about and skipped; any other ignored file under
+# scope keeps the hard fail. Deliberately hardcoded, not user-configurable.
+# Keep textually identical to IGNORE_GUARD_JUNK_BASENAMES in
+# mcp-server/src/tools.ts (sync_status's blocked_by_ignored probe).
+IGNORE_GUARD_JUNK_BASENAMES = ('.DS_Store', 'Thumbs.db', 'desktop.ini', '*~')
+
+# Prefix of the success-with-warning message stage_scope_files returns when
+# junk-allowlisted ignored files were skipped (#388). sync_push matches on
+# this to surface the warning WITHOUT treating staging as failed — same
+# contract as HOOK_STALL_WARNING_PREFIX below.
+JUNK_SKIP_WARNING_PREFIX = "skipped .gitignore-excluded junk file(s)"
+
+
+def _is_junk_basename(path: str) -> bool:
+    """True when the path's basename matches the junk allowlist (#388).
+
+    Ignored *directories* surface from the porcelain probe with a trailing
+    slash; their basename is then '' which matches nothing — directories are
+    never junk-skipped.
+
+    A basename match alone is only a CANDIDATE: `research/secret-plan~`
+    matches `*~` by name but may have been excluded by a content-targeting
+    rule like `secret*` — exactly the #361 threat model. _confirmed_junk
+    attributes the exclusion to its actual .gitignore pattern before
+    anything is skipped.
+    """
+    base = path.rsplit('/', 1)[-1]
+    return any(
+        fnmatch.fnmatchcase(base, pattern)
+        for pattern in IGNORE_GUARD_JUNK_BASENAMES
+    )
+
+
+def _is_junk_shaped_pattern(pattern: str) -> bool:
+    """True when a .gitignore PATTERN is itself a junk-allowlist entry.
+
+    Normalizes the anchoring prefix (`/` or `**/`) and any trailing `/`,
+    then requires exact textual equality with an allowlist entry: `*~` and
+    `**/.DS_Store` are junk-shaped; `secret*` and `research/.DS_Store` are
+    not — anything an admin wrote to target content stays blocking.
+    """
+    if pattern.startswith('**/'):
+        pattern = pattern[3:]
+    elif pattern.startswith('/'):
+        pattern = pattern[1:]
+    return pattern.rstrip('/') in IGNORE_GUARD_JUNK_BASENAMES
+
+
+def _confirmed_junk(vault_path: str, candidates: list[str]) -> set:
+    """Subset of junk-basename candidates whose exclusion git attributes to
+    a junk-shaped .gitignore pattern (#388 review).
+
+    Classification must be by CAUSE, not name: `git check-ignore --verbose`
+    names the pattern that excluded each path, and only allowlist-shaped
+    patterns confirm a skip. `secret*` matching `secret-plan~` is a content
+    rule silently eating a note — that file stays blocking.
+
+    On probe failure (timeout, exit != 0, or a candidate git won't
+    attribute), unconfirmed candidates stay BLOCKING — deliberately the
+    OPPOSITE of the porcelain probe's availability-over-strictness stance.
+    By this point we already KNOW ignored files exist; guessing "junk" on a
+    broken probe is exactly the silent drop this guard exists to prevent.
+    """
+    if not candidates:
+        return set()
+    try:
+        # -z: NUL-separated <source> <linenum> <pattern> <pathname> records —
+        # nothing is C-quoted, so no un-escaping needed for odd filenames.
+        # git only accepts -z together with --stdin, so candidates go on
+        # stdin (NUL-terminated) rather than argv.
+        result = subprocess.run(
+            ['git', 'check-ignore', '--verbose', '--stdin', '-z'],
+            cwd=vault_path, capture_output=True, text=True, timeout=30,
+            input='\0'.join(candidates) + '\0',
+        )
+    except subprocess.TimeoutExpired:
+        return set()
+    # check-ignore exits 0 when >=1 path is ignored (expected here: the
+    # porcelain probe said ALL candidates are), 1 when none are, 128 on
+    # error. Anything but 0 confirms nothing.
+    if result.returncode != 0:
+        return set()
+    fields = result.stdout.split('\0')
+    confirmed = set()
+    # The trailing NUL leaves a final '' element; walk whole 4-field records.
+    for i in range(0, len(fields) - 3, 4):
+        _source, _linenum, pattern, pathname = fields[i:i + 4]
+        if _is_junk_shaped_pattern(pattern):
+            confirmed.add(pathname)
+    return confirmed & set(candidates)
 
 # `git commit` runs the synchronous post-commit hook (schist-ingest), so it
 # needs a generous ceiling — but it MUST have one. Without it a stalled ingest
@@ -353,16 +452,27 @@ def stage_scope_files(vault_path: str, scope: str) -> tuple[bool, str]:
         # above silently skip those notes — they'd never reach the hub
         # (#361). Fail loudly instead: the error lands in stderr, which the
         # background-push sentinel records and sync_status surfaces.
-        ignored = ignored_scope_files(vault_path, scope)
-        if ignored:
-            shown = ', '.join(ignored[:10])
-            if len(ignored) > 10:
-                shown += f", … and {len(ignored) - 10} more"
+        # Exception (#388): junk-allowlisted files only warn — see
+        # IGNORE_GUARD_JUNK_BASENAMES.
+        blocking, junk = ignored_scope_files(vault_path, scope)
+        if blocking:
+            shown = ', '.join(blocking[:10])
+            if len(blocking) > 10:
+                shown += f", … and {len(blocking) - 10} more"
             return False, (
-                f"{len(ignored)} file(s) under scope '{scope}' are excluded "
+                f"{len(blocking)} file(s) under scope '{scope}' are excluded "
                 f"by .gitignore and would silently never reach the hub: "
                 f"{shown}. Fix the vault .gitignore (hub-owned; see vault "
                 f"root) or move the files out of the scope."
+            )
+        if junk:
+            shown = ', '.join(junk[:10])
+            if len(junk) > 10:
+                shown += f", … and {len(junk) - 10} more"
+            return True, (
+                f"{JUNK_SKIP_WARNING_PREFIX} under scope '{scope}' "
+                f"(OS/editor litter, never syncs to the hub): {shown}. "
+                f"Delete the file(s) to silence this warning."
             )
         return True, output.strip()
     except subprocess.TimeoutExpired:
@@ -379,21 +489,31 @@ def _scope_targets(vault_path: str, scope: str) -> list[str]:
     return [scope.rstrip('/') + '/']
 
 
-def ignored_scope_files(vault_path: str, scope: str) -> list[str]:
-    """On-disk files under the scope that .gitignore rules exclude (#361).
+def ignored_scope_files(vault_path: str, scope: str) -> tuple[list[str], list[str]]:
+    """On-disk files under the scope that .gitignore rules exclude (#361),
+    partitioned into ``(blocking, junk)``.
 
-    These are files a spoke wrote in good faith that `git add` skips with
-    exit 0 — and that `git status --porcelain` omits, so an ignored-only
-    change also never triggers the sync auto-commit. Callers treat a
-    non-empty result as a hard staging error.
+    ``blocking`` are files a spoke wrote in good faith that `git add` skips
+    with exit 0 — and that `git status --porcelain` omits, so an
+    ignored-only change also never triggers the sync auto-commit. Callers
+    treat a non-empty ``blocking`` list as a hard staging error.
 
-    Probe failures (timeout, git error) return [] — availability over
-    strictness: the guard is a data-loss tripwire, not a gate the sync
-    path should die behind when git itself is stalling.
+    ``junk`` are files that BOTH match IGNORE_GUARD_JUNK_BASENAMES by
+    basename AND were excluded by a junk-shaped .gitignore pattern
+    (_confirmed_junk, #388) — OS/editor litter that carries no vault
+    content. Callers warn about them and proceed; hard-failing on a
+    Finder-created .DS_Store would brick every sync on the spoke. A file
+    that merely LOOKS junky but was excluded by a content rule (`secret*`
+    eating `secret-plan~`) stays blocking.
+
+    Porcelain-probe failures (timeout, git error) return ([], []) —
+    availability over strictness: the guard is a data-loss tripwire, not a
+    gate the sync path should die behind when git itself is stalling.
+    (_confirmed_junk takes the opposite stance on ITS probe; see there.)
     """
     targets = _scope_targets(vault_path, scope)
     if not targets:
-        return []
+        return [], []
     try:
         # quotePath=off: porcelain v1 C-quotes non-ASCII paths ("s\303\251…"),
         # which would land garbled in the user-facing error message.
@@ -403,12 +523,21 @@ def ignored_scope_files(vault_path: str, scope: str) -> list[str]:
             cwd=vault_path, capture_output=True, text=True, timeout=30,
         )
     except subprocess.TimeoutExpired:
-        return []
+        return [], []
     if result.returncode != 0:
-        return []
-    return [
+        return [], []
+    ignored = [
         line[3:] for line in result.stdout.splitlines() if line.startswith('!! ')
     ]
+    # Two-step junk classification: basename shape is only a candidate
+    # filter; the exclusion must also be ATTRIBUTED to a junk-shaped
+    # .gitignore pattern. Common path (no junk-looking files) never pays
+    # for the extra check-ignore call.
+    candidates = [f for f in ignored if _is_junk_basename(f)]
+    confirmed = _confirmed_junk(vault_path, candidates)
+    blocking = [f for f in ignored if f not in confirmed]
+    junk = [f for f in ignored if f in confirmed]
+    return blocking, junk
 
 
 def _global_scope_dirs() -> list[str]:
