@@ -974,6 +974,71 @@ function syncFailureResponse(
   };
 }
 
+// Basename patterns of OS/editor litter the ignore guard warns about and
+// skips instead of hard-failing (#388) — a hub admin ignoring `.DS_Store`
+// must not brick every macOS spoke. Keep textually identical to
+// IGNORE_GUARD_JUNK_BASENAMES in cli/schist/git_ops.py so the CLI guard and
+// this sync_status probe always agree on what blocks a push; a drift test
+// in tests/tools.test.ts pins the two lists together.
+export const IGNORE_GUARD_JUNK_BASENAMES = [".DS_Store", "Thumbs.db", "desktop.ini", "*~"] as const;
+
+function isJunkBasename(filePath: string): boolean {
+  // Ignored *directories* surface from the porcelain probe with a trailing
+  // slash; their basename is then "" which matches nothing — directories are
+  // never junk-skipped. Mirrors cli/schist/git_ops.py _is_junk_basename.
+  const base = filePath.slice(filePath.lastIndexOf("/") + 1);
+  return IGNORE_GUARD_JUNK_BASENAMES.some((pattern) =>
+    pattern === "*~" ? base.endsWith("~") : base === pattern,
+  );
+}
+
+/** Pathspecs the spoke's scope stages — mirrors cli/schist/git_ops.py
+ *  _scope_targets so the probe below looks at exactly what `schist sync push`
+ *  stages. Returns [] when the vault isn't a spoke or spoke.yaml is
+ *  unreadable (probe is then skipped). */
+async function spokeScopeTargets(vaultRoot: string): Promise<string[]> {
+  try {
+    const raw = yamlLoad(
+      await fs.readFile(path.join(vaultRoot, ".schist", "spoke.yaml"), "utf-8"),
+    ) as Record<string, unknown> | null;
+    const scope = raw && typeof raw.scope === "string" ? raw.scope : "";
+    if (!scope) return [];
+    // Unlike git_ops._global_scope_targets, no existence/tracked filtering:
+    // `git status` accepts pathspecs that match nothing (exit 0, no output),
+    // so passing every canonical dir is equivalent and one probe cheaper.
+    if (scope === "global") return loadCanonicalDirectories().map((d) => `${d}/`);
+    return [scope.replace(/\/+$/, "") + "/"];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * #388: the same ignored-files probe the CLI ignore guard runs
+ * (cli/schist/git_ops.py ignored_scope_files), minus the junk allowlist.
+ * Non-empty means `schist sync push` would hard-fail (#361) even though
+ * plain `git status --porcelain` — and thus clean_working_tree — omits
+ * ignored files entirely. Probe failures return [] (availability over
+ * strictness, same as the CLI guard).
+ */
+async function blockingIgnoredScopeFiles(vaultRoot: string): Promise<string[]> {
+  const targets = await spokeScopeTargets(vaultRoot);
+  if (targets.length === 0) return [];
+  // quotePath=off matches the CLI probe: porcelain v1 would C-quote
+  // non-ASCII paths, garbling them in the reported list.
+  const probe = await runGit(
+    vaultRoot,
+    ["-c", "core.quotePath=off", "status", "--porcelain", "--ignored=matching", "--", ...targets],
+    SYNC_STATUS_TIMEOUT_MS,
+  );
+  if (!probe.ok) return [];
+  return (probe.stdout ?? "")
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("!! "))
+    .map((line) => line.slice(3))
+    .filter((p) => !isJunkBasename(p));
+}
+
 export async function sync_status(vaultRoot: string): Promise<SyncStatusResponse | ToolError> {
   try {
     const isSpoke = await isSpokeVault(vaultRoot);
@@ -1009,6 +1074,10 @@ export async function sync_status(vaultRoot: string): Promise<SyncStatusResponse
       hubError = outcomeMessage(upstream);
     }
 
+    // #388: clean_working_tree can read true while a push would still
+    // hard-fail on an ignored-only change — report that skew explicitly.
+    const blockingIgnored = isSpoke ? await blockingIgnoredScopeFiles(vaultRoot) : [];
+
     return {
       is_spoke: isSpoke,
       spoke_head: head.stdout?.trim() ?? "",
@@ -1017,6 +1086,8 @@ export async function sync_status(vaultRoot: string): Promise<SyncStatusResponse
       behind,
       last_sync_error: sentinel ? { timestamp: sentinel.timestamp, contents: sentinel.contents } : null,
       clean_working_tree: clean.ok ? (clean.stdout ?? "").trim().length === 0 : false,
+      blocked_by_ignored: blockingIgnored.length > 0,
+      blocking_ignored_paths: blockingIgnored.slice(0, 10),
       hub_error: hubError,
     };
   } catch (e: unknown) {

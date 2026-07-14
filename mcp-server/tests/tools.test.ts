@@ -6,7 +6,7 @@ import { fileURLToPath } from "url";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { load as yamlLoadSync } from "js-yaml";
-import { loadVaultConfig, create_note, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, DEFAULT_DIRECTORIES_FALLBACK } from "../src/tools.js";
+import { loadVaultConfig, create_note, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES } from "../src/tools.js";
 import Database from "better-sqlite3";
 import { INDEX_SCHEMA_VERSION } from "../src/sqlite-reader.js";
 
@@ -1142,11 +1142,59 @@ describe("sync_status + sync_retry (#135)", () => {
     expect((result.spoke_head as string).length).toBeGreaterThan(0);
     expect(result.hub_head).toBeNull();
     expect(result.clean_working_tree).toBe(true);
+    expect(result.blocked_by_ignored).toBe(false);
+    expect(result.blocking_ignored_paths).toEqual([]);
     expect(result.last_sync_error).toEqual({
       timestamp: "2026-06-02T12:00:00.000Z",
       contents: "push exited with code 1",
     });
   }, 10000);
+
+  test("sync_status reports blocked_by_ignored for a non-junk ignored file under scope (#388)", async () => {
+    const vault = await makeTempSpokeVault(); // scope: notes
+    await fs.appendFile(path.join(vault, ".gitignore"), "notes/secret*.md\n");
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, "notes", "secret-plan.md"), "hidden\n");
+
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
+
+    // The skew #388 fixed: plain `git status --porcelain` omits ignored
+    // files, so without this field the tool reports a pushable tree while
+    // `schist sync push` hard-fails on the #361 ignore guard.
+    expect(result.blocked_by_ignored).toBe(true);
+    expect(result.blocking_ignored_paths).toEqual(["notes/secret-plan.md"]);
+  }, 10000);
+
+  test("sync_status stays unblocked for junk-only ignored files (#388)", async () => {
+    const vault = await makeTempSpokeVault(); // scope: notes
+    await fs.appendFile(path.join(vault, ".gitignore"), ".DS_Store\n");
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, "notes", ".DS_Store"), "finder\n");
+
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
+
+    // The CLI guard warns-and-skips junk (IGNORE_GUARD_JUNK_BASENAMES), so
+    // the probe must not report a block the push would never hit.
+    expect(result.blocked_by_ignored).toBe(false);
+    expect(result.blocking_ignored_paths).toEqual([]);
+  }, 10000);
+
+  test("junk allowlist stays textually identical to cli/schist/git_ops.py (#388)", () => {
+    // Same cross-language pinning idea as the default.yaml drift test: the
+    // TS probe and the Python guard must agree on what blocks a push.
+    const pySource = readFileSync(
+      path.resolve(__dirname, "..", "..", "cli", "schist", "git_ops.py"),
+      "utf-8",
+    );
+    const match = pySource.match(/^IGNORE_GUARD_JUNK_BASENAMES = \(([^)]*)\)/m);
+    expect(match).not.toBeNull();
+    const pyPatterns = match![1]
+      .split(",")
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0)
+      .map((part) => part.replace(/^'(.*)'$/, "$1"));
+    expect([...IGNORE_GUARD_JUNK_BASENAMES]).toEqual(pyPatterns);
+  });
 
   test("sync_retry push-only calls only sync push and clears unchanged sentinel", async () => {
     const vault = await makeTempSpokeVault();
