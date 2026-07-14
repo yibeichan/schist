@@ -640,14 +640,21 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
     # even when git sees nothing to commit: `git status --porcelain` omits
     # ignored files, so a spoke whose ONLY change is .gitignore-suppressed
     # would otherwise no-op here forever — the permanent silent-drop corner
-    # of #361 (stage_scope_files reports the actual error).
+    # of #361 (stage_scope_files reports the actual error). Junk-allowlisted
+    # ignored files (#388) don't trigger the block — [0] is the blocking
+    # (non-junk) partition; junk never syncs by design, so there is nothing
+    # to commit for it.
     if git_ops.has_uncommitted_changes(vault_path) or git_ops.ignored_scope_files(
         vault_path, config.scope
-    ):
+    )[0]:
         ok, output = git_ops.stage_scope_files(vault_path, config.scope)
         if not ok:
             print(f"Error: failed to stage scope '{config.scope}': {output}", file=sys.stderr)
             sys.exit(1)
+        if output.startswith(git_ops.JUNK_SKIP_WARNING_PREFIX):
+            # Junk-allowlisted ignored files were skipped (#388) — surface
+            # the one-line warning but keep syncing.
+            print(f"Warning: {output}", file=sys.stderr)
 
         # Count staged files
         import subprocess

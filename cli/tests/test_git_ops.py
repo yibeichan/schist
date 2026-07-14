@@ -461,16 +461,109 @@ def test_ignored_scope_files_detects_ignored_only_change(tmp_path) -> None:
     (tmp_path / "research" / "secret-only.md").write_text("hidden\n", encoding="utf-8")
 
     assert git_ops.has_uncommitted_changes(str(tmp_path)) is False
-    assert git_ops.ignored_scope_files(str(tmp_path), "research") == [
-        "research/secret-only.md"
-    ]
+    assert git_ops.ignored_scope_files(str(tmp_path), "research") == (
+        ["research/secret-only.md"], []
+    )
 
 
 def test_ignored_scope_files_empty_on_probe_timeout() -> None:
     """Availability over strictness: a stalled probe must not block sync."""
     with patch("schist.git_ops.subprocess.run",
                side_effect=lambda *a, **k: _timeout(a[0], k)):
-        assert git_ops.ignored_scope_files("/tmp/vault", "research") == []
+        assert git_ops.ignored_scope_files("/tmp/vault", "research") == ([], [])
+
+
+# ---------------------------------------------------------------------------
+# Junk-file allowlist in the ignore guard (#388)
+# ---------------------------------------------------------------------------
+
+
+def test_stage_scope_files_warns_and_skips_junk_only_ignored(tmp_path) -> None:
+    """#388: a hub admin ignoring `.DS_Store` must not brick every macOS
+    spoke — junk-allowlisted ignored files warn and staging succeeds."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".DS_Store\n", encoding="utf-8")
+    _commit_all(tmp_path, "hub gitignore")
+
+    (tmp_path / "research").mkdir()
+    (tmp_path / "research" / ".DS_Store").write_text("finder\n", encoding="utf-8")
+    (tmp_path / "research" / "note.md").write_text("visible\n", encoding="utf-8")
+
+    ok, msg = git_ops.stage_scope_files(str(tmp_path), "research")
+
+    assert ok is True
+    assert msg.startswith(git_ops.JUNK_SKIP_WARNING_PREFIX)
+    assert "research/.DS_Store" in msg
+    staged = subprocess.run(
+        ["git", "-C", str(tmp_path), "diff", "--cached", "--name-only"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    assert "research/note.md" in staged
+
+
+def test_stage_scope_files_hard_fails_when_real_note_ignored_beside_junk(tmp_path) -> None:
+    """#388: the junk allowlist must not soften the #361 guard — a non-junk
+    ignored file still hard-fails even when junk is present too."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(
+        ".DS_Store\nresearch/secret*.md\n", encoding="utf-8"
+    )
+    _commit_all(tmp_path, "hub gitignore")
+
+    (tmp_path / "research").mkdir()
+    (tmp_path / "research" / ".DS_Store").write_text("finder\n", encoding="utf-8")
+    (tmp_path / "research" / "secret-plan.md").write_text("hidden\n", encoding="utf-8")
+
+    ok, msg = git_ops.stage_scope_files(str(tmp_path), "research")
+
+    assert ok is False
+    assert "research/secret-plan.md" in msg
+    assert "never reach the hub" in msg
+    # The error names only the blocking file — junk isn't the problem.
+    assert ".DS_Store" not in msg
+
+
+def test_ignored_scope_files_partitions_junk_basenames(tmp_path) -> None:
+    """Every allowlisted basename pattern (incl. trailing-tilde backups)
+    lands in the junk bucket; a real note lands in blocking."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(
+        ".DS_Store\nThumbs.db\ndesktop.ini\n*~\nresearch/secret*.md\n",
+        encoding="utf-8",
+    )
+    _commit_all(tmp_path, "hub gitignore")
+
+    (tmp_path / "research").mkdir()
+    for junk in (".DS_Store", "Thumbs.db", "desktop.ini", "note.md~"):
+        (tmp_path / "research" / junk).write_text("x\n", encoding="utf-8")
+    (tmp_path / "research" / "secret-plan.md").write_text("hidden\n", encoding="utf-8")
+
+    blocking, junk = git_ops.ignored_scope_files(str(tmp_path), "research")
+
+    assert blocking == ["research/secret-plan.md"]
+    assert sorted(junk) == [
+        "research/.DS_Store",
+        "research/Thumbs.db",
+        "research/desktop.ini",
+        "research/note.md~",
+    ]
+
+
+def test_junk_only_ignored_does_not_trigger_auto_commit(tmp_path) -> None:
+    """#388: junk never syncs by design, so a spoke whose ONLY change is a
+    Finder-created .DS_Store has nothing to commit — the sync_push trigger
+    (blocking list) must stay empty."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".DS_Store\n", encoding="utf-8")
+    _commit_all(tmp_path, "hub gitignore")
+
+    (tmp_path / "research").mkdir()
+    (tmp_path / "research" / ".DS_Store").write_text("finder\n", encoding="utf-8")
+
+    assert git_ops.has_uncommitted_changes(str(tmp_path)) is False
+    assert git_ops.ignored_scope_files(str(tmp_path), "research") == (
+        [], ["research/.DS_Store"]
+    )
 
 
 # ---------------------------------------------------------------------------
