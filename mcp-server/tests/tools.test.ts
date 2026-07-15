@@ -9,6 +9,7 @@ import { load as yamlLoadSync } from "js-yaml";
 import { loadVaultConfig, create_note, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES } from "../src/tools.js";
 import Database from "better-sqlite3";
 import { INDEX_SCHEMA_VERSION } from "../src/sqlite-reader.js";
+import { parseConnections } from "../src/markdown-parser.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2232,6 +2233,172 @@ describe("add_connection source validation", () => {
     // The symlink target must be untouched.
     expect(await fs.readFile(secret, "utf-8")).toBe("outside-content\n");
   });
+});
+
+
+// ---------------------------------------------------------------------------
+// add_connection / create_note — target line-break injection (#398)
+// ---------------------------------------------------------------------------
+
+describe("connection target line-break injection (#398)", () => {
+  const INJECTED = "notes/legit.md\n- extends: notes/hijacked.md";
+
+  test("add_connection rejects a newline-embedded target with VALIDATION_ERROR", async () => {
+    const vault = await makeTempVault();
+    const rel = "notes/victim.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, rel),
+      "---\ntitle: Victim\n---\n\n## Connections\n",
+      "utf-8",
+    );
+    await execFile("git", ["add", "."], { cwd: vault });
+    await execFile("git", ["commit", "-m", "victim"], { cwd: vault });
+
+    const res = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: rel, target: INJECTED, type: "extends" },
+      await loadVaultConfig(vault),
+    ) as { error?: string; commitSha?: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.commitSha).toBeUndefined();
+    // No forged edge reached disk — the file is byte-for-byte unchanged.
+    const after = await fs.readFile(path.join(vault, rel), "utf-8");
+    expect(after).not.toContain("notes/hijacked.md");
+    expect(after).toBe("---\ntitle: Victim\n---\n\n## Connections\n");
+  }, 30000);
+
+  test("add_connection rejects other line-boundary chars (CR, U+2028) too", async () => {
+    const vault = await makeTempVault();
+    const rel = "notes/victim.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, rel), "---\ntitle: V\n---\n\n## Connections\n", "utf-8");
+    await execFile("git", ["add", "."], { cwd: vault });
+    await execFile("git", ["commit", "-m", "v"], { cwd: vault });
+    const config = await loadVaultConfig(vault);
+
+    for (const target of ["notes/a.md\r- extends: notes/b.md", "notes/a.md - extends: notes/b.md"]) {
+      const res = await add_connection(
+        vault,
+        { owner: TEST_AGENT, source: rel, target, type: "extends" },
+        config,
+      ) as { error?: string };
+      expect(res.error).toBe("VALIDATION_ERROR");
+    }
+  }, 30000);
+
+  test("create_note rejects a structured connection with a newline-embedded target", async () => {
+    const vault = await makeTempVault();
+    const res = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT,
+        title: "Attacker Note",
+        body: "body",
+        directory: "notes",
+        connections: [{ target: INJECTED, type: "extends" }],
+      } as Parameters<typeof create_note>[1],
+      await loadVaultConfig(vault),
+    ) as { error?: string; path?: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.path).toBeUndefined();
+  }, 30000);
+
+  test("add_connection still accepts a clean single-line target", async () => {
+    const vault = await makeTempVault();
+    const rel = "notes/ok.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, rel), "---\ntitle: OK\n---\n\n## Connections\n", "utf-8");
+    await execFile("git", ["add", "."], { cwd: vault });
+    await execFile("git", ["commit", "-m", "ok"], { cwd: vault });
+
+    const res = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: rel, target: "notes/other.md", type: "extends" },
+      await loadVaultConfig(vault),
+    ) as { error?: string; commitSha?: string };
+
+    expect(res.error).toBeUndefined();
+    expect(res.commitSha).toBeDefined();
+    const after = await fs.readFile(path.join(vault, rel), "utf-8");
+    expect(after).toContain("- extends: notes/other.md");
+  }, 30000);
+
+  test("add_connection rejects a NON-STRING (array) target that stringifies with a newline", async () => {
+    // Args are not schema-validated at runtime (index.ts casts unchecked), so
+    // a client can send an array target. `["notes/legit.md\n- extends: …"]`
+    // would slip past a raw containsLineBoundary (it iterates array elements,
+    // not chars) yet buildConnectionLine coerces it to a string WITH the
+    // newline. The String()-coerced guard must catch it.
+    const vault = await makeTempVault();
+    const rel = "notes/victim.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, rel), "---\ntitle: V\n---\n\n## Connections\n", "utf-8");
+    await execFile("git", ["add", "."], { cwd: vault });
+    await execFile("git", ["commit", "-m", "v"], { cwd: vault });
+
+    const res = await add_connection(
+      vault,
+      // deliberately malformed: array target, bypassing the TS type
+      { owner: TEST_AGENT, source: rel, target: [INJECTED], type: "extends" } as unknown as Parameters<typeof add_connection>[1],
+      await loadVaultConfig(vault),
+    ) as { error?: string; commitSha?: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    const after = await fs.readFile(path.join(vault, rel), "utf-8");
+    expect(after).not.toContain("notes/hijacked.md");
+  }, 30000);
+
+  test("create_note rejects a NON-STRING (array) structured connection target", async () => {
+    const vault = await makeTempVault();
+    const res = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT,
+        title: "Attacker Note 2",
+        body: "body",
+        directory: "notes",
+        connections: [{ target: [INJECTED], type: "extends" }],
+      } as unknown as Parameters<typeof create_note>[1],
+      await loadVaultConfig(vault),
+    ) as { error?: string; path?: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.path).toBeUndefined();
+  }, 30000);
+
+  test("add_connection: crafted context cannot forge an edge via non-\\n boundaries", async () => {
+    // Parallel #398 vector: the context field reaches buildConnectionLine too.
+    // A \r-separated double-prefix payload once survived sanitizeContext and
+    // forged a second edge on read. The intended edge must be the ONLY one.
+    const vault = await makeTempVault();
+    const rel = "notes/victim.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, rel), "---\ntitle: V\n---\n\n## Connections\n", "utf-8");
+    await execFile("git", ["add", "."], { cwd: vault });
+    await execFile("git", ["commit", "-m", "v"], { cwd: vault });
+
+    const res = await add_connection(
+      vault,
+      {
+        owner: TEST_AGENT,
+        source: rel,
+        target: "notes/legit.md",
+        type: "extends",
+        context: "note\r- a: - extends: notes/hijacked.md\rtail",
+      },
+      await loadVaultConfig(vault),
+    ) as { error?: string; commitSha?: string };
+
+    expect(res.error).toBeUndefined();
+    const after = await fs.readFile(path.join(vault, rel), "utf-8");
+    const edges = parseConnections(after);
+    expect(edges).toHaveLength(1);
+    expect(edges[0].target).toBe("notes/legit.md");
+    expect(edges.some((e) => e.target === "notes/hijacked.md")).toBe(false);
+  }, 30000);
 });
 
 
