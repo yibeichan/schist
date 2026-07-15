@@ -2236,6 +2236,98 @@ describe("add_connection source validation", () => {
 
 
 // ---------------------------------------------------------------------------
+// add_connection / create_note — target line-break injection (#398)
+// ---------------------------------------------------------------------------
+
+describe("connection target line-break injection (#398)", () => {
+  const INJECTED = "notes/legit.md\n- extends: notes/hijacked.md";
+
+  test("add_connection rejects a newline-embedded target with VALIDATION_ERROR", async () => {
+    const vault = await makeTempVault();
+    const rel = "notes/victim.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, rel),
+      "---\ntitle: Victim\n---\n\n## Connections\n",
+      "utf-8",
+    );
+    await execFile("git", ["add", "."], { cwd: vault });
+    await execFile("git", ["commit", "-m", "victim"], { cwd: vault });
+
+    const res = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: rel, target: INJECTED, type: "extends" },
+      await loadVaultConfig(vault),
+    ) as { error?: string; commitSha?: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.commitSha).toBeUndefined();
+    // No forged edge reached disk — the file is byte-for-byte unchanged.
+    const after = await fs.readFile(path.join(vault, rel), "utf-8");
+    expect(after).not.toContain("notes/hijacked.md");
+    expect(after).toBe("---\ntitle: Victim\n---\n\n## Connections\n");
+  }, 30000);
+
+  test("add_connection rejects other line-boundary chars (CR, U+2028) too", async () => {
+    const vault = await makeTempVault();
+    const rel = "notes/victim.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, rel), "---\ntitle: V\n---\n\n## Connections\n", "utf-8");
+    await execFile("git", ["add", "."], { cwd: vault });
+    await execFile("git", ["commit", "-m", "v"], { cwd: vault });
+    const config = await loadVaultConfig(vault);
+
+    for (const target of ["notes/a.md\r- extends: notes/b.md", "notes/a.md - extends: notes/b.md"]) {
+      const res = await add_connection(
+        vault,
+        { owner: TEST_AGENT, source: rel, target, type: "extends" },
+        config,
+      ) as { error?: string };
+      expect(res.error).toBe("VALIDATION_ERROR");
+    }
+  }, 30000);
+
+  test("create_note rejects a structured connection with a newline-embedded target", async () => {
+    const vault = await makeTempVault();
+    const res = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT,
+        title: "Attacker Note",
+        body: "body",
+        directory: "notes",
+        connections: [{ target: INJECTED, type: "extends" }],
+      } as Parameters<typeof create_note>[1],
+      await loadVaultConfig(vault),
+    ) as { error?: string; path?: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.path).toBeUndefined();
+  }, 30000);
+
+  test("add_connection still accepts a clean single-line target", async () => {
+    const vault = await makeTempVault();
+    const rel = "notes/ok.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, rel), "---\ntitle: OK\n---\n\n## Connections\n", "utf-8");
+    await execFile("git", ["add", "."], { cwd: vault });
+    await execFile("git", ["commit", "-m", "ok"], { cwd: vault });
+
+    const res = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: rel, target: "notes/other.md", type: "extends" },
+      await loadVaultConfig(vault),
+    ) as { error?: string; commitSha?: string };
+
+    expect(res.error).toBeUndefined();
+    expect(res.commitSha).toBeDefined();
+    const after = await fs.readFile(path.join(vault, rel), "utf-8");
+    expect(after).toContain("- extends: notes/other.md");
+  }, 30000);
+});
+
+
+// ---------------------------------------------------------------------------
 // update_note (#119)
 // ---------------------------------------------------------------------------
 

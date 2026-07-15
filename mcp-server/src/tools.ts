@@ -6,7 +6,7 @@ import { spawn } from "child_process";
 import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote, updateNote, deleteNote } from "./git-writer.js";
-import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython } from "./markdown-parser.js";
+import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython, containsLineBoundary } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
 import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse, ComposeBriefResponse, Note, SearchResult } from "./types.js";
@@ -1542,6 +1542,17 @@ export async function create_note(
           message: `connection type must be one of: ${config.connectionTypes.join(", ")} (got "${conn.type}")`,
         } satisfies ToolError;
       }
+      // #398: a target carrying a line-boundary char serializes into a
+      // multi-line `## Connections` entry, so ingest indexes a forged extra
+      // edge. The type is vocabulary-gated (above) but the target is free
+      // text — reject the boundary here so buildConnectionLine only ever
+      // emits a single line.
+      if (typeof conn.target === "string" && containsLineBoundary(conn.target)) {
+        return {
+          error: "VALIDATION_ERROR",
+          message: "connection target must not contain line-break characters",
+        } satisfies ToolError;
+      }
     }
     // #317: the #304 loop above only covers STRUCTURED connections. buildNote
     // rewrites the `## Connections` section only when structured connections
@@ -1712,6 +1723,16 @@ export async function add_connection(
       return {
         error: "VALIDATION_ERROR",
         message: `connection type must be one of: ${config.connectionTypes.join(", ")} (got "${args.type}")`,
+      } satisfies ToolError;
+    }
+    // #398: reject a target carrying a line-boundary char before it reaches
+    // buildConnectionLine — otherwise the serialized `- type: target` splits
+    // into multiple lines on read and ingest indexes a forged extra edge that
+    // only the SOURCE write was ACL-gated for.
+    if (containsLineBoundary(args.target)) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: "connection target must not contain line-break characters",
       } satisfies ToolError;
     }
     const srcIdError = validateNoteId(args.source, config);
