@@ -242,7 +242,9 @@ describe("search_notes tool — pagination + cursor issuance", () => {
     const r = await search_notes(vaultRoot, { query: "haystack", limit: 9999 });
     if (!("results" in r)) throw new Error("expected results");
     expect(r.results.length).toBeLessThanOrEqual(100);
-  });
+    // Explicit timeout: this is the largest seed in the file (150 rows) and
+    // flaked against jest's 5s default on the loaded CI runner.
+  }, 30000);
 
   it("collapses limit: 0 to default 20", async () => {
     await seed(vaultRoot, 25);
