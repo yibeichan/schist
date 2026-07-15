@@ -240,7 +240,9 @@ describe("list_concepts tool — pagination + cursor issuance", () => {
     const r = await list_concepts(vaultRoot, { limit: 9999 });
     if (!("concepts" in r)) throw new Error("expected concepts");
     expect(r.concepts.length).toBeLessThanOrEqual(200);
-  });
+    // Explicit timeout: this is the largest seed in the file (250 rows) and
+    // flaked against jest's 5s default on the loaded CI runner.
+  }, 30000);
 
   it("collapses limit: 0 to default 50", async () => {
     await seed(vaultRoot, 60);
