@@ -9,6 +9,7 @@ import { load as yamlLoadSync } from "js-yaml";
 import { loadVaultConfig, create_note, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES } from "../src/tools.js";
 import Database from "better-sqlite3";
 import { INDEX_SCHEMA_VERSION } from "../src/sqlite-reader.js";
+import { parseConnections } from "../src/markdown-parser.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2323,6 +2324,80 @@ describe("connection target line-break injection (#398)", () => {
     expect(res.commitSha).toBeDefined();
     const after = await fs.readFile(path.join(vault, rel), "utf-8");
     expect(after).toContain("- extends: notes/other.md");
+  }, 30000);
+
+  test("add_connection rejects a NON-STRING (array) target that stringifies with a newline", async () => {
+    // Args are not schema-validated at runtime (index.ts casts unchecked), so
+    // a client can send an array target. `["notes/legit.md\n- extends: …"]`
+    // would slip past a raw containsLineBoundary (it iterates array elements,
+    // not chars) yet buildConnectionLine coerces it to a string WITH the
+    // newline. The String()-coerced guard must catch it.
+    const vault = await makeTempVault();
+    const rel = "notes/victim.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, rel), "---\ntitle: V\n---\n\n## Connections\n", "utf-8");
+    await execFile("git", ["add", "."], { cwd: vault });
+    await execFile("git", ["commit", "-m", "v"], { cwd: vault });
+
+    const res = await add_connection(
+      vault,
+      // deliberately malformed: array target, bypassing the TS type
+      { owner: TEST_AGENT, source: rel, target: [INJECTED], type: "extends" } as unknown as Parameters<typeof add_connection>[1],
+      await loadVaultConfig(vault),
+    ) as { error?: string; commitSha?: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    const after = await fs.readFile(path.join(vault, rel), "utf-8");
+    expect(after).not.toContain("notes/hijacked.md");
+  }, 30000);
+
+  test("create_note rejects a NON-STRING (array) structured connection target", async () => {
+    const vault = await makeTempVault();
+    const res = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT,
+        title: "Attacker Note 2",
+        body: "body",
+        directory: "notes",
+        connections: [{ target: [INJECTED], type: "extends" }],
+      } as unknown as Parameters<typeof create_note>[1],
+      await loadVaultConfig(vault),
+    ) as { error?: string; path?: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.path).toBeUndefined();
+  }, 30000);
+
+  test("add_connection: crafted context cannot forge an edge via non-\\n boundaries", async () => {
+    // Parallel #398 vector: the context field reaches buildConnectionLine too.
+    // A \r-separated double-prefix payload once survived sanitizeContext and
+    // forged a second edge on read. The intended edge must be the ONLY one.
+    const vault = await makeTempVault();
+    const rel = "notes/victim.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, rel), "---\ntitle: V\n---\n\n## Connections\n", "utf-8");
+    await execFile("git", ["add", "."], { cwd: vault });
+    await execFile("git", ["commit", "-m", "v"], { cwd: vault });
+
+    const res = await add_connection(
+      vault,
+      {
+        owner: TEST_AGENT,
+        source: rel,
+        target: "notes/legit.md",
+        type: "extends",
+        context: "note\r- a: - extends: notes/hijacked.md\rtail",
+      },
+      await loadVaultConfig(vault),
+    ) as { error?: string; commitSha?: string };
+
+    expect(res.error).toBeUndefined();
+    const after = await fs.readFile(path.join(vault, rel), "utf-8");
+    const edges = parseConnections(after);
+    expect(edges).toHaveLength(1);
+    expect(edges[0].target).toBe("notes/legit.md");
+    expect(edges.some((e) => e.target === "notes/hijacked.md")).toBe(false);
   }, 30000);
 });
 

@@ -258,10 +258,24 @@ export function parseNote(content: string): {
 }
 
 function sanitizeContext(context: string): string {
-  // Remove patterns that look like connection entries FIRST (multiline match must run before \n removal)
-  let safe = context.replace(/^-\s+\S+:\s+/gm, "");
-  // Then normalize newlines to spaces
-  safe = safe.replace(/\n/g, " ");
+  // Flatten EVERY line boundary splitLinesLikePython splits on (the whole
+  // LINE_BOUNDARY set — not just "\n") to a space, FIRST. A raw \r, \v, \f,
+  // U+0085, U+2028, etc. otherwise survives into the quoted context and, on
+  // read, splits the connection line so its tail forges an edge with an
+  // attacker-chosen type and target — the #398 injection through the context
+  // field rather than the target. The old "\n"-only flatten left the other 9
+  // boundaries live, and the `^…/gm` strip below anchors only at JS line
+  // terminators (\n \r U+2028 U+2029), so a `\v`/`\f`/`\x1c`-separated
+  // `- type: target` payload (or a double `- a: - type: target` payload that
+  // survives one strip) reached disk intact. With boundaries flattened the
+  // context is single-line and CONNECTION_RE captures it whole.
+  let safe = context;
+  for (const ch of LINE_BOUNDARY) {
+    if (safe.includes(ch)) safe = safe.split(ch).join(" ");
+  }
+  // Defense-in-depth: drop a leading connection-entry-looking prefix. With
+  // boundaries already flattened this can no longer forge a multi-line edge.
+  safe = safe.replace(/^-\s+\S+:\s+/gm, "");
   // Strip embedded double-quotes entirely: the context field is delimited by "..."
   // in the serialised format (regex: [^"]*) so any " inside would break parsing.
   // Replace with single-quote to preserve readability of quoted speech.

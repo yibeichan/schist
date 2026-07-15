@@ -1546,8 +1546,13 @@ export async function create_note(
       // multi-line `## Connections` entry, so ingest indexes a forged extra
       // edge. The type is vocabulary-gated (above) but the target is free
       // text — reject the boundary here so buildConnectionLine only ever
-      // emits a single line.
-      if (typeof conn.target === "string" && containsLineBoundary(conn.target)) {
+      // emits a single line. Coerce with String() first: args are NOT
+      // schema-validated at runtime (index.ts casts unchecked), so a
+      // non-string target like `["notes/x.md\n- extends: evil.md"]` would
+      // otherwise skip a typeof-string guard yet stringify WITH the newline
+      // when buildConnectionLine interpolates it — String() checks exactly
+      // what gets written.
+      if (containsLineBoundary(String(conn.target))) {
         return {
           error: "VALIDATION_ERROR",
           message: "connection target must not contain line-break characters",
@@ -1728,8 +1733,13 @@ export async function add_connection(
     // #398: reject a target carrying a line-boundary char before it reaches
     // buildConnectionLine — otherwise the serialized `- type: target` splits
     // into multiple lines on read and ingest indexes a forged extra edge that
-    // only the SOURCE write was ACL-gated for.
-    if (containsLineBoundary(args.target)) {
+    // only the SOURCE write was ACL-gated for. Coerce with String() first:
+    // args are NOT schema-validated at runtime (index.ts casts unchecked), so
+    // a non-string target such as an array `["notes/x.md\n- extends: evil.md"]`
+    // would slip past a raw containsLineBoundary (which would iterate array
+    // elements, not characters) yet still stringify WITH the newline in
+    // buildConnectionLine — String() checks exactly what gets written.
+    if (containsLineBoundary(String(args.target))) {
       return {
         error: "VALIDATION_ERROR",
         message: "connection target must not contain line-break characters",

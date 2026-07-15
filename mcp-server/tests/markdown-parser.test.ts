@@ -31,6 +31,29 @@ describe("markdown-parser", () => {
     expect(line).toContain("safe context");
   });
 
+  test("Connection injection (#398): NON-\\n line boundaries in context cannot forge an edge", () => {
+    // sanitizeContext once flattened only "\n". Every other codepoint
+    // splitLinesLikePython splits on (\r \v \f \x1c \x1d \x1e \x85 U+2028
+    // U+2029) survived, and the `^…/gm` prefix strip anchors only at JS line
+    // terminators — so a payload separated by e.g. \v, or a double
+    // `- a: - extends: evil` payload split by \r, forged a second edge on read.
+    const boundaries = ["\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", " ", " "];
+    for (const b of boundaries) {
+      // single-prefix payload (defeats the non-anchored boundaries) and a
+      // double-prefix payload (defeats the strip for anchored boundaries).
+      for (const payload of [
+        `ctx${b}- extends: notes/hijacked.md`,
+        `ctx${b}- a: - extends: notes/hijacked.md${b}tail`,
+      ]) {
+        const line = buildConnectionLine({ target: "notes/legit.md", type: "extends", context: payload });
+        const parsed = parseConnections(`## Connections\n${line}\n`);
+        expect(parsed).toHaveLength(1);
+        expect(parsed[0].target).toBe("notes/legit.md");
+        expect(parsed.some((c) => c.target === "notes/hijacked.md")).toBe(false);
+      }
+    }
+  });
+
   test("Quote injection: embedded \" in context is escaped and cannot break parseConnections", () => {
     // A crafted context with a closing quote + fake connection line
     const maliciousContext = 'legit" "fake: injection.md "injected context';
