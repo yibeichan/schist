@@ -7,6 +7,23 @@ from datetime import date
 from pathlib import Path
 
 from . import git_ops, markdown_io, sqlite_query
+from .ingest import _normalize_concept_slug, _normalize_tag
+
+
+def _load_schema_config(vault_path: str) -> dict:
+    """Load the vault's schist.yaml, falling back to the packaged default.
+
+    Shared by link() and schema() so the CLI's write-side vocabulary checks
+    read the exact config ingest indexes against.
+    """
+    import yaml
+
+    vault_schema = Path(vault_path) / 'schist.yaml'
+    default_schema = Path(__file__).resolve().parent / 'default.yaml'
+    path = vault_schema if vault_schema.exists() else default_schema
+    if not path.exists():
+        return {}
+    return yaml.safe_load(path.read_text()) or {}
 
 
 def add(args, vault_path: str, db_path: str):
@@ -25,10 +42,16 @@ def add(args, vault_path: str, db_path: str):
     filepath = os.path.join(dest_dir, filename)
 
     fm = {'title': title, 'date': date.today().isoformat(), 'status': args.status}
+    # Normalize on the write side so on-disk frontmatter matches what ingest
+    # indexes (#399). MCP create_note already does this (#289 tags, #302
+    # concepts); the CLI is the human-facing write path and must not diverge.
+    # Reuse ingest's own normalizers so the two paths can never drift.
     if args.tags:
-        fm['tags'] = [t.strip() for t in args.tags.split(',')]
+        fm['tags'] = [tag for t in args.tags.split(',') if (tag := _normalize_tag(t))]
     if args.concepts:
-        fm['concepts'] = [c.strip() for c in args.concepts.split(',')]
+        fm['concepts'] = [
+            slug for c in args.concepts.split(',') if (slug := _normalize_concept_slug(c))
+        ]
     if args.file_ref:
         fm['file_ref'] = args.file_ref
 
@@ -48,6 +71,20 @@ def add(args, vault_path: str, db_path: str):
 
 def link(args, vault_path: str, db_path: str):
     """Add a connection between two documents."""
+    # Validate the connection type against the configured vocabulary before
+    # writing (#397). MCP add_connection has enforced this since #304; the CLI
+    # writing unchecked types was the root cause of #363 (notes made
+    # un-editable via update_note by out-of-vocabulary edges). An empty/absent
+    # connection_types list means "no vocabulary configured" — accept anything.
+    connection_types = _load_schema_config(vault_path).get('connection_types') or []
+    if connection_types and args.link_type not in connection_types:
+        print(
+            f"Error: connection type '{args.link_type}' is not in the configured "
+            f"connection_types: {', '.join(connection_types)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     source_path = os.path.join(vault_path, args.source)
     if not os.path.exists(source_path):
         print(f'Error: source not found: {args.source}', file=sys.stderr)
@@ -224,9 +261,32 @@ def schema(args, vault_path: str, db_path: str):
     # Validate: check every .md in vault for title in frontmatter
     violations = []
     vault = Path(vault_path)
+    # rglob follows file symlinks (any Python) and directory symlinks (<=3.12
+    # patch releases before the glob reimplementation), so a symlink escaping
+    # the vault would otherwise be read and validated — mixing external state
+    # into the vault's health report. Mirror ingest.py's #342 containment
+    # guard: reject anything whose real path escapes the vault or resolves into
+    # a hidden/excluded dir (the startswith('.') filter below only inspects the
+    # symlink's OWN path, not its target).
+    vault_real = vault.resolve()
     for md_file in sorted(vault.rglob('*.md')):
         rel = md_file.relative_to(vault)
         if any(part.startswith('.') for part in rel.parts):
+            continue
+        # Skip escaping/excluded symlinks with a stderr WARN rather than
+        # counting them as violations — this keeps the validate exit code
+        # clean for legitimate symlinked content (e.g. shared skills) and
+        # matches ingest.py's #342 handling exactly.
+        try:
+            resolved = md_file.resolve()
+        except OSError as e:
+            print(f'  WARN: skipping {rel} — unresolvable path: {e}', file=sys.stderr)
+            continue
+        if not resolved.is_relative_to(vault_real):
+            print(f'  WARN: skipping {rel} — resolves outside the vault (symlink)', file=sys.stderr)
+            continue
+        if any(part.startswith('.') for part in resolved.relative_to(vault_real).parts):
+            print(f'  WARN: skipping {rel} — resolves into an excluded directory (symlink)', file=sys.stderr)
             continue
         # Skip non-note files (README, SCHEMA, TAGS, etc. at root level without frontmatter)
         try:
