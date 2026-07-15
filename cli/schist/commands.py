@@ -10,20 +10,49 @@ from . import git_ops, markdown_io, sqlite_query
 from .ingest import _normalize_concept_slug, _normalize_tag
 
 
+def _load_default_config() -> dict:
+    """Load the packaged default.yaml (the canonical default `schist init`
+    copies into new vaults)."""
+    import yaml
+
+    default_schema = Path(__file__).resolve().parent / 'default.yaml'
+    if not default_schema.exists():
+        return {}
+    return yaml.safe_load(default_schema.read_text()) or {}
+
+
 def _load_schema_config(vault_path: str) -> dict:
     """Load the vault's schist.yaml, falling back to the packaged default.
 
-    Shared by link() and schema() so the CLI's write-side vocabulary checks
-    read the exact config ingest indexes against.
+    Used by link() (via _connection_types) so the CLI's write-side vocabulary
+    check reads the same config the MCP server and ingest validate against.
     """
     import yaml
 
     vault_schema = Path(vault_path) / 'schist.yaml'
-    default_schema = Path(__file__).resolve().parent / 'default.yaml'
-    path = vault_schema if vault_schema.exists() else default_schema
-    if not path.exists():
-        return {}
-    return yaml.safe_load(path.read_text()) or {}
+    if vault_schema.exists():
+        return yaml.safe_load(vault_schema.read_text()) or {}
+    return _load_default_config()
+
+
+def _connection_types(vault_path: str) -> list:
+    """Resolve the connection-type vocabulary for a vault, mirroring the MCP
+    server's loadVaultConfig/getStringList semantics (mcp-server/src/tools.ts)
+    so `schist link` and `add_connection` accept exactly the same set:
+
+    - a `connection_types` LIST in the vault's schist.yaml is used verbatim,
+      including an explicit empty list — which therefore rejects every type,
+      exactly as MCP's `connectionTypes.includes()` does;
+    - an ABSENT or non-list `connection_types` (e.g. a partial hand-edited
+      schist.yaml) falls back to the packaged default vocabulary rather than
+      silently disabling the check — a missing key must not reopen #363.
+
+    Empty/falsy entries are dropped to match getStringList's .filter(Boolean).
+    """
+    ct = _load_schema_config(vault_path).get('connection_types')
+    if not isinstance(ct, list):
+        ct = _load_default_config().get('connection_types') or []
+    return [str(x) for x in ct if x]
 
 
 def add(args, vault_path: str, db_path: str):
@@ -74,13 +103,14 @@ def link(args, vault_path: str, db_path: str):
     # Validate the connection type against the configured vocabulary before
     # writing (#397). MCP add_connection has enforced this since #304; the CLI
     # writing unchecked types was the root cause of #363 (notes made
-    # un-editable via update_note by out-of-vocabulary edges). An empty/absent
-    # connection_types list means "no vocabulary configured" — accept anything.
-    connection_types = _load_schema_config(vault_path).get('connection_types') or []
-    if connection_types and args.link_type not in connection_types:
+    # un-editable via update_note by out-of-vocabulary edges). _connection_types
+    # mirrors the MCP server's resolution so both accept the same set.
+    connection_types = _connection_types(vault_path)
+    if args.link_type not in connection_types:
+        allowed = ', '.join(connection_types) if connection_types else '(none configured)'
         print(
             f"Error: connection type '{args.link_type}' is not in the configured "
-            f"connection_types: {', '.join(connection_types)}",
+            f"connection_types: {allowed}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -264,10 +294,13 @@ def schema(args, vault_path: str, db_path: str):
     # rglob follows file symlinks (any Python) and directory symlinks (<=3.12
     # patch releases before the glob reimplementation), so a symlink escaping
     # the vault would otherwise be read and validated — mixing external state
-    # into the vault's health report. Mirror ingest.py's #342 containment
-    # guard: reject anything whose real path escapes the vault or resolves into
-    # a hidden/excluded dir (the startswith('.') filter below only inspects the
-    # symlink's OWN path, not its target).
+    # into the vault's health report. Follows the intent of ingest.py's #342
+    # containment guard: skip anything whose real path escapes the vault or
+    # resolves into a hidden dir (the startswith('.') filter below only
+    # inspects the symlink's OWN path, not its target). NOTE: this uses the
+    # startswith('.') hidden-dir rule, which is broader than ingest.py's
+    # SKIP_DIRS={'.git','.schist'}; the difference is in the safe direction
+    # (validate skips more than ingest indexes).
     vault_real = vault.resolve()
     for md_file in sorted(vault.rglob('*.md')):
         rel = md_file.relative_to(vault)
@@ -275,11 +308,12 @@ def schema(args, vault_path: str, db_path: str):
             continue
         # Skip escaping/excluded symlinks with a stderr WARN rather than
         # counting them as violations — this keeps the validate exit code
-        # clean for legitimate symlinked content (e.g. shared skills) and
-        # matches ingest.py's #342 handling exactly.
+        # clean for legitimate symlinked content (e.g. shared skills).
+        # resolve() raises RuntimeError (not OSError) on a symlink LOOP on
+        # Python <=3.12 — the project floor — so both must be caught.
         try:
             resolved = md_file.resolve()
-        except OSError as e:
+        except (OSError, RuntimeError) as e:
             print(f'  WARN: skipping {rel} — unresolvable path: {e}', file=sys.stderr)
             continue
         if not resolved.is_relative_to(vault_real):

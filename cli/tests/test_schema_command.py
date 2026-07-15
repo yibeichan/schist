@@ -117,3 +117,32 @@ class TestSchemaCommand:
         # The one real in-vault note is valid; the external foreign.md (which
         # would be a violation if recursed) never enters the report.
         assert capsys.readouterr().out.strip() == "All documents valid."
+
+    def test_validate_symlink_loop_does_not_crash(self, tmp_path, capsys):
+        # A symlink loop must never propagate an uncaught exception out of
+        # schema(). resolve() raises RuntimeError (NOT OSError) on a loop on
+        # Python <=3.12 — the project floor — so a too-narrow `except OSError`
+        # would let one looping .md symlink crash the whole validate run with a
+        # traceback. On 3.13+ resolve() no longer raises and the loop instead
+        # surfaces as a failed-to-parse violation at read time. Either outcome
+        # (clean skip or reported violation) is acceptable; an uncaught
+        # RuntimeError is not — and would fail this test on the floor Python.
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir()
+        (notes_dir / "good.md").write_text(
+            "---\ntitle: Valid\n---\n\nBody\n", encoding="utf-8",
+        )
+        a = notes_dir / "a.md"
+        b = notes_dir / "b.md"
+        a.symlink_to(b)
+        b.symlink_to(a)
+
+        try:
+            commands.schema(_schema_args(validate=True), str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        except SystemExit as e:
+            # 3.13+: loop reported as a violation (non-zero exit) — fine.
+            assert e.code == 1
+
+        captured = capsys.readouterr()
+        # The loop is handled one of two ways; both mention it, neither crashes.
+        assert "unresolvable path" in captured.err or "failed to parse" in captured.out

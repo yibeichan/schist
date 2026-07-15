@@ -116,14 +116,43 @@ class TestLinkVocabulary:
         body = (tmp_path / "notes" / "src.md").read_text()
         assert "- extends: notes/dst.md" in body
 
-    def test_empty_vocabulary_accepts_any_type(self, tmp_path, capsys):
-        # An empty connection_types list means "no vocabulary configured" —
-        # the CLI must not hard-fail every link in that vault.
+    def test_explicit_empty_vocabulary_rejects_all_types(self, tmp_path, capsys):
+        # An explicit `connection_types: []` is used verbatim and therefore
+        # rejects every type — matching MCP's connectionTypes.includes() where
+        # an empty array admits nothing. (A MISSING key is different: see below.)
         self._vault_with_types(tmp_path, types="[]")
-        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+        with pytest.raises(SystemExit) as exc:
             commands.link(
-                _link_args("notes/src.md", "notes/dst.md", "anything-goes"),
+                _link_args("notes/src.md", "notes/dst.md", "extends"),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert exc.value.code == 1
+        assert "extends" not in (tmp_path / "notes" / "src.md").read_text().split("## Connections")[1]
+
+    def test_missing_connection_types_key_falls_back_to_default_vocabulary(self, tmp_path, capsys):
+        # A partial hand-edited schist.yaml with no connection_types key must
+        # NOT silently disable the check (that would reopen #363); it falls
+        # back to the packaged default vocabulary, exactly as MCP's
+        # loadVaultConfig applies its default. "extends" is in the default set;
+        # "made-up" is not.
+        (tmp_path / "schist.yaml").write_text(
+            "directories:\n  notes: notes/\n", encoding="utf-8",
+        )
+        notes = tmp_path / "notes"
+        notes.mkdir()
+        (notes / "src.md").write_text(
+            "---\ntitle: Src\nstatus: draft\n---\n\nBody\n\n## Connections\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(SystemExit):
+            commands.link(
+                _link_args("notes/src.md", "notes/dst.md", "made-up"),
                 str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
             )
         capsys.readouterr()
-        assert "- anything-goes: notes/dst.md" in (tmp_path / "notes" / "src.md").read_text()
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.link(
+                _link_args("notes/src.md", "notes/dst.md", "extends"),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert "- extends: notes/dst.md" in (tmp_path / "notes" / "src.md").read_text()
