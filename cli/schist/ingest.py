@@ -426,7 +426,10 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
 
         try:
             resolved = md_file.resolve()
-        except OSError as e:
+        except (OSError, RuntimeError) as e:
+            # resolve() raises RuntimeError (not OSError) on a symlink LOOP on
+            # Python <=3.12 — the project floor — so both must be caught, else
+            # one looping .md symlink crashes the whole ingest (#342 follow-up).
             print(f'  WARN: skipping {rel} — unresolvable path: {e}', file=sys.stderr)
             skipped_count += 1
             continue
