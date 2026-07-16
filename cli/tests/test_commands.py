@@ -97,11 +97,8 @@ def _vault_with_types(tmp_path, types="[extends, supports]"):
 
 
 class TestLinkVocabulary:
-    def _vault_with_types(self, tmp_path, types="[extends, supports]"):
-        _vault_with_types(tmp_path, types)
-
     def test_rejects_out_of_vocabulary_type(self, tmp_path, capsys):
-        self._vault_with_types(tmp_path)
+        _vault_with_types(tmp_path)
         with pytest.raises(SystemExit) as exc:
             commands.link(
                 _link_args("notes/src.md", "notes/dst.md", "made-up-type"),
@@ -115,7 +112,7 @@ class TestLinkVocabulary:
         assert "made-up-type" not in (tmp_path / "notes" / "src.md").read_text()
 
     def test_accepts_in_vocabulary_type(self, tmp_path, capsys):
-        self._vault_with_types(tmp_path)
+        _vault_with_types(tmp_path)
         with patch("schist.commands.git_ops.commit", return_value=(True, "")):
             commands.link(
                 _link_args("notes/src.md", "notes/dst.md", "extends"),
@@ -129,7 +126,7 @@ class TestLinkVocabulary:
         # An explicit `connection_types: []` is used verbatim and therefore
         # rejects every type — matching MCP's connectionTypes.includes() where
         # an empty array admits nothing. (A MISSING key is different: see below.)
-        self._vault_with_types(tmp_path, types="[]")
+        _vault_with_types(tmp_path, types="[]")
         with pytest.raises(SystemExit) as exc:
             commands.link(
                 _link_args("notes/src.md", "notes/dst.md", "extends"),
@@ -191,7 +188,7 @@ class TestLinkInjection:
         assert "line-break" in capsys.readouterr().err
         assert "evil" not in (tmp_path / "notes" / "src.md").read_text()
 
-    @pytest.mark.parametrize("sep", ["\r", "\v", "\f", "\x1c", "\x85", "\u2028", "\u2029"])
+    @pytest.mark.parametrize("sep", list(markdown_io.LINE_BOUNDARY_CHARS))
     def test_rejects_every_splitlines_boundary_in_target(self, tmp_path, capsys, sep):
         # The guard must cover the FULL splitlines set, not just \n — the
         # same bypass the MCP fix's adversarial review caught (#402).
@@ -315,3 +312,127 @@ class TestAddStatusVocabulary:
                          str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
         assert exc.value.code == 1
         assert "(none configured)" in capsys.readouterr().err
+
+
+class TestLinkTargetRoundTrip:
+    """Review findings on #405: an empty or whitespace-carrying target writes
+    a line CONNECTION_RE can never round-trip — silent success, no edge."""
+
+    def test_rejects_empty_target(self, tmp_path, capsys):
+        # With an empty target the quoted context slides into the target slot
+        # on read — context text promoted to an edge target.
+        _vault_with_types(tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            commands.link(
+                _link_args("notes/src.md", "", "extends", context="evil.md"),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert exc.value.code == 1
+        assert "non-empty" in capsys.readouterr().err
+        assert "evil" not in (tmp_path / "notes" / "src.md").read_text()
+
+    @pytest.mark.parametrize("target", ["notes/a b.md", "notes/a\tb.md", "notes/a\xa0b.md"])
+    def test_rejects_whitespace_carrying_target(self, tmp_path, capsys, target):
+        _vault_with_types(tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            commands.link(
+                _link_args("notes/src.md", target, "extends"),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert exc.value.code == 1
+        assert "whitespace" in capsys.readouterr().err
+        assert target not in (tmp_path / "notes" / "src.md").read_text()
+
+
+class TestAddCollisionHardening:
+    """Review findings on #406: the guard must survive same-second collisions
+    and must not read a dangling symlink as 'no file'."""
+
+    def test_third_same_second_add_gets_counter_suffix(self, tmp_path, capsys):
+        # Freeze the clock so all three adds land "in the same second": a
+        # single MCP-style exists-check would re-mint add #2's suffix for
+        # add #3 and truncate it.
+        from datetime import datetime as real_datetime
+
+        class _FixedDatetime:
+            @staticmethod
+            def now(tz=None):
+                return real_datetime(2026, 7, 16, 12, 0, 0)
+
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")), \
+             patch("schist.commands.datetime", _FixedDatetime):
+            for body in ("first", "second", "third"):
+                commands.add(_add_args("Daily note", body=body),
+                             str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        capsys.readouterr()
+        files = sorted(f.name for f in (tmp_path / "notes").glob("*.md"))
+        assert len(files) == 3, files
+        assert any(f.endswith("-12-00-00.md") for f in files)
+        assert any(f.endswith("-12-00-00-2.md") for f in files)
+        bodies = {markdown_io.read_note(str(tmp_path / "notes" / f))["body"] for f in files}
+        assert bodies == {"first", "second", "third"}
+
+    def test_dangling_symlink_counts_as_collision(self, tmp_path, capsys):
+        # os.path.exists is False for a dangling symlink; writing "through" it
+        # would create the note body at the symlink's target — outside the
+        # vault if the link points there. lexists must treat it as taken.
+        from datetime import date as real_date
+        notes = tmp_path / "notes"
+        notes.mkdir()
+        base = notes / f"{real_date.today().isoformat()}-daily-note.md"
+        outside_target = tmp_path / "outside" / "escape.md"
+        base.symlink_to(outside_target)
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.add(_add_args("Daily note", body="content"),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        capsys.readouterr()
+        assert not outside_target.exists(), "note body escaped through the symlink"
+        real_files = [f for f in notes.glob("*.md") if not f.is_symlink()]
+        assert len(real_files) == 1
+        assert markdown_io.read_note(str(real_files[0]))["body"] == "content"
+
+
+class TestAddTitleDatePrefix:
+    """Parity with MCP create_note's #118 guard: a YYYY-MM-DD-prefixed title
+    would mint a doubled-date note id the MCP write path refuses."""
+
+    def test_rejects_date_prefixed_title(self, tmp_path, capsys):
+        with pytest.raises(SystemExit) as exc:
+            commands.add(_add_args("2026-07-16 Meeting notes"),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        assert exc.value.code == 1
+        assert "date prefix" in capsys.readouterr().err
+        assert not (tmp_path / "notes").exists()
+
+    def test_accepts_title_with_interior_date(self, tmp_path, capsys):
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.add(_add_args("Meeting notes 2026-07-16"),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        capsys.readouterr()
+        assert _written_frontmatter(tmp_path)["title"] == "Meeting notes 2026-07-16"
+
+
+class TestSchemaConfigRobustness:
+    """Review finding: a non-mapping schist.yaml (hand-edited top-level list)
+    must degrade to the packaged defaults — like MCP's loadVaultConfig, where
+    raw[key] on a non-mapping is undefined — not crash every command."""
+
+    def test_non_mapping_schist_yaml_falls_back_to_defaults(self, tmp_path, capsys):
+        (tmp_path / "schist.yaml").write_text("- extends\n- supports\n", encoding="utf-8")
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.add(_add_args("Note"),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        capsys.readouterr()
+        assert _written_frontmatter(tmp_path)["status"] == "draft"
+
+    def test_falsy_but_stringifiable_vocab_entry_is_kept(self, tmp_path, capsys):
+        # getStringList parity: .map(String).filter(Boolean) coerces BEFORE
+        # filtering, so an unquoted 0 in YAML is the status "0" on both
+        # writers — filtering raw values would make the CLI reject what MCP
+        # accepts (#363's skew class).
+        (tmp_path / "schist.yaml").write_text("statuses: [draft, 0]\n", encoding="utf-8")
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.add(_add_args("Note", status="0"),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        capsys.readouterr()
+        assert str(_written_frontmatter(tmp_path)["status"]) == "0"

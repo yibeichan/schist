@@ -2,8 +2,9 @@
 
 import json
 import os
+import re
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 
 from . import git_ops, markdown_io, sqlite_query
@@ -31,7 +32,12 @@ def _load_schema_config(vault_path: str) -> dict:
 
     vault_schema = Path(vault_path) / 'schist.yaml'
     if vault_schema.exists():
-        return yaml.safe_load(vault_schema.read_text()) or {}
+        parsed = yaml.safe_load(vault_schema.read_text())
+        # A non-mapping top level (hand-edited list/scalar) must degrade to
+        # "no keys" — MCP's loadVaultConfig reads raw[key] as undefined on a
+        # non-mapping and falls back to defaults; .get() on a list would
+        # instead crash every command that resolves a vocabulary.
+        return parsed if isinstance(parsed, dict) else {}
     return _load_default_config()
 
 
@@ -52,7 +58,10 @@ def _connection_types(vault_path: str) -> list:
     ct = _load_schema_config(vault_path).get('connection_types')
     if not isinstance(ct, list):
         ct = _load_default_config().get('connection_types') or []
-    return [str(x) for x in ct if x]
+    # Coerce BEFORE filtering, like getStringList's .map(String).filter(Boolean)
+    # — filtering raw values drops falsy-but-stringifiable entries (an unquoted
+    # 0 in YAML) that MCP accepts, skewing the two writers' vocabularies.
+    return [s for x in ct if (s := str(x))]
 
 
 def _statuses(vault_path: str) -> list:
@@ -65,7 +74,7 @@ def _statuses(vault_path: str) -> list:
     st = _load_schema_config(vault_path).get('statuses')
     if not isinstance(st, list):
         st = _load_default_config().get('statuses') or []
-    return [str(x) for x in st if x]
+    return [s for x in st if (s := str(x))]
 
 
 def add(args, vault_path: str, db_path: str):
@@ -98,17 +107,40 @@ def add(args, vault_path: str, db_path: str):
         body = ''
 
     slug = markdown_io.slugify(title)
-    filename = f'{date.today().isoformat()}-{slug}.md'
+    # Reject a title that starts with a YYYY-MM-DD date prefix, like MCP
+    # create_note (#118): the filename already prefixes the date, so accepting
+    # it mints a doubled-date note id the MCP write path refuses — a
+    # cross-writer accept-set skew. Same regex as tools.ts: leading hyphens
+    # allowed because slugify turns leading whitespace into a surviving dash.
+    if re.match(r'^-*\d{4}-\d{2}-\d{2}(-|$)', slug):
+        print(
+            'Error: title must not start with a YYYY-MM-DD date prefix — '
+            'the filename already prefixes the date.',
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    today_str = date.today().isoformat()
+    filename = f'{today_str}-{slug}.md'
     dest_dir = os.path.join(vault_path, args.directory)
     os.makedirs(dest_dir, exist_ok=True)
     filepath = os.path.join(dest_dir, filename)
-    # Same-day same-title collision guard (#406): mirror MCP create_note —
-    # never let open('w') silently truncate an existing note; append an
-    # HH-MM-SS suffix (UTC, like the TS toISOString slice) to mint a unique
-    # path instead.
-    if os.path.exists(filepath):
-        time_suffix = datetime.now(timezone.utc).strftime('%H-%M-%S')
-        filename = f'{date.today().isoformat()}-{slug}-{time_suffix}.md'
+    # Same-day same-title collision guard (#406): never let open('w')
+    # silently truncate an existing note — append an HH-MM-SS suffix (local
+    # time, consistent with the local date.today() in the filename and
+    # frontmatter), then a counter, until the path is free. The loop closes
+    # the same-second hole a single MCP-style check leaves (add #3 in one
+    # second would re-mint add #2's suffix and truncate it). lexists, not
+    # exists: a DANGLING symlink at the candidate path reads as "no file" to
+    # exists() and open('w') would then write the note THROUGH the symlink to
+    # wherever it points — outside the vault included.
+    if os.path.lexists(filepath):
+        time_suffix = datetime.now().strftime('%H-%M-%S')
+        filename = f'{today_str}-{slug}-{time_suffix}.md'
+        counter = 2
+        while os.path.lexists(os.path.join(dest_dir, filename)):
+            filename = f'{today_str}-{slug}-{time_suffix}-{counter}.md'
+            counter += 1
         filepath = os.path.join(dest_dir, filename)
 
     fm = {'title': title, 'date': date.today().isoformat(), 'status': status}
@@ -167,6 +199,21 @@ def link(args, vault_path: str, db_path: str):
         print(
             'Error: target must not contain line-break characters '
             '(it would forge extra connection entries on read)',
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # A target must round-trip through CONNECTION_RE, whose target group is
+    # ONE non-whitespace run (the pinned SLUG_WS_CHARS class). An empty
+    # target lets the quoted context slide into the target slot on read —
+    # indexing an edge whose target is caller-chosen context text — and a
+    # whitespace-carrying target (space, tab, NBSP) writes a line the parser
+    # never matches: `link` prints success and commits, but no edge is ever
+    # indexed. Reject both instead of writing a dead or forgeable line.
+    if not args.target or any(ch in markdown_io.SLUG_WS_CHARS for ch in str(args.target)):
+        print(
+            'Error: target must be a non-empty token without whitespace '
+            '(the connection line could not round-trip through the parser)',
             file=sys.stderr,
         )
         sys.exit(1)

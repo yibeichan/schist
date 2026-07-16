@@ -191,7 +191,11 @@ def test_sanitize_context_flattens_boundaries_and_strips_forgery() -> None:
     # single-quotes, matching TS sanitizeContext.
     assert sanitize_context('she said "no"') == "she said 'no'"
     # All-boundary context sanitizes to '' (caller then omits it).
-    assert sanitize_context("\n\r ") == ""
+    assert sanitize_context("\n\r\u2028") == ""
+    # Edge strip uses the pinned SLUG_WS_CHARS union, so a pasted BOM
+    # (U+FEFF - in JS's trim set but not Python's str.strip default) is
+    # dropped like TS sanitizeContext does.
+    assert sanitize_context("\ufeffhello") == "hello"
 
 
 def test_append_connection_context_injection_yields_single_edge(tmp_path) -> None:
@@ -203,7 +207,7 @@ def test_append_connection_context_injection_yields_single_edge(tmp_path) -> Non
     note = tmp_path / "note.md"
     note.write_text("---\ntitle: A\n---\n\n## Connections\n", encoding="utf-8")
     append_connection(str(note), "extends", "notes/b.md",
-                      context='x" - supports: notes/evil.md')
+                      context='x"\u2028- supports: notes/evil.md')
 
     edges = parse_connections(note.read_text(encoding="utf-8"))
     assert [(e["type"], e["target"]) for e in edges] == [("extends", "notes/b.md")]

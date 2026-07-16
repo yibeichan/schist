@@ -74,10 +74,14 @@ def sanitize_context(context: str) -> str:
     leading connection-entry-looking prefix is dropped (defense-in-depth),
     then embedded double-quotes become single-quotes because the serialized
     format delimits context with "..." (CONNECTION_RE: [^"]*). The prefix
-    regex uses the pinned SLUG_WS_CHARS union class per the #338 convention
-    — broader than JS \\s only in the safe direction (strips at least every
-    prefix TS strips; with boundaries already flattened the difference is
-    cosmetic, never a forged edge).
+    regex and the edge strip use the pinned SLUG_WS_CHARS union class per
+    the #338 convention rather than replicating JS's \\s/trim() exactly, so
+    the two implementations CAN disagree on exotic control chars (e.g. TS
+    trim() drops a leading U+FEFF but keeps U+001F; the union strips both,
+    and a U+001F embedded in a prefix word stops Python's non-ws run where
+    TS's \\S continues). With boundaries already flattened every such
+    divergence is cosmetic — a byte-different context string, never a
+    forged edge.
     """
     safe = context
     for ch in LINE_BOUNDARY_CHARS:
@@ -85,7 +89,7 @@ def sanitize_context(context: str) -> str:
             safe = safe.replace(ch, ' ')
     safe = _FORGED_PREFIX_RE.sub('', safe)
     safe = safe.replace('"', "'")
-    return safe.strip()
+    return safe.strip(SLUG_WS_CHARS)
 
 
 def read_note(path: str) -> dict:
