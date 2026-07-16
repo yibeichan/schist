@@ -3277,6 +3277,26 @@ describe("create_note collision hardening (#408)", () => {
     const content = await fs.readFile(path.join(vault, result.path), "utf-8");
     expect(content).toContain("must stay inside");
   }, 30000);
+
+  test("two CONCURRENT same-title creates both survive (O_EXCL closes the race)", async () => {
+    // The pre-probe is a TOCTOU: both calls select basePath before either
+    // writes. The O_EXCL write makes the loser throw EEXIST inside the mutex,
+    // so create_note retries the next candidate instead of truncating the
+    // winner. Without the exclusive flag the second fs.writeFile silently
+    // overwrote the first note's body.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const [r1, r2] = await Promise.all([
+      create_note(vault, { owner: TEST_AGENT, title: "Race Title", body: "body-one" }, config) as Promise<{ path: string }>,
+      create_note(vault, { owner: TEST_AGENT, title: "Race Title", body: "body-two" }, config) as Promise<{ path: string }>,
+    ]);
+    expect(r1.path).not.toBe(r2.path);
+    const bodies = new Set([
+      (await fs.readFile(path.join(vault, r1.path), "utf-8")).match(/body-\w+/)?.[0],
+      (await fs.readFile(path.join(vault, r2.path), "utf-8")).match(/body-\w+/)?.[0],
+    ]);
+    expect(bodies).toEqual(new Set(["body-one", "body-two"]));
+  }, 60000);
 });
 
 // ---------------------------------------------------------------------------
@@ -3354,6 +3374,35 @@ describe("connection target round-trip guard (#408)", () => {
       config
     ) as { error: string };
     expect(spaced.error).toBe("VALIDATION_ERROR");
+  }, 30000);
+
+  test("target validation fires BEFORE the ACL check (ordering is pinned)", async () => {
+    // An ungranted identity sending a malformed (whitespace) target gets
+    // VALIDATION_ERROR, not ACL_DENIED: input is validated on its own merits
+    // before grant state is consulted. Pinned so a future reorder that leaks
+    // ACL state for never-round-trippable requests is caught. A well-formed
+    // target from the same ungranted identity still returns ACL_DENIED
+    // (covered by the ACL enforcement suite above).
+    const vault = await makeTempVaultWithAcl("dragonfly", ["notes"]);
+    const config = await loadVaultConfig(vault);
+    process.env.SCHIST_IDENTITY = "dragonfly";
+    process.env.SCHIST_AGENT_ID = "dragonfly";
+    let created: { path: string };
+    try {
+      created = await create_note(
+        vault, { owner: "dragonfly", title: "Ordering Src", body: "x", directory: "notes" }, config
+      ) as { path: string };
+      process.env.SCHIST_IDENTITY = "orcd"; // now ungranted
+      const result = await add_connection(
+        vault,
+        { owner: "dragonfly", source: created.path, target: "notes/a b.md", type: "extends" },
+        config
+      ) as { error: string };
+      expect(result.error).toBe("VALIDATION_ERROR");
+    } finally {
+      delete process.env.SCHIST_IDENTITY;
+      process.env.SCHIST_AGENT_ID = TEST_AGENT;
+    }
   }, 30000);
 });
 
