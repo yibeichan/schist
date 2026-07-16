@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseNote, buildNote, buildConnectionLine, parseConnections } from "../src/markdown-parser.js";
+import { parseNote, buildNote, buildConnectionLine, parseConnections, isRoundTrippableTarget, SLUG_WS_CHARS } from "../src/markdown-parser.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -192,5 +192,22 @@ describe("markdown-parser", () => {
     );
 
     expect(parsed.metadata.title).toBe("read [book] about");
+  });
+});
+
+describe("isRoundTrippableTarget (#408)", () => {
+  test("accepts a normal note id and a concept slug", () => {
+    expect(isRoundTrippableTarget("notes/2026-07-16-a.md")).toBe(true);
+    expect(isRoundTrippableTarget("predictive-coding")).toBe(true);
+  });
+
+  test("rejects empty", () => {
+    expect(isRoundTrippableTarget("")).toBe(false);
+  });
+
+  test("rejects every SLUG_WS_CHARS codepoint anywhere in the target", () => {
+    for (const ch of SLUG_WS_CHARS) {
+      expect(isRoundTrippableTarget(`notes/a${ch}b.md`)).toBe(false);
+    }
   });
 });

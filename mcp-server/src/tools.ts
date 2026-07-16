@@ -6,7 +6,7 @@ import { spawn } from "child_process";
 import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote, updateNote, deleteNote } from "./git-writer.js";
-import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython, containsLineBoundary } from "./markdown-parser.js";
+import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython, containsLineBoundary, isRoundTrippableTarget } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
 import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse, ComposeBriefResponse, Note, SearchResult } from "./types.js";
@@ -335,14 +335,23 @@ export async function loadVaultConfig(vaultRoot: string): Promise<VaultConfig> {
     name: getString("name", path.basename(vaultRoot)),
     path: vaultRoot,
     directories: getStringList("directories", [...loadCanonicalDirectories()]),
-    connectionTypes: getStringList("connection_types", [
-      "extends", "contradicts", "supports", "replicates",
-      "applies-method-of", "reinterprets", "related",
-    ]),
-    statuses: getStringList("statuses", ["draft", "review", "final", "archived"]),
+    connectionTypes: getStringList("connection_types", [...DEFAULT_CONNECTION_TYPES]),
+    statuses: getStringList("statuses", [...DEFAULT_STATUSES]),
     writeBranch: getString("write_branch", "drafts"),
   };
 }
+
+// Fallback vocabularies for a schist.yaml that exists but omits the key.
+// These MUST match cli/schist/default.yaml — the canonical default `schist
+// init` writes and the CLI's own fallback — or the two write paths enforce
+// different vocabularies on the same partial-config vault (#403: this list
+// omitted "references", so MCP rejected an edge type `schist link` accepted).
+// Exported for the parity test that pins them against the YAML file.
+export const DEFAULT_CONNECTION_TYPES = [
+  "extends", "contradicts", "supports", "replicates",
+  "applies-method-of", "reinterprets", "related", "references",
+] as const;
+export const DEFAULT_STATUSES = ["draft", "review", "final", "archived"] as const;
 
 export function triggerIngestion(vaultRoot: string): void {
   const dbPath = path.join(vaultRoot, ".schist", "schist.db");
@@ -1558,6 +1567,17 @@ export async function create_note(
           message: "connection target must not contain line-break characters",
         } satisfies ToolError;
       }
+      // #408: beyond boundaries, the target must round-trip through
+      // CONNECTION_RE (empty target promotes quoted context into the target
+      // slot on read; interior whitespace writes a permanently unindexable
+      // line). A nullish target coerces to "" — missing is empty, not the
+      // literal token "undefined".
+      if (!isRoundTrippableTarget(conn.target == null ? "" : String(conn.target))) {
+        return {
+          error: "VALIDATION_ERROR",
+          message: "connection target must be a non-empty token without whitespace (the connection line could not round-trip through the parser)",
+        } satisfies ToolError;
+      }
     }
     // #317: the #304 loop above only covers STRUCTURED connections. buildNote
     // rewrites the `## Connections` section only when structured connections
@@ -1623,21 +1643,36 @@ export async function create_note(
 
     // Guard against same-day same-title collision: append HH-MM-SS suffix when
     // the target path already exists so we never silently overwrite a note or
-    // produce a git "nothing to commit" error.
+    // produce a git "nothing to commit" error (#408, CLI sibling on #406).
+    // Two hardening notes from the #405–#407 adversarial review:
+    // - lstat, NOT access: access() follows symlinks, so a DANGLING symlink at
+    //   the candidate path read as "no file" and writeFile then wrote the note
+    //   body THROUGH the symlink to wherever it points — outside the vault
+    //   included. lstat sees the link itself, so any occupant counts as taken.
+    // - loop-until-unique, not a single re-mint: a third same-title create in
+    //   the same second re-minted the second note's HH-MM-SS suffix and
+    //   truncated it — the exact loss class the guard exists to stop.
+    const pathTaken = async (rel: string): Promise<boolean> => {
+      try {
+        await fs.lstat(path.join(vaultRoot, rel));
+        return true;
+      } catch {
+        return false;
+      }
+    };
     const baseFilename = `${date}-${slug}.md`;
     const basePath = `${directory}/${baseFilename}`;
     let relPath = basePath;
-    try {
-      await fs.access(path.join(vaultRoot, basePath));
-      // File exists — append time suffix to make the path unique
+    if (await pathTaken(basePath)) {
       const timeSuffix = new Date()
         .toISOString()
         .split("T")[1]
         .slice(0, 8)       // HH:MM:SS
         .replace(/:/g, "-"); // colons not safe in filenames on all OSes
       relPath = `${directory}/${date}-${slug}-${timeSuffix}.md`;
-    } catch {
-      // File does not exist — use base path as-is
+      for (let counter = 2; await pathTaken(relPath); counter++) {
+        relPath = `${directory}/${date}-${slug}-${timeSuffix}-${counter}.md`;
+      }
     }
 
     // #155: intersect with vault.yaml write-grants so we never produce a
@@ -1743,6 +1778,13 @@ export async function add_connection(
       return {
         error: "VALIDATION_ERROR",
         message: "connection target must not contain line-break characters",
+      } satisfies ToolError;
+    }
+    // #408: see create_note's connections loop — same round-trip guard.
+    if (!isRoundTrippableTarget(args.target == null ? "" : String(args.target))) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: "connection target must be a non-empty token without whitespace (the connection line could not round-trip through the parser)",
       } satisfies ToolError;
     }
     const srcIdError = validateNoteId(args.source, config);
