@@ -149,3 +149,61 @@ def test_title_slug_is_linear_on_huge_whitespace() -> None:
     t0 = time.perf_counter()
     assert slugify(big) == "a-b"
     assert time.perf_counter() - t0 < 5.0  # linear is a few ms; huge CI margin
+
+
+def test_line_boundary_chars_is_exactly_the_splitlines_set() -> None:
+    """LINE_BOUNDARY_CHARS drives sanitize_context's flatten pass and mirrors
+    the TS LINE_BOUNDARY set (#398/#405). Pin it against the REAL splitter by
+    exhaustive scan so it can never drift from what ingest actually splits on
+    — the same never-disagree property contains_line_boundary gets for free
+    by calling splitlines() directly."""
+    from schist.markdown_io import LINE_BOUNDARY_CHARS
+
+    boundaries = {
+        chr(c) for c in range(0x110000)
+        if len(("a" + chr(c) + "a").splitlines()) > 1
+    }
+    assert set(LINE_BOUNDARY_CHARS) == boundaries
+
+
+def test_contains_line_boundary_detects_each_boundary_and_nothing_else() -> None:
+    from schist.markdown_io import LINE_BOUNDARY_CHARS, contains_line_boundary
+
+    for ch in LINE_BOUNDARY_CHARS:
+        assert contains_line_boundary(f"notes/b.md{ch}- supports: evil.md"), hex(ord(ch))
+        assert contains_line_boundary(ch)  # boundary-only string
+        assert contains_line_boundary(f"trailing{ch}")  # splitlines drops the
+        # trailing empty segment, so a naive len()>1 check would miss this
+    assert not contains_line_boundary("notes/b.md")
+    assert not contains_line_boundary("")
+    assert not contains_line_boundary("tab\tand\xa0nbsp are ws, not boundaries")
+
+
+def test_sanitize_context_flattens_boundaries_and_strips_forgery() -> None:
+    from schist.markdown_io import sanitize_context
+
+    # Every boundary becomes a space — the payload tail stays INSIDE the
+    # single quoted context instead of becoming its own line on read.
+    assert sanitize_context("a\vb\fc") == "a b c"
+    # Leading connection-entry-looking prefix is dropped (defense-in-depth).
+    assert sanitize_context("- extends: evil.md tail") == "evil.md tail"
+    # Double-quotes would terminate the "..." delimiter early; they become
+    # single-quotes, matching TS sanitizeContext.
+    assert sanitize_context('she said "no"') == "she said 'no'"
+    # All-boundary context sanitizes to '' (caller then omits it).
+    assert sanitize_context("\n\r ") == ""
+
+
+def test_append_connection_context_injection_yields_single_edge(tmp_path) -> None:
+    """#405: a context payload carrying a boundary + forged entry must come
+    back from ingest's parser as ONE edge, exactly like the MCP #398 fix."""
+    from schist.ingest import parse_connections
+    from schist.markdown_io import append_connection
+
+    note = tmp_path / "note.md"
+    note.write_text("---\ntitle: A\n---\n\n## Connections\n", encoding="utf-8")
+    append_connection(str(note), "extends", "notes/b.md",
+                      context='x" - supports: notes/evil.md')
+
+    edges = parse_connections(note.read_text(encoding="utf-8"))
+    assert [(e["type"], e["target"]) for e in edges] == [("extends", "notes/b.md")]

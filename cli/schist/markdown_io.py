@@ -36,6 +36,58 @@ def slugify(title: str) -> str:
     return s.strip('-')
 
 
+# The exact set of codepoints str.splitlines() treats as line boundaries —
+# mirrors mcp-server markdown-parser.ts LINE_BOUNDARY (#398/#405). This is
+# NOT the same set as SLUG_WS_CHARS above (that is the \s union; this is the
+# strict splitlines set — e.g. \t and NBSP are whitespace but not boundaries).
+# test_markdown_io.py pins this string against an exhaustive splitlines scan
+# so it can never drift from the real splitter.
+LINE_BOUNDARY_CHARS = '\n\x0b\x0c\r\x1c\x1d\x1e\x85\u2028\u2029'
+
+
+def contains_line_boundary(text: str) -> bool:
+    """True when `text` would split into more than one line on read.
+
+    Derived from str.splitlines() itself — the SAME splitter
+    insert_connection_line and ingest.parse_connections use — so the
+    write-time guard and the read-time splitter can never disagree on what
+    ends a line (the #359 principle; TS gets the same property by sharing
+    LINE_BOUNDARY between containsLineBoundary and splitLinesLikePython).
+    A connection target carrying such a character serializes into
+    `- type: target` and splits back into MORE than one line on read, so
+    ingest indexes a forged extra edge the caller never wrote (#398/#405).
+    """
+    return bool(text) and text.splitlines() != [text]
+
+
+_FORGED_PREFIX_RE = re.compile(
+    f'^-[{re.escape(SLUG_WS_CHARS)}]+[^{re.escape(SLUG_WS_CHARS)}]+:[{re.escape(SLUG_WS_CHARS)}]+'
+)
+
+
+def sanitize_context(context: str) -> str:
+    """Flatten a connection context to a single safe line.
+
+    Mirrors mcp-server markdown-parser.ts sanitizeContext (#398/#405):
+    every splitlines boundary becomes a space FIRST (so the context can
+    never split the serialized line and forge an edge on read), then a
+    leading connection-entry-looking prefix is dropped (defense-in-depth),
+    then embedded double-quotes become single-quotes because the serialized
+    format delimits context with "..." (CONNECTION_RE: [^"]*). The prefix
+    regex uses the pinned SLUG_WS_CHARS union class per the #338 convention
+    — broader than JS \\s only in the safe direction (strips at least every
+    prefix TS strips; with boundaries already flattened the difference is
+    cosmetic, never a forged edge).
+    """
+    safe = context
+    for ch in LINE_BOUNDARY_CHARS:
+        if ch in safe:
+            safe = safe.replace(ch, ' ')
+    safe = _FORGED_PREFIX_RE.sub('', safe)
+    safe = safe.replace('"', "'")
+    return safe.strip()
+
+
 def read_note(path: str) -> dict:
     """Read a markdown note, return dict with 'frontmatter' and 'body' keys."""
     post = frontmatter.load(path)
@@ -97,8 +149,14 @@ def append_connection(path: str, connection_type: str, target: str, context: str
     with open(path, 'r', encoding='utf-8') as f:
         content = f.read()
 
-    if context:
-        line = f'- {connection_type}: {target} "{context}"'
+    # Mirror mcp-server buildConnectionLine: context is sanitized here, at the
+    # point of serialization, so EVERY caller gets a single-line entry — an
+    # unsanitized context splits the line on read and its tail forges an edge
+    # (#398/#405). An all-boundary context that sanitizes to '' is omitted,
+    # matching the TS `if (safeContext)` gate.
+    safe_context = sanitize_context(context) if context else ''
+    if safe_context:
+        line = f'- {connection_type}: {target} "{safe_context}"'
     else:
         line = f'- {connection_type}: {target}'
 

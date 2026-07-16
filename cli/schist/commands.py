@@ -3,7 +3,7 @@
 import json
 import os
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from . import git_ops, markdown_io, sqlite_query
@@ -55,8 +55,41 @@ def _connection_types(vault_path: str) -> list:
     return [str(x) for x in ct if x]
 
 
+def _statuses(vault_path: str) -> list:
+    """Resolve the status vocabulary for a vault, with the same fallback
+    semantics as _connection_types (see its docstring): a `statuses` LIST in
+    the vault's schist.yaml is used verbatim (including an explicit empty
+    list, which rejects every status); an absent or non-list key falls back
+    to the packaged default rather than silently disabling the check.
+    """
+    st = _load_schema_config(vault_path).get('statuses')
+    if not isinstance(st, list):
+        st = _load_default_config().get('statuses') or []
+    return [str(x) for x in st if x]
+
+
 def add(args, vault_path: str, db_path: str):
     """Create a new note in the vault."""
+    # Validate the status against the configured vocabulary before writing
+    # (#407). MCP create_note has enforced this server-side since #276; an
+    # unchecked status is indexed verbatim by ingest, hidden from every
+    # --status filter, and blocks later MCP-side repair via update_note.
+    # Like MCP, the bare default resolves to 'draft' only when the vault's
+    # vocabulary includes it, else to the first configured status — so a
+    # default-status `schist add` can't slip an out-of-vocabulary value
+    # onto disk in a vault whose custom statuses exclude 'draft'.
+    statuses = _statuses(vault_path)
+    status = args.status
+    if status is None:
+        status = 'draft' if 'draft' in statuses else (statuses[0] if statuses else 'draft')
+    if status not in statuses:
+        allowed = ', '.join(statuses) if statuses else '(none configured)'
+        print(
+            f"Error: status '{status}' is not in the configured statuses: {allowed}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     title = args.title
     body = args.body
     if body is None and not sys.stdin.isatty():
@@ -69,8 +102,16 @@ def add(args, vault_path: str, db_path: str):
     dest_dir = os.path.join(vault_path, args.directory)
     os.makedirs(dest_dir, exist_ok=True)
     filepath = os.path.join(dest_dir, filename)
+    # Same-day same-title collision guard (#406): mirror MCP create_note —
+    # never let open('w') silently truncate an existing note; append an
+    # HH-MM-SS suffix (UTC, like the TS toISOString slice) to mint a unique
+    # path instead.
+    if os.path.exists(filepath):
+        time_suffix = datetime.now(timezone.utc).strftime('%H-%M-%S')
+        filename = f'{date.today().isoformat()}-{slug}-{time_suffix}.md'
+        filepath = os.path.join(dest_dir, filename)
 
-    fm = {'title': title, 'date': date.today().isoformat(), 'status': args.status}
+    fm = {'title': title, 'date': date.today().isoformat(), 'status': status}
     # Normalize on the write side so on-disk frontmatter matches what ingest
     # indexes (#399). MCP create_note already does this (#289 tags, #302
     # concepts); the CLI is the human-facing write path and must not diverge.
@@ -111,6 +152,21 @@ def link(args, vault_path: str, db_path: str):
         print(
             f"Error: connection type '{args.link_type}' is not in the configured "
             f"connection_types: {allowed}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Reject a target carrying any str.splitlines() boundary before writing
+    # (#405) — the CLI sibling of MCP add_connection's #398 guard. Such a
+    # target serializes into `- type: target` and splits back into MORE than
+    # one line on read, so ingest indexes a forged extra edge nobody wrote.
+    # The context field is the parallel vector; it is flattened (not
+    # rejected) by sanitize_context inside append_connection, matching the
+    # MCP split of reject-target / sanitize-context.
+    if markdown_io.contains_line_boundary(str(args.target)):
+        print(
+            'Error: target must not contain line-break characters '
+            '(it would forge extra connection entries on read)',
             file=sys.stderr,
         )
         sys.exit(1)
