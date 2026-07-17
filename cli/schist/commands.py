@@ -4,7 +4,6 @@ import json
 import os
 import re
 import sys
-from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 
@@ -54,32 +53,9 @@ def _assert_resolves_inside_vault(vault_path: str, candidate_path: str, what: st
         sys.exit(1)
 
 
-@contextmanager
-def _vault_write_lock(vault_path: str):
-    """Serialize CLI vault writes across processes (#412).
-
-    Exclusive advisory flock on <vault>/.schist/cli-write.lock, held across
-    a read-modify-write: append_connection is read → insert → whole-file
-    rewrite, so two unserialized `schist link` calls on the same source both
-    read the same base content and the loser's edge silently vanishes. The
-    lock file lives under .schist/ (gitignored runtime state, like
-    schist.db) and is never deleted — unlinking a flock'd path is a classic
-    unlock-bypass race. flock is POSIX-only, like the rest of the deployment
-    (Mac/Linux spokes, Pi hub). NOTE: this serializes CLI↔CLI only; the MCP
-    server serializes its own writes in-process and does not take this lock
-    — the cross-writer CLI↔MCP window is the remaining gap noted in #412.
-    """
-    import fcntl
-
-    lock_dir = os.path.join(vault_path, '.schist')
-    os.makedirs(lock_dir, exist_ok=True)
-    fd = os.open(os.path.join(lock_dir, 'cli-write.lock'), os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+# The CLI vault write lock moved to git_ops.vault_write_lock (#419): sync.py
+# stages+commits too, and every git-index user must take the same lock.
+_vault_write_lock = git_ops.vault_write_lock
 
 
 def _load_default_config() -> dict:
@@ -242,15 +218,29 @@ def add(args, vault_path: str, db_path: str):
 
     # #411: containment for --dir. Textual check BEFORE the join (an absolute
     # value makes os.path.join discard the vault prefix entirely), physical
-    # check AFTER makedirs (an in-vault symlink pointing outside is invisible
-    # to any string test — resolve what's actually on disk). MCP has enforced
-    # both halves since #323; the CLI had neither.
+    # check BEFORE makedirs (#418): realpath resolves a dangling symlink's
+    # target without requiring it to exist, so an outside-pointing dangling
+    # symlink is rejected as containment — the old makedirs-first order
+    # crashed with an uncaught FileExistsError before the guard ever fired.
+    # MCP has enforced both halves since #323; the CLI had neither.
     directory = str(args.directory)
     _reject_escaping_relpath(directory, 'directory')
     today_str = date.today().isoformat()
     dest_dir = os.path.join(vault_path, directory)
-    os.makedirs(dest_dir, exist_ok=True)
     _assert_resolves_inside_vault(vault_path, dest_dir, 'directory')
+    # exist_ok only suppresses EEXIST for a real directory — a regular file
+    # or an in-vault-pointing DANGLING symlink at the path still raises
+    # (#418). Refuse cleanly rather than create through/around the occupant.
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except (FileExistsError, NotADirectoryError):
+        print(
+            f"Error: directory path '{directory}' is occupied by a "
+            f'non-directory (a file or dangling symlink) — remove it or '
+            f'choose another --dir',
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # Same-day same-title collision guard (#406), race-safe like the MCP
     # sibling (#408): candidate names in priority order — base, then an
@@ -320,7 +310,14 @@ def add(args, vault_path: str, db_path: str):
             filename = _next_free()
 
     rel_path = os.path.relpath(filepath, vault_path)
-    ok, output = git_ops.commit(vault_path, f'add: {rel_path}', [rel_path])
+    # #419: stage+commit under the vault write lock — commit() ends in a
+    # plain `git commit -m` that sweeps EVERYTHING staged, so an unserialized
+    # add racing a link's (locked) stage+commit lands this note in the link's
+    # commit and leaves this one empty. The note write above stays outside
+    # the lock: O_EXCL is already atomic, and an on-disk-but-unstaged file
+    # can't be swept by someone else's pathspec'd `git add`.
+    with git_ops.vault_write_lock(vault_path):
+        ok, output = git_ops.commit(vault_path, f'add: {rel_path}', [rel_path])
     if not ok:
         print(f'Warning: git commit failed: {output}', file=sys.stderr)
     elif output.startswith(git_ops.HOOK_STALL_WARNING_PREFIX):
