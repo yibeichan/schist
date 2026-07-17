@@ -22,7 +22,12 @@ def main():
     p_add.add_argument('--tags', default=None, help='Comma-separated tags')
     p_add.add_argument('--concepts', default=None, help='Comma-separated concept slugs')
     p_add.add_argument('--file-ref', default=None, dest='file_ref', help='External file path/reference to index in frontmatter')
-    p_add.add_argument('--status', default='draft')
+    # Default resolves in commands.add (#407): 'draft' when the vault's
+    # vocabulary includes it, else the first configured status — mirroring
+    # MCP create_note's resolved-default so a bare `schist add` can't write
+    # an out-of-vocabulary status on a vault with custom statuses.
+    p_add.add_argument('--status', default=None,
+                       help="Note status (default: draft, or the vault's first configured status)")
     p_add.add_argument('--dir', default='notes', dest='directory')
 
     # link
