@@ -36,10 +36,28 @@ def vault_write_lock(vault_path: str):
     noted in #412.
     """
     import fcntl
+    import sys
 
     lock_dir = os.path.join(vault_path, '.schist')
     os.makedirs(lock_dir, exist_ok=True)
-    fd = os.open(os.path.join(lock_dir, 'cli-write.lock'), os.O_CREAT | os.O_RDWR, 0o644)
+    lock_path = os.path.join(lock_dir, 'cli-write.lock')
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    except PermissionError:
+        # A second unix user on a shared vault can't O_RDWR a 0o644 lock
+        # file owned by the first (/review finding). flock(2) grants LOCK_EX
+        # on ANY fd regardless of open mode, so read-only is just as
+        # exclusive — fall back before failing.
+        try:
+            fd = os.open(lock_path, os.O_RDONLY)
+        except OSError as e:
+            print(
+                f'Error: cannot open the vault write lock {lock_path}: {e} — '
+                f'fix its permissions (any mode readable by every vault '
+                f'writer works; the lock carries no data)',
+                file=sys.stderr,
+            )
+            sys.exit(1)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
