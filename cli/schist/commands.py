@@ -291,32 +291,49 @@ def add(args, vault_path: str, db_path: str):
     # write makes open('x') raise FileExistsError; advance to the next free
     # candidate instead of truncating. Capped like MCP's
     # MAX_COLLISION_RETRIES so a wedged filesystem can't spin forever.
+    #
+    # The WRITE sits inside the same lock acquisition as the commit (#419
+    # /review follow-up). An earlier revision wrote outside the lock claiming
+    # an unstaged file "can't be swept by someone else's pathspec'd git add"
+    # — false: sync push stages DIRECTORY pathspecs (_scope_targets yields
+    # `notes/`, not per-file specs), so a concurrent sync swept the on-disk
+    # note into its own `sync(...)` commit (attribution lost; this add then
+    # warned "nothing to commit" for a note that landed), and could even
+    # hash a PARTIALLY WRITTEN file — O_EXCL makes the create atomic, not
+    # the content write.
     max_collision_retries = 50
-    for attempt in range(max_collision_retries + 1):
-        filepath = os.path.join(dest_dir, filename)
-        try:
-            markdown_io.write_note(filepath, fm, body, exclusive=True)
-            break
-        except FileExistsError:
-            if attempt == max_collision_retries:
-                print(
-                    f"Error: could not find a free filename for "
-                    f"'{today_str}-{slug}*.md' after {max_collision_retries} "
-                    f"collision retries — extreme concurrent add contention "
-                    f"on this title; retry, or vary the title.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            filename = _next_free()
-
-    rel_path = os.path.relpath(filepath, vault_path)
-    # #419: stage+commit under the vault write lock — commit() ends in a
-    # plain `git commit -m` that sweeps EVERYTHING staged, so an unserialized
-    # add racing a link's (locked) stage+commit lands this note in the link's
-    # commit and leaves this one empty. The note write above stays outside
-    # the lock: O_EXCL is already atomic, and an on-disk-but-unstaged file
-    # can't be swept by someone else's pathspec'd `git add`.
     with git_ops.vault_write_lock(vault_path):
+        for attempt in range(max_collision_retries + 1):
+            filepath = os.path.join(dest_dir, filename)
+            try:
+                markdown_io.write_note(filepath, fm, body, exclusive=True)
+                break
+            except FileExistsError:
+                if attempt == max_collision_retries:
+                    print(
+                        f"Error: could not find a free filename for "
+                        f"'{today_str}-{slug}*.md' after {max_collision_retries} "
+                        f"collision retries — extreme concurrent add contention "
+                        f"on this title; retry, or vary the title.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                filename = _next_free()
+            except OSError as e:
+                # FileExistsError is handled above; anything else (EACCES on
+                # a read-only dir, ELOOP, EMFILE) must be a clean error, not
+                # a traceback — the lexists probe reads all of those as
+                # "free", so the exclusive open is where they surface (the
+                # CLI face of MCP pathTaken's #401 distinguish-error-kinds
+                # rethrow).
+                print(f'Error: could not write note: {e}', file=sys.stderr)
+                sys.exit(1)
+
+        rel_path = os.path.relpath(filepath, vault_path)
+        # #419: commit under the SAME lock hold — commit() ends in a plain
+        # `git commit -m` that sweeps EVERYTHING staged, so an unserialized
+        # add racing a link's (locked) stage+commit lands this note in the
+        # link's commit and leaves this one empty.
         ok, output = git_ops.commit(vault_path, f'add: {rel_path}', [rel_path])
     if not ok:
         print(f'Warning: git commit failed: {output}', file=sys.stderr)
