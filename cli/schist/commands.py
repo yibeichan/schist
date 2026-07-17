@@ -4,11 +4,82 @@ import json
 import os
 import re
 import sys
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 
 from . import git_ops, markdown_io, sqlite_query
 from .ingest import _normalize_concept_slug, _normalize_tag
+
+
+def _reject_escaping_relpath(value: str, what: str):
+    """Reject an absolute or `..`-carrying path argument before it is joined
+    onto the vault root (#411). os.path.join DISCARDS the vault prefix when
+    the second argument is absolute, so `--dir /tmp/x` wrote wherever it
+    pointed with only a later git-commit warning as a symptom. Same textual
+    rule as MCP create_note's directory guard (`includes("..") ||
+    path.isAbsolute`) so the two writers reject the same shapes; the
+    substring `..` test is deliberately broad for that parity.
+    """
+    if not value or '..' in value or os.path.isabs(value):
+        print(
+            f'Error: invalid {what}: must be relative and not contain ..',
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def _assert_resolves_inside_vault(vault_path: str, candidate_path: str, what: str):
+    """Fail unless candidate_path physically resolves inside the vault (#411).
+
+    The textual pre-check above catches `..`/absolute escapes; this catches
+    the physical one — a symlink inside the vault pointing outside it, which
+    no string check can see. The CLI sibling of MCP's resolvesInsideVault
+    (add_connection) and withWriteLock's assertResolvesInside (#323).
+    os.path.realpath, never Path.resolve() — resolve() raises RuntimeError
+    (not OSError) on a symlink loop on Python ≤3.12 (#401) — and any error
+    resolving counts as OUTSIDE, never as safe.
+    """
+    try:
+        real_root = os.path.realpath(vault_path)
+        real_candidate = os.path.realpath(candidate_path)
+    except (OSError, RuntimeError) as e:
+        print(f'Error: could not resolve {what} path: {e}', file=sys.stderr)
+        sys.exit(1)
+    if real_candidate != real_root and not real_candidate.startswith(real_root + os.sep):
+        print(
+            f'Error: {what} resolves outside the vault (symlink?)',
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+@contextmanager
+def _vault_write_lock(vault_path: str):
+    """Serialize CLI vault writes across processes (#412).
+
+    Exclusive advisory flock on <vault>/.schist/cli-write.lock, held across
+    a read-modify-write: append_connection is read → insert → whole-file
+    rewrite, so two unserialized `schist link` calls on the same source both
+    read the same base content and the loser's edge silently vanishes. The
+    lock file lives under .schist/ (gitignored runtime state, like
+    schist.db) and is never deleted — unlinking a flock'd path is a classic
+    unlock-bypass race. flock is POSIX-only, like the rest of the deployment
+    (Mac/Linux spokes, Pi hub). NOTE: this serializes CLI↔CLI only; the MCP
+    server serializes its own writes in-process and does not take this lock
+    — the cross-writer CLI↔MCP window is the remaining gap noted in #412.
+    """
+    import fcntl
+
+    lock_dir = os.path.join(vault_path, '.schist')
+    os.makedirs(lock_dir, exist_ok=True)
+    fd = os.open(os.path.join(lock_dir, 'cli-write.lock'), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def _load_default_config() -> dict:
@@ -145,9 +216,17 @@ def add(args, vault_path: str, db_path: str):
         )
         sys.exit(1)
 
+    # #411: containment for --dir. Textual check BEFORE the join (an absolute
+    # value makes os.path.join discard the vault prefix entirely), physical
+    # check AFTER makedirs (an in-vault symlink pointing outside is invisible
+    # to any string test — resolve what's actually on disk). MCP has enforced
+    # both halves since #323; the CLI had neither.
+    directory = str(args.directory)
+    _reject_escaping_relpath(directory, 'directory')
     today_str = date.today().isoformat()
-    dest_dir = os.path.join(vault_path, args.directory)
+    dest_dir = os.path.join(vault_path, directory)
     os.makedirs(dest_dir, exist_ok=True)
+    _assert_resolves_inside_vault(vault_path, dest_dir, 'directory')
 
     # Same-day same-title collision guard (#406), race-safe like the MCP
     # sibling (#408): candidate names in priority order — base, then an
@@ -289,14 +368,27 @@ def link(args, vault_path: str, db_path: str):
         )
         sys.exit(1)
 
-    source_path = os.path.join(vault_path, args.source)
+    # #411: same two-layer containment as add --dir — textual check before
+    # the join, physical (realpath) check on the existing note so an in-vault
+    # symlink pointing outside can't route the append through itself. MCP
+    # add_connection has enforced both since #323.
+    source_rel = str(args.source)
+    _reject_escaping_relpath(source_rel, 'source')
+    source_path = os.path.join(vault_path, source_rel)
     if not os.path.exists(source_path):
         print(f'Error: source not found: {args.source}', file=sys.stderr)
         sys.exit(1)
+    _assert_resolves_inside_vault(vault_path, source_path, 'source')
 
-    markdown_io.append_connection(source_path, args.link_type, args.target, args.context)
+    # #412: append_connection is read → insert → whole-file rewrite; two
+    # unserialized links on the same source both read the same base content
+    # and the loser's edge silently vanishes. Hold the vault write lock
+    # across the RMW AND the commit so each commit stages exactly its own
+    # append (mirrors MCP holding its write mutex across the git commit).
+    with _vault_write_lock(vault_path):
+        markdown_io.append_connection(source_path, args.link_type, args.target, args.context)
 
-    ok, output = git_ops.commit(vault_path, f'link: {args.source} -{args.link_type}-> {args.target}', [args.source])
+        ok, output = git_ops.commit(vault_path, f'link: {args.source} -{args.link_type}-> {args.target}', [args.source])
     if not ok:
         print(f'Warning: git commit failed: {output}', file=sys.stderr)
     elif output.startswith(git_ops.HOOK_STALL_WARNING_PREFIX):

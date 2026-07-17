@@ -541,3 +541,135 @@ class TestLinkBracketTarget:
         assert exc.value.code == 1
         assert "bracket" in capsys.readouterr().err
         assert target not in (tmp_path / "notes" / "src.md").read_text()
+
+
+class TestAddDirContainment:
+    """#411 — `add --dir` must not write outside the vault: textual check
+    on the raw argument (os.path.join discards the vault prefix for an
+    absolute value), then a physical realpath check for in-vault symlinks
+    pointing outside. MCP has enforced both since #323."""
+
+    def test_rejects_absolute_dir(self, tmp_path, capsys):
+        outside = tmp_path / "outside"
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        with pytest.raises(SystemExit) as exc:
+            commands.add(_add_args("Note", directory=str(outside)),
+                         str(vault), str(vault / ".schist" / "schist.db"))
+        assert exc.value.code == 1
+        assert "invalid directory" in capsys.readouterr().err
+        assert not outside.exists()
+
+    def test_rejects_dotdot_dir(self, tmp_path, capsys):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        with pytest.raises(SystemExit) as exc:
+            commands.add(_add_args("Note", directory="../escape"),
+                         str(vault), str(vault / ".schist" / "schist.db"))
+        assert exc.value.code == 1
+        assert "invalid directory" in capsys.readouterr().err
+        assert not (tmp_path / "escape").exists()
+
+    def test_rejects_symlinked_dir_escaping_vault(self, tmp_path, capsys):
+        # 'evil' passes every textual check — only resolving what is actually
+        # on disk can see the escape.
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "evil").symlink_to(outside)
+        with pytest.raises(SystemExit) as exc:
+            commands.add(_add_args("Note", directory="evil"),
+                         str(vault), str(vault / ".schist" / "schist.db"))
+        assert exc.value.code == 1
+        assert "resolves outside the vault" in capsys.readouterr().err
+        assert list(outside.iterdir()) == []
+
+    def test_nested_relative_dir_still_works(self, tmp_path, capsys):
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.add(_add_args("Note", directory="projects/sub"),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        capsys.readouterr()
+        assert len(list((tmp_path / "projects" / "sub").glob("*.md"))) == 1
+
+
+class TestLinkSourceContainment:
+    """#411 — `link`'s source is joined onto the vault with the same two-layer
+    guard as add --dir; a symlinked note pointing outside must not route the
+    append through itself."""
+
+    def test_rejects_dotdot_source(self, tmp_path, capsys):
+        _vault_with_types(tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            commands.link(
+                _link_args("../outside.md", "notes/dst.md", "extends"),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert exc.value.code == 1
+        assert "invalid source" in capsys.readouterr().err
+
+    def test_rejects_absolute_source(self, tmp_path, capsys):
+        _vault_with_types(tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            commands.link(
+                _link_args(str(tmp_path / "notes" / "src.md"), "notes/dst.md", "extends"),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert exc.value.code == 1
+        assert "invalid source" in capsys.readouterr().err
+
+    def test_rejects_symlinked_source_escaping_vault(self, tmp_path, capsys):
+        _vault_with_types(tmp_path)
+        outside = tmp_path.parent / f"{tmp_path.name}-outside.md"
+        outside.write_text(
+            "---\ntitle: Out\nstatus: draft\n---\n\nBody\n\n## Connections\n",
+            encoding="utf-8",
+        )
+        before = outside.read_text(encoding="utf-8")
+        (tmp_path / "notes" / "evil.md").symlink_to(outside)
+        with pytest.raises(SystemExit) as exc:
+            commands.link(
+                _link_args("notes/evil.md", "notes/dst.md", "extends"),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert exc.value.code == 1
+        assert "resolves outside the vault" in capsys.readouterr().err
+        assert outside.read_text(encoding="utf-8") == before
+
+
+class TestLinkConcurrentAppend:
+    """#412 — append_connection is read → insert → rewrite; without the vault
+    write lock two concurrent links both read the same base content and the
+    loser's edge silently vanishes."""
+
+    def test_concurrent_links_keep_both_edges(self, tmp_path, capsys):
+        import threading
+        import time
+
+        _vault_with_types(tmp_path)
+        real_insert = markdown_io.insert_connection_line
+
+        def slow_insert(content, line):
+            # Widen the read→write window so an unserialized second link
+            # deterministically reads the pre-append content.
+            time.sleep(0.05)
+            return real_insert(content, line)
+
+        def run(target):
+            commands.link(
+                _link_args("notes/src.md", target, "extends"),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")), \
+             patch("schist.markdown_io.insert_connection_line", side_effect=slow_insert):
+            threads = [threading.Thread(target=run, args=(t,))
+                       for t in ("notes/b.md", "notes/c.md")]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        capsys.readouterr()
+
+        edges = _parsed_edges(tmp_path)
+        assert sorted(e["target"] for e in edges) == ["notes/b.md", "notes/c.md"]
