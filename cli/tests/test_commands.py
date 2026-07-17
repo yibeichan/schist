@@ -734,3 +734,80 @@ class TestConnectionTypeVocabTokens:
             )
         capsys.readouterr()
         assert "- extends: notes/dst.md" in (notes / "src.md").read_text(encoding="utf-8")
+
+
+class TestAddDirOccupiedPath:
+    """#418 — makedirs on a dangling symlink (or a file) at --dir crashed
+    with an uncaught FileExistsError BEFORE the #411 containment guard fired:
+    exist_ok=True only suppresses EEXIST for a real directory. Containment
+    now runs first (realpath resolves a dangling symlink's target without
+    requiring it to exist), and an in-vault occupant is a clean error."""
+
+    def test_dangling_symlink_dir_pointing_outside_is_containment_error(self, tmp_path, capsys):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "evil").symlink_to(tmp_path / "not-there")
+        with pytest.raises(SystemExit) as exc:
+            commands.add(_add_args("Note", directory="evil"),
+                         str(vault), str(vault / ".schist" / "schist.db"))
+        assert exc.value.code == 1
+        assert "resolves outside the vault" in capsys.readouterr().err
+        assert not (tmp_path / "not-there").exists()
+
+    def test_dangling_symlink_dir_pointing_inside_is_clean_error(self, tmp_path, capsys):
+        (tmp_path / "evil").symlink_to(tmp_path / "not-there")
+        with pytest.raises(SystemExit) as exc:
+            commands.add(_add_args("Note", directory="evil"),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        assert exc.value.code == 1
+        assert "occupied by a non-directory" in capsys.readouterr().err
+        assert not (tmp_path / "not-there").exists()
+
+    def test_file_at_dir_path_is_clean_error(self, tmp_path, capsys):
+        (tmp_path / "notes").write_text("i am a file", encoding="utf-8")
+        with pytest.raises(SystemExit) as exc:
+            commands.add(_add_args("Note", directory="notes"),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        assert exc.value.code == 1
+        assert "occupied by a non-directory" in capsys.readouterr().err
+        assert (tmp_path / "notes").read_text(encoding="utf-8") == "i am a file"
+
+
+def _assert_commit_runs_locked(vault_path, *_args, **_kwargs):
+    """Stand-in for git_ops.commit that PROVES the caller holds the vault
+    write lock: a nonblocking flock attempt on a fresh fd must fail while an
+    exclusive lock is held (flock is per open-file-description, so this works
+    within one process). #419."""
+    import fcntl
+    import os as _os
+
+    fd = _os.open(_os.path.join(vault_path, ".schist", "cli-write.lock"), _os.O_RDWR)
+    try:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        _os.close(fd)
+    return (True, "")
+
+
+class TestCommitUnderWriteLock:
+    """#419 — git_ops.commit ends in a plain `git commit -m`, which commits
+    EVERYTHING staged; every CLI stage+commit must therefore run inside the
+    vault write lock or a concurrent caller's commit sweeps this caller's
+    staged file into the wrong commit and leaves this one empty."""
+
+    def test_add_commits_inside_the_lock(self, tmp_path, capsys):
+        with patch("schist.commands.git_ops.commit", side_effect=_assert_commit_runs_locked):
+            commands.add(_add_args("Note"),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        capsys.readouterr()
+
+    def test_link_commits_inside_the_lock(self, tmp_path, capsys):
+        # Regression pin for the #412 behavior link already had.
+        _vault_with_types(tmp_path)
+        with patch("schist.commands.git_ops.commit", side_effect=_assert_commit_runs_locked):
+            commands.link(
+                _link_args("notes/src.md", "notes/dst.md", "extends"),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        capsys.readouterr()

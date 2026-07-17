@@ -647,44 +647,52 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
     if git_ops.has_uncommitted_changes(vault_path) or git_ops.ignored_scope_files(
         vault_path, config.scope
     )[0]:
-        ok, output = git_ops.stage_scope_files(vault_path, config.scope)
-        if not ok:
-            print(f"Error: failed to stage scope '{config.scope}': {output}", file=sys.stderr)
-            sys.exit(1)
-        if output.startswith(git_ops.JUNK_SKIP_WARNING_PREFIX):
-            # Junk-allowlisted ignored files were skipped (#388) — surface
-            # the one-line warning but keep syncing.
-            print(f"Warning: {output}", file=sys.stderr)
-
-        # Count staged files
-        import subprocess
-
-        try:
-            result = subprocess.run(
-                ["git", "diff", "--cached", "--name-only"],
-                cwd=vault_path, capture_output=True, text=True, timeout=30,
-            )
-        except subprocess.TimeoutExpired:
-            # #314 review: the sixth unbounded git call in this hot path.
-            # Bail like a stage failure — the staged files stay staged and
-            # the next push attempt picks them up.
-            print("Error: git diff --cached timed out after 30s (NFS stall?)", file=sys.stderr)
-            sys.exit(1)
-        staged = [f for f in result.stdout.strip().split("\n") if f]
-        n = len(staged)
-
-        if n > 0:
-            msg = f"sync({config.identity}): {n} file{'s' if n != 1 else ''}"
-            ok, output = git_ops.commit(vault_path, msg, files=staged)
+        # #419: the whole stage → count → commit sequence runs under the
+        # vault write lock — commit() ends in a plain `git commit -m` that
+        # sweeps EVERYTHING staged, and MCP's triggerSpokePush spawns
+        # `schist sync push` concurrently with interactive CLI writes as a
+        # matter of course. Locking only the commit would still let an
+        # add/link commit fire between this staging and this commit and
+        # sweep the staged scope files into the wrong commit.
+        with git_ops.vault_write_lock(vault_path):
+            ok, output = git_ops.stage_scope_files(vault_path, config.scope)
             if not ok:
-                print(f"Error: commit failed: {output}", file=sys.stderr)
+                print(f"Error: failed to stage scope '{config.scope}': {output}", file=sys.stderr)
                 sys.exit(1)
-            if output.startswith(git_ops.HOOK_STALL_WARNING_PREFIX):
-                # The commit landed despite the stalled hook (#364) — warn
-                # and continue to the push; exiting here (the old False path)
-                # stranded an already-landed commit unpushed.
+            if output.startswith(git_ops.JUNK_SKIP_WARNING_PREFIX):
+                # Junk-allowlisted ignored files were skipped (#388) — surface
+                # the one-line warning but keep syncing.
                 print(f"Warning: {output}", file=sys.stderr)
-            print(f"Committed {n} file{'s' if n != 1 else ''}")
+
+            # Count staged files
+            import subprocess
+
+            try:
+                result = subprocess.run(
+                    ["git", "diff", "--cached", "--name-only"],
+                    cwd=vault_path, capture_output=True, text=True, timeout=30,
+                )
+            except subprocess.TimeoutExpired:
+                # #314 review: the sixth unbounded git call in this hot path.
+                # Bail like a stage failure — the staged files stay staged and
+                # the next push attempt picks them up.
+                print("Error: git diff --cached timed out after 30s (NFS stall?)", file=sys.stderr)
+                sys.exit(1)
+            staged = [f for f in result.stdout.strip().split("\n") if f]
+            n = len(staged)
+
+            if n > 0:
+                msg = f"sync({config.identity}): {n} file{'s' if n != 1 else ''}"
+                ok, output = git_ops.commit(vault_path, msg, files=staged)
+                if not ok:
+                    print(f"Error: commit failed: {output}", file=sys.stderr)
+                    sys.exit(1)
+                if output.startswith(git_ops.HOOK_STALL_WARNING_PREFIX):
+                    # The commit landed despite the stalled hook (#364) — warn
+                    # and continue to the push; exiting here (the old False path)
+                    # stranded an already-landed commit unpushed.
+                    print(f"Warning: {output}", file=sys.stderr)
+                print(f"Committed {n} file{'s' if n != 1 else ''}")
 
     # Push
     if not git_ops.has_unpushed_commits(vault_path):

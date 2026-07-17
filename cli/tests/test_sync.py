@@ -516,6 +516,41 @@ class TestSyncPush:
         mock_push.assert_called_once()
         assert "Pushed to hub" in capsys.readouterr().out
 
+    @patch("schist.sync.git_ops.push", return_value=(True, ""))
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+    @patch("schist.sync.git_ops.stage_scope_files", return_value=(True, ""))
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=True)
+    @patch("subprocess.run")
+    def test_stage_and_commit_run_inside_the_vault_write_lock(
+            self, mock_run, mock_changes, mock_stage, mock_unpushed, mock_push,
+            tmp_path, capsys):
+        """#419: sync's stage → commit must hold the same vault write lock as
+        add/link — commit() sweeps the whole index, and MCP's triggerSpokePush
+        spawns `schist sync push` concurrently with interactive CLI writes."""
+        import fcntl
+        import os as _os
+
+        from schist.sync import sync_push
+
+        mock_run.return_value = MagicMock(stdout="research/mario/note.md\n", returncode=0)
+        vault = _make_spoke(tmp_path)
+
+        def assert_locked(vault_path, *_a, **_k):
+            # A nonblocking flock on a fresh fd must fail while the exclusive
+            # lock is held (flock is per open-file-description).
+            fd = _os.open(_os.path.join(vault_path, ".schist", "cli-write.lock"), _os.O_RDWR)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                _os.close(fd)
+            return (True, "")
+
+        with patch("schist.sync.git_ops.commit", side_effect=assert_locked) as mock_commit:
+            sync_push(MagicMock(), vault, "db.sqlite")
+        mock_commit.assert_called_once()
+        capsys.readouterr()
+
     @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=True)
     @patch("schist.sync.git_ops.stage_scope_files", return_value=(False, "fatal: pathspec 'global/' did not match"))
     def test_stage_failure_is_reported(self, mock_stage, mock_changes, tmp_path, capsys):

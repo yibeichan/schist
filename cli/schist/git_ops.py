@@ -2,11 +2,50 @@
 
 import fnmatch
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import signal
 import subprocess
 
 import yaml
+
+
+@contextmanager
+def vault_write_lock(vault_path: str):
+    """Serialize CLI vault writes across processes (#412, #419).
+
+    Exclusive advisory flock on <vault>/.schist/cli-write.lock. Two things
+    need this serialization:
+    - read-modify-writes: append_connection is read → insert → whole-file
+      rewrite, so two unserialized `schist link` calls on the same source
+      both read the same base content and the loser's edge silently
+      vanishes (#412);
+    - the git INDEX: commit() below is `git add <files>` then a plain
+      `git commit -m`, which commits EVERYTHING staged — an unserialized
+      concurrent stage+commit pair sweeps the other caller's staged file
+      into the wrong commit and leaves the loser's own commit empty
+      (#419). Every CLI stage+commit (add, link, sync push) must run
+      inside this lock.
+    Lives here (not commands.py) because sync.py stages+commits too. The
+    lock file sits under .schist/ (gitignored runtime state, like
+    schist.db) and is never deleted — unlinking a flock'd path is a classic
+    unlock-bypass race. flock is POSIX-only, like the rest of the
+    deployment (Mac/Linux spokes, Pi hub). NOTE: this serializes CLI↔CLI
+    only; the MCP server serializes its own writes in-process and does not
+    take this lock — the cross-writer CLI↔MCP window is the remaining gap
+    noted in #412.
+    """
+    import fcntl
+
+    lock_dir = os.path.join(vault_path, '.schist')
+    os.makedirs(lock_dir, exist_ok=True)
+    fd = os.open(os.path.join(lock_dir, 'cli-write.lock'), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 GLOBAL_SCOPE_FALLBACK_DIRS = [
