@@ -26,7 +26,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from schist import commands, markdown_io
+from schist import commands, git_ops, markdown_io
 
 
 def _add_args(title, *, body="body", tags=None, concepts=None, file_ref=None,
@@ -811,3 +811,67 @@ class TestCommitUnderWriteLock:
                 str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
             )
         capsys.readouterr()
+
+
+class TestReviewLockHardening:
+    """/review follow-up batch on #419/#416: the note WRITE must hold the
+    vault write lock (sync push stages DIRECTORY pathspecs, so an on-disk-
+    but-uncommitted note outside the lock is swept — possibly half-written —
+    into a concurrent sync commit), and failure modes must be clean errors."""
+
+    def test_add_writes_the_note_inside_the_lock(self, tmp_path, capsys):
+        def locked_write(path, fm, body, exclusive=False):
+            # Same nonblocking-flock probe as _assert_commit_runs_locked.
+            import fcntl
+            import os as _os
+            fd = _os.open(_os.path.join(str(tmp_path), ".schist", "cli-write.lock"), _os.O_RDONLY)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                _os.close(fd)
+            Path(path).write_text("---\ntitle: stub\n---\n\nstub\n", encoding="utf-8")
+
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")), \
+             patch("schist.commands.markdown_io.write_note", side_effect=locked_write):
+            commands.add(_add_args("Note"),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        capsys.readouterr()
+
+    def test_unwritable_dest_dir_is_a_clean_error(self, tmp_path, capsys):
+        # The lexists probe reads EACCES as "free"; the exclusive open is
+        # where it surfaces — previously an uncaught PermissionError
+        # traceback, now a clean exit.
+        notes = tmp_path / "notes"
+        notes.mkdir(mode=0o555)
+        try:
+            with pytest.raises(SystemExit) as exc:
+                commands.add(_add_args("Note"),
+                             str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        finally:
+            notes.chmod(0o755)
+        assert exc.value.code == 1
+        assert "could not write note" in capsys.readouterr().err
+
+    def test_lock_works_when_lock_file_is_not_writable(self, tmp_path):
+        # A second unix user (simulated here by a 0o400 lock file that even
+        # the owner can't O_RDWR) must fall back to a read-only fd — flock
+        # grants LOCK_EX regardless of open mode — instead of crashing every
+        # add/link/sync with a raw PermissionError traceback.
+        import fcntl
+        import os as _os
+
+        lock_dir = tmp_path / ".schist"
+        lock_dir.mkdir()
+        lock = lock_dir / "cli-write.lock"
+        lock.touch(mode=0o400)
+        try:
+            with git_ops.vault_write_lock(str(tmp_path)):
+                fd = _os.open(str(lock), _os.O_RDONLY)
+                try:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    _os.close(fd)
+        finally:
+            lock.chmod(0o644)
