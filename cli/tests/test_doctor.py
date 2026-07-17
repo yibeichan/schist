@@ -18,6 +18,7 @@ from schist.doctor import (
     check_ingest_available,
     check_mcp_config,
     check_mcp_schema_alignment,
+    check_mcp_vocab_alignment,
     check_node,
     check_post_commit_hook,
     check_python,
@@ -1448,3 +1449,121 @@ class TestDoctorHubWiring:
         results = run_doctor(None, None, as_json=False)
         labels = [r.label for r in results]
         assert "Hub ACL drift" not in labels
+
+
+class TestCheckMcpVocabAlignment:
+    """#414: the repo pins DEFAULT_CONNECTION_TYPES/DEFAULT_STATUSES against
+    default.yaml with a test, but pip CLI and npm MCP server version
+    independently — doctor must catch an installed pair that re-skewed
+    (the #403 failure mode: MCP rejecting an edge type `schist link`
+    accepts on a partial schist.yaml)."""
+
+    @staticmethod
+    def _cli_defaults():
+        from schist.commands import _load_default_config
+        cfg = _load_default_config()
+        return list(cfg["connection_types"]), list(cfg["statuses"])
+
+    def _write_dist_with_vocab(self, dist_dir, types, statuses):
+        """Stub a tools.js with the named constants in tsc's emitted shape."""
+        dist_dir.mkdir(parents=True, exist_ok=True)
+        (dist_dir / "index.js").write_text("// stub\n")
+        t = ", ".join(f'"{x}"' for x in types)
+        s = ", ".join(f'"{x}"' for x in statuses)
+        (dist_dir / "tools.js").write_text(
+            f"export const DEFAULT_CONNECTION_TYPES = [\n    {t},\n];\n"
+            f"export const DEFAULT_STATUSES = [{s}];\n"
+        )
+
+    def _write_claude_json(self, tmp_path, dist_dir):
+        import json as _json
+        (tmp_path / ".claude.json").write_text(_json.dumps({
+            "mcpServers": {"schist": {
+                "command": "node", "args": [str(dist_dir / "index.js")],
+            }}
+        }))
+
+    def test_pass_when_vocabularies_match(self, tmp_path, monkeypatch):
+        types, statuses = self._cli_defaults()
+        dist_dir = tmp_path / "mcp" / "dist"
+        self._write_dist_with_vocab(dist_dir, types, statuses)
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_vocab_alignment(None)
+        assert r.status == "PASS", r.message
+        assert "match" in r.message
+
+    def test_order_difference_is_not_a_skew(self, tmp_path, monkeypatch):
+        # Membership is what gates writes; a reordered baked list is
+        # behaviorally identical and must not warn.
+        types, statuses = self._cli_defaults()
+        dist_dir = tmp_path / "mcp" / "dist"
+        self._write_dist_with_vocab(dist_dir, list(reversed(types)), statuses)
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_vocab_alignment(None)
+        assert r.status == "PASS", r.message
+
+    def test_warn_when_mcp_dist_misses_references(self, tmp_path, monkeypatch):
+        """The exact #403 scenario: an older MCP dist baked the 7-item list
+        without `references` while the CLI's default.yaml ships 8."""
+        types, statuses = self._cli_defaults()
+        assert "references" in types, "test prerequisite: default.yaml ships references"
+        stale = [t for t in types if t != "references"]
+        dist_dir = tmp_path / "mcp" / "dist"
+        self._write_dist_with_vocab(dist_dir, stale, statuses)
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_vocab_alignment(None)
+        assert r.status == "WARN"
+        assert "CLI-only references" in r.message
+        assert r.fix is not None and "npm run build" in r.fix
+
+    def test_warn_when_mcp_dist_has_extra_status(self, tmp_path, monkeypatch):
+        types, statuses = self._cli_defaults()
+        dist_dir = tmp_path / "mcp" / "dist"
+        self._write_dist_with_vocab(dist_dir, types, statuses + ["published"])
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_vocab_alignment(None)
+        assert r.status == "WARN"
+        assert "MCP-only published" in r.message
+
+    def test_skip_when_no_mcp_config(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_vocab_alignment(None)
+        assert r.status == "SKIP"
+        assert "no MCP config" in r.message
+
+    def test_skip_when_dist_predates_named_constants(self, tmp_path, monkeypatch):
+        """A pre-#410 dist inlined the lists without names — SKIP, not a
+        misreported skew."""
+        dist_dir = tmp_path / "mcp" / "dist"
+        dist_dir.mkdir(parents=True)
+        (dist_dir / "index.js").write_text("// stub\n")
+        (dist_dir / "tools.js").write_text(
+            '// older MCP server\nconst x = ["extends", "supports"];\n'
+        )
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_vocab_alignment(None)
+        assert r.status == "SKIP"
+        assert "not declared" in r.message
+
+    def test_regexes_pin_against_real_tools_ts_source(self):
+        """The extraction regexes must match the REAL tools.ts text (the `as
+        const` source form) — a refactor of the literals there would
+        otherwise silently downgrade the check to SKIP on the next build.
+        Runs only in the repo layout (skipped for an installed package)."""
+        from schist.doctor import _MCP_DEFAULT_VOCAB_RES, _VOCAB_ENTRY_STRING_RE
+
+        tools_ts = Path(__file__).resolve().parents[2] / "mcp-server" / "src" / "tools.ts"
+        if not tools_ts.exists():
+            pytest.skip("mcp-server source not present (installed-package run)")
+        text = tools_ts.read_text(encoding="utf-8")
+        types, statuses = self._cli_defaults()
+        m_t = _MCP_DEFAULT_VOCAB_RES["connection_types"].search(text)
+        m_s = _MCP_DEFAULT_VOCAB_RES["statuses"].search(text)
+        assert m_t and m_s, "named vocab constants not found in tools.ts"
+        assert _VOCAB_ENTRY_STRING_RE.findall(m_t.group(1)) == types
+        assert _VOCAB_ENTRY_STRING_RE.findall(m_s.group(1)) == statuses

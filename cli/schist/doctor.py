@@ -1021,6 +1021,114 @@ def check_mcp_schema_alignment(vault_path: Optional[str]) -> CheckResult:
     )
 
 
+# Match the baked fallback vocabularies in the compiled dist/tools.js (#414).
+# `as const` is a type-level assertion tsc erases, so the emitted form is
+# `export const DEFAULT_CONNECTION_TYPES = [\n  "extends", ...\n];`. The
+# non-greedy `\[(.*?)\]` stops at the first `]`, which also works on the
+# annotated SOURCE form (`] as const`) — test_doctor.py pins these regexes
+# against the REAL tools.ts text so a refactor of the literals can't
+# silently downgrade check_mcp_vocab_alignment to SKIP on the next build.
+_MCP_DEFAULT_VOCAB_RES = {
+    "connection_types": re.compile(
+        r"DEFAULT_CONNECTION_TYPES(?::[^=]*)?\s*=\s*\[(.*?)\]", re.DOTALL
+    ),
+    "statuses": re.compile(
+        r"DEFAULT_STATUSES(?::[^=]*)?\s*=\s*\[(.*?)\]", re.DOTALL
+    ),
+}
+_VOCAB_ENTRY_STRING_RE = re.compile(r"""['"]([A-Za-z0-9_-]+)['"]""")
+
+
+def _extract_mcp_default_vocab(dist_dir: Path) -> Optional[dict]:
+    """Read DEFAULT_CONNECTION_TYPES/DEFAULT_STATUSES from the MCP server's
+    compiled tools.js. Returns None when either constant can't be found —
+    older MCP builds (pre-#410) inlined the lists without names.
+    """
+    tools_js = dist_dir / "tools.js"
+    try:
+        text = tools_js.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    vocab = {}
+    for key, pattern in _MCP_DEFAULT_VOCAB_RES.items():
+        m = pattern.search(text)
+        if not m:
+            return None
+        vocab[key] = _VOCAB_ENTRY_STRING_RE.findall(m.group(1))
+    return vocab
+
+
+def check_mcp_vocab_alignment(vault_path: Optional[str]) -> CheckResult:
+    """Detect version skew between the MCP dist's BAKED fallback vocabularies
+    and this CLI's packaged default.yaml (#414).
+
+    The repo pins the two with a test, but the pip CLI and npm MCP server
+    version independently — an installed pair can re-skew with no repo test
+    running, and a partial schist.yaml (omitting the key) then makes the two
+    write paths enforce different vocabularies on the same vault: the #403
+    failure mode, where MCP rejected a `references` edge `schist link`
+    accepted. Compared as SETS — order can't change membership behavior.
+
+    SKIPs when no MCP entry is configured or the dist predates the named
+    constants (pre-#410).
+    """
+    dist_dir = _mcp_dist_dir_from_config(vault_path)
+    if dist_dir is None:
+        return CheckResult("SKIP", "MCP vocabulary alignment", "skipped (no MCP config)")
+
+    mcp_vocab = _extract_mcp_default_vocab(dist_dir)
+    if mcp_vocab is None:
+        return CheckResult(
+            "SKIP", "MCP vocabulary alignment",
+            f"skipped (baked default vocabularies not declared in "
+            f"{dist_dir / 'tools.js'} — dist predates #410)",
+        )
+
+    from .commands import _load_default_config
+
+    cli_defaults = _load_default_config()
+    skews = []
+    for key in ("connection_types", "statuses"):
+        cli_list = cli_defaults.get(key)
+        if not isinstance(cli_list, list):
+            return CheckResult(
+                "FAIL", "MCP vocabulary alignment",
+                f"could not read `{key}` from the packaged default.yaml",
+                "Reinstall schist: `uv tool install --reinstall --force <path-to-schist/cli>`.",
+            )
+        cli_set = {str(x) for x in cli_list}
+        mcp_set = set(mcp_vocab[key])
+        mcp_only = sorted(mcp_set - cli_set)
+        cli_only = sorted(cli_set - mcp_set)
+        if mcp_only:
+            skews.append(f"{key}: MCP-only {', '.join(mcp_only)}")
+        if cli_only:
+            skews.append(f"{key}: CLI-only {', '.join(cli_only)}")
+
+    if not skews:
+        return CheckResult(
+            "PASS", "MCP vocabulary alignment",
+            f"baked MCP defaults match this CLI's default.yaml "
+            f"({len(mcp_vocab['connection_types'])} connection types, "
+            f"{len(mcp_vocab['statuses'])} statuses)",
+        )
+
+    return CheckResult(
+        "WARN", "MCP vocabulary alignment",
+        f"baked default vocabularies skew from default.yaml — {'; '.join(skews)}",
+        fix=(
+            "The MCP dist and the installed CLI were built from different "
+            "versions. On a partial schist.yaml (no explicit vocabulary key) "
+            "the two write paths enforce DIFFERENT fallback vocabularies "
+            "(#403/#414). Rebuild the MCP dist from the same checkout as the "
+            "CLI: `cd <schist>/mcp-server && npm run build`, then restart "
+            "Claude Code / Claude Desktop — or reinstall the older side. "
+            "Vaults with an explicit `connection_types:`/`statuses:` key in "
+            "schist.yaml are unaffected."
+        ),
+    )
+
+
 # Match the `schemaVersion: <int>` entry of the INDEX_CONTRACT_FALLBACK
 # object literal in the compiled dist/sqlite-reader.js. Non-greedy `\{(.*?)\}`
 # is safe: the object nests arrays (brackets), never braces. The optional
@@ -1226,6 +1334,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_spoke_acl_drift(vault_path),
         check_mcp_config(vault_path),
         check_mcp_schema_alignment(vault_path),
+        check_mcp_vocab_alignment(vault_path),
         check_index_schema_version(vault_path, db_path),
         check_skill_tool_references(vault_path),
     ]
