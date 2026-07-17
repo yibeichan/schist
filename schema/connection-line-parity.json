@@ -210,6 +210,15 @@
         "target": "note-b",
         "context": null
       }
+    },
+    {
+      "name": "single-token bracket target MATCHES the regex (the skip is parser-level, not regex-level; #415)",
+      "line": "- extends: [moltbook]",
+      "expected": {
+        "type": "extends",
+        "target": "[moltbook]",
+        "context": null
+      }
     }
   ],
   "bodies": [
@@ -420,6 +429,43 @@
     {
       "name": "intro paragraph before an LS-separated section",
       "body": "Intro.\u2028\u2028## Connections\u2028- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "single-token bracket reference is skipped by both parsers (#415)",
+      "body": "## Connections\n- extends: [moltbook]",
+      "edges": []
+    },
+    {
+      "name": "wiki-link bracket reference is skipped (#415)",
+      "body": "## Connections\n- extends: [[some-note]]",
+      "edges": []
+    },
+    {
+      "name": "bracket reference among real edges: only the real edges survive (#415)",
+      "body": "## Connections\n- extends: note-a\n- supports: [moltbook]\n- related: note-b",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "related",
+          "target": "note-b",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "multi-word bracket reference never matches the regex at all (#415)",
+      "body": "## Connections\n- extends: [Moltbook, Jan 2026]\n- extends: note-a",
       "edges": [
         {
           "type": "extends",
