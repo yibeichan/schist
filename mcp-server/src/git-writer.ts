@@ -557,7 +557,8 @@ export async function writeNote(
   relPath: string,
   content: string,
   commitTitle?: string,
-  owner?: string
+  owner?: string,
+  opts?: { exclusive?: boolean }
 ): Promise<WriteResult> {
   assertPathSafe(vaultRoot, relPath);
   // Prefer the caller-supplied title — gray-matter folds long or special-char
@@ -566,12 +567,22 @@ export async function writeNote(
   // when no title is provided.
   const rawTitle = commitTitle && commitTitle.trim().length > 0 ? commitTitle : relPath;
   const title = sanitizeCommitTitle(rawTitle);
+  // exclusive: write with O_EXCL ("wx") so the create FAILS with EEXIST if the
+  // path already exists on the checked-out write branch. This is the ONLY
+  // race-safe collision check for create_note (#408): a pre-lock existence
+  // probe is a TOCTOU — two concurrent same-title creates both see the path
+  // free, then serialize inside the mutex and the second truncates the first.
+  // With O_EXCL the loser's write throws EEXIST inside the lock and create_note
+  // retries the next candidate. Also correct across branch skew: the check now
+  // runs post-checkout, against the write branch the note actually lands on,
+  // not whatever branch happened to be checked out when the path was chosen.
+  const flag = opts?.exclusive ? "wx" : "w";
   return withWriteLock(
     vaultRoot,
     relPath,
     `feat(schist): write ${title} — ${attribution(owner)}`,
     async (absPath) => {
-      await fs.writeFile(absPath, content, "utf-8");
+      await fs.writeFile(absPath, content, { encoding: "utf-8", flag });
     }
   );
 }

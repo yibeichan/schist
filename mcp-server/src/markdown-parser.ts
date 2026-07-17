@@ -89,6 +89,25 @@ export function containsLineBoundary(text: string): boolean {
   return false;
 }
 
+/**
+ * True when `target` can round-trip through CONNECTION_RE, whose target group
+ * is ONE non-whitespace run over the pinned SLUG_WS_CHARS class (#408). An
+ * EMPTY target serializes `- type:  "context"` — on read the quoted context
+ * slides into the target slot, promoting caller-chosen context text to an
+ * edge target (or, with no context, a dead line that parses to nothing while
+ * the tool reports success). A whitespace-carrying target (space, tab, NBSP —
+ * not just the #398 line boundaries, which are a subset of SLUG_WS_CHARS)
+ * writes a line CONNECTION_RE never matches: the write succeeds and commits,
+ * but no edge is ever indexed. Callers reject the write instead.
+ */
+export function isRoundTrippableTarget(target: string): boolean {
+  if (!target) return false;
+  for (const ch of target) {
+    if (SLUG_WS_CHARS.includes(ch)) return false;
+  }
+  return true;
+}
+
 export function parseConnections(body: string): Connection[] {
   const connections: Connection[] = [];
   let inSection = false;
@@ -280,6 +299,13 @@ function sanitizeContext(context: string): string {
   // in the serialised format (regex: [^"]*) so any " inside would break parsing.
   // Replace with single-quote to preserve readability of quoted speech.
   safe = safe.replace(/"/g, "'");
+  // NOTE (#408): the CLI's sanitize_context edge-strips with the pinned
+  // SLUG_WS_CHARS union while trim() uses JS's WhiteSpace set, and the
+  // prefix regex above uses native \s/\S where the CLI uses the union class
+  // — so the two writers can serialize byte-different context for inputs
+  // carrying exotic control chars (U+001F, U+FEFF edges). With boundaries
+  // already flattened every such divergence is cosmetic, never a forged
+  // edge; pin a parity fixture before relying on byte-identical context.
   return safe.trim();
 }
 

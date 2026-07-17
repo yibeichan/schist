@@ -6,7 +6,8 @@ import { fileURLToPath } from "url";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { load as yamlLoadSync } from "js-yaml";
-import { loadVaultConfig, create_note, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES } from "../src/tools.js";
+import { jest } from "@jest/globals";
+import { loadVaultConfig, create_note, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES } from "../src/tools.js";
 import Database from "better-sqlite3";
 import { INDEX_SCHEMA_VERSION } from "../src/sqlite-reader.js";
 import { parseConnections } from "../src/markdown-parser.js";
@@ -2116,7 +2117,7 @@ access:
     // Step 3: add_connection should now be denied for the papers note
     const result = await add_connection(
       vault,
-      { owner: TEST_AGENT, source: created.path, target: "[[Some Concept]]", type: "extends" },
+      { owner: TEST_AGENT, source: created.path, target: "concepts/some-concept.md", type: "extends" },
       config,
     ) as { error: string; message: string };
     expect(result.error).toBe("ACL_DENIED");
@@ -2142,7 +2143,7 @@ access:
 
       const result = await add_connection(
         vault,
-        { owner: "claude-desktop", source: created.path, target: "[[Some Concept]]", type: "extends" },
+        { owner: "claude-desktop", source: created.path, target: "concepts/some-concept.md", type: "extends" },
         config,
       ) as { commitSha?: string; error?: string };
       expect(result.error).toBeUndefined();
@@ -2173,7 +2174,7 @@ access:
       process.env.SCHIST_IDENTITY = "orcd";
       const result = await add_connection(
         vault,
-        { owner: "dragonfly", source: created.path, target: "[[Some Concept]]", type: "extends" },
+        { owner: "dragonfly", source: created.path, target: "concepts/some-concept.md", type: "extends" },
         config,
       ) as { error: string; message: string };
       expect(result.error).toBe("ACL_DENIED");
@@ -3207,5 +3208,308 @@ access:
     await fs.writeFile(path.join(vault, ".schist", "last-sync-error"), "2026-05-22T23:06:22.980Z push exited with code 1\n");
     const result = await update_note(vault, { owner: TEST_AGENT, id: "notes/anything.md", body: "x" }, config) as { error: string };
     expect(result.error).toBe("SYNC_DIRTY");
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
+// #408 — create_note collision hardening (loop-until-unique, lstat)
+// ---------------------------------------------------------------------------
+
+describe("create_note collision hardening (#408)", () => {
+  test("three same-title creates in one frozen second get three distinct paths", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    // Freeze ONLY Date so the HH-MM-SS suffix is identical across all three
+    // creates — a single-check guard re-mints create #2's suffix for #3 and
+    // writeFile truncates it. Timers/process APIs stay real: create_note
+    // spawns git underneath.
+    jest.useFakeTimers({
+      doNotFake: [
+        "hrtime", "nextTick", "performance", "queueMicrotask",
+        "setImmediate", "clearImmediate", "setInterval", "clearInterval",
+        "setTimeout", "clearTimeout", "requestAnimationFrame",
+        "cancelAnimationFrame", "requestIdleCallback", "cancelIdleCallback",
+      ],
+      now: new Date("2026-07-16T12:00:00Z"),
+    });
+    try {
+      const results = [] as { path: string }[];
+      for (const body of ["first", "second", "third"]) {
+        results.push(await create_note(
+          vault,
+          { owner: TEST_AGENT, title: "Same Second", body },
+          config
+        ) as { path: string });
+      }
+      const paths = results.map((r) => r.path);
+      expect(new Set(paths).size).toBe(3);
+      expect(paths[1]).toBe("notes/2026-07-16-same-second-12-00-00.md");
+      expect(paths[2]).toBe("notes/2026-07-16-same-second-12-00-00-2.md");
+      for (const [i, body] of ["first", "second", "third"].entries()) {
+        const content = await fs.readFile(path.join(vault, paths[i]), "utf-8");
+        expect(content).toContain(body);
+      }
+    } finally {
+      jest.useRealTimers();
+    }
+  }, 60000);
+
+  test("dangling symlink at the base path counts as a collision, not a write-through", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const today = new Date().toISOString().split("T")[0];
+    const outsideTarget = path.join(os.tmpdir(), `schist-escape-${Date.now()}.md`);
+    // makeTempVault doesn't create notes/ — create_note normally mints it.
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.symlink(outsideTarget, path.join(vault, "notes", `${today}-dangling.md`));
+
+    const result = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Dangling", body: "must stay inside" },
+      config
+    ) as { path: string };
+
+    // fs.access saw the dangling link as "no file" and writeFile then created
+    // the note body AT THE SYMLINK TARGET — outside the vault. lstat treats
+    // any occupant as taken, so the note lands at a suffixed real file.
+    expect(result.path).not.toBe(`notes/${today}-dangling.md`);
+    await expect(fs.access(outsideTarget)).rejects.toThrow();
+    const content = await fs.readFile(path.join(vault, result.path), "utf-8");
+    expect(content).toContain("must stay inside");
+  }, 30000);
+
+  test("two CONCURRENT same-title creates both survive (O_EXCL closes the race)", async () => {
+    // The pre-probe is a TOCTOU: both calls select basePath before either
+    // writes. The O_EXCL write makes the loser throw EEXIST inside the mutex,
+    // so create_note retries the next candidate instead of truncating the
+    // winner. Without the exclusive flag the second fs.writeFile silently
+    // overwrote the first note's body.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const [r1, r2] = await Promise.all([
+      create_note(vault, { owner: TEST_AGENT, title: "Race Title", body: "body-one" }, config) as Promise<{ path: string }>,
+      create_note(vault, { owner: TEST_AGENT, title: "Race Title", body: "body-two" }, config) as Promise<{ path: string }>,
+    ]);
+    expect(r1.path).not.toBe(r2.path);
+    const bodies = new Set([
+      (await fs.readFile(path.join(vault, r1.path), "utf-8")).match(/body-\w+/)?.[0],
+      (await fs.readFile(path.join(vault, r2.path), "utf-8")).match(/body-\w+/)?.[0],
+    ]);
+    expect(bodies).toEqual(new Set(["body-one", "body-two"]));
+  }, 60000);
+});
+
+// ---------------------------------------------------------------------------
+// #408 — connection target round-trip guard (empty / whitespace targets)
+// ---------------------------------------------------------------------------
+
+describe("connection target round-trip guard (#408)", () => {
+  test("add_connection rejects an empty target (context would slide into the target slot)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const note = await create_note(
+      vault, { owner: TEST_AGENT, title: "Src", body: "x" }, config
+    ) as { path: string };
+
+    const result = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: note.path, target: "", type: "extends", context: "evil.md" },
+      config
+    ) as { error: string; message: string };
+    expect(result.error).toBe("VALIDATION_ERROR");
+    expect(result.message).toMatch(/non-empty token/);
+    const content = await fs.readFile(path.join(vault, note.path), "utf-8");
+    expect(content).not.toContain("evil");
+  }, 30000);
+
+  test("add_connection rejects a missing (undefined) target as empty, not the token 'undefined'", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const note = await create_note(
+      vault, { owner: TEST_AGENT, title: "Src2", body: "x" }, config
+    ) as { path: string };
+
+    const result = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: note.path, type: "extends" } as never,
+      config
+    ) as { error: string };
+    expect(result.error).toBe("VALIDATION_ERROR");
+  }, 30000);
+
+  test.each([
+    ["space", "notes/a b.md"],
+    ["tab", "notes/a\tb.md"],
+    ["NBSP", "notes/a\u00a0b.md"],
+  ])("add_connection rejects a %s-carrying target (line could never round-trip)", async (_label, target) => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const note = await create_note(
+      vault, { owner: TEST_AGENT, title: "Src3", body: "x" }, config
+    ) as { path: string };
+
+    const result = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: note.path, target, type: "extends" },
+      config
+    ) as { error: string; message: string };
+    expect(result.error).toBe("VALIDATION_ERROR");
+    expect(result.message).toMatch(/without whitespace/);
+  }, 30000);
+
+  test("create_note structured connections reject empty and whitespace targets", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+
+    const empty = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Conn Empty", body: "x", connections: [{ type: "extends", target: "", context: "evil.md" }] },
+      config
+    ) as { error: string };
+    expect(empty.error).toBe("VALIDATION_ERROR");
+
+    const spaced = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Conn Spaced", body: "x", connections: [{ type: "extends", target: "notes/a b.md" }] },
+      config
+    ) as { error: string };
+    expect(spaced.error).toBe("VALIDATION_ERROR");
+  }, 30000);
+
+  test.each([
+    ["bracket reference", "[moltbook]"],
+    ["wiki link", "[[some-note]]"],
+  ])("rejects a %s target — ingest's bracket skip means the edge would never be indexed", async (_label, target) => {
+    // A '['-leading no-whitespace target passes the boundary and round-trip
+    // checks and matches CONNECTION_RE, but Python ingest skips '['-leading
+    // targets (parse_connections) — success reported, edge never indexed,
+    // and the TS parser disagrees on read (#415). Reject at write time.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const note = await create_note(
+      vault, { owner: TEST_AGENT, title: "Bracket Src", body: "x" }, config
+    ) as { path: string };
+
+    const viaAdd = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: note.path, target, type: "extends" },
+      config
+    ) as { error: string; message: string };
+    expect(viaAdd.error).toBe("VALIDATION_ERROR");
+    expect(viaAdd.message).toMatch(/bracket/);
+
+    const viaCreate = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Bracket Conn", body: "x", connections: [{ type: "extends", target }] },
+      config
+    ) as { error: string };
+    expect(viaCreate.error).toBe("VALIDATION_ERROR");
+  }, 30000);
+
+  test("non-string context is coerced, not crashed into a GIT_ERROR", async () => {
+    // sanitizeContext assumes a string; a JSON-number context previously
+    // threw TypeError inside it (surfaced as a misleading GIT_ERROR). The
+    // validation boundary now String()-coerces context like the target.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const note = await create_note(
+      vault, { owner: TEST_AGENT, title: "Ctx Src", body: "x" }, config
+    ) as { path: string };
+
+    const result = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: note.path, target: "notes/other.md", type: "extends", context: 42 as never },
+      config
+    ) as { error?: string; commitSha?: string };
+    expect(result.error).toBeUndefined();
+    const content = await fs.readFile(path.join(vault, note.path), "utf-8");
+    expect(content).toContain('- extends: notes/other.md "42"');
+  }, 30000);
+
+  test("the validated coercion is what gets written for a non-string target", async () => {
+    // Coerce-once contract: the guard validates String(target) and the SAME
+    // string must reach buildConnectionLine — a numeric target must serialize
+    // as its digits, proving the write no longer re-coerces the raw value.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const note = await create_note(
+      vault, { owner: TEST_AGENT, title: "Coerce Src", body: "x" }, config
+    ) as { path: string };
+
+    const result = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: note.path, target: 12345 as never, type: "extends" },
+      config
+    ) as { error?: string; target?: string };
+    expect(result.error).toBeUndefined();
+    expect(result.target).toBe("12345");
+    const content = await fs.readFile(path.join(vault, note.path), "utf-8");
+    expect(content).toContain("- extends: 12345");
+  }, 30000);
+
+  test("target validation fires BEFORE the ACL check (ordering is pinned)", async () => {
+    // An ungranted identity sending a malformed (whitespace) target gets
+    // VALIDATION_ERROR, not ACL_DENIED: input is validated on its own merits
+    // before grant state is consulted. Pinned so a future reorder that leaks
+    // ACL state for never-round-trippable requests is caught. A well-formed
+    // target from the same ungranted identity still returns ACL_DENIED
+    // (covered by the ACL enforcement suite above).
+    const vault = await makeTempVaultWithAcl("dragonfly", ["notes"]);
+    const config = await loadVaultConfig(vault);
+    process.env.SCHIST_IDENTITY = "dragonfly";
+    process.env.SCHIST_AGENT_ID = "dragonfly";
+    let created: { path: string };
+    try {
+      created = await create_note(
+        vault, { owner: "dragonfly", title: "Ordering Src", body: "x", directory: "notes" }, config
+      ) as { path: string };
+      process.env.SCHIST_IDENTITY = "orcd"; // now ungranted
+      const result = await add_connection(
+        vault,
+        { owner: "dragonfly", source: created.path, target: "notes/a b.md", type: "extends" },
+        config
+      ) as { error: string };
+      expect(result.error).toBe("VALIDATION_ERROR");
+    } finally {
+      delete process.env.SCHIST_IDENTITY;
+      process.env.SCHIST_AGENT_ID = TEST_AGENT;
+    }
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
+// #403 — fallback vocabulary parity with cli/schist/default.yaml
+// ---------------------------------------------------------------------------
+
+describe("fallback vocabulary parity (#403)", () => {
+  test("hardcoded defaults match cli/schist/default.yaml exactly", () => {
+    const defaultYaml = yamlLoadSync(
+      readFileSync(path.join(__dirname, "..", "..", "cli", "schist", "default.yaml"), "utf-8")
+    ) as { connection_types: string[]; statuses: string[] };
+    expect([...DEFAULT_CONNECTION_TYPES]).toEqual(defaultYaml.connection_types);
+    expect([...DEFAULT_STATUSES]).toEqual(defaultYaml.statuses);
+  });
+
+  test("a schist.yaml omitting connection_types accepts a 'references' edge", async () => {
+    const vault = await makeTempVault();
+    // Rewrite the config WITHOUT connection_types/statuses so loadVaultConfig
+    // falls back to the hardcoded defaults — the #403 skew fired only on a
+    // partial config (the 7-item default rejected `references` while the CLI's
+    // default.yaml fallback accepted it).
+    await fs.writeFile(
+      path.join(vault, "schist.yaml"),
+      "name: Test Vault\nwrite_branch: drafts\ndirectories:\n  - notes\n",
+    );
+    const config = await loadVaultConfig(vault);
+    const note = await create_note(
+      vault, { owner: TEST_AGENT, title: "Refs Src", body: "x" }, config
+    ) as { path: string };
+
+    const result = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: note.path, target: "notes/other.md", type: "references" },
+      config
+    ) as { error?: string; committed?: boolean };
+    expect(result.error).toBeUndefined();
   }, 30000);
 });

@@ -6,7 +6,7 @@ import { spawn } from "child_process";
 import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote, updateNote, deleteNote } from "./git-writer.js";
-import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython, containsLineBoundary } from "./markdown-parser.js";
+import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython, containsLineBoundary, isRoundTrippableTarget } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
 import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse, ComposeBriefResponse, Note, SearchResult } from "./types.js";
@@ -335,14 +335,30 @@ export async function loadVaultConfig(vaultRoot: string): Promise<VaultConfig> {
     name: getString("name", path.basename(vaultRoot)),
     path: vaultRoot,
     directories: getStringList("directories", [...loadCanonicalDirectories()]),
-    connectionTypes: getStringList("connection_types", [
-      "extends", "contradicts", "supports", "replicates",
-      "applies-method-of", "reinterprets", "related",
-    ]),
-    statuses: getStringList("statuses", ["draft", "review", "final", "archived"]),
+    connectionTypes: getStringList("connection_types", [...DEFAULT_CONNECTION_TYPES]),
+    statuses: getStringList("statuses", [...DEFAULT_STATUSES]),
     writeBranch: getString("write_branch", "drafts"),
   };
 }
+
+// Fallback vocabularies for a schist.yaml that exists but omits the key.
+// These MUST match cli/schist/default.yaml — the canonical default `schist
+// init` writes and the CLI's own fallback — or the two write paths enforce
+// different vocabularies on the same partial-config vault (#403: this list
+// omitted "references", so MCP rejected an edge type `schist link` accepted).
+// Exported for the parity test that pins them against the YAML file.
+// KNOWN ASYMMETRY (#414): `directories` falls back via a RUNTIME read of that
+// same default.yaml (loadCanonicalDirectories) while these two are baked at
+// build time — a default.yaml patched in place skews vocab but not
+// directories, and independently-versioned pip/npm installs can re-skew the
+// baked copy with no repo test running. Both are tracked in #414 (doctor
+// version-skew check + unify-or-document the fallback split); don't silently
+// "fix" one side here without reading that issue first.
+export const DEFAULT_CONNECTION_TYPES = [
+  "extends", "contradicts", "supports", "replicates",
+  "applies-method-of", "reinterprets", "related", "references",
+] as const;
+export const DEFAULT_STATUSES = ["draft", "review", "final", "archived"] as const;
 
 export function triggerIngestion(vaultRoot: string): void {
   const dbPath = path.join(vaultRoot, ".schist", "schist.db");
@@ -1468,6 +1484,58 @@ function validateBodyConnectionTypes(
   return null;
 }
 
+/**
+ * Validate a connection target for both write paths (add_connection and
+ * create_note's structured-connections loop). One definition so the two sites
+ * can't drift — the manual-mirroring burden that let #398's guard land in one
+ * place and #408's round-trip gap open in the other (#408). Two checks with
+ * distinct messages: the boundary check keeps the precise #398 wording (its
+ * set is a strict subset of the round-trip check's SLUG_WS_CHARS, so it fires
+ * first for the boundary case). Coerce with String() because args are NOT
+ * schema-validated at runtime (index.ts casts unchecked) — a non-string
+ * target stringifies WITH its contents when buildConnectionLine interpolates
+ * it, so the guard must check exactly that written form. A nullish target is
+ * "missing" → treated as empty "", never the literal token "undefined".
+ * On success the COERCED string is returned and callers must write THAT, not
+ * the raw value — validating one coercion and serializing another re-opens
+ * the gap for a stateful toString() (clean on the validation call, payload on
+ * the interpolation call). Coerce once, validate it, write it.
+ */
+function validateConnectionTarget(target: unknown): { error: ToolError } | { target: string } {
+  const written = target == null ? "" : String(target);
+  if (containsLineBoundary(written)) {
+    return {
+      error: {
+        error: "VALIDATION_ERROR",
+        message: "connection target must not contain line-break characters",
+      } satisfies ToolError,
+    };
+  }
+  if (!isRoundTrippableTarget(written)) {
+    return {
+      error: {
+        error: "VALIDATION_ERROR",
+        message: "connection target must be a non-empty token without whitespace (the connection line could not round-trip through the parser)",
+      } satisfies ToolError,
+    };
+  }
+  // A '['-leading target round-trips through CONNECTION_RE but Python ingest
+  // explicitly skips bracket references (ingest.py parse_connections), so the
+  // write would succeed and commit while the edge is never indexed — the same
+  // silent-no-op failure mode as a whitespace target, reached one parser
+  // later. Reject at write time; the read-side TS/Python divergence on
+  // pre-existing bracket lines is tracked in #415.
+  if (written.startsWith("[")) {
+    return {
+      error: {
+        error: "VALIDATION_ERROR",
+        message: "connection target must not start with '[' (bracket references are skipped by the indexer, so the edge would never be indexed)",
+      } satisfies ToolError,
+    };
+  }
+  return { target: written };
+}
+
 export async function create_note(
   vaultRoot: string,
   args: {
@@ -1542,22 +1610,18 @@ export async function create_note(
           message: `connection type must be one of: ${config.connectionTypes.join(", ")} (got "${conn.type}")`,
         } satisfies ToolError;
       }
-      // #398: a target carrying a line-boundary char serializes into a
-      // multi-line `## Connections` entry, so ingest indexes a forged extra
-      // edge. The type is vocabulary-gated (above) but the target is free
-      // text — reject the boundary here so buildConnectionLine only ever
-      // emits a single line. Coerce with String() first: args are NOT
-      // schema-validated at runtime (index.ts casts unchecked), so a
-      // non-string target like `["notes/x.md\n- extends: evil.md"]` would
-      // otherwise skip a typeof-string guard yet stringify WITH the newline
-      // when buildConnectionLine interpolates it — String() checks exactly
-      // what gets written.
-      if (containsLineBoundary(String(conn.target))) {
-        return {
-          error: "VALIDATION_ERROR",
-          message: "connection target must not contain line-break characters",
-        } satisfies ToolError;
-      }
+      // #398 (line boundaries) + #408 (empty/whitespace round-trip): both
+      // checks live in validateConnectionTarget so this loop and add_connection
+      // can't drift. Reassign the validated coercion so buildNote serializes
+      // exactly the string the guard checked (see the helper's contract).
+      const validated = validateConnectionTarget(conn.target);
+      if ("error" in validated) return validated.error;
+      conn.target = validated.target;
+      // context is sanitized (not rejected) downstream, but sanitizeContext
+      // assumes a string — a JSON number/array context would TypeError inside
+      // it and surface as a misleading GIT_ERROR. Same String()-coercion rule
+      // as the target (#402: cover every free-text field on the line).
+      if (conn.context != null) conn.context = String(conn.context);
     }
     // #317: the #304 loop above only covers STRUCTURED connections. buildNote
     // rewrites the `## Connections` section only when structured connections
@@ -1622,23 +1686,80 @@ export async function create_note(
     const date = today();
 
     // Guard against same-day same-title collision: append HH-MM-SS suffix when
-    // the target path already exists so we never silently overwrite a note or
-    // produce a git "nothing to commit" error.
-    const baseFilename = `${date}-${slug}.md`;
-    const basePath = `${directory}/${baseFilename}`;
-    let relPath = basePath;
-    try {
-      await fs.access(path.join(vaultRoot, basePath));
-      // File exists — append time suffix to make the path unique
-      const timeSuffix = new Date()
-        .toISOString()
-        .split("T")[1]
-        .slice(0, 8)       // HH:MM:SS
-        .replace(/:/g, "-"); // colons not safe in filenames on all OSes
-      relPath = `${directory}/${date}-${slug}-${timeSuffix}.md`;
-    } catch {
-      // File does not exist — use base path as-is
+    // the target path is taken so we never silently overwrite a note or
+    // produce a git "nothing to commit" error (#408, CLI sibling #406).
+    // The race-safe design has two parts, split across this function and
+    // writeNote:
+    // - the O_EXCL write in writeNote is the AUTHORITATIVE guard (see its
+    //   retry loop below). It closes both the concurrent-create race and the
+    //   same-second sequential case the old single-probe design lost.
+    // - a DANGLING symlink at the write path is NOT a write-through risk on
+    //   the MCP side: withWriteLock's in-lock assertResolvesInside (#323)
+    //   lstats the path post-checkout and rejects any symlink with
+    //   PATH_TRAVERSAL before writeFile runs. (This differs from the CLI,
+    //   whose write path has no such in-lock guard — do NOT delete #323
+    //   assuming the pre-probe covers it; the pre-probe is pre-lock and
+    //   race-able.) The pre-probe's lstat only lets a stray symlink be
+    //   suffixed AROUND (parity with the CLI's lexists) rather than turned
+    //   into a hard error.
+    // pathTaken is a BEST-EFFORT pre-probe only — it picks a nice filename and
+    // lets a stray symlink at a candidate be suffixed around (parity with the
+    // CLI's lexists) instead of hard-erroring in-lock. It is NOT the collision
+    // guard: the authoritative, race-safe check is writeNote's O_EXCL write
+    // below (a pre-lock probe is a TOCTOU — see the retry loop). ENOENT is the
+    // only "free" signal; any OTHER lstat error (EACCES, EMFILE, ELOOP) is
+    // rethrown rather than mis-read as "path free" (#401's distinguish-error-
+    // kinds lesson — a bare catch here silently disabled the guard under fd
+    // exhaustion). The rethrow is a ToolError shape so normalizeError passes
+    // it through as a typed IO_ERROR carrying the vault-RELATIVE path — a raw
+    // Node error here surfaced as GIT_ERROR (nothing git-related failed) with
+    // the absolute vault path and a stack in details.
+    const pathTaken = async (rel: string): Promise<boolean> => {
+      try {
+        await fs.lstat(path.join(vaultRoot, rel));
+        return true;
+      } catch (e) {
+        const code = e !== null && typeof e === "object" && "code" in e
+          ? (e as { code?: string }).code
+          : undefined;
+        if (code === "ENOENT") return false;
+        throw {
+          error: "IO_ERROR",
+          message: `cannot probe candidate path "${rel}"${code ? ` (${code})` : ""} — refusing to treat an unreadable path as free`,
+          details: { code },
+        } satisfies ToolError;
+      }
+    };
+    const timeSuffix = new Date()
+      .toISOString()
+      .split("T")[1]
+      .slice(0, 8)       // HH:MM:SS
+      .replace(/:/g, "-"); // colons not safe in filenames on all OSes
+    // Candidate filenames in priority order: base, then time-suffixed, then
+    // -2, -3, … Single source of the sequence, consumed by the pre-probe and
+    // the O_EXCL retry loop so both walk the same names.
+    // Generator<string, never>: the compiler enforces the sequence is
+    // infinite, so .next().value is string with no cast — a future return
+    // path would surface as a type error here instead of an undefined
+    // silently laundered through `as string`.
+    function* candidatePaths(): Generator<string, never> {
+      yield `${directory}/${date}-${slug}.md`;
+      yield `${directory}/${date}-${slug}-${timeSuffix}.md`;
+      for (let counter = 2; ; counter++) {
+        yield `${directory}/${date}-${slug}-${timeSuffix}-${counter}.md`;
+      }
     }
+    const candidates = candidatePaths();
+    // Advance to the first candidate the pre-probe reports free. Resumable:
+    // the O_EXCL retry loop calls this again to skip past a name a concurrent
+    // writer just took.
+    const nextFreeCandidate = async (): Promise<string> => {
+      for (;;) {
+        const cand = candidates.next().value;
+        if (!(await pathTaken(cand))) return cand;
+      }
+    };
+    let relPath = await nextFreeCandidate();
 
     // #155: intersect with vault.yaml write-grants so we never produce a
     // local commit the hub's pre-receive will reject. Fail-open when
@@ -1682,7 +1803,41 @@ export async function create_note(
     }
 
     const noteContent = buildNote(metadata, args.body, args.connections);
-    const result = await writeNote(vaultRoot, relPath, noteContent, args.title, owner);
+    // O_EXCL write with EEXIST-retry: the ONLY race-safe collision guard
+    // (#408). The pre-probe above chose relPath, but between that probe and
+    // the write a concurrent create_note (the "vault push burst" pattern) can
+    // take the same name — writeNote's exclusive flag makes that loser's write
+    // throw EEXIST INSIDE the mutex, so we advance to the next free candidate
+    // and retry instead of truncating the winner's note. The counter is
+    // unbounded in principle; MAX_COLLISION_RETRIES caps the pathological case
+    // (every candidate racing) so a wedged filesystem can't spin forever.
+    const MAX_COLLISION_RETRIES = 50;
+    let result: Awaited<ReturnType<typeof writeNote>> | undefined;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        result = await writeNote(vaultRoot, relPath, noteContent, args.title, owner, { exclusive: true });
+        break;
+      } catch (e) {
+        // A filename collision is EEXIST from the exclusive OPEN specifically.
+        // withWriteLock's mkdir(dirname, {recursive}) also throws EEXIST when
+        // the parent dir exists as a FILE on the write branch (branch-skew) —
+        // syscall-blind retrying would misread that as a collision and burn a
+        // full checkout cycle per candidate before failing anyway.
+        const err = e !== null && typeof e === "object" ? (e as { code?: string; syscall?: string }) : {};
+        const isCollision = err.code === "EEXIST" && err.syscall === "open";
+        if (!isCollision) throw e;
+        if (attempt >= MAX_COLLISION_RETRIES) {
+          // Typed instead of rethrowing the raw EEXIST: the outer catch's
+          // normalizeError fallback is GIT_ERROR (nothing git-related failed)
+          // and the raw Node message carries the absolute vault path.
+          return {
+            error: "COLLISION_RETRIES_EXHAUSTED",
+            message: `could not find a free filename for "${directory}/${date}-${slug}*.md" after ${MAX_COLLISION_RETRIES} collision retries — extreme concurrent create_note contention on this title; retry, or vary the title`,
+          } satisfies ToolError;
+        }
+        relPath = await nextFreeCandidate();
+      }
+    }
 
     // Always-fire even on dedup'd writes: triggerSpokePush is the SOLE spoke→hub
     // mechanism (no git hook handles it), so gating it on `committed` would
@@ -1730,21 +1885,23 @@ export async function add_connection(
         message: `connection type must be one of: ${config.connectionTypes.join(", ")} (got "${args.type}")`,
       } satisfies ToolError;
     }
-    // #398: reject a target carrying a line-boundary char before it reaches
-    // buildConnectionLine — otherwise the serialized `- type: target` splits
-    // into multiple lines on read and ingest indexes a forged extra edge that
-    // only the SOURCE write was ACL-gated for. Coerce with String() first:
-    // args are NOT schema-validated at runtime (index.ts casts unchecked), so
-    // a non-string target such as an array `["notes/x.md\n- extends: evil.md"]`
-    // would slip past a raw containsLineBoundary (which would iterate array
-    // elements, not characters) yet still stringify WITH the newline in
-    // buildConnectionLine — String() checks exactly what gets written.
-    if (containsLineBoundary(String(args.target))) {
-      return {
-        error: "VALIDATION_ERROR",
-        message: "connection target must not contain line-break characters",
-      } satisfies ToolError;
-    }
+    // #398 (line boundaries) + #408 (empty/whitespace round-trip): a forged
+    // multi-line target would index an extra edge only the SOURCE write was
+    // ACL-gated for; an empty/whitespace target writes a line that never
+    // round-trips. Shared with create_note via validateConnectionTarget so
+    // the two sites can't drift. Ordering note: this VALIDATION_ERROR fires
+    // before the ACL check below — a malformed request is rejected on its
+    // own merits and we don't disclose grant state for input that could
+    // never have produced an edge.
+    const validatedTarget = validateConnectionTarget(args.target);
+    if ("error" in validatedTarget) return validatedTarget.error;
+    // Write (and echo back) the validated coercion, never the raw value —
+    // see validateConnectionTarget's coerce-once contract.
+    args.target = validatedTarget.target;
+    // Same String()-coercion for context as create_note's structured loop:
+    // sanitizeContext assumes a string and a non-string context would
+    // TypeError into a misleading GIT_ERROR.
+    if (args.context != null) args.context = String(args.context);
     const srcIdError = validateNoteId(args.source, config);
     if (srcIdError !== null) return srcIdError;
     const filePath = path.join(vaultRoot, args.source);
