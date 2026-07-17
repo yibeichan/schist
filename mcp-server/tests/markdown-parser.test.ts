@@ -211,3 +211,19 @@ describe("isRoundTrippableTarget (#408)", () => {
     }
   });
 });
+
+describe("parseConnections bracket-reference skip (#415)", () => {
+  test.each([
+    ["bracket reference", "[moltbook]"],
+    ["wiki link", "[[some-note]]"],
+  ])("skips a %s target exactly like Python ingest", (_label, target) => {
+    // Python ingest's parse_connections and tools.ts bodyConnectionEdgeLines
+    // both skip '['-leading targets; this parser was the odd one out —
+    // get_note showed an edge the index never contained (#415). Body-level
+    // agreement is pinned by schema/connection-line-parity.json.
+    const body = `## Connections\n- extends: ${target}\n- related: note-a`;
+    expect(parseConnections(body)).toEqual([
+      { type: "related", target: "note-a", context: undefined },
+    ]);
+  });
+});

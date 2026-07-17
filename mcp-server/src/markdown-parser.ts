@@ -121,6 +121,15 @@ export function parseConnections(body: string): Connection[] {
     if (inSection) {
       const match = stripped.match(CONNECTION_RE);
       if (match) {
+        // #415: skip bracket references like `[moltbook]` / `[[wiki-note]]`,
+        // exactly as cli/schist/ingest.py parse_connections and tools.ts
+        // bodyConnectionEdgeLines do. This parser was the ODD ONE OUT: the
+        // index never contains these lines, so get_note showed an "edge"
+        // query_graph could never return (reader split-brain). Note only a
+        // single-token bracket reaches this check — a multi-word one
+        // (`[Moltbook, Jan 2026]`) never matches CONNECTION_RE at all.
+        // Pinned by schema/connection-line-parity.json body cases.
+        if (match[2].startsWith("[")) continue;
         connections.push({
           type: match[1],
           target: match[2],
