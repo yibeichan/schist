@@ -1,0 +1,80 @@
+{
+  "description": "Pins the connection-type vocabulary token filter (#413) across cli/schist/commands.py _connection_types and mcp-server loadVaultConfig. An entry serializes into `- {type}: target` connection lines, so it must satisfy the same single-token rule as a target: non-empty and free of every SLUG_WS_CHARS codepoint (CONNECTION_RE's token groups are each one non-whitespace run). Entries are the POST-COERCION strings (after str()/String()); `kept` says whether the entry survives into the effective vocabulary. Non-ASCII test codepoints are stored as uXXXX escapes on purpose (ensure_ascii JSON) - keep it that way. Consumed by cli/tests/test_commands.py and mcp-server/tests/tools.test.ts.",
+  "entries": [
+    {
+      "name": "plain token",
+      "entry": "extends",
+      "kept": true
+    },
+    {
+      "name": "hyphenated token",
+      "entry": "applies-method-of",
+      "kept": true
+    },
+    {
+      "name": "digit token (coerced unquoted YAML scalar)",
+      "entry": "0",
+      "kept": true
+    },
+    {
+      "name": "colon inside a token round-trips via regex backtracking",
+      "entry": "a:b",
+      "kept": true
+    },
+    {
+      "name": "leading bracket is valid for a TYPE (ingest's bracket skip applies to targets only)",
+      "entry": "[weird]",
+      "kept": true
+    },
+    {
+      "name": "empty string (dropped silently - getStringList filter(Boolean) parity)",
+      "entry": "",
+      "kept": false
+    },
+    {
+      "name": "interior space",
+      "entry": "in review",
+      "kept": false
+    },
+    {
+      "name": "tab",
+      "entry": "a\tb",
+      "kept": false
+    },
+    {
+      "name": "NBSP (whitespace but not a line boundary)",
+      "entry": "a\u00a0b",
+      "kept": false
+    },
+    {
+      "name": "newline (line boundary - would split the serialized line)",
+      "entry": "a\nb",
+      "kept": false
+    },
+    {
+      "name": "NEL U+0085 (Python-side of the whitespace union)",
+      "entry": "a\u0085b",
+      "kept": false
+    },
+    {
+      "name": "U+2028 line separator",
+      "entry": "a\u2028b",
+      "kept": false
+    },
+    {
+      "name": "ZWNBSP/BOM U+FEFF (JS-side of the whitespace union)",
+      "entry": "a\ufeffb",
+      "kept": false
+    },
+    {
+      "name": "leading space",
+      "entry": " extends",
+      "kept": false
+    },
+    {
+      "name": "trailing space",
+      "entry": "extends ",
+      "kept": false
+    }
+  ]
+}
