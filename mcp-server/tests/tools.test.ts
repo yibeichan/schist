@@ -3376,6 +3376,77 @@ describe("connection target round-trip guard (#408)", () => {
     expect(spaced.error).toBe("VALIDATION_ERROR");
   }, 30000);
 
+  test.each([
+    ["bracket reference", "[moltbook]"],
+    ["wiki link", "[[some-note]]"],
+  ])("rejects a %s target — ingest's bracket skip means the edge would never be indexed", async (_label, target) => {
+    // A '['-leading no-whitespace target passes the boundary and round-trip
+    // checks and matches CONNECTION_RE, but Python ingest skips '['-leading
+    // targets (parse_connections) — success reported, edge never indexed,
+    // and the TS parser disagrees on read (#415). Reject at write time.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const note = await create_note(
+      vault, { owner: TEST_AGENT, title: "Bracket Src", body: "x" }, config
+    ) as { path: string };
+
+    const viaAdd = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: note.path, target, type: "extends" },
+      config
+    ) as { error: string; message: string };
+    expect(viaAdd.error).toBe("VALIDATION_ERROR");
+    expect(viaAdd.message).toMatch(/bracket/);
+
+    const viaCreate = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Bracket Conn", body: "x", connections: [{ type: "extends", target }] },
+      config
+    ) as { error: string };
+    expect(viaCreate.error).toBe("VALIDATION_ERROR");
+  }, 30000);
+
+  test("non-string context is coerced, not crashed into a GIT_ERROR", async () => {
+    // sanitizeContext assumes a string; a JSON-number context previously
+    // threw TypeError inside it (surfaced as a misleading GIT_ERROR). The
+    // validation boundary now String()-coerces context like the target.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const note = await create_note(
+      vault, { owner: TEST_AGENT, title: "Ctx Src", body: "x" }, config
+    ) as { path: string };
+
+    const result = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: note.path, target: "notes/other.md", type: "extends", context: 42 as never },
+      config
+    ) as { error?: string; commitSha?: string };
+    expect(result.error).toBeUndefined();
+    const content = await fs.readFile(path.join(vault, note.path), "utf-8");
+    expect(content).toContain('- extends: notes/other.md "42"');
+  }, 30000);
+
+  test("the validated coercion is what gets written for a non-string target", async () => {
+    // Coerce-once contract: the guard validates String(target) and the SAME
+    // string must reach buildConnectionLine — a numeric target must serialize
+    // as its digits, proving the write no longer re-coerces the raw value.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const note = await create_note(
+      vault, { owner: TEST_AGENT, title: "Coerce Src", body: "x" }, config
+    ) as { path: string };
+
+    const result = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: note.path, target: 12345 as never, type: "extends" },
+      config
+    ) as { error?: string; target?: string };
+    expect(result.error).toBeUndefined();
+    expect(result.target).toBe("12345");
+    const content = await fs.readFile(path.join(vault, note.path), "utf-8");
+    expect(content).toContain("- extends: 12345");
+  }, 30000);
+
   test("target validation fires BEFORE the ACL check (ordering is pinned)", async () => {
     // An ungranted identity sending a malformed (whitespace) target gets
     // VALIDATION_ERROR, not ACL_DENIED: input is validated on its own merits
