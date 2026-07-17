@@ -1567,3 +1567,63 @@ class TestCheckMcpVocabAlignment:
         assert m_t and m_s, "named vocab constants not found in tools.ts"
         assert _VOCAB_ENTRY_STRING_RE.findall(m_t.group(1)) == types
         assert _VOCAB_ENTRY_STRING_RE.findall(m_s.group(1)) == statuses
+
+    # -- /review findings on this check ------------------------------------
+
+    def test_extraction_is_linear_on_adversarial_prose_mention(self):
+        """/review finding: the sibling checks' `(?::[^=]*)?\\s*=` colon arm
+        backtracks quadratically on an `=`-free tail after a prose mention
+        ("DEFAULT_STATUSES:") — the memory-#152 O(n²) class. The vocab
+        regexes carry no colon arm (the constants are never annotated), so
+        this must fail fast. 1M-char probe with a huge CI margin."""
+        import time
+        from schist.doctor import _MCP_DEFAULT_VOCAB_RES
+
+        text = "// see DEFAULT_STATUSES: keep in sync\n" + " " * 1_000_000
+        t0 = time.perf_counter()
+        assert _MCP_DEFAULT_VOCAB_RES["statuses"].search(text) is None
+        assert time.perf_counter() - t0 < 5.0  # linear is ~ms; huge margin
+
+    def test_prose_mention_cannot_bridge_to_a_wrong_array(self, tmp_path, monkeypatch):
+        """/review finding: with a colon arm + DOTALL, a comment mentioning
+        the constant name bridged across to the FIRST `= [...]` anywhere
+        later, extracting a wrong array (false PASS or false WARN). Pinned:
+        the comment mention must be inert and the real definition win."""
+        from schist.doctor import _extract_mcp_default_vocab
+
+        dist_dir = tmp_path / "dist"
+        dist_dir.mkdir()
+        (dist_dir / "tools.js").write_text(
+            '// NOTE on DEFAULT_CONNECTION_TYPES: keep in sync with default.yaml\n'
+            'const decoy = ["wrong-entry"];\n'
+            'export const DEFAULT_CONNECTION_TYPES = ["extends"];\n'
+            'export const DEFAULT_STATUSES = ["draft"];\n'
+        )
+        vocab = _extract_mcp_default_vocab(dist_dir)
+        assert vocab == {"connection_types": ["extends"], "statuses": ["draft"]}
+
+    @pytest.mark.parametrize("breakage", ["raises", "non_mapping"])
+    def test_corrupt_packaged_default_yaml_is_a_FAIL_not_a_crash(
+            self, tmp_path, monkeypatch, breakage):
+        """/review finding: run_doctor has no per-check exception shield, and
+        _load_default_config raises on a corrupt (vs missing) default.yaml —
+        the whole diagnostic died with a traceback exactly when the
+        'reinstall schist' FAIL is the useful answer."""
+        types, statuses = self._cli_defaults()
+        dist_dir = tmp_path / "mcp" / "dist"
+        self._write_dist_with_vocab(dist_dir, types, statuses)
+        self._write_claude_json(tmp_path, dist_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        if breakage == "raises":
+            import yaml as _yaml
+
+            def broken():
+                raise _yaml.YAMLError("stray tab")
+        else:
+            def broken():
+                return ["not", "a", "mapping"]
+        monkeypatch.setattr("schist.commands._load_default_config", broken)
+        r = check_mcp_vocab_alignment(None)
+        assert r.status == "FAIL"
+        assert "packaged default.yaml" in r.message
+        assert r.fix is not None and "Reinstall" in r.fix

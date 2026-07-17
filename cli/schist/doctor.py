@@ -1022,18 +1022,28 @@ def check_mcp_schema_alignment(vault_path: Optional[str]) -> CheckResult:
 
 
 # Match the baked fallback vocabularies in the compiled dist/tools.js (#414).
-# `as const` is a type-level assertion tsc erases, so the emitted form is
-# `export const DEFAULT_CONNECTION_TYPES = [\n  "extends", ...\n];`. The
-# non-greedy `\[(.*?)\]` stops at the first `]`, which also works on the
-# annotated SOURCE form (`] as const`) — test_doctor.py pins these regexes
-# against the REAL tools.ts text so a refactor of the literals can't
-# silently downgrade check_mcp_vocab_alignment to SKIP on the next build.
+# `as const` is a POSTFIX type assertion tsc erases, so neither the source
+# nor the emitted form carries a `name: annotation =` shape — deliberately NO
+# `(?::[^=]*)?` colon arm here, unlike the sibling REQUIRED_DOCS_COLUMNS
+# regex. The /review pass showed the colon arm is actively harmful: its
+# `[^=]*` overlaps `\s*` (quadratic backtracking on an `=`-free tail after a
+# prose mention like "DEFAULT_STATUSES:" — the memory-#152 O(n²) class,
+# measured ×4 per input doubling), and with DOTALL it BRIDGES from a comment
+# mention of the name across to the first `= [...]` anywhere later,
+# extracting the wrong array. Without the arm, `\s*=` fails at the first
+# non-ws non-`=` char — linear and unbridgeable. If a type annotation is
+# ever added to the source constants, the pin test below fails loudly and
+# this comment is the instruction manual. The non-greedy `\[(.*?)\]` stops
+# at the first `]`, which also works on the `] as const` source form —
+# test_doctor.py pins these regexes against the REAL tools.ts text so a
+# refactor of the literals can't silently downgrade
+# check_mcp_vocab_alignment to SKIP on the next build.
 _MCP_DEFAULT_VOCAB_RES = {
     "connection_types": re.compile(
-        r"DEFAULT_CONNECTION_TYPES(?::[^=]*)?\s*=\s*\[(.*?)\]", re.DOTALL
+        r"DEFAULT_CONNECTION_TYPES\s*=\s*\[(.*?)\]", re.DOTALL
     ),
     "statuses": re.compile(
-        r"DEFAULT_STATUSES(?::[^=]*)?\s*=\s*\[(.*?)\]", re.DOTALL
+        r"DEFAULT_STATUSES\s*=\s*\[(.*?)\]", re.DOTALL
     ),
 }
 _VOCAB_ENTRY_STRING_RE = re.compile(r"""['"]([A-Za-z0-9_-]+)['"]""")
@@ -1086,7 +1096,21 @@ def check_mcp_vocab_alignment(vault_path: Optional[str]) -> CheckResult:
 
     from .commands import _load_default_config
 
-    cli_defaults = _load_default_config()
+    # _load_default_config only handles the MISSING-file case itself; a
+    # corrupt packaged default.yaml (yaml error, unreadable, non-mapping top
+    # level) raises or returns a non-dict. run_doctor has no per-check
+    # exception shield, so anything uncaught kills the whole diagnostic —
+    # exactly when the "reinstall schist" FAIL below is the useful answer.
+    try:
+        cli_defaults = _load_default_config()
+    except Exception:  # noqa: BLE001 — surface as FAIL so doctor never crashes
+        cli_defaults = None
+    if not isinstance(cli_defaults, dict):
+        return CheckResult(
+            "FAIL", "MCP vocabulary alignment",
+            "could not read the packaged default.yaml",
+            "Reinstall schist: `uv tool install --reinstall --force <path-to-schist/cli>`.",
+        )
     skews = []
     for key in ("connection_types", "statuses"):
         cli_list = cli_defaults.get(key)
