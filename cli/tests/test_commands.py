@@ -436,3 +436,108 @@ class TestSchemaConfigRobustness:
                          str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
         capsys.readouterr()
         assert str(_written_frontmatter(tmp_path)["status"]) == "0"
+
+    def test_malformed_schist_yaml_exits_cleanly(self, tmp_path, capsys):
+        # Second /review batch: a syntactically INVALID schist.yaml (unclosed
+        # quote — distinct from the non-mapping case above) must die with a
+        # clean message, not a raw yaml.YAMLError traceback, and must NOT
+        # silently widen the vocabulary by falling back to the default.
+        (tmp_path / "schist.yaml").write_text('statuses: ["unclosed\n', encoding="utf-8")
+        with pytest.raises(SystemExit) as exc:
+            commands.add(_add_args("Note"),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        assert exc.value.code == 1
+        assert "could not read schist.yaml" in capsys.readouterr().err
+        assert not (tmp_path / "notes").exists()
+
+
+class TestAddCollisionRace:
+    """Second /review batch on #406: the lexists loop is only the sequential
+    fix — the AUTHORITATIVE guard is the O_EXCL ('x') write. Simulate the
+    concurrent-writer race by making the pre-probe lie ("path free") while
+    the path exists: a probe-then-open('w') design truncates; the exclusive
+    write must step to the next candidate instead."""
+
+    def test_probe_lied_existing_file_is_not_truncated(self, tmp_path, capsys):
+        from datetime import date as real_date
+        notes = tmp_path / "notes"
+        notes.mkdir()
+        base = notes / f"{real_date.today().isoformat()}-daily-note.md"
+        base.write_text("---\ntitle: Winner\n---\n\nfirst\n", encoding="utf-8")
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")), \
+             patch("schist.commands.os.path.lexists", return_value=False):
+            commands.add(_add_args("Daily note", body="second"),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        capsys.readouterr()
+        assert "first" in base.read_text(encoding="utf-8"), "concurrent winner was truncated"
+        files = sorted(notes.glob("*.md"))
+        assert len(files) == 2, [f.name for f in files]
+        bodies = {markdown_io.read_note(str(f))["body"] for f in files}
+        assert "second" in bodies
+
+    def test_probe_lied_dangling_symlink_is_not_written_through(self, tmp_path, capsys):
+        # A dangling symlink planted in the probe→write window: open('w')
+        # would create the note body AT THE SYMLINK TARGET (outside the vault
+        # included); open('x') refuses atomically and the loop steps around.
+        from datetime import date as real_date
+        notes = tmp_path / "notes"
+        notes.mkdir()
+        outside_target = tmp_path / "outside" / "escape.md"
+        base = notes / f"{real_date.today().isoformat()}-daily-note.md"
+        base.symlink_to(outside_target)
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")), \
+             patch("schist.commands.os.path.lexists", return_value=False):
+            commands.add(_add_args("Daily note", body="content"),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        capsys.readouterr()
+        assert not outside_target.exists(), "note body escaped through the symlink"
+        real_files = [f for f in notes.glob("*.md") if not f.is_symlink()]
+        assert len(real_files) == 1
+        assert markdown_io.read_note(str(real_files[0]))["body"] == "content"
+
+
+class TestAddTitleEmptySlug:
+    """Second /review batch: parity with MCP create_note's empty-slug guard
+    (the check right beside the #118 date-prefix guard already ported)."""
+
+    def test_rejects_all_symbol_title(self, tmp_path, capsys):
+        with pytest.raises(SystemExit) as exc:
+            commands.add(_add_args("!!!"),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        assert exc.value.code == 1
+        assert "alphanumeric" in capsys.readouterr().err
+        assert not (tmp_path / "notes").exists()
+
+
+class TestAddDateConsistency:
+    """Second /review batch: filename date and frontmatter date come from ONE
+    today_str computation — a second date.today() call could disagree across
+    midnight, minting an id/frontmatter skew MCP can't produce."""
+
+    def test_frontmatter_date_matches_filename_prefix(self, tmp_path, capsys):
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.add(_add_args("Note"),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        capsys.readouterr()
+        (note,) = (tmp_path / "notes").glob("*.md")
+        fm = markdown_io.read_note(str(note))["frontmatter"]
+        assert note.name.startswith(f"{fm['date']}-")
+
+
+class TestLinkBracketTarget:
+    """Second /review batch: a '['-leading target passes the boundary and
+    round-trip guards and matches CONNECTION_RE, but ingest.parse_connections
+    SKIPS bracket references — success reported, edge never indexed (#415
+    tracks the read-side TS/Python divergence)."""
+
+    @pytest.mark.parametrize("target", ["[moltbook]", "[[some-note]]"])
+    def test_rejects_bracket_leading_target(self, tmp_path, capsys, target):
+        _vault_with_types(tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            commands.link(
+                _link_args("notes/src.md", target, "extends"),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert exc.value.code == 1
+        assert "bracket" in capsys.readouterr().err
+        assert target not in (tmp_path / "notes" / "src.md").read_text()

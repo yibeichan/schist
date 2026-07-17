@@ -211,3 +211,24 @@ def test_append_connection_context_injection_yields_single_edge(tmp_path) -> Non
 
     edges = parse_connections(note.read_text(encoding="utf-8"))
     assert [(e["type"], e["target"]) for e in edges] == [("extends", "notes/b.md")]
+
+
+def test_write_note_exclusive_refuses_existing_file_and_symlink(tmp_path) -> None:
+    """Second /review batch on #406: exclusive=True is the race-safe collision
+    check (O_CREAT|O_EXCL, mirroring MCP writeNote's "wx"). It must fail on an
+    existing file instead of truncating, and must refuse a symlink at the path
+    atomically — dangling included — instead of writing through it."""
+    from schist.markdown_io import read_note, write_note
+
+    existing = tmp_path / "existing.md"
+    write_note(str(existing), {"title": "A"}, "first")
+    with pytest.raises(FileExistsError):
+        write_note(str(existing), {"title": "B"}, "second", exclusive=True)
+    assert read_note(str(existing))["body"] == "first"
+
+    outside = tmp_path / "outside.md"
+    dangling = tmp_path / "dangling.md"
+    dangling.symlink_to(outside)
+    with pytest.raises(FileExistsError):
+        write_note(str(dangling), {"title": "C"}, "escaped", exclusive=True)
+    assert not outside.exists()

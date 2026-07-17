@@ -98,10 +98,18 @@ def read_note(path: str) -> dict:
     return {'frontmatter': dict(post.metadata), 'body': post.content}
 
 
-def write_note(path: str, fm: dict, body: str):
-    """Write a markdown note with YAML frontmatter."""
+def write_note(path: str, fm: dict, body: str, exclusive: bool = False):
+    """Write a markdown note with YAML frontmatter.
+
+    exclusive=True opens with 'x' (O_CREAT|O_EXCL): the create FAILS with
+    FileExistsError if the path exists — the only race-safe collision check
+    (a probe-then-'w' is a TOCTOU; mirrors MCP writeNote's "wx" mode, #406/
+    #408). O_EXCL also refuses to follow a symlink at the path, dangling
+    included, atomically — 'w' would write the note THROUGH it, outside the
+    vault if that's where it points.
+    """
     post = frontmatter.Post(body, **fm)
-    with open(path, 'w', encoding='utf-8') as f:
+    with open(path, 'x' if exclusive else 'w', encoding='utf-8') as f:
         f.write(frontmatter.dumps(post) + '\n')
 
 
