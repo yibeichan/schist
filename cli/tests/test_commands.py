@@ -673,3 +673,64 @@ class TestLinkConcurrentAppend:
 
         edges = _parsed_edges(tmp_path)
         assert sorted(e["target"] for e in edges) == ["notes/b.md", "notes/c.md"]
+
+
+class TestConnectionTypeVocabTokens:
+    """#413 — connection-type vocabulary entries are validated as
+    round-trippable tokens at config load (an entry serializes into
+    `- {type}: target` lines, so a whitespace-carrying entry passes the
+    membership check and then writes a dead or forgeable line). Warn-and-
+    drop; pinned against MCP loadVaultConfig by schema/vocab-token-parity.json."""
+
+    @staticmethod
+    def _fixture():
+        import json
+        fixture_path = Path(__file__).resolve().parents[2] / "schema" / "vocab-token-parity.json"
+        return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def test_fixture_parity(self, tmp_path, capsys):
+        import json
+        fixture = self._fixture()
+        entries = [e["entry"] for e in fixture["entries"]]
+        # JSON is valid YAML flow syntax, and json.dumps escapes the exotic
+        # codepoints — no invisible literals land in this file or on disk.
+        (tmp_path / "schist.yaml").write_text(
+            f"connection_types: {json.dumps(entries)}\n", encoding="utf-8",
+        )
+        kept = commands._connection_types(str(tmp_path))
+        err = capsys.readouterr().err
+        assert kept == [e["entry"] for e in fixture["entries"] if e["kept"]]
+        # Every dropped NON-EMPTY entry warns; the empty string is dropped
+        # silently (getStringList .filter(Boolean) parity).
+        dropped_warned = [e for e in fixture["entries"] if not e["kept"] and e["entry"]]
+        assert err.count("ignoring connection_types entry") == len(dropped_warned)
+
+    def test_dropped_junk_type_is_rejected_at_link(self, tmp_path, capsys):
+        import json
+        (tmp_path / "schist.yaml").write_text(
+            f"connection_types: {json.dumps(['extends', 'in review'])}\n"
+            "directories:\n  notes: notes/\n",
+            encoding="utf-8",
+        )
+        notes = tmp_path / "notes"
+        notes.mkdir()
+        (notes / "src.md").write_text(
+            "---\ntitle: Src\nstatus: draft\n---\n\nBody\n\n## Connections\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(SystemExit) as exc:
+            commands.link(
+                _link_args("notes/src.md", "notes/dst.md", "in review"),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        # The advertised vocabulary is exactly the filtered list.
+        assert "connection_types: extends" in err
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.link(
+                _link_args("notes/src.md", "notes/dst.md", "extends"),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        capsys.readouterr()
+        assert "- extends: notes/dst.md" in (notes / "src.md").read_text(encoding="utf-8")

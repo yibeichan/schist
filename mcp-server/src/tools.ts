@@ -331,11 +331,32 @@ export async function loadVaultConfig(vaultRoot: string): Promise<VaultConfig> {
     return def;
   };
 
+  // #413: a connection-type entry serializes into `- {type}: target` lines,
+  // so it must satisfy the same single-token rule as a target (non-empty, no
+  // SLUG_WS_CHARS — CONNECTION_RE's type group is one non-whitespace run). A
+  // whitespace-carrying entry passes the membership check but then writes a
+  // line that never round-trips (dead edge) or splits on read (forged
+  // entry) — the config-reachable version of the #398/#408 target holes.
+  // Warn-and-drop, not hard-error: one junk entry must not brick the server,
+  // and a dropped type is simply rejected at write time by the membership
+  // check. Statuses are deliberately NOT token-validated: they live in YAML
+  // frontmatter, which round-trips arbitrary strings — no structural failure
+  // mode. Pinned against the CLI by schema/vocab-token-parity.json.
+  const connectionTypes = getStringList("connection_types", [...DEFAULT_CONNECTION_TYPES])
+    .filter((t) => {
+      if (isRoundTrippableTarget(t)) return true;
+      console.error(
+        `[schist] Ignoring connection_types entry ${JSON.stringify(t)}: ` +
+        `not a single whitespace-free token — a connection line using it could never round-trip through the parser`
+      );
+      return false;
+    });
+
   return {
     name: getString("name", path.basename(vaultRoot)),
     path: vaultRoot,
     directories: getStringList("directories", [...loadCanonicalDirectories()]),
-    connectionTypes: getStringList("connection_types", [...DEFAULT_CONNECTION_TYPES]),
+    connectionTypes,
     statuses: getStringList("statuses", [...DEFAULT_STATUSES]),
     writeBranch: getString("write_branch", "drafts"),
   };

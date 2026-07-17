@@ -3513,3 +3513,74 @@ describe("fallback vocabulary parity (#403)", () => {
     expect(result.error).toBeUndefined();
   }, 30000);
 });
+
+// ---------------------------------------------------------------------------
+// #413 — connection-type vocabulary entries validated as round-trippable tokens
+// ---------------------------------------------------------------------------
+
+describe("connection-type vocabulary token filter (#413)", () => {
+  test("fixture parity: schema/vocab-token-parity.json pins kept vs dropped", async () => {
+    const fixture = JSON.parse(readFileSync(
+      path.join(__dirname, "..", "..", "schema", "vocab-token-parity.json"), "utf-8"
+    )) as { entries: Array<{ name: string; entry: string; kept: boolean }> };
+
+    const vault = await makeTempVault();
+    // JSON is valid YAML flow syntax, and JSON.stringify escapes the exotic
+    // codepoints — no invisible literals land in this file or on disk.
+    await fs.writeFile(
+      path.join(vault, "schist.yaml"),
+      `connection_types: ${JSON.stringify(fixture.entries.map((e) => e.entry))}\n`
+    );
+    const errSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const config = await loadVaultConfig(vault);
+      expect(config.connectionTypes).toEqual(
+        fixture.entries.filter((e) => e.kept).map((e) => e.entry)
+      );
+      // Every dropped NON-EMPTY entry warns; the empty string is dropped
+      // silently by getStringList's filter(Boolean) before the token filter.
+      const warned = errSpy.mock.calls.filter((c) =>
+        String(c[0]).includes("Ignoring connection_types entry"));
+      expect(warned.length).toBe(
+        fixture.entries.filter((e) => !e.kept && e.entry !== "").length
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  }, 30000);
+
+  test("a dropped junk type is rejected at write time by the membership check", async () => {
+    const vault = await makeTempVault();
+    await fs.writeFile(
+      path.join(vault, "schist.yaml"),
+      `connection_types: ${JSON.stringify(["extends", "in review"])}\n`
+    );
+    const errSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    let config;
+    try {
+      config = await loadVaultConfig(vault);
+    } finally {
+      errSpy.mockRestore();
+    }
+    const note = await create_note(
+      vault, { owner: TEST_AGENT, title: "Vocab Src", body: "x" }, config
+    ) as { path: string };
+
+    const junk = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: note.path, target: "notes/other.md", type: "in review" },
+      config
+    ) as { error?: string; message?: string };
+    expect(junk.error).toBe("VALIDATION_ERROR");
+    // The advertised vocabulary is exactly the filtered list — the junk
+    // entry must not appear in it.
+    expect(junk.message).toMatch(/must be one of: extends \(/);
+
+    const ok = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: note.path, target: "notes/other.md", type: "extends" },
+      config
+    ) as { error?: string };
+    expect(ok.error).toBeUndefined();
+  }, 30000);
+});

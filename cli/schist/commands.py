@@ -143,9 +143,33 @@ def _connection_types(vault_path: str) -> list:
     # 0 in YAML) that MCP accepts, skewing the two writers' vocabularies.
     # CAVEAT: str() only matches String() for strings and integers. Non-string
     # scalars diverge (None→'None' vs 'null', True→'True' vs 'true', a YAML
-    # float 1.0→'1.0' vs '1'), so junk entries of those kinds still skew the
-    # two writers — validating vocabulary entries as safe tokens is #413.
-    return [s for x in ct if (s := str(x))]
+    # float 1.0→'1.0' vs '1') — but any such junk with whitespace is dropped
+    # by the token filter below, and whitespace-free junk is at worst a
+    # harmless extra token.
+    # #413: an entry serializes into `- {type}: target`, so it must satisfy
+    # the same single-token rule as a target — a whitespace-carrying entry
+    # passes the membership check and then writes a line that never
+    # round-trips (dead edge) or splits on read (forged entry): the
+    # config-reachable version of the #398/#408 target holes. Warn-and-drop,
+    # not hard-error — a junk entry must not brick every command; a dropped
+    # type is simply rejected at write time by the membership check. The
+    # empty string is dropped SILENTLY (getStringList .filter(Boolean)
+    # parity). Pinned against MCP by schema/vocab-token-parity.json.
+    kept = []
+    for x in ct:
+        s = str(x)
+        if not s:
+            continue
+        if not markdown_io.is_round_trippable_token(s):
+            print(
+                f'Warning: ignoring connection_types entry {s!r}: not a '
+                f'single whitespace-free token — a connection line using it '
+                f'could never round-trip through the parser',
+                file=sys.stderr,
+            )
+            continue
+        kept.append(s)
+    return kept
 
 
 def _statuses(vault_path: str) -> list:
@@ -346,7 +370,7 @@ def link(args, vault_path: str, db_path: str):
     # whitespace-carrying target (space, tab, NBSP) writes a line the parser
     # never matches: `link` prints success and commits, but no edge is ever
     # indexed. Reject both instead of writing a dead or forgeable line.
-    if not args.target or any(ch in markdown_io.SLUG_WS_CHARS for ch in str(args.target)):
+    if not markdown_io.is_round_trippable_token(str(args.target)):
         print(
             'Error: target must be a non-empty token without whitespace '
             '(the connection line could not round-trip through the parser)',

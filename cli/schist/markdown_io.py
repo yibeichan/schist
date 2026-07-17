@@ -60,6 +60,18 @@ def contains_line_boundary(text: str) -> bool:
     return bool(text) and text.splitlines() != [text]
 
 
+def is_round_trippable_token(text: str) -> bool:
+    """True when `text` can occupy a CONNECTION_RE token slot (type or
+    target): non-empty and free of every SLUG_WS_CHARS codepoint — the
+    regex's token groups are each ONE non-whitespace run. Mirrors mcp-server
+    isRoundTrippableTarget (#408); one definition serves both `link`'s
+    target guard and the connection-type vocabulary filter (#413) so the
+    two can't drift. Note this does NOT encode the target-only rules
+    (leading-`[` bracket skip) — those stay at the target call site.
+    """
+    return bool(text) and not any(ch in SLUG_WS_CHARS for ch in text)
+
+
 _FORGED_PREFIX_RE = re.compile(
     f'^-[{re.escape(SLUG_WS_CHARS)}]+[^{re.escape(SLUG_WS_CHARS)}]+:[{re.escape(SLUG_WS_CHARS)}]+'
 )
