@@ -141,6 +141,71 @@ def test_append_connection_creates_section_when_missing(tmp_path) -> None:
     assert {(e["type"], e["target"]) for e in edges} == {("extends", "notes/b.md")}
 
 
+def test_append_connection_preserves_original_on_write_failure(tmp_path, monkeypatch) -> None:
+    """A plain `open(path,'w')` truncates at open() — a crash between truncation
+    and the write left a zero-byte note (#425). append_connection now writes to
+    a temp file + os.replace, so a failure at the rename must leave the ORIGINAL
+    content intact (never an empty file) and must not leak the temp file."""
+    import schist.markdown_io as mio
+
+    note = tmp_path / "note.md"
+    original = "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n"
+    note.write_text(original, encoding="utf-8")
+
+    # Simulate a kill/failure at the atomic-rename step (after temp is written).
+    def boom(_src, _dst):
+        raise OSError("simulated crash at rename")
+
+    monkeypatch.setattr(mio.os, "replace", boom)
+    with pytest.raises(OSError):
+        mio.append_connection(str(note), "extends", "notes/b.md")
+
+    # Original note survives byte-for-byte — no truncation, no partial write.
+    assert note.read_text(encoding="utf-8") == original
+    # The temp file was cleaned up — nothing left behind in the directory.
+    assert [p.name for p in tmp_path.iterdir()] == ["note.md"]
+
+
+def test_append_connection_writes_atomically_via_replace(tmp_path, monkeypatch) -> None:
+    """The write-back must go through os.replace (atomic rename), not a direct
+    truncating open() on the target."""
+    import schist.markdown_io as mio
+
+    note = tmp_path / "note.md"
+    note.write_text("---\ntitle: A\n---\nBody.\n", encoding="utf-8")
+
+    calls = {"replace": 0}
+    real_replace = mio.os.replace
+
+    def counting_replace(src, dst):
+        calls["replace"] += 1
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(mio.os, "replace", counting_replace)
+    mio.append_connection(str(note), "extends", "notes/b.md")
+
+    assert calls["replace"] == 1
+    assert "- extends: notes/b.md" in note.read_text(encoding="utf-8")
+
+
+def test_append_connection_preserves_file_mode(tmp_path) -> None:
+    """os.replace renames the mkstemp temp (0600) over the note, so without mode
+    preservation an append silently drops the note to 0600. git tracks only the
+    exec bit, so the change would be invisible in history but real on disk."""
+    import os
+    import stat
+
+    note = tmp_path / "note.md"
+    note.write_text("---\ntitle: A\n---\nBody.\n", encoding="utf-8")
+    os.chmod(note, 0o644)
+
+    from schist.markdown_io import append_connection
+
+    append_connection(str(note), "extends", "notes/b.md")
+
+    assert stat.S_IMODE(os.stat(note).st_mode) == 0o644
+
+
 def test_title_slug_is_linear_on_huge_whitespace() -> None:
     """Whitespace collapse is a single [class]+ pass and the edge strip is
     str.strip — never a `^[ws]+|[ws]+$` alternated anchored regex, which

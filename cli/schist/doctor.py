@@ -1046,7 +1046,15 @@ _MCP_DEFAULT_VOCAB_RES = {
         r"DEFAULT_STATUSES\s*=\s*\[(.*?)\]", re.DOTALL
     ),
 }
-_VOCAB_ENTRY_STRING_RE = re.compile(r"""['"]([A-Za-z0-9_-]+)['"]""")
+# Capture any quoted run of non-quote, non-whitespace chars — NOT restricted to
+# [A-Za-z0-9_-]. The write-time validator (isRoundTrippableTarget /
+# is_round_trippable_token) only requires non-empty + no SLUG_WS_CHARS, so a
+# valid vocab entry like "applies-method-of.v2" or "cites/chapter" can exist;
+# the old [A-Za-z0-9_-]+ class silently captured NOTHING for such an entry,
+# making check_mcp_vocab_alignment report a false-PASS on real CLI↔MCP skew
+# (#426). Captures are then filtered through is_round_trippable_token so the
+# extraction stays semantically identical to what the writers actually accept.
+_VOCAB_ENTRY_STRING_RE = re.compile(r"""['"]([^'"\s]+)['"]""")
 
 
 def _extract_mcp_default_vocab(dist_dir: Path) -> Optional[dict]:
@@ -1059,12 +1067,20 @@ def _extract_mcp_default_vocab(dist_dir: Path) -> Optional[dict]:
         text = tools_js.read_text()
     except (OSError, UnicodeDecodeError):
         return None
+    from .markdown_io import is_round_trippable_token
+
     vocab = {}
     for key, pattern in _MCP_DEFAULT_VOCAB_RES.items():
         m = pattern.search(text)
         if not m:
             return None
-        vocab[key] = _VOCAB_ENTRY_STRING_RE.findall(m.group(1))
+        # Keep only entries the write-time validator would accept, so a stray
+        # neighboring JS string literal (should never occur in a well-formed
+        # constant, but be defensive) can't masquerade as a vocab member (#426).
+        vocab[key] = [
+            e for e in _VOCAB_ENTRY_STRING_RE.findall(m.group(1))
+            if is_round_trippable_token(e)
+        ]
     return vocab
 
 
