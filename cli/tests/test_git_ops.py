@@ -449,6 +449,26 @@ def test_stage_scope_files_ok_when_ignores_do_not_touch_scope(tmp_path) -> None:
     assert ok is True, msg
 
 
+def test_commit_stages_note_path_beginning_with_dash(tmp_path) -> None:
+    """#428: a note path starting with `-` (e.g. a vault-root `-inbox.md` reached
+    via `schist link --source=-inbox.md`) must be committed, not parsed as a git
+    option. Without the `--` end-of-options separator, `git add -inbox.md` treats
+    `-i…` as a switch — erroring out and leaving the edge written but uncommitted."""
+    _init_repo(tmp_path)
+    note = tmp_path / "-inbox.md"
+    note.write_text("---\ntitle: Inbox\n---\n\n## Connections\n\n- related: notes/x.md\n",
+                    encoding="utf-8")
+
+    ok, out = git_ops.commit(str(tmp_path), "add edge to -inbox", ["-inbox.md"])
+
+    assert ok is True, out
+    tracked = subprocess.run(
+        ["git", "-C", str(tmp_path), "ls-files", "--", "-inbox.md"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert tracked == "-inbox.md"
+
+
 def test_ignored_scope_files_detects_ignored_only_change(tmp_path) -> None:
     """#361 permanent-drop corner: when the ignored note is the ONLY change,
     `git status --porcelain` is empty (has_uncommitted_changes -> False), so

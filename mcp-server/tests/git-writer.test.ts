@@ -1,4 +1,4 @@
-import { writeNote, appendToNote, writeMutex } from "../src/git-writer.js";
+import { writeNote, appendToNote, updateNote, writeMutex } from "../src/git-writer.js";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
@@ -248,4 +248,69 @@ describe("git-writer", () => {
 
     expect(acquireAfterRelease).toBe("ok");
   });
+
+  // #427: writes go through a temp file + atomic rename so a mid-write kill
+  // can never leave a zero-byte note. Observable guarantee: the final content
+  // is correct AND no `.tmp` scratch file is left behind in the note dir.
+  test("ATOMIC: writeNote/updateNote/appendToNote leave no temp files behind", async () => {
+    const vault = await makeTempVault();
+    const rel = "notes/atomic.md";
+
+    await writeNote(vault, rel, "---\ntitle: Atomic\n---\nv1");
+    await updateNote(vault, rel, "Atomic", undefined, () => "---\ntitle: Atomic\n---\nv2");
+    await appendToNote(vault, rel, "appended line");
+
+    const content = await fs.readFile(path.join(vault, rel), "utf-8");
+    expect(content).toContain("v2");
+    expect(content).toContain("appended line");
+
+    // No leaked temp files (`.atomic.md.<pid>.<hex>.tmp`) in the note directory.
+    const entries = await fs.readdir(path.join(vault, "notes"));
+    expect(entries.filter((e) => e.endsWith(".tmp"))).toEqual([]);
+    expect(entries).toContain("atomic.md");
+  }, 30000);
+
+  // #427 regression guard: the exclusive-create path must NOT be routed through
+  // temp+rename — that would silently clobber an existing note and defeat the
+  // O_EXCL collision check (#408). A second exclusive create must still fail.
+  test("ATOMIC: exclusive create still rejects on an existing path (O_EXCL preserved)", async () => {
+    const vault = await makeTempVault();
+    const rel = "notes/excl.md";
+
+    await writeNote(vault, rel, "---\ntitle: Excl\n---\nfirst", undefined, undefined, {
+      exclusive: true,
+    });
+    await expect(
+      writeNote(vault, rel, "---\ntitle: Excl\n---\nSECOND", undefined, undefined, {
+        exclusive: true,
+      })
+    ).rejects.toMatchObject({ code: "EEXIST" });
+
+    // The original content survives — the failed exclusive create did not clobber it.
+    const content = await fs.readFile(path.join(vault, rel), "utf-8");
+    expect(content).toContain("first");
+    expect(content).not.toContain("SECOND");
+  }, 30000);
+
+  // #427 follow-up: the atomic rename swaps the note's inode, so the write must
+  // carry the target's prior mode forward — otherwise a note with custom perms
+  // is silently reset (a change git can't show, since it tracks only the exec
+  // bit). Skipped on Windows, where POSIX mode bits don't apply.
+  (process.platform === "win32" ? test.skip : test)(
+    "ATOMIC: update preserves the note's existing file mode",
+    async () => {
+      const vault = await makeTempVault();
+      const rel = "notes/perm.md";
+
+      await writeNote(vault, rel, "---\ntitle: Perm\n---\nv1");
+      const abs = path.join(vault, rel);
+      await fs.chmod(abs, 0o640);
+
+      await updateNote(vault, rel, "Perm", undefined, () => "---\ntitle: Perm\n---\nv2");
+
+      const mode = (await fs.stat(abs)).mode & 0o777;
+      expect(mode).toBe(0o640);
+    },
+    30000
+  );
 });

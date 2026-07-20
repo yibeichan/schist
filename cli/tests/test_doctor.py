@@ -1602,6 +1602,28 @@ class TestCheckMcpVocabAlignment:
         vocab = _extract_mcp_default_vocab(dist_dir)
         assert vocab == {"connection_types": ["extends"], "statuses": ["draft"]}
 
+    def test_extracts_entries_with_chars_outside_alphanum_hyphen(self, tmp_path):
+        """#426: the write-time validator accepts any non-empty, whitespace-free
+        token, so a vocab entry like "cites/chapter" or "applies-method-of.v2"
+        is legal. The old [A-Za-z0-9_-]+ class captured NOTHING for such an
+        entry, so it never entered the comparison set — a genuine CLI↔MCP skew
+        on it read as a false PASS. The broadened [^'"\\s]+ class must now
+        surface it."""
+        from schist.doctor import _extract_mcp_default_vocab
+
+        dist_dir = tmp_path / "dist"
+        dist_dir.mkdir()
+        (dist_dir / "tools.js").write_text(
+            'export const DEFAULT_CONNECTION_TYPES = '
+            '["extends", "cites/chapter", "applies-method-of.v2"];\n'
+            'export const DEFAULT_STATUSES = ["draft", "in:review"];\n'
+        )
+        vocab = _extract_mcp_default_vocab(dist_dir)
+        assert vocab == {
+            "connection_types": ["extends", "cites/chapter", "applies-method-of.v2"],
+            "statuses": ["draft", "in:review"],
+        }
+
     @pytest.mark.parametrize("breakage", ["raises", "non_mapping"])
     def test_corrupt_packaged_default_yaml_is_a_FAIL_not_a_crash(
             self, tmp_path, monkeypatch, breakage):
