@@ -248,7 +248,13 @@ def commit(vault_path: str, message: str, files: list[str] | None = None) -> tup
     try:
         add_args = files if files else ['.']
         subprocess.run(
-            ['git', 'add'] + add_args,
+            # `--` end-of-options: a note path beginning with `-` (e.g. a
+            # vault-root `-inbox.md` reached via `schist link --source=-inbox.md`,
+            # or such a path re-staged by sync) would otherwise be parsed as a git
+            # option — silently mis-staging or erroring, leaving the edge written
+            # to disk but uncommitted. Mirrors stage_scope_files and both TS
+            # `git add` call sites (#428).
+            ['git', 'add', '--'] + add_args,
             cwd=vault_path, check=True, capture_output=True, text=True,
             timeout=60,
         )
