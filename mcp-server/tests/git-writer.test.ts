@@ -291,4 +291,26 @@ describe("git-writer", () => {
     expect(content).toContain("first");
     expect(content).not.toContain("SECOND");
   }, 30000);
+
+  // #427 follow-up: the atomic rename swaps the note's inode, so the write must
+  // carry the target's prior mode forward — otherwise a note with custom perms
+  // is silently reset (a change git can't show, since it tracks only the exec
+  // bit). Skipped on Windows, where POSIX mode bits don't apply.
+  (process.platform === "win32" ? test.skip : test)(
+    "ATOMIC: update preserves the note's existing file mode",
+    async () => {
+      const vault = await makeTempVault();
+      const rel = "notes/perm.md";
+
+      await writeNote(vault, rel, "---\ntitle: Perm\n---\nv1");
+      const abs = path.join(vault, rel);
+      await fs.chmod(abs, 0o640);
+
+      await updateNote(vault, rel, "Perm", undefined, () => "---\ntitle: Perm\n---\nv2");
+
+      const mode = (await fs.stat(abs)).mode & 0o777;
+      expect(mode).toBe(0o640);
+    },
+    30000
+  );
 });

@@ -16,8 +16,6 @@ from pathlib import Path
 
 import pytest
 
-import pytest
-
 from schist.markdown_io import SLUG_WS_CHARS, slugify
 
 
@@ -188,6 +186,24 @@ def test_append_connection_writes_atomically_via_replace(tmp_path, monkeypatch) 
 
     assert calls["replace"] == 1
     assert "- extends: notes/b.md" in note.read_text(encoding="utf-8")
+
+
+def test_append_connection_preserves_file_mode(tmp_path) -> None:
+    """os.replace renames the mkstemp temp (0600) over the note, so without mode
+    preservation an append silently drops the note to 0600. git tracks only the
+    exec bit, so the change would be invisible in history but real on disk."""
+    import os
+    import stat
+
+    note = tmp_path / "note.md"
+    note.write_text("---\ntitle: A\n---\nBody.\n", encoding="utf-8")
+    os.chmod(note, 0o644)
+
+    from schist.markdown_io import append_connection
+
+    append_connection(str(note), "extends", "notes/b.md")
+
+    assert stat.S_IMODE(os.stat(note).st_mode) == 0o644
 
 
 def test_title_slug_is_linear_on_huge_whitespace() -> None:

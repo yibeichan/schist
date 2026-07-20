@@ -576,6 +576,17 @@ async function atomicWriteFile(absPath: string, content: string): Promise<void> 
   );
   try {
     await fs.writeFile(tmpPath, content, "utf-8");
+    // Preserve the target's existing mode across the rename. fs.writeFile created
+    // the temp with the default (0666 & ~umask, ~0644), so an existing note with
+    // tighter or looser perms would otherwise be silently reset — a change git
+    // can't surface (it tracks only the exec bit). Best-effort: a brand-new note
+    // (no prior file) keeps the default create mode, matching the old writeFile.
+    try {
+      const { mode } = await fs.stat(absPath);
+      await fs.chmod(tmpPath, mode);
+    } catch {
+      /* target doesn't exist yet (new note) — keep the default create mode */
+    }
     await fs.rename(tmpPath, absPath);
   } catch (e) {
     try {

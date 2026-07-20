@@ -2,6 +2,7 @@
 
 import os
 import re
+import stat
 import tempfile
 
 import frontmatter
@@ -186,6 +187,18 @@ def _atomic_write(path: str, content: str) -> None:
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             f.write(content)
+        # mkstemp hardcodes the temp to 0600, and os.replace renames that inode
+        # OVER the target — so without this the note would silently inherit 0600
+        # and lose group/other read. git tracks only the exec bit, so the change
+        # is invisible in history but real on disk (bites a shared hub). Preserve
+        # the note's existing mode; a not-yet-existing file falls back to the
+        # umask default, matching the old open('w', ...) behavior.
+        try:
+            os.chmod(tmp_path, stat.S_IMODE(os.stat(path).st_mode))
+        except FileNotFoundError:
+            cur = os.umask(0)
+            os.umask(cur)
+            os.chmod(tmp_path, 0o666 & ~cur)
         os.replace(tmp_path, path)
     except BaseException:
         try:
