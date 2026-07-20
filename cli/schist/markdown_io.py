@@ -1,6 +1,8 @@
 """Markdown I/O — read, write, and manipulate vault notes."""
 
+import os
 import re
+import tempfile
 
 import frontmatter
 
@@ -168,6 +170,31 @@ def insert_connection_line(content: str, line: str) -> str:
     return '\n'.join(lines) + '\n'
 
 
+def _atomic_write(path: str, content: str) -> None:
+    """Write `content` to `path` atomically (write-to-temp + os.replace).
+
+    A plain `open(path, 'w')` truncates the target at open() time, before any
+    byte is written — a SIGKILL/OOM/power-loss in that window leaves a zero-byte
+    note with the previous content gone (#425). We write to a unique temp file
+    in the SAME directory (⇒ same filesystem ⇒ rename is atomic on POSIX) and
+    `os.replace` over the target, so a reader/crash sees either the old file
+    intact or the new file complete, never an empty intermediate. Mirrors
+    sync.py's _atomic_write_hook.
+    """
+    dir_ = os.path.dirname(os.path.abspath(path))
+    fd, tmp_path = tempfile.mkstemp(dir=dir_, suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def append_connection(path: str, connection_type: str, target: str, context: str | None = None):
     """Append a connection line to the ## Connections section (creating it if needed)."""
     with open(path, 'r', encoding='utf-8') as f:
@@ -184,5 +211,4 @@ def append_connection(path: str, connection_type: str, target: str, context: str
     else:
         line = f'- {connection_type}: {target}'
 
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(insert_connection_line(content, line))
+    _atomic_write(path, insert_connection_line(content, line))

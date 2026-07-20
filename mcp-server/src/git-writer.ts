@@ -3,6 +3,7 @@ import { promisify } from "util";
 import { Mutex, withTimeout } from "async-mutex";
 import * as fs from "fs/promises";
 import * as path from "path";
+import { randomBytes } from "crypto";
 import { load as yamlLoad } from "js-yaml";
 
 const execFile = promisify(execFileCb);
@@ -552,6 +553,40 @@ function attribution(owner: string | undefined): string {
   return cleaned.length > 0 ? `by ${cleaned}` : "via MCP";
 }
 
+/**
+ * Write `content` to `absPath` atomically (write-to-temp + rename).
+ *
+ * A plain `fs.writeFile(absPath, ...)` with flag "w" opens the target with
+ * O_TRUNC, zeroing the file BEFORE any byte is written. A process kill (OOM,
+ * SIGKILL, Claude Desktop force-quit, power loss) in that window leaves a
+ * zero-byte note, and any uncommitted content is unrecoverable (#427). We
+ * write to a unique temp file in the SAME directory (⇒ same filesystem ⇒
+ * `fs.rename` is atomic on POSIX) and rename over the target, so a crash sees
+ * either the old file intact or the new file complete — never an empty
+ * intermediate. The temp name is per-pid + random so a concurrent CLI writer
+ * (not covered by this process's writeMutex) can't collide on it; it is renamed
+ * away before any git staging and is unlinked on error, so it never leaks into
+ * a commit. Mirrors the CLI's markdown_io._atomic_write / sync._atomic_write_hook.
+ */
+async function atomicWriteFile(absPath: string, content: string): Promise<void> {
+  const dir = path.dirname(absPath);
+  const tmpPath = path.join(
+    dir,
+    `.${path.basename(absPath)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`
+  );
+  try {
+    await fs.writeFile(tmpPath, content, "utf-8");
+    await fs.rename(tmpPath, absPath);
+  } catch (e) {
+    try {
+      await fs.unlink(tmpPath);
+    } catch {
+      /* temp file may not exist if writeFile itself failed — ignore */
+    }
+    throw e;
+  }
+}
+
 export async function writeNote(
   vaultRoot: string,
   relPath: string,
@@ -576,13 +611,21 @@ export async function writeNote(
   // retries the next candidate. Also correct across branch skew: the check now
   // runs post-checkout, against the write branch the note actually lands on,
   // not whatever branch happened to be checked out when the path was chosen.
-  const flag = opts?.exclusive ? "wx" : "w";
   return withWriteLock(
     vaultRoot,
     relPath,
     `feat(schist): write ${title} — ${attribution(owner)}`,
     async (absPath) => {
-      await fs.writeFile(absPath, content, { encoding: "utf-8", flag });
+      if (opts?.exclusive) {
+        // O_EXCL create — the race-safe collision check (#408). This MUST stay a
+        // direct write: a temp-file + rename would silently clobber an existing
+        // note and defeat the EEXIST guard create_note relies on. A fresh create
+        // has no prior content to lose to a mid-write kill, so the truncation
+        // window that atomicWriteFile closes (#427) does not apply here.
+        await fs.writeFile(absPath, content, { encoding: "utf-8", flag: "wx" });
+      } else {
+        await atomicWriteFile(absPath, content);
+      }
     }
   );
 }
@@ -606,7 +649,7 @@ export async function appendToNote(
         // file doesn't exist yet
       }
       const newContent = existing + (existing.endsWith("\n") ? "" : "\n") + addition;
-      await fs.writeFile(absPath, newContent, "utf-8");
+      await atomicWriteFile(absPath, newContent);
     }
   );
 }
@@ -646,7 +689,7 @@ export async function updateNote(
       } catch {
         throw { error: "NOT_FOUND", message: `Note not found: ${relPath}` };
       }
-      await fs.writeFile(absPath, transform(current), "utf-8");
+      await atomicWriteFile(absPath, transform(current));
     }
   );
 }
@@ -696,7 +739,7 @@ export async function deleteNote(
         // rather than writing through it). #119.
         await assertResolvesInside(vaultRoot, r.relPath);
         const absPath = path.resolve(vaultRoot, r.relPath);
-        await fs.writeFile(absPath, r.content, "utf-8");
+        await atomicWriteFile(absPath, r.content);
         await git(vaultRoot, ["add", "--", r.relPath]);
       }
 
