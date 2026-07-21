@@ -8,6 +8,7 @@ real-looking secrets.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -144,6 +145,90 @@ def test_benign_long_path_commits(vault: Path) -> None:
     assert result.returncode == 0, (
         f"Hook rejected a benign file at a long path: {result.stdout}{result.stderr}"
     )
+
+
+def test_missing_inherited_tmpdir_falls_back_to_system_tmp(vault: Path, tmp_path: Path) -> None:
+    """A stale sandbox TMPDIR must not make otherwise-valid commits fail."""
+    missing_tmpdir = tmp_path / "removed-sandbox-tmp"
+    (vault / "note.md").write_text("just a note\n")
+    subprocess.run(["git", "add", "note.md"], cwd=vault, check=True)
+
+    env = os.environ.copy()
+    env["TMPDIR"] = str(missing_tmpdir)
+    result = subprocess.run(
+        ["git", "commit", "-m", "test"],
+        cwd=vault,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, (
+        f"Hook trusted a missing inherited TMPDIR: {result.stdout}{result.stderr}"
+    )
+    assert not missing_tmpdir.exists(), "hook must not create an untrusted TMPDIR"
+
+
+def test_unsearchable_inherited_tmpdir_falls_back_to_system_tmp(
+    vault: Path, tmp_path: Path,
+) -> None:
+    """A writable TMPDIR without search permission must also be rejected."""
+    inaccessible_tmpdir = tmp_path / "unsearchable-sandbox-tmp"
+    inaccessible_tmpdir.mkdir()
+    inaccessible_tmpdir.chmod(0o200)
+    (vault / "note.md").write_text("just a note\n")
+    subprocess.run(["git", "add", "note.md"], cwd=vault, check=True)
+
+    env = os.environ.copy()
+    env["TMPDIR"] = str(inaccessible_tmpdir)
+    try:
+        result = subprocess.run(
+            ["git", "commit", "-m", "test"],
+            cwd=vault,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    finally:
+        # Restore traversal so pytest can clean up tmp_path even if the
+        # assertion below fails.
+        inaccessible_tmpdir.chmod(0o700)
+
+    assert result.returncode == 0, (
+        f"Hook trusted an unsearchable inherited TMPDIR: {result.stdout}{result.stderr}"
+    )
+    assert list(inaccessible_tmpdir.iterdir()) == []
+
+
+def test_readonly_inherited_tmpdir_falls_back_to_system_tmp(
+    vault: Path, tmp_path: Path,
+) -> None:
+    """A searchable TMPDIR that is not writable must also be rejected."""
+    readonly_tmpdir = tmp_path / "readonly-sandbox-tmp"
+    readonly_tmpdir.mkdir()
+    readonly_tmpdir.chmod(0o500)  # r-x: searchable but not writable
+    (vault / "note.md").write_text("just a note\n")
+    subprocess.run(["git", "add", "note.md"], cwd=vault, check=True)
+
+    env = os.environ.copy()
+    env["TMPDIR"] = str(readonly_tmpdir)
+    try:
+        result = subprocess.run(
+            ["git", "commit", "-m", "test"],
+            cwd=vault,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    finally:
+        # Restore write so pytest can clean up tmp_path even if the
+        # assertion below fails.
+        readonly_tmpdir.chmod(0o700)
+
+    assert result.returncode == 0, (
+        f"Hook trusted a read-only inherited TMPDIR: {result.stdout}{result.stderr}"
+    )
+    assert list(readonly_tmpdir.iterdir()) == []
 
 
 def test_staged_secret_blocked_after_worktree_cleanup(vault: Path) -> None:
