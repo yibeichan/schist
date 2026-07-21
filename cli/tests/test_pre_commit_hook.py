@@ -200,6 +200,37 @@ def test_unsearchable_inherited_tmpdir_falls_back_to_system_tmp(
     assert list(inaccessible_tmpdir.iterdir()) == []
 
 
+def test_readonly_inherited_tmpdir_falls_back_to_system_tmp(
+    vault: Path, tmp_path: Path,
+) -> None:
+    """A searchable TMPDIR that is not writable must also be rejected."""
+    readonly_tmpdir = tmp_path / "readonly-sandbox-tmp"
+    readonly_tmpdir.mkdir()
+    readonly_tmpdir.chmod(0o500)  # r-x: searchable but not writable
+    (vault / "note.md").write_text("just a note\n")
+    subprocess.run(["git", "add", "note.md"], cwd=vault, check=True)
+
+    env = os.environ.copy()
+    env["TMPDIR"] = str(readonly_tmpdir)
+    try:
+        result = subprocess.run(
+            ["git", "commit", "-m", "test"],
+            cwd=vault,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    finally:
+        # Restore write so pytest can clean up tmp_path even if the
+        # assertion below fails.
+        readonly_tmpdir.chmod(0o700)
+
+    assert result.returncode == 0, (
+        f"Hook trusted a read-only inherited TMPDIR: {result.stdout}{result.stderr}"
+    )
+    assert list(readonly_tmpdir.iterdir()) == []
+
+
 def test_staged_secret_blocked_after_worktree_cleanup(vault: Path) -> None:
     """The hook must inspect the staged blob, not the working-tree file."""
     note = vault / "secret.md"
