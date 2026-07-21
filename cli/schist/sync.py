@@ -98,7 +98,7 @@ PATTERNS="(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}|(^|[^A-Za-z0-9])ghp_[A-Za-z0-9]{
 # valid commit depend on stale ambient process state. Do not mkdir an
 # untrusted TMPDIR: it may point outside the paths this hook should mutate.
 TMP_BASE=${TMPDIR:-/tmp}
-if [ ! -d "$TMP_BASE" ] || [ ! -w "$TMP_BASE" ]; then
+if [ ! -d "$TMP_BASE" ] || [ ! -w "$TMP_BASE" ] || [ ! -x "$TMP_BASE" ]; then
     TMP_BASE=/tmp
 fi
 STAGED_FILES=$(mktemp "$TMP_BASE/schist-pre-commit.XXXXXX") || exit 1
