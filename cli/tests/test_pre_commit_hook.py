@@ -8,6 +8,7 @@ real-looking secrets.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -144,6 +145,28 @@ def test_benign_long_path_commits(vault: Path) -> None:
     assert result.returncode == 0, (
         f"Hook rejected a benign file at a long path: {result.stdout}{result.stderr}"
     )
+
+
+def test_missing_inherited_tmpdir_falls_back_to_system_tmp(vault: Path, tmp_path: Path) -> None:
+    """A stale sandbox TMPDIR must not make otherwise-valid commits fail."""
+    missing_tmpdir = tmp_path / "removed-sandbox-tmp"
+    (vault / "note.md").write_text("just a note\n")
+    subprocess.run(["git", "add", "note.md"], cwd=vault, check=True)
+
+    env = os.environ.copy()
+    env["TMPDIR"] = str(missing_tmpdir)
+    result = subprocess.run(
+        ["git", "commit", "-m", "test"],
+        cwd=vault,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, (
+        f"Hook trusted a missing inherited TMPDIR: {result.stdout}{result.stderr}"
+    )
+    assert not missing_tmpdir.exists(), "hook must not create an untrusted TMPDIR"
 
 
 def test_staged_secret_blocked_after_worktree_cleanup(vault: Path) -> None:

@@ -53,7 +53,7 @@ sys.exit(main())
 
 POST_COMMIT_HOOK = r"""#!/bin/sh
 # schist post-commit hook — re-ingest vault into SQLite after every commit
-# schist-hook-version: 5
+# schist-hook-version: 6
 
 VAULT_ROOT=$(git rev-parse --show-toplevel)
 DB_PATH="$VAULT_ROOT/.schist/schist.db"
@@ -81,11 +81,11 @@ python3 "$INGEST" --vault "$VAULT_ROOT" --db "$DB_PATH"
 # `# schist-hook-version: N` line lives inside each hook script body. A user
 # who has intentionally customized their hook can replace the version line
 # with `# schist-hook-version: pinned` to silence the staleness warning.
-HOOK_VERSION = 5
+HOOK_VERSION = 6
 
 PRE_COMMIT_HOOK = r"""#!/bin/sh
 # schist pre-commit hook — reject staged files containing secrets
-# schist-hook-version: 5
+# schist-hook-version: 6
 
 # Patterns intentionally require a left boundary on token prefixes so substrings
 # like "task-..." inside a filename don't trigger on "sk-...", and require a
@@ -93,7 +93,15 @@ PRE_COMMIT_HOOK = r"""#!/bin/sh
 # doesn't trip the guard. See issue #103 for the false-positive cases.
 PATTERNS="(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}|(^|[^A-Za-z0-9])ghp_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9])ghs_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9])AKIA[A-Z0-9]{16}|-----BEGIN [A-Z ]+PRIVATE KEY-----|password\s*=\s*[\"'][^\"' ]+[\"']|api_key\s*=\s*[\"'][^\"' ]+[\"']"
 
-STAGED_FILES=$(mktemp "${TMPDIR:-/tmp}/schist-pre-commit.XXXXXX") || exit 1
+# Sandboxed hosts can inherit a per-process TMPDIR whose parent has already
+# been removed. Fall back to the system temp directory rather than making a
+# valid commit depend on stale ambient process state. Do not mkdir an
+# untrusted TMPDIR: it may point outside the paths this hook should mutate.
+TMP_BASE=${TMPDIR:-/tmp}
+if [ ! -d "$TMP_BASE" ] || [ ! -w "$TMP_BASE" ]; then
+    TMP_BASE=/tmp
+fi
+STAGED_FILES=$(mktemp "$TMP_BASE/schist-pre-commit.XXXXXX") || exit 1
 trap 'rm -f "$STAGED_FILES"' EXIT HUP INT TERM
 
 git diff --cached --name-only -z --diff-filter=ACMR > "$STAGED_FILES"
