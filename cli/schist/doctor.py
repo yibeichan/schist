@@ -742,7 +742,9 @@ def check_mcp_config(vault_path: Optional[str]) -> CheckResult:
         for name, cfg in servers.items():
             if not isinstance(cfg, dict):
                 continue
-            args = cfg.get("args", [])
+            args = cfg.get("args")
+            if not isinstance(args, list):
+                continue  # null/scalar args is not iterable — #441 crash class
             if any("schist" in str(a) or "dist/index.js" in str(a) for a in args):
                 located = (c, name, cfg)
                 break
@@ -780,7 +782,12 @@ def check_mcp_config(vault_path: Optional[str]) -> CheckResult:
             "Re-run `schist init --print-mcp-config --identity <name>` and "
             "replace the malformed schist entry in your Claude Code config.",
         )
-    args = entry.get("args", [])
+    # A well-formed dict entry can still carry a non-list `args` (null, scalar,
+    # dict) — subscripting args[0] would raise and crash the unshielded doctor
+    # run (#441 class). Normalize to [] so it degrades to the "no args[0]" WARN.
+    args = entry.get("args")
+    if not isinstance(args, list):
+        args = []
     args0 = str(args[0]) if args else ""
 
     warnings: list[str] = []
@@ -793,7 +800,9 @@ def check_mcp_config(vault_path: Optional[str]) -> CheckResult:
 
     # Sub-check 2: env SCHIST_VAULT_PATH matches current vault
     if vault_path and args0:
-        env = entry.get("env", {}) or {}
+        env = entry.get("env")
+        if not isinstance(env, dict):  # truthy non-dict env survives `or {}` — #441 class
+            env = {}
         entry_vault = env.get("SCHIST_VAULT_PATH", "")
         if entry_vault and Path(entry_vault).resolve() != Path(vault_path).resolve():
             warnings.append(
@@ -890,19 +899,24 @@ def _mcp_dist_dir_from_config(vault_path: Optional[str]) -> Optional[Path]:
         if not isinstance(servers, dict):
             continue
         entry = servers.get("schist")
-        if not isinstance(entry, dict):
+        # Fall through to the args scan when the schist entry is absent, null,
+        # non-dict, OR an empty dict — preserving the original falsy semantics
+        # while the isinstance half guards the #441 non-dict crash.
+        if not isinstance(entry, dict) or not entry:
             entry = None
             for cfg in servers.values():
                 if not isinstance(cfg, dict):
                     continue
-                args = cfg.get("args", [])
+                args = cfg.get("args")
+                if not isinstance(args, list):
+                    continue  # null/scalar args is not iterable — #441 crash class
                 if any("schist" in str(a) or "dist/index.js" in str(a) for a in args):
                     entry = cfg
                     break
         if not entry:
             continue
-        args = entry.get("args", [])
-        if not args:
+        args = entry.get("args")
+        if not isinstance(args, list) or not args:
             continue
         args0 = Path(str(args[0]))
         if args0.is_file():
