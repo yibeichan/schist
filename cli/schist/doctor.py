@@ -723,12 +723,28 @@ def check_mcp_config(vault_path: Optional[str]) -> CheckResult:
             data = json.loads(c.read_text())
         except Exception:
             continue
-        servers = data.get("mcpServers", {})
+        # A settings file can be valid JSON that isn't the shape we expect —
+        # `null`, a list, a scalar, `{"mcpServers": null}`, or a null server
+        # entry — from a mid-write truncation or a hand edit. run_doctor has no
+        # per-check exception shield (see the comment near its definition), so
+        # an unguarded `.get()`/`in`/`.items()` here would abort the WHOLE
+        # doctor run with a raw traceback (#437, #441). Guard each level.
+        if not isinstance(data, dict):
+            continue
+        servers = data.get("mcpServers")
+        if not isinstance(servers, dict):
+            continue
         if "schist" in servers:
+            # entry value may still be non-dict (e.g. null) — validated at the
+            # `located` unpack below so a malformed entry becomes a WARN.
             located = (c, "schist", servers["schist"])
             break
         for name, cfg in servers.items():
-            args = cfg.get("args", [])
+            if not isinstance(cfg, dict):
+                continue
+            args = cfg.get("args")
+            if not isinstance(args, list):
+                continue  # null/scalar args is not iterable — #441 crash class
             if any("schist" in str(a) or "dist/index.js" in str(a) for a in args):
                 located = (c, name, cfg)
                 break
@@ -741,9 +757,10 @@ def check_mcp_config(vault_path: Optional[str]) -> CheckResult:
         if cursor.exists():
             try:
                 data = json.loads(cursor.read_text())
-                servers = data.get("mcpServers", {})
-                if "schist" in servers:
-                    located = (cursor, "schist", servers["schist"])
+                if isinstance(data, dict):
+                    servers = data.get("mcpServers")
+                    if isinstance(servers, dict) and "schist" in servers:
+                        located = (cursor, "schist", servers["schist"])
             except Exception:
                 pass
 
@@ -755,7 +772,22 @@ def check_mcp_config(vault_path: Optional[str]) -> CheckResult:
         )
 
     config_path, entry_name, entry = located
-    args = entry.get("args", [])
+    # The schist-key branches above intentionally accept a present-but-null (or
+    # otherwise non-dict) entry so this single point reports it as a WARN rather
+    # than crashing on `.get()` (#441). Reachable via `{"mcpServers":{"schist":
+    # null}}` in any candidate file, including the Cursor fallback.
+    if not isinstance(entry, dict):
+        return CheckResult(
+            "WARN", "MCP", f"schist entry in {config_path} is not a JSON object",
+            "Re-run `schist init --print-mcp-config --identity <name>` and "
+            "replace the malformed schist entry in your Claude Code config.",
+        )
+    # A well-formed dict entry can still carry a non-list `args` (null, scalar,
+    # dict) — subscripting args[0] would raise and crash the unshielded doctor
+    # run (#441 class). Normalize to [] so it degrades to the "no args[0]" WARN.
+    args = entry.get("args")
+    if not isinstance(args, list):
+        args = []
     args0 = str(args[0]) if args else ""
 
     warnings: list[str] = []
@@ -768,7 +800,9 @@ def check_mcp_config(vault_path: Optional[str]) -> CheckResult:
 
     # Sub-check 2: env SCHIST_VAULT_PATH matches current vault
     if vault_path and args0:
-        env = entry.get("env", {}) or {}
+        env = entry.get("env")
+        if not isinstance(env, dict):  # truthy non-dict env survives `or {}` — #441 class
+            env = {}
         entry_vault = env.get("SCHIST_VAULT_PATH", "")
         if entry_vault and Path(entry_vault).resolve() != Path(vault_path).resolve():
             warnings.append(
@@ -856,18 +890,33 @@ def _mcp_dist_dir_from_config(vault_path: Optional[str]) -> Optional[Path]:
             data = json.loads(c.read_text())
         except Exception:
             continue
-        servers = data.get("mcpServers", {})
+        # Same non-dict/null-shape hardening as check_mcp_config (#437, #441):
+        # this helper feeds the schema/vocab-alignment checks, which also run
+        # under run_doctor's unshielded loop.
+        if not isinstance(data, dict):
+            continue
+        servers = data.get("mcpServers")
+        if not isinstance(servers, dict):
+            continue
         entry = servers.get("schist")
-        if not entry:
+        # Fall through to the args scan when the schist entry is absent, null,
+        # non-dict, OR an empty dict — preserving the original falsy semantics
+        # while the isinstance half guards the #441 non-dict crash.
+        if not isinstance(entry, dict) or not entry:
+            entry = None
             for cfg in servers.values():
-                args = cfg.get("args", [])
+                if not isinstance(cfg, dict):
+                    continue
+                args = cfg.get("args")
+                if not isinstance(args, list):
+                    continue  # null/scalar args is not iterable — #441 crash class
                 if any("schist" in str(a) or "dist/index.js" in str(a) for a in args):
                     entry = cfg
                     break
         if not entry:
             continue
-        args = entry.get("args", [])
-        if not args:
+        args = entry.get("args")
+        if not isinstance(args, list) or not args:
             continue
         args0 = Path(str(args[0]))
         if args0.is_file():
