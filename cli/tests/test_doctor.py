@@ -12,6 +12,7 @@ import yaml
 
 from schist.doctor import (
     CheckResult,
+    _mcp_dist_dir_from_config,
     check_git,
     check_hooks_freshness,
     check_hooks_path,
@@ -700,6 +701,86 @@ class TestCheckMcpConfig:
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         r = check_mcp_config(None)
         assert r.status == "WARN"
+
+    # --- Non-dict / null JSON hardening (#437, #441) ------------------------
+    # run_doctor has no per-check exception shield, so any of these valid-JSON
+    # but wrong-shape settings files would otherwise abort the entire doctor
+    # run with a raw traceback. Each must return a CheckResult, never raise.
+
+    @pytest.mark.parametrize("raw", ["null", "[]", '"a-string"', "42"])
+    def test_top_level_non_dict_json_returns_warn_not_crash(
+        self, tmp_path, monkeypatch, raw
+    ):
+        """#437: a settings file whose top-level JSON isn't a dict."""
+        (tmp_path / ".claude.json").write_text(raw)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_config(None)
+        assert r.status == "WARN"
+        assert "no schist entry found" in r.message
+
+    def test_null_mcpservers_returns_warn_not_crash(self, tmp_path, monkeypatch):
+        """#441 scenario A: `{"mcpServers": null}` — key present, value null."""
+        (tmp_path / ".claude.json").write_text(json.dumps({"mcpServers": None}))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_config(None)
+        assert r.status == "WARN"
+        assert "no schist entry found" in r.message
+
+    def test_null_schist_entry_returns_warn_not_crash(self, tmp_path, monkeypatch):
+        """#441 scenario B: `{"mcpServers": {"schist": null}}` — null entry."""
+        (tmp_path / ".claude.json").write_text(
+            json.dumps({"mcpServers": {"schist": None}})
+        )
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_config(None)
+        assert r.status == "WARN"
+        assert "not a JSON object" in r.message
+
+    def test_null_non_schist_entry_returns_warn_not_crash(
+        self, tmp_path, monkeypatch
+    ):
+        """#441 scenario B': a null value under a non-schist server name must
+        not crash the fallback scan over `servers.items()`."""
+        (tmp_path / ".claude.json").write_text(
+            json.dumps({"mcpServers": {"other-server": None}})
+        )
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_config(None)
+        assert r.status == "WARN"
+        assert "no schist entry found" in r.message
+
+    def test_null_schist_entry_in_cursor_fallback_returns_warn(
+        self, tmp_path, monkeypatch
+    ):
+        """The Cursor fallback path shares the `located` unpack, so a null
+        schist entry there must also WARN, not crash."""
+        (tmp_path / ".cursor").mkdir()
+        (tmp_path / ".cursor" / "mcp.json").write_text(
+            json.dumps({"mcpServers": {"schist": None}})
+        )
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_config(None)
+        assert r.status == "WARN"
+        assert "not a JSON object" in r.message
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "null",
+            "[]",
+            '{"mcpServers": null}',
+            '{"mcpServers": {"schist": null}}',
+            '{"mcpServers": {"other": null}}',
+        ],
+    )
+    def test_mcp_dist_dir_from_config_survives_bad_shapes(
+        self, tmp_path, monkeypatch, raw
+    ):
+        """#441: the schema/vocab-alignment helper reads the same configs under
+        run_doctor's unshielded loop — it must return None, never raise."""
+        (tmp_path / ".claude.json").write_text(raw)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        assert _mcp_dist_dir_from_config(None) is None
 
     def test_args0_missing_returns_warn(self, tmp_path, monkeypatch):
         """Issue #43 sub-check 1: WARN when args[0] doesn't exist on disk."""
