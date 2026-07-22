@@ -442,10 +442,16 @@ async function withWriteLock(
     const branch = await getWriteBranch(vaultRoot);
     await ensureBranch(vaultRoot, branch);
     // Trailing "--": force the branch reading even if a file shares the name
-    // (universal, ancient). --end-of-options (git ≥2.24 only): an option-like
-    // branch can never be parsed as a flag — defense-in-depth behind
-    // assertValidWriteBranch (#331).
-    await git(vaultRoot, ["checkout", ...(await endOfOptionsArgs()), branch, "--"]);
+    // (universal, ancient). NO --end-of-options here (#444): `git checkout` only
+    // learned to honor that flag after 2.43 (fails on ≤2.43, works on ≥2.49) —
+    // unlike rev-parse/branch, which honor it since 2.24. endOfOptionsArgs()
+    // gates on ≥2.24, so on git in [2.24, ~2.44) the flag reached checkout,
+    // which read it as an operand and rejected the command with "only one
+    // reference expected, 2 given" — breaking EVERY write (the common HPC git
+    // 2.43.x is in that window). The real option-injection defense is
+    // assertValidWriteBranch (full check-ref-format + leading-dash reject),
+    // unconditional and version-independent, so the flag is safe to drop here.
+    await git(vaultRoot, ["checkout", branch, "--"]);
     await assertAttachedToWriteBranch(vaultRoot, branch);
 
     const absPath = path.resolve(vaultRoot, relPath);
@@ -735,9 +741,12 @@ export async function deleteNote(
   try {
     const branch = await getWriteBranch(vaultRoot);
     await ensureBranch(vaultRoot, branch);
-    // Same option-injection hardening as withWriteLock (#331); --end-of-options
-    // is git ≥2.24-gated, the trailing "--" is universal.
-    await git(vaultRoot, ["checkout", ...(await endOfOptionsArgs()), branch, "--"]);
+    // Same option-injection hardening as withWriteLock: trailing "--" is
+    // universal, and NO --end-of-options — `git checkout` only honors that flag
+    // after 2.43 (fails on ≤2.43), so with endOfOptionsArgs()'s ≥2.24 gate it
+    // broke every delete on the common HPC git 2.43.x (#444).
+    // assertValidWriteBranch is the real, version-independent defense.
+    await git(vaultRoot, ["checkout", branch, "--"]);
     await assertAttachedToWriteBranch(vaultRoot, branch);
 
     try {
