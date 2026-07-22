@@ -12,6 +12,7 @@ import yaml
 
 from schist.doctor import (
     CheckResult,
+    _mcp_dist_dir_from_config,
     check_git,
     check_hooks_freshness,
     check_hooks_path,
@@ -700,6 +701,153 @@ class TestCheckMcpConfig:
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         r = check_mcp_config(None)
         assert r.status == "WARN"
+
+    # --- Non-dict / null JSON hardening (#437, #441) ------------------------
+    # run_doctor has no per-check exception shield, so any of these valid-JSON
+    # but wrong-shape settings files would otherwise abort the entire doctor
+    # run with a raw traceback. Each must return a CheckResult, never raise.
+
+    @pytest.mark.parametrize("raw", ["null", "[]", '"a-string"', "42"])
+    def test_top_level_non_dict_json_returns_warn_not_crash(
+        self, tmp_path, monkeypatch, raw
+    ):
+        """#437: a settings file whose top-level JSON isn't a dict."""
+        (tmp_path / ".claude.json").write_text(raw)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_config(None)
+        assert r.status == "WARN"
+        assert "no schist entry found" in r.message
+
+    def test_null_mcpservers_returns_warn_not_crash(self, tmp_path, monkeypatch):
+        """#441 scenario A: `{"mcpServers": null}` — key present, value null."""
+        (tmp_path / ".claude.json").write_text(json.dumps({"mcpServers": None}))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_config(None)
+        assert r.status == "WARN"
+        assert "no schist entry found" in r.message
+
+    def test_null_schist_entry_returns_warn_not_crash(self, tmp_path, monkeypatch):
+        """#441 scenario B: `{"mcpServers": {"schist": null}}` — null entry."""
+        (tmp_path / ".claude.json").write_text(
+            json.dumps({"mcpServers": {"schist": None}})
+        )
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_config(None)
+        assert r.status == "WARN"
+        assert "not a JSON object" in r.message
+
+    def test_null_non_schist_entry_returns_warn_not_crash(
+        self, tmp_path, monkeypatch
+    ):
+        """#441 scenario B': a null value under a non-schist server name must
+        not crash the fallback scan over `servers.items()`."""
+        (tmp_path / ".claude.json").write_text(
+            json.dumps({"mcpServers": {"other-server": None}})
+        )
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_config(None)
+        assert r.status == "WARN"
+        assert "no schist entry found" in r.message
+
+    def test_null_schist_entry_in_cursor_fallback_returns_warn(
+        self, tmp_path, monkeypatch
+    ):
+        """The Cursor fallback path shares the `located` unpack, so a null
+        schist entry there must also WARN, not crash."""
+        (tmp_path / ".cursor").mkdir()
+        (tmp_path / ".cursor" / "mcp.json").write_text(
+            json.dumps({"mcpServers": {"schist": None}})
+        )
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_config(None)
+        assert r.status == "WARN"
+        assert "not a JSON object" in r.message
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "null",
+            "[]",
+            '{"mcpServers": null}',
+            '{"mcpServers": {"schist": null}}',
+            '{"mcpServers": {"other": null}}',
+        ],
+    )
+    def test_mcp_dist_dir_from_config_survives_bad_shapes(
+        self, tmp_path, monkeypatch, raw
+    ):
+        """#441: the schema/vocab-alignment helper reads the same configs under
+        run_doctor's unshielded loop — it must return None, never raise."""
+        (tmp_path / ".claude.json").write_text(raw)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        assert _mcp_dist_dir_from_config(None) is None
+
+    # --- Leaf-field type hardening (args / env inside a well-formed entry) ---
+    # A dict entry can still carry a non-list `args` or non-dict `env`; the
+    # container guards don't cover those, and args[0] / `for a in args` /
+    # env.get would still crash the unshielded doctor loop.
+
+    @pytest.mark.parametrize("bad_args", [42, True, {"a": 1}, "string"])
+    def test_schist_entry_non_list_args_returns_warn_not_crash(
+        self, tmp_path, monkeypatch, bad_args
+    ):
+        (tmp_path / ".claude.json").write_text(
+            json.dumps({"mcpServers": {"schist": {"args": bad_args}}})
+        )
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        with patch("schist.doctor._auto_detect_mcp_path", return_value=None):
+            r = check_mcp_config(None)
+        assert r.status == "WARN"
+        assert "no args[0]" in r.message
+
+    @pytest.mark.parametrize("bad_args", [None, 42])
+    def test_non_schist_entry_non_list_args_returns_warn_not_crash(
+        self, tmp_path, monkeypatch, bad_args
+    ):
+        """A dict cfg (passes the cfg guard) with a null/scalar args must not
+        crash the `for a in args` scan — the gap the null-cfg test missed."""
+        (tmp_path / ".claude.json").write_text(
+            json.dumps({"mcpServers": {"other": {"args": bad_args}}})
+        )
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        r = check_mcp_config(None)
+        assert r.status == "WARN"
+        assert "no schist entry found" in r.message
+
+    @pytest.mark.parametrize("bad_env", ["oops", [1, 2], 42])
+    def test_schist_entry_non_dict_env_returns_result_not_crash(
+        self, tmp_path, monkeypatch, bad_env
+    ):
+        """A truthy non-dict `env` survives the old `or {}` and would crash
+        env.get when a vault_path is supplied (sub-check 2)."""
+        fake_mcp = tmp_path / "fake-mcp" / "dist" / "index.js"
+        fake_mcp.parent.mkdir(parents=True)
+        fake_mcp.write_text("// stub\n")
+        (tmp_path / ".claude.json").write_text(json.dumps({
+            "mcpServers": {"schist": {"args": [str(fake_mcp)], "env": bad_env}}
+        }))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        with patch("schist.doctor._auto_detect_mcp_path", return_value=None):
+            r = check_mcp_config(str(tmp_path / "vault"))
+        # A non-dict env is treated as absent → no SCHIST_VAULT_PATH mismatch
+        # warning, so the check passes on the otherwise-valid entry.
+        assert r.status == "PASS"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            '{"mcpServers": {"schist": {"args": 42}}}',
+            '{"mcpServers": {"schist": {"args": null}}}',
+            '{"mcpServers": {"other": {"args": null}}}',
+            '{"mcpServers": {"other": {"args": 42}}}',
+        ],
+    )
+    def test_mcp_dist_dir_from_config_survives_bad_args(
+        self, tmp_path, monkeypatch, raw
+    ):
+        (tmp_path / ".claude.json").write_text(raw)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        assert _mcp_dist_dir_from_config(None) is None
 
     def test_args0_missing_returns_warn(self, tmp_path, monkeypatch):
         """Issue #43 sub-check 1: WARN when args[0] doesn't exist on disk."""
