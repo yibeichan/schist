@@ -171,18 +171,35 @@ def insert_connection_line(content: str, line: str) -> str:
     return '\n'.join(lines) + '\n'
 
 
-def _atomic_write(path: str, content: str) -> None:
+def _atomic_write(path: str, content: str, vault_root: str | None = None) -> None:
     """Write `content` to `path` atomically (write-to-temp + os.replace).
 
     A plain `open(path, 'w')` truncates the target at open() time, before any
     byte is written — a SIGKILL/OOM/power-loss in that window leaves a zero-byte
     note with the previous content gone (#425). We write to a unique temp file
-    in the SAME directory (⇒ same filesystem ⇒ rename is atomic on POSIX) and
-    `os.replace` over the target, so a reader/crash sees either the old file
-    intact or the new file complete, never an empty intermediate. Mirrors
-    sync.py's _atomic_write_hook.
+    on the SAME filesystem (⇒ rename is atomic on POSIX) and `os.replace` over
+    the target, so a reader/crash sees either the old file intact or the new
+    file complete, never an empty intermediate. Mirrors sync.py's
+    _atomic_write_hook and git-writer.ts's atomicWriteFile.
+
+    `vault_root` selects WHERE the temp lives. A hard kill in the microsecond
+    window between the write and the rename leaves the temp orphaned (the
+    `except` cleanup never runs on SIGKILL). If that orphan sits in the target's
+    own directory — a synced scope like `notes/` — the next `schist sync push`
+    stages and commits it (junk-named, possibly a truncated partial note) and
+    fans it out to the hub and every spoke (#433). So when a vault_root is
+    given, the temp goes under `<vault_root>/.schist/tmp/` — gitignored
+    (`.schist/`) and never a sync scope target (`_global_scope_targets`), so a
+    leaked orphan is inert. `.schist/` is inside the vault tree, hence the same
+    filesystem as the target, so os.replace stays atomic across the two dirs.
+    Falls back to the target's own directory when no vault_root is supplied
+    (bare notes outside a vault / unit tests) — still same-fs, still atomic.
     """
-    dir_ = os.path.dirname(os.path.abspath(path))
+    if vault_root:
+        dir_ = os.path.join(vault_root, '.schist', 'tmp')
+        os.makedirs(dir_, exist_ok=True)
+    else:
+        dir_ = os.path.dirname(os.path.abspath(path))
     fd, tmp_path = tempfile.mkstemp(dir=dir_, suffix='.tmp')
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -208,8 +225,14 @@ def _atomic_write(path: str, content: str) -> None:
         raise
 
 
-def append_connection(path: str, connection_type: str, target: str, context: str | None = None):
-    """Append a connection line to the ## Connections section (creating it if needed)."""
+def append_connection(path: str, connection_type: str, target: str, context: str | None = None,
+                      vault_root: str | None = None):
+    """Append a connection line to the ## Connections section (creating it if needed).
+
+    Pass `vault_root` for any note inside a synced vault so the atomic-write temp
+    lands under `.schist/tmp/` instead of alongside the note — see _atomic_write
+    (#433). Omitting it (bare notes / tests) keeps the same-dir fallback.
+    """
     with open(path, 'r', encoding='utf-8') as f:
         content = f.read()
 
@@ -224,4 +247,4 @@ def append_connection(path: str, connection_type: str, target: str, context: str
     else:
         line = f'- {connection_type}: {target}'
 
-    _atomic_write(path, insert_connection_line(content, line))
+    _atomic_write(path, insert_connection_line(content, line), vault_root=vault_root)

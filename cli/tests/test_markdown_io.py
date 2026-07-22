@@ -206,6 +206,110 @@ def test_append_connection_preserves_file_mode(tmp_path) -> None:
     assert stat.S_IMODE(os.stat(note).st_mode) == 0o644
 
 
+def test_atomic_write_temp_lives_in_schist_tmp_when_vault_root_given(tmp_path) -> None:
+    """#433: with a vault_root, the atomic-write temp is created under
+    <vault>/.schist/tmp/ — gitignored (`.schist/`) and never a sync scope — so
+    a hard kill in the write→replace window can't strand an orphan under a
+    synced scope dir (notes/) that the next `schist sync push` would stage,
+    commit, and fan out to the hub. Capture the rename source to assert location
+    AND confirm the note content still lands correctly across the two dirs."""
+    import os
+
+    import schist.markdown_io as mio
+
+    vault = tmp_path
+    (vault / ".schist").mkdir()
+    notes = vault / "notes"
+    notes.mkdir()
+    note = notes / "a.md"
+    note.write_text("---\ntitle: A\n---\nBody.\n", encoding="utf-8")
+
+    seen: dict[str, str] = {}
+    real_replace = mio.os.replace
+
+    def capturing_replace(src, dst):
+        seen["src"] = src
+        return real_replace(src, dst)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(mio.os, "replace", capturing_replace)
+    try:
+        mio.append_connection(str(note), "extends", "notes/b.md", vault_root=str(vault))
+    finally:
+        monkeypatch.undo()
+
+    # Temp came from .schist/tmp/, not from the note's own (synced) directory.
+    assert seen["src"].startswith(str(vault / ".schist" / "tmp") + os.sep)
+    # No *.tmp orphan left in the synced scope dir.
+    assert list(notes.glob("*.tmp")) == []
+    # Cross-directory os.replace still landed the new content atomically.
+    assert "- extends: notes/b.md" in note.read_text(encoding="utf-8")
+
+
+def test_orphaned_temp_on_hard_kill_is_confined_to_schist_tmp(tmp_path) -> None:
+    """Models the exact #433 failure: a hard kill (SIGKILL/OOM/power-loss)
+    between the temp write and os.replace runs NO cleanup — the `except`/unlink
+    path never executes. The orphaned temp must be confined to .schist/tmp/
+    (gitignored, non-scope), NOT left under notes/ where sync would commit it."""
+    import schist.markdown_io as mio
+
+    vault = tmp_path
+    (vault / ".schist").mkdir()
+    notes = vault / "notes"
+    notes.mkdir()
+    note = notes / "a.md"
+    note.write_text("---\ntitle: A\n---\nBody.\n", encoding="utf-8")
+
+    def crash(_src, _dst):
+        raise OSError("simulated hard kill at rename")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(mio.os, "replace", crash)
+    # Neutralize the error-path cleanup so the temp survives, as it would after
+    # a real SIGKILL (which never runs the `except` block at all).
+    monkeypatch.setattr(mio.os, "unlink", lambda *_a, **_k: None)
+    try:
+        with pytest.raises(OSError):
+            mio.append_connection(str(note), "extends", "notes/b.md", vault_root=str(vault))
+    finally:
+        monkeypatch.undo()
+
+    # Orphan is in .schist/tmp/ (inert), never under the synced scope dir.
+    assert list(notes.glob("*.tmp")) == [], "orphan leaked into a synced scope dir"
+    assert list((vault / ".schist" / "tmp").glob("*.tmp")), "temp should orphan under .schist/tmp"
+    # Original content is untouched (the write never reached the target).
+    assert note.read_text(encoding="utf-8") == "---\ntitle: A\n---\nBody.\n"
+
+
+def test_atomic_write_without_vault_root_falls_back_to_target_dir(tmp_path) -> None:
+    """No vault_root (bare note / non-vault caller) keeps the original same-dir
+    temp behavior — the fallback must stay same-filesystem so os.replace is
+    still atomic, and must not require a .schist/ dir that doesn't exist."""
+    import os
+
+    import schist.markdown_io as mio
+
+    note = tmp_path / "note.md"
+    note.write_text("---\ntitle: A\n---\nBody.\n", encoding="utf-8")
+
+    seen: dict[str, str] = {}
+    real_replace = mio.os.replace
+
+    def capturing_replace(src, dst):
+        seen["src"] = src
+        return real_replace(src, dst)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(mio.os, "replace", capturing_replace)
+    try:
+        mio.append_connection(str(note), "extends", "notes/b.md")
+    finally:
+        monkeypatch.undo()
+
+    assert os.path.dirname(seen["src"]) == str(tmp_path)
+    assert "- extends: notes/b.md" in note.read_text(encoding="utf-8")
+
+
 def test_title_slug_is_linear_on_huge_whitespace() -> None:
     """Whitespace collapse is a single [class]+ pass and the edge strip is
     str.strip — never a `^[ws]+|[ws]+$` alternated anchored regex, which

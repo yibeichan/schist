@@ -566,16 +566,26 @@ function attribution(owner: string | undefined): string {
  * O_TRUNC, zeroing the file BEFORE any byte is written. A process kill (OOM,
  * SIGKILL, Claude Desktop force-quit, power loss) in that window leaves a
  * zero-byte note, and any uncommitted content is unrecoverable (#427). We
- * write to a unique temp file in the SAME directory (⇒ same filesystem ⇒
- * `fs.rename` is atomic on POSIX) and rename over the target, so a crash sees
- * either the old file intact or the new file complete — never an empty
- * intermediate. The temp name is per-pid + random so a concurrent CLI writer
- * (not covered by this process's writeMutex) can't collide on it; it is renamed
- * away before any git staging and is unlinked on error, so it never leaks into
- * a commit. Mirrors the CLI's markdown_io._atomic_write / sync._atomic_write_hook.
+ * write to a unique temp file on the SAME filesystem (⇒ `fs.rename` is atomic
+ * on POSIX) and rename over the target, so a crash sees either the old file
+ * intact or the new file complete — never an empty intermediate. The temp name
+ * is per-pid + random so a concurrent CLI writer (not covered by this process's
+ * writeMutex) can't collide on it. On the happy path it is renamed away before
+ * any git staging and is unlinked on a caught error.
+ *
+ * The temp lives under `<vaultRoot>/.schist/tmp/`, NOT alongside the target.
+ * A hard kill (OOM/SIGKILL/force-quit/power-loss) in the write→rename window
+ * runs no `catch` cleanup, so the temp is orphaned. In the target's own
+ * directory — a synced scope like `notes/` — the next `schist sync push` stages
+ * and commits that junk-named orphan (possibly a truncated partial note) to the
+ * hub and every spoke (#433). `.schist/` is gitignored and never a sync scope
+ * target, so a leaked orphan there is inert; it is inside the vault tree, hence
+ * same filesystem as the target, so the rename stays atomic across the two dirs.
+ * Mirrors the CLI's markdown_io._atomic_write / sync._atomic_write_hook.
  */
-async function atomicWriteFile(absPath: string, content: string): Promise<void> {
-  const dir = path.dirname(absPath);
+async function atomicWriteFile(absPath: string, content: string, vaultRoot: string): Promise<void> {
+  const dir = path.join(vaultRoot, ".schist", "tmp");
+  await fs.mkdir(dir, { recursive: true });
   const tmpPath = path.join(
     dir,
     `.${path.basename(absPath)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`
@@ -641,7 +651,7 @@ export async function writeNote(
         // window that atomicWriteFile closes (#427) does not apply here.
         await fs.writeFile(absPath, content, { encoding: "utf-8", flag: "wx" });
       } else {
-        await atomicWriteFile(absPath, content);
+        await atomicWriteFile(absPath, content, vaultRoot);
       }
     }
   );
@@ -666,7 +676,7 @@ export async function appendToNote(
         // file doesn't exist yet
       }
       const newContent = existing + (existing.endsWith("\n") ? "" : "\n") + addition;
-      await atomicWriteFile(absPath, newContent);
+      await atomicWriteFile(absPath, newContent, vaultRoot);
     }
   );
 }
@@ -706,7 +716,7 @@ export async function updateNote(
       } catch {
         throw { error: "NOT_FOUND", message: `Note not found: ${relPath}` };
       }
-      await atomicWriteFile(absPath, transform(current));
+      await atomicWriteFile(absPath, transform(current), vaultRoot);
     }
   );
 }
@@ -759,7 +769,7 @@ export async function deleteNote(
         // rather than writing through it). #119.
         await assertResolvesInside(vaultRoot, r.relPath);
         const absPath = path.resolve(vaultRoot, r.relPath);
-        await atomicWriteFile(absPath, r.content);
+        await atomicWriteFile(absPath, r.content, vaultRoot);
         await git(vaultRoot, ["add", "--", r.relPath]);
       }
 

@@ -17,6 +17,7 @@
  */
 import {
   writeNote,
+  updateNote,
   deleteNote,
   endOfOptionsArgs,
   parseGitMajorMinor,
@@ -271,6 +272,61 @@ describe("checkout omits --end-of-options (#444)", () => {
     await expect(
       execFile("git", ["cat-file", "-e", "drafts:notes/doomed.md"], { cwd: vault }),
     ).rejects.toBeTruthy();
+  });
+});
+
+describe("atomic-write temp lives under .schist/tmp (#433)", () => {
+  // atomicWriteFile writes to a temp then renames over the target. A hard kill
+  // (OOM/SIGKILL/force-quit/power-loss) in the write→rename window runs no
+  // cleanup, orphaning the temp. If that temp sat in the note's own directory —
+  // a synced scope like notes/ — the next `schist sync push` would stage and
+  // commit the junk-named orphan (possibly a truncated partial note) to the hub
+  // and every spoke (#433). The temp must instead be created under
+  // <vault>/.schist/tmp/, which is gitignored (`.schist/`) and never a sync
+  // scope target, so a leaked orphan is inert. These go red if atomicWriteFile
+  // reverts to a same-dir temp: .schist/tmp/ would never be created, and a temp
+  // shape could reappear under the scope dir.
+  async function listTmpShaped(dir: string): Promise<string[]> {
+    let entries: string[] = [];
+    try {
+      entries = await fs.readdir(dir);
+    } catch {
+      return [];
+    }
+    return entries.filter((n) => n.endsWith(".tmp"));
+  }
+
+  test("writeNote routes its atomic temp through .schist/tmp, not the scope dir", async () => {
+    const vault = await makeTempVault();
+    const result = await writeNote(vault, "notes/created.md", "---\ntitle: Created\n---\nBody\n");
+    expect(result.committed).toBe(true);
+
+    // The temp staging dir was created under the gitignored .schist/ runtime dir.
+    const tmpDir = path.join(vault, ".schist", "tmp");
+    await expect(fs.stat(tmpDir)).resolves.toBeTruthy();
+    // No orphaned temp under the synced scope dir.
+    expect(await listTmpShaped(path.join(vault, "notes"))).toEqual([]);
+  });
+
+  test("updateNote (read-modify-write) keeps its temp out of the scope dir", async () => {
+    // The RMW path is where a mid-write kill is most damaging — the target
+    // already holds content that a same-dir orphan could shadow/partial-commit.
+    const vault = await makeTempVault();
+    await writeNote(vault, "notes/edited.md", "---\ntitle: Edited\n---\nOne\n");
+    const result = await updateNote(
+      vault,
+      "notes/edited.md",
+      undefined,
+      undefined,
+      () => "---\ntitle: Edited\n---\nTwo\n",
+    );
+    expect(result.committed).toBe(true);
+
+    await expect(fs.stat(path.join(vault, ".schist", "tmp"))).resolves.toBeTruthy();
+    expect(await listTmpShaped(path.join(vault, "notes"))).toEqual([]);
+    // Content actually updated across the cross-directory rename.
+    const onDisk = await execFile("git", ["show", "drafts:notes/edited.md"], { cwd: vault });
+    expect(onDisk.stdout).toContain("Two");
   });
 });
 
