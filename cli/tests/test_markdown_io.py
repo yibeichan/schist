@@ -310,6 +310,83 @@ def test_atomic_write_without_vault_root_falls_back_to_target_dir(tmp_path) -> N
     assert "- extends: notes/b.md" in note.read_text(encoding="utf-8")
 
 
+def test_atomic_write_falls_back_to_target_dir_on_cross_fs_exdev(tmp_path) -> None:
+    """#433 review: if `.schist/` is on a different filesystem than the note
+    (e.g. a vault on NFS with `.schist` symlinked to local disk), the replace
+    from .schist/tmp raises EXDEV. The write must fall back to a same-dir temp
+    (guaranteed same-fs) and SUCCEED — a rare orphan beats a total write outage.
+    A non-EXDEV OSError must still propagate."""
+    import errno
+    import os
+
+    import schist.markdown_io as mio
+
+    vault = tmp_path
+    (vault / ".schist").mkdir()
+    notes = vault / "notes"
+    notes.mkdir()
+    note = notes / "a.md"
+    note.write_text("---\ntitle: A\n---\nBody.\n", encoding="utf-8")
+
+    schist_tmp = str(vault / ".schist" / "tmp")
+    real_replace = mio.os.replace
+    srcs: list[str] = []
+
+    def exdev_from_schist(src, dst):
+        srcs.append(src)
+        # Only the .schist/tmp attempt "crosses" a filesystem boundary.
+        if os.path.dirname(src) == schist_tmp:
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_replace(src, dst)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(mio.os, "replace", exdev_from_schist)
+    try:
+        mio.append_connection(str(note), "extends", "notes/b.md", vault_root=str(vault))
+    finally:
+        monkeypatch.undo()
+
+    # First attempt was .schist/tmp (EXDEV), retry landed in the note's own dir.
+    assert os.path.dirname(srcs[0]) == schist_tmp
+    assert os.path.dirname(srcs[-1]) == str(notes)
+    # The write ultimately succeeded — content is present, no leftover temp.
+    assert "- extends: notes/b.md" in note.read_text(encoding="utf-8")
+    assert list(notes.glob("*.tmp")) == []
+    assert list((vault / ".schist" / "tmp").glob("*.tmp")) == []
+
+
+def test_atomic_write_non_exdev_oserror_still_propagates(tmp_path) -> None:
+    """The EXDEV fallback must not swallow OTHER replace failures (disk full,
+    permission): those are real errors and must raise, leaving the original
+    note intact and no leaked temp."""
+    import errno
+
+    import schist.markdown_io as mio
+
+    vault = tmp_path
+    (vault / ".schist").mkdir()
+    notes = vault / "notes"
+    notes.mkdir()
+    note = notes / "a.md"
+    original = "---\ntitle: A\n---\nBody.\n"
+    note.write_text(original, encoding="utf-8")
+
+    def enospc(_src, _dst):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(mio.os, "replace", enospc)
+    try:
+        with pytest.raises(OSError) as ei:
+            mio.append_connection(str(note), "extends", "notes/b.md", vault_root=str(vault))
+        assert ei.value.errno == errno.ENOSPC
+    finally:
+        monkeypatch.undo()
+
+    assert note.read_text(encoding="utf-8") == original
+    assert list((vault / ".schist" / "tmp").glob("*.tmp")) == []
+
+
 def test_title_slug_is_linear_on_huge_whitespace() -> None:
     """Whitespace collapse is a single [class]+ pass and the edge strip is
     str.strip — never a `^[ws]+|[ws]+$` alternated anchored regex, which

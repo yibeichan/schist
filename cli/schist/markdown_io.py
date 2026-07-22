@@ -1,5 +1,6 @@
 """Markdown I/O — read, write, and manipulate vault notes."""
 
+import errno
 import os
 import re
 import stat
@@ -193,36 +194,52 @@ def _atomic_write(path: str, content: str, vault_root: str | None = None) -> Non
     leaked orphan is inert. `.schist/` is inside the vault tree, hence the same
     filesystem as the target, so os.replace stays atomic across the two dirs.
     Falls back to the target's own directory when no vault_root is supplied
-    (bare notes outside a vault / unit tests) — still same-fs, still atomic.
+    (bare notes outside a vault / unit tests) OR when `.schist/` turns out to be
+    on a different filesystem than the note (os.replace raises EXDEV) — e.g. a
+    vault on NFS with `.schist` symlinked to local disk. The same-dir temp is
+    guaranteed same-fs so the atomic replace still works; that write forgoes the
+    #433 orphan protection, but a rare orphan beats a total write outage.
     """
+    def _write_via(dir_: str) -> None:
+        fd, tmp_path = tempfile.mkstemp(dir=dir_, suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(content)
+            # mkstemp hardcodes the temp to 0600, and os.replace renames that
+            # inode OVER the target — so without this the note would silently
+            # inherit 0600 and lose group/other read. git tracks only the exec
+            # bit, so the change is invisible in history but real on disk (bites
+            # a shared hub). Preserve the note's existing mode; a not-yet-
+            # existing file falls back to the umask default, matching the old
+            # open('w', ...) behavior.
+            try:
+                os.chmod(tmp_path, stat.S_IMODE(os.stat(path).st_mode))
+            except FileNotFoundError:
+                cur = os.umask(0)
+                os.umask(cur)
+                os.chmod(tmp_path, 0o666 & ~cur)
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    same_dir = os.path.dirname(os.path.abspath(path))
     if vault_root:
-        dir_ = os.path.join(vault_root, '.schist', 'tmp')
-        os.makedirs(dir_, exist_ok=True)
-    else:
-        dir_ = os.path.dirname(os.path.abspath(path))
-    fd, tmp_path = tempfile.mkstemp(dir=dir_, suffix='.tmp')
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            f.write(content)
-        # mkstemp hardcodes the temp to 0600, and os.replace renames that inode
-        # OVER the target — so without this the note would silently inherit 0600
-        # and lose group/other read. git tracks only the exec bit, so the change
-        # is invisible in history but real on disk (bites a shared hub). Preserve
-        # the note's existing mode; a not-yet-existing file falls back to the
-        # umask default, matching the old open('w', ...) behavior.
+        staging = os.path.join(vault_root, '.schist', 'tmp')
+        os.makedirs(staging, exist_ok=True)
         try:
-            os.chmod(tmp_path, stat.S_IMODE(os.stat(path).st_mode))
-        except FileNotFoundError:
-            cur = os.umask(0)
-            os.umask(cur)
-            os.chmod(tmp_path, 0o666 & ~cur)
-        os.replace(tmp_path, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+            _write_via(staging)
+            return
+        except OSError as e:
+            # EXDEV only: .schist is on another filesystem than the note. Any
+            # other OSError (disk full, permission, …) is a real failure — the
+            # `_write_via` cleanup already unlinked the temp, so just re-raise.
+            if e.errno != errno.EXDEV:
+                raise
+    _write_via(same_dir)
 
 
 def append_connection(path: str, connection_type: str, target: str, context: str | None = None,

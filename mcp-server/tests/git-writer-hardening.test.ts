@@ -286,6 +286,14 @@ describe("atomic-write temp lives under .schist/tmp (#433)", () => {
   // scope target, so a leaked orphan is inert. These go red if atomicWriteFile
   // reverts to a same-dir temp: .schist/tmp/ would never be created, and a temp
   // shape could reappear under the scope dir.
+  //
+  // The EXDEV fallback (`.schist` on a different filesystem than the note ⇒
+  // retry the temp in the note's own dir) is not unit-tested here: forcing
+  // fs.rename to raise EXDEV needs a mock of the frozen `fs/promises` ESM
+  // namespace, which would break makeTempVault and every other test in this
+  // file. The branch is small and symmetric with markdown_io._atomic_write,
+  // whose EXDEV fallback IS directly covered — see
+  // cli/tests/test_markdown_io.py::test_atomic_write_falls_back_to_target_dir_on_cross_fs_exdev.
   async function listTmpShaped(dir: string): Promise<string[]> {
     let entries: string[] = [];
     try {

@@ -581,36 +581,54 @@ function attribution(owner: string | undefined): string {
  * hub and every spoke (#433). `.schist/` is gitignored and never a sync scope
  * target, so a leaked orphan there is inert; it is inside the vault tree, hence
  * same filesystem as the target, so the rename stays atomic across the two dirs.
+ *
+ * Fallback: if `.schist/` turns out to be on a DIFFERENT filesystem than the
+ * note (fs.rename raises EXDEV — e.g. a vault on NFS with `.schist` symlinked to
+ * local disk), retry the write with a temp in the target's OWN directory, which
+ * is guaranteed same-fs. That write forgoes the #433 orphan protection, but a
+ * rare orphan beats a total write outage.
  * Mirrors the CLI's markdown_io._atomic_write / sync._atomic_write_hook.
  */
 async function atomicWriteFile(absPath: string, content: string, vaultRoot: string): Promise<void> {
-  const dir = path.join(vaultRoot, ".schist", "tmp");
-  await fs.mkdir(dir, { recursive: true });
-  const tmpPath = path.join(
-    dir,
-    `.${path.basename(absPath)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`
-  );
+  const writeVia = async (dir: string): Promise<void> => {
+    const tmpPath = path.join(
+      dir,
+      `.${path.basename(absPath)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`
+    );
+    try {
+      await fs.writeFile(tmpPath, content, "utf-8");
+      // Preserve the target's existing mode across the rename. fs.writeFile created
+      // the temp with the default (0666 & ~umask, ~0644), so an existing note with
+      // tighter or looser perms would otherwise be silently reset — a change git
+      // can't surface (it tracks only the exec bit). Best-effort: a brand-new note
+      // (no prior file) keeps the default create mode, matching the old writeFile.
+      try {
+        const { mode } = await fs.stat(absPath);
+        await fs.chmod(tmpPath, mode);
+      } catch {
+        /* target doesn't exist yet (new note) — keep the default create mode */
+      }
+      await fs.rename(tmpPath, absPath);
+    } catch (e) {
+      try {
+        await fs.unlink(tmpPath);
+      } catch {
+        /* temp file may not exist if writeFile itself failed — ignore */
+      }
+      throw e;
+    }
+  };
+
+  const staging = path.join(vaultRoot, ".schist", "tmp");
+  await fs.mkdir(staging, { recursive: true });
   try {
-    await fs.writeFile(tmpPath, content, "utf-8");
-    // Preserve the target's existing mode across the rename. fs.writeFile created
-    // the temp with the default (0666 & ~umask, ~0644), so an existing note with
-    // tighter or looser perms would otherwise be silently reset — a change git
-    // can't surface (it tracks only the exec bit). Best-effort: a brand-new note
-    // (no prior file) keeps the default create mode, matching the old writeFile.
-    try {
-      const { mode } = await fs.stat(absPath);
-      await fs.chmod(tmpPath, mode);
-    } catch {
-      /* target doesn't exist yet (new note) — keep the default create mode */
-    }
-    await fs.rename(tmpPath, absPath);
+    await writeVia(staging);
   } catch (e) {
-    try {
-      await fs.unlink(tmpPath);
-    } catch {
-      /* temp file may not exist if writeFile itself failed — ignore */
-    }
-    throw e;
+    // EXDEV only: .schist is on another filesystem than the note. Any other
+    // error (ENOSPC, EACCES, …) is a real failure — writeVia already unlinked
+    // the temp, so re-raise. The fallback temp lives in the note's own dir.
+    if ((e as NodeJS.ErrnoException)?.code !== "EXDEV") throw e;
+    await writeVia(path.dirname(absPath));
   }
 }
 
