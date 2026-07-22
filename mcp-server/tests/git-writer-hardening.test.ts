@@ -17,6 +17,7 @@
  */
 import {
   writeNote,
+  deleteNote,
   endOfOptionsArgs,
   parseGitMajorMinor,
   __setGitVersionCacheForTesting,
@@ -227,6 +228,49 @@ describe("--end-of-options gated on runtime git version (#355 deploy fix)", () =
     await expect(
       writeNote(vault, "notes/n.md", "---\ntitle: N\n---\nBody\n"),
     ).rejects.toMatchObject({ error: "VALIDATION_ERROR" });
+  });
+});
+
+describe("checkout omits --end-of-options (#444)", () => {
+  // #355 spread endOfOptionsArgs() into the branch-checkout argv, producing
+  // `git checkout --end-of-options <branch> --`. But `git checkout` only learned
+  // to honor --end-of-options AFTER 2.43 (fails on ≤2.43, works on ≥2.49) —
+  // unlike rev-parse/branch, which honor it since 2.24. endOfOptionsArgs() gates
+  // on ≥2.24, so on git in [2.24, ~2.44) the flag reached checkout, which read
+  // it as an operand and rejected the command with "only one reference expected,
+  // 2 given" — breaking every write. The common HPC git 2.43.x is in that
+  // window; the CI runner (2.54) is past it, so CI never caught it. The #355
+  // hardening tests forced the OLD-git path ([2,20]), so endOfOptionsArgs()
+  // returned [] and the flagged checkout argv was never exercised.
+  //
+  // These tests force git version [2,43] — the exact broken window on a common
+  // HPC host — so endOfOptionsArgs() would return the flag, then run the real
+  // write/delete paths. They go red if the flag is re-added to a checkout site,
+  // regardless of the host git version (verified: red against pre-fix source).
+  afterEach(() => {
+    __setGitVersionCacheForTesting(undefined); // restore real detection
+  });
+
+  test("writeNote succeeds on the ≥2.24 path (checkout must not carry the flag)", async () => {
+    __setGitVersionCacheForTesting([2, 43]);
+    // Sanity-check the premise: the flag IS returned for this version, so the
+    // checkout call site is the only reason the write can still succeed.
+    expect(await endOfOptionsArgs()).toEqual(["--end-of-options"]);
+    const vault = await makeTempVault();
+    const result = await writeNote(vault, "notes/modern.md", "---\ntitle: Modern\n---\nBody\n");
+    expect(result.committed).toBe(true);
+    await execFile("git", ["cat-file", "-e", "drafts:notes/modern.md"], { cwd: vault });
+  });
+
+  test("deleteNote succeeds on the ≥2.24 path (checkout must not carry the flag)", async () => {
+    __setGitVersionCacheForTesting([2, 43]);
+    const vault = await makeTempVault();
+    await writeNote(vault, "notes/doomed.md", "---\ntitle: Doomed\n---\nBody\n");
+    const result = await deleteNote(vault, "notes/doomed.md", "Doomed");
+    expect(result.committed).toBe(true);
+    await expect(
+      execFile("git", ["cat-file", "-e", "drafts:notes/doomed.md"], { cwd: vault }),
+    ).rejects.toBeTruthy();
   });
 });
 
