@@ -18,6 +18,7 @@
 import {
   writeNote,
   updateNote,
+  appendToNote,
   deleteNote,
   endOfOptionsArgs,
   parseGitMajorMinor,
@@ -335,6 +336,50 @@ describe("atomic-write temp lives under .schist/tmp (#433)", () => {
     // Content actually updated across the cross-directory rename.
     const onDisk = await execFile("git", ["show", "drafts:notes/edited.md"], { cwd: vault });
     expect(onDisk.stdout).toContain("Two");
+  });
+
+  test("appendToNote keeps its temp out of the scope dir (#450 coverage gap)", async () => {
+    // #447 covered writeNote/updateNote but not appendToNote — a same-dir revert
+    // there would have slipped through. appendToNote reads-then-atomic-writes,
+    // so its temp must also route through .schist/tmp.
+    const vault = await makeTempVault();
+    await writeNote(vault, "notes/log.md", "---\ntitle: Log\n---\nline1\n");
+    const result = await appendToNote(vault, "notes/log.md", "line2");
+    expect(result.committed).toBe(true);
+
+    await expect(fs.stat(path.join(vault, ".schist", "tmp"))).resolves.toBeTruthy();
+    expect(await listTmpShaped(path.join(vault, "notes"))).toEqual([]);
+    const onDisk = await execFile("git", ["show", "drafts:notes/log.md"], { cwd: vault });
+    expect(onDisk.stdout).toContain("line1"); // prior content preserved
+    expect(onDisk.stdout).toContain("line2"); // addition applied
+  });
+});
+
+describe("appendToNote read error is not swallowed (#449)", () => {
+  // appendToNote read the existing note under a bare `catch {}` labeled "file
+  // doesn't exist yet". ENOENT IS that case — the note is created. But ANY other
+  // read error (EACCES/EIO/EISDIR/stale NFS handle) was also swallowed, leaving
+  // existing="" so atomicWriteFile overwrote the note with ONLY the addition,
+  // erasing all prior content. The fix re-raises every non-ENOENT read error.
+  test("ENOENT (note absent) still creates the note from just the addition", async () => {
+    const vault = await makeTempVault();
+    const result = await appendToNote(vault, "notes/fresh.md", "first line");
+    expect(result.committed).toBe(true);
+    const onDisk = await execFile("git", ["show", "drafts:notes/fresh.md"], { cwd: vault });
+    expect(onDisk.stdout).toContain("first line");
+  });
+
+  test("a non-ENOENT read error aborts the append instead of clobbering", async () => {
+    // Deterministic non-ENOENT read error, no root-bypass concerns: put a
+    // DIRECTORY where the note path is — fs.readFile then rejects with EISDIR.
+    // Pre-fix that was swallowed and the append proceeded; post-fix it must
+    // propagate so nothing overwrites the path.
+    const vault = await makeTempVault();
+    await fs.mkdir(path.join(vault, "notes", "asdir.md"), { recursive: true });
+    await expect(appendToNote(vault, "notes/asdir.md", "should not be written")).rejects.toBeTruthy();
+    // The directory is untouched — the append never wrote through it.
+    const stat = await fs.stat(path.join(vault, "notes", "asdir.md"));
+    expect(stat.isDirectory()).toBe(true);
   });
 });
 
