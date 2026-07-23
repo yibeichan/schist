@@ -250,9 +250,13 @@ describe("git-writer", () => {
   });
 
   // #427: writes go through a temp file + atomic rename so a mid-write kill
-  // can never leave a zero-byte note. Observable guarantee: the final content
-  // is correct AND no `.tmp` scratch file is left behind in the note dir.
-  test("ATOMIC: writeNote/updateNote/appendToNote leave no temp files behind", async () => {
+  // can never leave a zero-byte note. #447 moved the temp OUT of the note dir
+  // into <vault>/.schist/tmp/ (gitignored, non-scope) so a crash-orphaned temp
+  // can't be committed to the hub. Observable guarantee: the final content is
+  // correct, the temp is staged under .schist/tmp/, and no `.tmp` scratch file
+  // is left in the note dir. (Per-function routing is asserted in
+  // git-writer-hardening.test.ts "#433"; this keeps the end-to-end triple.)
+  test("ATOMIC: writeNote/updateNote/appendToNote route temps through .schist/tmp", async () => {
     const vault = await makeTempVault();
     const rel = "notes/atomic.md";
 
@@ -264,7 +268,9 @@ describe("git-writer", () => {
     expect(content).toContain("v2");
     expect(content).toContain("appended line");
 
-    // No leaked temp files (`.atomic.md.<pid>.<hex>.tmp`) in the note directory.
+    // Temp staging happened under the gitignored .schist/ runtime dir…
+    await expect(fs.stat(path.join(vault, ".schist", "tmp"))).resolves.toBeTruthy();
+    // …and NOT in the synced note directory (#447): no `.tmp` orphan there.
     const entries = await fs.readdir(path.join(vault, "notes"));
     expect(entries.filter((e) => e.endsWith(".tmp"))).toEqual([]);
     expect(entries).toContain("atomic.md");
