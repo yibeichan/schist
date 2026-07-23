@@ -607,8 +607,9 @@ async function atomicWriteFile(absPath: string, content: string, vaultRoot: stri
         await fs.chmod(tmpPath, mode);
       } catch (e) {
         // ENOENT is the expected "brand-new note, no prior file" case — keep the
-        // default create mode. Any OTHER stat error (EACCES, EIO, stale NFS
-        // handle) means the target exists but we couldn't read its mode;
+        // default create mode. Any OTHER error from this stat-then-chmod pair
+        // (stat EACCES/EIO/stale NFS handle; chmod EPERM/EROFS) means the target
+        // exists but we couldn't faithfully carry its mode across the rename;
         // swallowing it would silently reset the note's perms on a shared hub —
         // a git-invisible but real change. Re-raise so the write aborts loudly
         // (#443). writeVia's outer catch unlinks the temp.

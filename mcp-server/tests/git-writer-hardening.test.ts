@@ -376,7 +376,11 @@ describe("appendToNote read error is not swallowed (#449)", () => {
     // propagate so nothing overwrites the path.
     const vault = await makeTempVault();
     await fs.mkdir(path.join(vault, "notes", "asdir.md"), { recursive: true });
-    await expect(appendToNote(vault, "notes/asdir.md", "should not be written")).rejects.toBeTruthy();
+    // Pin the rejection to the readFile EISDIR (code ≠ ENOENT), so this can't
+    // pass for the wrong reason if a future containment guard rejects earlier.
+    await expect(
+      appendToNote(vault, "notes/asdir.md", "should not be written"),
+    ).rejects.toMatchObject({ code: "EISDIR" });
     // The directory is untouched — the append never wrote through it.
     const stat = await fs.stat(path.join(vault, "notes", "asdir.md"));
     expect(stat.isDirectory()).toBe(true);
