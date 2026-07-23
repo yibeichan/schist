@@ -231,6 +231,39 @@ def test_readonly_inherited_tmpdir_falls_back_to_system_tmp(
     assert list(readonly_tmpdir.iterdir()) == []
 
 
+def test_staged_file_enumeration_failure_aborts_commit(
+    vault: Path, tmp_path: Path,
+) -> None:
+    """A failed `git diff` must not look like an empty staging area (#440)."""
+    note = vault / "secret.md"
+    note.write_text("api_key = 'sk-redacted-but-quoted-value-here'\n")
+    subprocess.run(["git", "add", "secret.md"], cwd=vault, check=True)
+
+    # Run the hook directly with a PATH shim that makes its first `git diff`
+    # fail. Calling `git commit` here would let Git prepend its own exec-path,
+    # bypassing the shim on some platforms.
+    failing_bin = tmp_path / "failing-bin"
+    failing_bin.mkdir()
+    git_shim = failing_bin / "git"
+    git_shim.write_text("#!/bin/sh\nexit 42\n")
+    git_shim.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{failing_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [str(vault / ".git" / "hooks" / "pre-commit")],
+        cwd=vault,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode != 0, (
+        "Hook treated failed staged-file enumeration as an empty staging area"
+    )
+    assert "could not enumerate staged files" in result.stdout + result.stderr
+
+
 def test_staged_secret_blocked_after_worktree_cleanup(vault: Path) -> None:
     """The hook must inspect the staged blob, not the working-tree file."""
     note = vault / "secret.md"
