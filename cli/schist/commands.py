@@ -424,7 +424,8 @@ def link(args, vault_path: str, db_path: str):
     # across the RMW AND the commit so each commit stages exactly its own
     # append (mirrors MCP holding its write mutex across the git commit).
     with _vault_write_lock(vault_path):
-        markdown_io.append_connection(source_path, args.link_type, args.target, args.context)
+        markdown_io.append_connection(source_path, args.link_type, args.target, args.context,
+                                       vault_root=vault_path)
 
         ok, output = git_ops.commit(vault_path, f'link: {args.source} -{args.link_type}-> {args.target}', [args.source])
     if not ok:

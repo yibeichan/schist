@@ -1,5 +1,6 @@
 """Markdown I/O — read, write, and manipulate vault notes."""
 
+import errno
 import os
 import re
 import stat
@@ -171,45 +172,84 @@ def insert_connection_line(content: str, line: str) -> str:
     return '\n'.join(lines) + '\n'
 
 
-def _atomic_write(path: str, content: str) -> None:
+def _atomic_write(path: str, content: str, vault_root: str | None = None) -> None:
     """Write `content` to `path` atomically (write-to-temp + os.replace).
 
     A plain `open(path, 'w')` truncates the target at open() time, before any
     byte is written — a SIGKILL/OOM/power-loss in that window leaves a zero-byte
     note with the previous content gone (#425). We write to a unique temp file
-    in the SAME directory (⇒ same filesystem ⇒ rename is atomic on POSIX) and
-    `os.replace` over the target, so a reader/crash sees either the old file
-    intact or the new file complete, never an empty intermediate. Mirrors
-    sync.py's _atomic_write_hook.
+    on the SAME filesystem (⇒ rename is atomic on POSIX) and `os.replace` over
+    the target, so a reader/crash sees either the old file intact or the new
+    file complete, never an empty intermediate. Mirrors sync.py's
+    _atomic_write_hook and git-writer.ts's atomicWriteFile.
+
+    `vault_root` selects WHERE the temp lives. A hard kill in the microsecond
+    window between the write and the rename leaves the temp orphaned (the
+    `except` cleanup never runs on SIGKILL). If that orphan sits in the target's
+    own directory — a synced scope like `notes/` — the next `schist sync push`
+    stages and commits it (junk-named, possibly a truncated partial note) and
+    fans it out to the hub and every spoke (#433). So when a vault_root is
+    given, the temp goes under `<vault_root>/.schist/tmp/` — gitignored
+    (`.schist/`) and never a sync scope target (`_global_scope_targets`), so a
+    leaked orphan is inert. `.schist/` is inside the vault tree, hence the same
+    filesystem as the target, so os.replace stays atomic across the two dirs.
+    Falls back to the target's own directory when no vault_root is supplied
+    (bare notes outside a vault / unit tests) OR when `.schist/` turns out to be
+    on a different filesystem than the note (os.replace raises EXDEV) — e.g. a
+    vault on NFS with `.schist` symlinked to local disk. The same-dir temp is
+    guaranteed same-fs so the atomic replace still works; that write forgoes the
+    #433 orphan protection, but a rare orphan beats a total write outage.
     """
-    dir_ = os.path.dirname(os.path.abspath(path))
-    fd, tmp_path = tempfile.mkstemp(dir=dir_, suffix='.tmp')
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            f.write(content)
-        # mkstemp hardcodes the temp to 0600, and os.replace renames that inode
-        # OVER the target — so without this the note would silently inherit 0600
-        # and lose group/other read. git tracks only the exec bit, so the change
-        # is invisible in history but real on disk (bites a shared hub). Preserve
-        # the note's existing mode; a not-yet-existing file falls back to the
-        # umask default, matching the old open('w', ...) behavior.
+    def _write_via(dir_: str) -> None:
+        fd, tmp_path = tempfile.mkstemp(dir=dir_, suffix='.tmp')
         try:
-            os.chmod(tmp_path, stat.S_IMODE(os.stat(path).st_mode))
-        except FileNotFoundError:
-            cur = os.umask(0)
-            os.umask(cur)
-            os.chmod(tmp_path, 0o666 & ~cur)
-        os.replace(tmp_path, path)
-    except BaseException:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(content)
+            # mkstemp hardcodes the temp to 0600, and os.replace renames that
+            # inode OVER the target — so without this the note would silently
+            # inherit 0600 and lose group/other read. git tracks only the exec
+            # bit, so the change is invisible in history but real on disk (bites
+            # a shared hub). Preserve the note's existing mode; a not-yet-
+            # existing file falls back to the umask default, matching the old
+            # open('w', ...) behavior.
+            try:
+                os.chmod(tmp_path, stat.S_IMODE(os.stat(path).st_mode))
+            except FileNotFoundError:
+                cur = os.umask(0)
+                os.umask(cur)
+                os.chmod(tmp_path, 0o666 & ~cur)
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    same_dir = os.path.dirname(os.path.abspath(path))
+    if vault_root:
+        staging = os.path.join(vault_root, '.schist', 'tmp')
+        os.makedirs(staging, exist_ok=True)
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+            _write_via(staging)
+            return
+        except OSError as e:
+            # EXDEV only: .schist is on another filesystem than the note. Any
+            # other OSError (disk full, permission, …) is a real failure — the
+            # `_write_via` cleanup already unlinked the temp, so just re-raise.
+            if e.errno != errno.EXDEV:
+                raise
+    _write_via(same_dir)
 
 
-def append_connection(path: str, connection_type: str, target: str, context: str | None = None):
-    """Append a connection line to the ## Connections section (creating it if needed)."""
+def append_connection(path: str, connection_type: str, target: str, context: str | None = None,
+                      vault_root: str | None = None):
+    """Append a connection line to the ## Connections section (creating it if needed).
+
+    Pass `vault_root` for any note inside a synced vault so the atomic-write temp
+    lands under `.schist/tmp/` instead of alongside the note — see _atomic_write
+    (#433). Omitting it (bare notes / tests) keeps the same-dir fallback.
+    """
     with open(path, 'r', encoding='utf-8') as f:
         content = f.read()
 
@@ -224,4 +264,4 @@ def append_connection(path: str, connection_type: str, target: str, context: str
     else:
         line = f'- {connection_type}: {target}'
 
-    _atomic_write(path, insert_connection_line(content, line))
+    _atomic_write(path, insert_connection_line(content, line), vault_root=vault_root)
