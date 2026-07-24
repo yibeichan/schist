@@ -193,7 +193,8 @@ export function makeWriteTools(config: VaultConfig) {
           },
           directory: {
             type: "string",
-            enum: config.directories,
+            enum: config.directories.filter((directory) => directory !== "concepts"),
+            description: "Document directory. Concept nodes must be created with create_concept.",
           },
           confidence: {
             type: "string",
@@ -206,6 +207,30 @@ export function makeWriteTools(config: VaultConfig) {
           },
         },
         required: ["owner", "title", "body"],
+      },
+    },
+    {
+      name: "create_concept",
+      description:
+        "Create a stable concept node at concepts/<slug>.md. Concept nodes have no date, status, or outgoing Connections section. Auto-commits to git.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          owner: {
+            type: "string",
+            description:
+              "Agent identity. Required; validated against SCHIST_ALLOWED_AGENTS or SCHIST_AGENT_ID. Stamped on source_agent and the git commit.",
+          },
+          slug: {
+            type: "string",
+            pattern: "^[a-z0-9-]+$",
+            description: "Stable lowercase concept identifier and filename stem.",
+          },
+          title: { type: "string", description: "Human-readable display title." },
+          body: { type: "string", description: "Concept definition. Must not contain an outgoing ## Connections section." },
+          tags: { type: "array", items: { type: "string" } },
+        },
+        required: ["owner", "slug", "title", "body"],
       },
     },
     {

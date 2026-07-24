@@ -19,7 +19,7 @@ import * as os from "os";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { fileURLToPath } from "url";
-import { loadVaultConfig, create_note, update_note, PATCHABLE_FRONTMATTER_KEYS } from "../src/tools.js";
+import { loadVaultConfig, create_note, create_concept, update_note, PATCHABLE_FRONTMATTER_KEYS } from "../src/tools.js";
 import { parseNote } from "../src/markdown-parser.js";
 
 const execFile = promisify(execFileCb);
@@ -79,6 +79,7 @@ async function makeTempVault(): Promise<string> {
       "write_branch: drafts",
       "directories:",
       "  - notes",
+      "  - concepts",
       "statuses:",
       "  - draft",
       "connection_types:",
@@ -124,7 +125,7 @@ describe("frontmatter contract fixture", () => {
     const APPLIES_TO = new Set(["documents", "concepts", "papers"]);
     // cli_add is enforced by the Python conformance suite; keep it in this
     // shared vocabulary so either suite catches a misspelled writer id.
-    const WRITTEN_BY = new Set(["create_note", "update_note", "cli_add"]);
+    const WRITTEN_BY = new Set(["create_note", "create_concept", "update_note", "cli_add"]);
     const READ_BY = new Set(["ingest", "parseNote"]);
     const INVALID = new Set([
       "coerce-null", "coerce-int-or-null", "stringify", "stringify-scalar",
@@ -223,6 +224,35 @@ describe("create_note written field set matches the contract", () => {
   });
 });
 
+describe("create_concept written field set matches the contract", () => {
+  test("frontmatter keys equal the contract's create_concept set", async () => {
+    const contract = loadContract();
+    const contractCreateSet = new Set(
+      contract.filter((d) => d.writtenBy.includes("create_concept")).map((d) => d.field),
+    );
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const result = (await create_concept(
+      vault,
+      {
+        owner: TEST_AGENT,
+        slug: "contract-concept",
+        title: "Contract Concept",
+        body: "definition",
+        tags: ["#schema"],
+      },
+      config,
+    )) as { path?: string; error?: string; message?: string };
+    expect(result.error).toBeUndefined();
+    const content = await fs.readFile(path.join(vault, result.path as string), "utf-8");
+    const written = new Set(Object.keys(parseNote(content).metadata));
+    expect(drift(written, contractCreateSet)).toEqual({
+      inContractButNotInCode: [],
+      inCodeButNotInContract: [],
+    });
+  });
+});
+
 describe("update_note patchable key set matches the contract", () => {
   test("PATCHABLE_FRONTMATTER_KEYS equals the contract's update_note set", () => {
     const contract = loadContract();
@@ -248,7 +278,7 @@ describe("security-frozen fields", () => {
     expect(byField.get("scope")?.writtenBy).toEqual([]);
     expect(byField.get("source")?.writtenBy).toEqual([]);
     // source_agent is stamped once at creation and never patchable after.
-    expect(byField.get("source_agent")?.writtenBy).toEqual(["create_note"]);
+    expect(byField.get("source_agent")?.writtenBy).toEqual(["create_note", "create_concept"]);
   });
 
   // Behavioral half: proves the running validation path enforces the freeze,

@@ -1673,6 +1673,14 @@ export async function create_note(
         message: `Directory "${directory}" not configured. Allowed top-level: ${config.directories.join(", ")}`,
       } satisfies ToolError;
     }
+    if (topLevel === "concepts") {
+      return {
+        error: "VALIDATION_ERROR",
+        message:
+          'create_note writes document-shaped notes and cannot target "concepts". ' +
+          "Use create_concept for stable concept nodes.",
+      } satisfies ToolError;
+    }
 
     // NFKC fold before validation/slugify so compatibility digits (fullwidth
     // `２０２６`, Arabic-Indic `٢٠٢٦`) that the user clearly intended as a date
@@ -1875,6 +1883,121 @@ export async function create_note(
     // synchronously enqueue child.on("error") soon enough that THIS call's
     // failure is included too — either case is a real signal the agent
     // should see, so we don't try to distinguish.
+    const syncWarning = await readSyncWarning(vaultRoot);
+    return {
+      id: relPath,
+      path: relPath,
+      commitSha: result.commitSha,
+      ...(result.commitWarning ? { commitWarning: result.commitWarning } : {}),
+      ...(syncWarning !== undefined ? { syncWarning } : {}),
+    };
+  } catch (e: unknown) {
+    return normalizeError(e, "GIT_ERROR");
+  }
+}
+
+/**
+ * Create a stable concept node under concepts/<slug>.md.
+ *
+ * Concepts are a distinct node type, not document notes in a special folder:
+ * they have a caller-chosen stable slug and omit date/status/concepts,
+ * confidence, file_ref, and outgoing Connections sections. Legacy
+ * document-shaped files already under concepts/ remain readable; this writer
+ * only prevents minting more of them. Issue #454.
+ */
+export async function create_concept(
+  vaultRoot: string,
+  args: {
+    owner: string;
+    slug: string;
+    title: string;
+    body: string;
+    tags?: string[];
+  },
+  config: VaultConfig
+): Promise<unknown> {
+  try {
+    const owner = validateOwner(args.owner);
+    const syncDirty = await blockWriteIfSyncDirty(vaultRoot);
+    if (syncDirty !== null) return syncDirty;
+
+    if (!config.directories.includes("concepts")) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: 'Concept creation is disabled because "concepts" is not a configured directory.',
+      } satisfies ToolError;
+    }
+    if (typeof args.slug !== "string" || !/^[a-z0-9-]+$/.test(args.slug)) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: "slug must match [a-z0-9-]+ exactly",
+      } satisfies ToolError;
+    }
+    if (typeof args.title !== "string" || !args.title.trim()) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: "title must be a non-empty string",
+      } satisfies ToolError;
+    }
+    if (typeof args.body !== "string") {
+      return {
+        error: "VALIDATION_ERROR",
+        message: "body must be a string",
+      } satisfies ToolError;
+    }
+    if (args.tags !== undefined) {
+      const tagsError = validateTags(args.tags, "tags");
+      if (tagsError !== null) return tagsError;
+    }
+    if (splitLinesLikePython(args.body).some((line) => line.trim().startsWith("## Connections"))) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: "Concept nodes cannot contain an outgoing ## Connections section.",
+      } satisfies ToolError;
+    }
+
+    const relPath = `concepts/${args.slug}.md`;
+    const acl = loadVaultAcl(vaultRoot);
+    if (acl !== null) {
+      const scope = deriveScope(relPath);
+      const aclIdentity = resolveAclIdentity(owner);
+      if (!canWrite(acl, aclIdentity, scope)) {
+        return {
+          error: "ACL_DENIED",
+          message:
+            `Identity '${aclIdentity}' is not granted write access to scope ` +
+            `'${scope}' by vault.yaml. Hub push would reject this write. ` +
+            `Ask the hub admin to extend your write grant.`,
+        } satisfies ToolError;
+      }
+    }
+
+    const metadata: Record<string, unknown> = {
+      title: args.title,
+      tags: args.tags !== undefined ? normalizeTags(args.tags) : [],
+      source_agent: owner,
+    };
+    const content = buildNote(metadata, args.body);
+
+    let result: Awaited<ReturnType<typeof writeNote>>;
+    try {
+      result = await writeNote(vaultRoot, relPath, content, args.title, owner, { exclusive: true });
+    } catch (e: unknown) {
+      const err = e !== null && typeof e === "object"
+        ? (e as { code?: string; syscall?: string })
+        : {};
+      if (err.code === "EEXIST" && err.syscall === "open") {
+        return {
+          error: "VALIDATION_ERROR",
+          message: `Concept already exists: ${relPath}`,
+        } satisfies ToolError;
+      }
+      throw e;
+    }
+
+    triggerIngestion(vaultRoot);
+    triggerSpokePush(vaultRoot);
+
     const syncWarning = await readSyncWarning(vaultRoot);
     return {
       id: relPath,

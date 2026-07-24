@@ -7,10 +7,10 @@ import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { load as yamlLoadSync } from "js-yaml";
 import { jest } from "@jest/globals";
-import { loadVaultConfig, create_note, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES } from "../src/tools.js";
+import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES } from "../src/tools.js";
 import Database from "better-sqlite3";
 import { INDEX_SCHEMA_VERSION } from "../src/sqlite-reader.js";
-import { parseConnections } from "../src/markdown-parser.js";
+import { parseConnections, parseNote } from "../src/markdown-parser.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -902,11 +902,142 @@ describe("create_note directory validation", () => {
     expect(result.error).toBe("VALIDATION_ERROR");
     expect(result.message).toContain("..");
   }, 30000);
+
+  test.each(["concepts", "concepts/nested"])(
+    "rejects document creation under the concept axis: %s",
+    async (directory) => {
+      const vault = await vaultWithDirectories(["notes", "concepts"]);
+      const config = await loadVaultConfig(vault);
+
+      const result = await create_note(
+        vault,
+        { owner: TEST_AGENT, title: "Wrong Node Shape", body: "x", directory },
+        config,
+      ) as { error: string; message: string };
+
+      expect(result.error).toBe("VALIDATION_ERROR");
+      expect(result.message).toContain("create_concept");
+      await expect(fs.access(path.join(vault, "concepts"))).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
-// Lazy capabilities — index-level behaviour (unit test via tools layer)
+// create_concept — stable identity and concept-only shape (#454)
 // ---------------------------------------------------------------------------
+
+describe("create_concept", () => {
+  async function makeConceptVault(): Promise<string> {
+    const vault = await makeTempVault();
+    await fs.writeFile(
+      path.join(vault, "schist.yaml"),
+      [
+        "name: Test Vault",
+        "write_branch: drafts",
+        "directories: [notes, concepts]",
+        "statuses: [draft, review, final]",
+        "connection_types: [extends, supports]",
+        "",
+      ].join("\n"),
+    );
+    await execFile("git", ["add", "schist.yaml"], { cwd: vault });
+    await execFile("git", ["commit", "-m", "enable concepts"], { cwd: vault });
+    return vault;
+  }
+
+  test("writes a stable slug file with concept-only frontmatter", async () => {
+    const vault = await makeConceptVault();
+    const config = await loadVaultConfig(vault);
+
+    const result = await create_concept(
+      vault,
+      {
+        owner: TEST_AGENT,
+        slug: "stable-concept",
+        title: "Stable Concept",
+        body: "A timeless definition.",
+        tags: ["#Graph", " reference "],
+      },
+      config,
+    ) as { id: string; path: string; commitSha: string };
+
+    expect(result.id).toBe("concepts/stable-concept.md");
+    expect(result.path).toBe(result.id);
+    expect(result.commitSha).toBeDefined();
+    const parsed = parseNote(await fs.readFile(path.join(vault, result.id), "utf-8"));
+    expect(parsed.metadata).toEqual({
+      title: "Stable Concept",
+      tags: ["Graph", "reference"],
+      source_agent: TEST_AGENT,
+    });
+    expect(parsed.body.trim()).toBe("A timeless definition.");
+    expect(parsed.connections).toEqual([]);
+  }, 30000);
+
+  test.each(["Stable Concept", "stable_concept", "../stable", "", "é"])(
+    "rejects a non-canonical stable slug: %j",
+    async (slug) => {
+      const vault = await makeConceptVault();
+      const config = await loadVaultConfig(vault);
+      const result = await create_concept(
+        vault,
+        { owner: TEST_AGENT, slug, title: "Stable Concept", body: "definition" },
+        config,
+      ) as { error: string; message: string };
+      expect(result.error).toBe("VALIDATION_ERROR");
+      expect(result.message).toContain("[a-z0-9-]+");
+    },
+  );
+
+  test("refuses an outgoing Connections section", async () => {
+    const vault = await makeConceptVault();
+    const config = await loadVaultConfig(vault);
+    const result = await create_concept(
+      vault,
+      {
+        owner: TEST_AGENT,
+        slug: "source-concept",
+        title: "Source Concept",
+        body: "definition\n\n## Connections\n\n- extends: concepts/other",
+      },
+      config,
+    ) as { error: string; message: string };
+    expect(result.error).toBe("VALIDATION_ERROR");
+    expect(result.message).toContain("cannot contain");
+  });
+
+  test("refuses to overwrite an existing stable slug", async () => {
+    const vault = await makeConceptVault();
+    const config = await loadVaultConfig(vault);
+    const first = await create_concept(
+      vault,
+      { owner: TEST_AGENT, slug: "same", title: "First", body: "original" },
+      config,
+    ) as { id: string };
+    const second = await create_concept(
+      vault,
+      { owner: TEST_AGENT, slug: "same", title: "Second", body: "replacement" },
+      config,
+    ) as { error: string; message: string };
+
+    expect(second.error).toBe("VALIDATION_ERROR");
+    expect(second.message).toContain("already exists");
+    expect(await fs.readFile(path.join(vault, first.id), "utf-8")).toContain("original");
+    expect(await fs.readFile(path.join(vault, first.id), "utf-8")).not.toContain("replacement");
+  }, 30000);
+
+  test("requires concepts to be configured", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const result = await create_concept(
+      vault,
+      { owner: TEST_AGENT, slug: "disabled", title: "Disabled", body: "definition" },
+      config,
+    ) as { error: string; message: string };
+    expect(result.error).toBe("VALIDATION_ERROR");
+    expect(result.message).toContain("not a configured directory");
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Spoke auto-sync — fires only when .schist/spoke.yaml is present
@@ -2901,8 +3032,8 @@ describe("delete_note", () => {
 
   it("cascade strips a bare-slug connection to a concept note (#7)", async () => {
     const vault = await makeTempVault();
-    // Default fixture allows only notes/papers; add `concepts` so create_note
-    // and the id-validation accept a concepts/ path.
+    // Default fixture allows only notes/papers; add `concepts` so the
+    // dedicated writer and id validation accept a concepts/ path.
     await fs.writeFile(
       path.join(vault, "schist.yaml"),
       "name: Test Vault\nwrite_branch: drafts\ndirectories:\n  - notes\n  - papers\n  - concepts\nstatuses:\n  - draft\n  - final\nconnection_types:\n  - extends\n  - supports\n",
@@ -2911,8 +3042,8 @@ describe("delete_note", () => {
     await execFile("git", ["commit", "-m", "add concepts dir"], { cwd: vault });
     const config = await loadVaultConfig(vault);
     // Concept note + a linker referencing it by the BARE slug, not the path.
-    const concept = await create_note(
-      vault, { owner: TEST_AGENT, title: "Backprop", body: "b", directory: "concepts" }, config,
+    const concept = await create_concept(
+      vault, { owner: TEST_AGENT, slug: "backprop", title: "Backprop", body: "b" }, config,
     ) as { id: string };
     const slug = concept.id.replace(/^concepts\//, "").replace(/\.md$/, "");
     const linker = await create_note(
@@ -2940,8 +3071,8 @@ describe("delete_note", () => {
     await execFile("git", ["add", "schist.yaml"], { cwd: vault });
     await execFile("git", ["commit", "-m", "add concepts dir"], { cwd: vault });
     const config = await loadVaultConfig(vault);
-    const concept = await create_note(
-      vault, { owner: TEST_AGENT, title: "Backprop", body: "b", directory: "concepts" }, config,
+    const concept = await create_concept(
+      vault, { owner: TEST_AGENT, slug: "backprop", title: "Backprop", body: "b" }, config,
     ) as { id: string };
     const slug = concept.id.replace(/^concepts\//, "").replace(/\.md$/, "");
     // Linker references the concept ONLY via `concepts:` frontmatter — no

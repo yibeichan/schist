@@ -1,12 +1,12 @@
 """schema/frontmatter-contract.json conformance — Python side (#130 slice A).
 
-The frontmatter field lists used to live independently in create_note's
-written metadata, update_note's PATCHABLE_FRONTMATTER_KEYS (both TS),
+The frontmatter field lists used to live independently in create_note's and
+create_concept's written metadata, update_note's PATCHABLE_FRONTMATTER_KEYS (TS),
 cli_add's written metadata, and ingest's read set here — prose-only in
 schema/SCHEMA.md, with no machine check that they agree. The contract JSON is
 the single source of truth; this suite pins ingest's read set and coercion
 rules plus cli_add's written set to it, and
-mcp-server/tests/frontmatter-contract.test.ts pins the two TS write sets. A
+mcp-server/tests/frontmatter-contract.test.ts pins the TS write sets. A
 field added on either side without updating the contract fails that language's
 CI.
 
@@ -170,7 +170,7 @@ def test_contract_descriptors_use_known_vocabulary() -> None:
     """Typos in enum-like descriptor values would silently drop a field from
     the filtered sets both suites assert against — fail them here instead."""
     applies_to = {"documents", "concepts", "papers"}
-    written_by = {"create_note", "update_note", "cli_add"}
+    written_by = {"create_note", "create_concept", "update_note", "cli_add"}
     read_by = {"ingest", "parseNote"}
     invalid_policies = {
         "coerce-null", "coerce-int-or-null", "stringify", "stringify-scalar",

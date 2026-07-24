@@ -21,6 +21,7 @@ describe("listAllTools — unconditional tool exposure", () => {
       "add_connection",
       "add_memory",
       "compose_brief",
+      "create_concept",
       "create_note",
       "delete_agent_state",
       "delete_note",
@@ -48,6 +49,7 @@ describe("listAllTools — unconditional tool exposure", () => {
 
     for (const tool of [
       "create_note",
+      "create_concept",
       "update_note",
       "delete_note",
       "add_connection",
@@ -105,11 +107,27 @@ describe("listAllTools — unconditional tool exposure", () => {
     // CONFIG_ERROR / VALIDATION_ERROR — wasting tokens on an avoidable
     // round-trip. This test catches that drift at build time.
     const tools = listAllTools(testConfig());
-    for (const name of ["create_note", "update_note", "delete_note", "add_connection"]) {
+    for (const name of ["create_note", "create_concept", "update_note", "delete_note", "add_connection"]) {
       const tool = tools.find((t) => t.name === name);
       expect(tool).toBeDefined();
       const required = (tool!.inputSchema as { required?: string[] }).required ?? [];
       expect(required).toContain("owner");
     }
+  });
+
+  test("routes concepts through create_concept, not create_note (#454)", () => {
+    const config = { ...testConfig(), directories: ["notes", "concepts"] };
+    const tools = listAllTools(config);
+    const createNote = tools.find((tool) => tool.name === "create_note");
+    const createConcept = tools.find((tool) => tool.name === "create_concept");
+    const noteProperties = (createNote!.inputSchema as {
+      properties: { directory: { enum: string[] } };
+    }).properties;
+    const conceptProperties = (createConcept!.inputSchema as {
+      properties: { slug: { pattern: string } };
+    }).properties;
+
+    expect(noteProperties.directory.enum).toEqual(["notes"]);
+    expect(conceptProperties.slug.pattern).toBe("^[a-z0-9-]+$");
   });
 });
