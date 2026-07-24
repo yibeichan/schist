@@ -1,6 +1,6 @@
 #!/bin/sh
 # schist pre-commit hook — reject staged files containing secrets
-# schist-hook-version: 6
+# schist-hook-version: 7
 
 # Patterns intentionally require a left boundary on token prefixes so substrings
 # like "task-..." inside a filename don't trigger on "sk-...", and require a
@@ -19,7 +19,11 @@ fi
 STAGED_FILES=$(mktemp "$TMP_BASE/schist-pre-commit.XXXXXX") || exit 1
 trap 'rm -f "$STAGED_FILES"' EXIT HUP INT TERM
 
-git diff --cached --name-only -z --diff-filter=ACMR > "$STAGED_FILES"
+if ! git diff --cached --name-only -z --diff-filter=ACMR > "$STAGED_FILES"; then
+    echo "ERROR: could not enumerate staged files — aborting commit rather than skipping the guard."
+    echo "If this is intentional, use git commit --no-verify"
+    exit 1
+fi
 if [ ! -s "$STAGED_FILES" ]; then
     exit 0
 fi

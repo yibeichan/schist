@@ -53,7 +53,7 @@ sys.exit(main())
 
 POST_COMMIT_HOOK = r"""#!/bin/sh
 # schist post-commit hook — re-ingest vault into SQLite after every commit
-# schist-hook-version: 6
+# schist-hook-version: 7
 
 VAULT_ROOT=$(git rev-parse --show-toplevel)
 DB_PATH="$VAULT_ROOT/.schist/schist.db"
@@ -81,11 +81,11 @@ python3 "$INGEST" --vault "$VAULT_ROOT" --db "$DB_PATH"
 # `# schist-hook-version: N` line lives inside each hook script body. A user
 # who has intentionally customized their hook can replace the version line
 # with `# schist-hook-version: pinned` to silence the staleness warning.
-HOOK_VERSION = 6
+HOOK_VERSION = 7
 
 PRE_COMMIT_HOOK = r"""#!/bin/sh
 # schist pre-commit hook — reject staged files containing secrets
-# schist-hook-version: 6
+# schist-hook-version: 7
 
 # Patterns intentionally require a left boundary on token prefixes so substrings
 # like "task-..." inside a filename don't trigger on "sk-...", and require a
@@ -104,7 +104,11 @@ fi
 STAGED_FILES=$(mktemp "$TMP_BASE/schist-pre-commit.XXXXXX") || exit 1
 trap 'rm -f "$STAGED_FILES"' EXIT HUP INT TERM
 
-git diff --cached --name-only -z --diff-filter=ACMR > "$STAGED_FILES"
+if ! git diff --cached --name-only -z --diff-filter=ACMR > "$STAGED_FILES"; then
+    echo "ERROR: could not enumerate staged files — aborting commit rather than skipping the guard."
+    echo "If this is intentional, use git commit --no-verify"
+    exit 1
+fi
 if [ ! -s "$STAGED_FILES" ]; then
     exit 0
 fi
