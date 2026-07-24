@@ -1,15 +1,16 @@
 """schema/frontmatter-contract.json conformance — Python side (#130 slice A).
 
-The frontmatter field lists used to live three times: create_note's written
-metadata, update_note's PATCHABLE_FRONTMATTER_KEYS (both TS), and ingest's
-read set here — prose-only in schema/SCHEMA.md, with no machine check that
-they agree. The contract JSON is the single source of truth; this suite pins
-ingest's read set and coercion rules to it, and
-mcp-server/tests/frontmatter-contract.test.ts pins the two TS write sets.
-A field added on either side without updating the contract fails that
-language's CI.
+The frontmatter field lists used to live independently in create_note's
+written metadata, update_note's PATCHABLE_FRONTMATTER_KEYS (both TS),
+cli_add's written metadata, and ingest's read set here — prose-only in
+schema/SCHEMA.md, with no machine check that they agree. The contract JSON is
+the single source of truth; this suite pins ingest's read set and coercion
+rules plus cli_add's written set to it, and
+mcp-server/tests/frontmatter-contract.test.ts pins the two TS write sets. A
+field added on either side without updating the contract fails that language's
+CI.
 
-Two layers:
+Three layers:
 
 1. **Structural** — scan ingest.py's source for the frontmatter keys it
    actually reads (``meta.get(...)`` / ``meta[...]`` / ``'x' in meta`` and the
@@ -22,12 +23,18 @@ Two layers:
    ``invalid`` coercion policy against the resulting SQLite columns
    (e.g. off-enum ``confidence`` -> NULL, digit-string ``year`` -> int).
 
+3. **CLI writer** — scan ``commands.add`` for every key assigned to its
+   frontmatter dict and require set equality with ``writtenBy: cli_add``.
+   Value normalization and validation stay behaviorally pinned in
+   ``test_commands.py``.
+
 Consumers must ignore descriptor keys they don't know — new keys may be
 added to the contract without breaking either suite.
 """
 
 from __future__ import annotations
 
+import ast
 import io
 import json
 import re
@@ -37,6 +44,7 @@ from pathlib import Path
 
 import pytest
 
+from schist import commands as commands_module
 from schist import ingest as ingest_module
 from schist.ingest import PAPER_FIELDS, ingest
 
@@ -56,6 +64,78 @@ def _contract() -> list[dict]:
 
 def _ingest_read_fields() -> set[str]:
     return {d["field"] for d in _contract() if "ingest" in d["readBy"]}
+
+
+def _cli_add_written_fields() -> set[str]:
+    """Return literal keys written to cli_add's ``fm`` frontmatter dict.
+
+    Fail closed on mutation shapes this scanner does not understand. Otherwise
+    a future ``fm.update(...)`` or dynamic subscript could add an on-disk field
+    while the conformance test continued to report the old write set.
+    """
+    source = Path(commands_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    add_fn = next(
+        node for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "add"
+    )
+    fields: set[str] = set()
+    initializers = 0
+    unsupported: list[str] = []
+    for node in ast.walk(add_fn):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "fm":
+                    if not isinstance(node.value, ast.Dict):
+                        unsupported.append(f"line {node.lineno}: non-literal fm assignment")
+                        continue
+                    initializers += 1
+                    if any(
+                        not isinstance(key, ast.Constant) or not isinstance(key.value, str)
+                        for key in node.value.keys
+                    ):
+                        unsupported.append(f"line {node.lineno}: non-literal fm initializer key")
+                        continue
+                    fields.update(key.value for key in node.value.keys)
+                elif (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "fm"
+                ):
+                    if not (
+                        isinstance(target.slice, ast.Constant)
+                        and isinstance(target.slice.value, str)
+                    ):
+                        unsupported.append(f"line {node.lineno}: dynamic fm subscript")
+                        continue
+                    fields.add(target.slice.value)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "fm"
+        ):
+            unsupported.append(f"line {node.lineno}: fm.{node.func.attr}(...) mutation")
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            target = node.target
+            if (
+                isinstance(target, ast.Name) and target.id == "fm"
+            ) or (
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "fm"
+            ):
+                unsupported.append(f"line {node.lineno}: unsupported fm assignment")
+
+    assert initializers == 1, (
+        f"expected exactly one literal fm initializer in commands.add, got {initializers}"
+    )
+    assert not unsupported, (
+        "commands.add mutates fm in forms the contract scanner cannot prove: "
+        + "; ".join(unsupported)
+    )
+    return fields
 
 
 def _docs_enum_fields() -> list[dict]:
@@ -90,9 +170,6 @@ def test_contract_descriptors_use_known_vocabulary() -> None:
     """Typos in enum-like descriptor values would silently drop a field from
     the filtered sets both suites assert against — fail them here instead."""
     applies_to = {"documents", "concepts", "papers"}
-    # cli_add is documentation-only (see the contract's $comment): `schist add`
-    # writes frontmatter with none of the MCP normalizations and has no
-    # conformance suite of its own.
     written_by = {"create_note", "update_note", "cli_add"}
     read_by = {"ingest", "parseNote"}
     invalid_policies = {
@@ -110,6 +187,23 @@ def test_contract_descriptors_use_known_vocabulary() -> None:
         if "ingest" in d["readBy"] and d["invalid"] is None:
             violations.append(f"{field}: read by ingest but has no invalid-coercion policy")
     assert not violations, "contract vocabulary violations: " + "; ".join(violations)
+
+
+def test_cli_add_written_set_matches_contract() -> None:
+    """The Python CLI writer is an enforced contract consumer, not prose-only."""
+    scanned = _cli_add_written_fields()
+    contract_fields = {
+        d["field"] for d in _contract()
+        if "cli_add" in d["writtenBy"]
+    }
+    missing = sorted(contract_fields - scanned)
+    extra = sorted(scanned - contract_fields)
+    assert not missing and not extra, (
+        "cli_add write-set drift vs schema/frontmatter-contract.json — "
+        f"in contract but never written by commands.add: {missing}; "
+        f"written by commands.add but missing from the contract: {extra}. "
+        "Update the contract before changing CLI frontmatter fields."
+    )
 
 
 # \w+ (not [a-z_]+): a digit-bearing field like s2_id must scan correctly —

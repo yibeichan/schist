@@ -122,9 +122,8 @@ describe("frontmatter contract fixture", () => {
     // Typos in enum-like descriptor values would silently drop a field from
     // the filtered sets both suites assert against — fail them here instead.
     const APPLIES_TO = new Set(["documents", "concepts", "papers"]);
-    // cli_add is documentation-only (see the contract's $comment): `schist add`
-    // writes frontmatter with none of the MCP normalizations and has no
-    // conformance suite of its own.
+    // cli_add is enforced by the Python conformance suite; keep it in this
+    // shared vocabulary so either suite catches a misspelled writer id.
     const WRITTEN_BY = new Set(["create_note", "update_note", "cli_add"]);
     const READ_BY = new Set(["ingest", "parseNote"]);
     const INVALID = new Set([
@@ -152,7 +151,7 @@ describe("frontmatter contract fixture", () => {
     expect(violations).toEqual([]);
   });
 
-  test("every MCP-written field applies to documents (tools only write document notes)", () => {
+  test("every writer-produced field is part of the document contract", () => {
     for (const d of contract) {
       if (d.writtenBy.length > 0 && !d.appliesTo.includes("documents")) {
         throw new Error(
