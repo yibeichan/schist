@@ -1,7 +1,8 @@
 # schist data model — design doc (#130)
 
 Status: **all three slices implemented (2026-07-06)** — D2's
-`schema/frontmatter-contract.json` + both-language conformance tests, D3's
+`schema/frontmatter-contract.json` + both-language conformance tests
+(including the Python `cli_add` writer since 2026-07-23), D3's
 `schema/index-contract.json` (`INDEX_SCHEMA_VERSION` stamped via
 `user_version`, single-sourced required tables; fixed #339), and D4's memory
 contract (`related_doc` shape validation, `recentMemory` in `get_context`,
@@ -92,9 +93,10 @@ descriptor per field, e.g.
 ```
 
 - Both suites load it: a TS test asserts `create_note`'s written fields and
-  `PATCHABLE_FRONTMATTER_KEYS` match the contract; a Python test asserts
-  ingest's read set and coercion rules (`confidence` → NULL on invalid, etc.)
-  match. Drift in either language fails that language's CI.
+  `PATCHABLE_FRONTMATTER_KEYS` match the contract; Python tests assert
+  `cli_add`'s written fields plus ingest's read set and coercion rules
+  (`confidence` → NULL on invalid, etc.) match. Drift in either language fails
+  that language's CI.
 - `schema/SCHEMA.md` keeps the prose (human spec) and gains a line per table
   pointing at the JSON as the enforced source of truth.
 - Scope: document + concept + paper fields, including nested
