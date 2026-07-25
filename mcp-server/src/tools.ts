@@ -1505,6 +1505,16 @@ function validateBodyConnectionTypes(
   return null;
 }
 
+function isConceptNoteId(id: string): boolean {
+  return id.split("/")[0] === "concepts";
+}
+
+function hasConnectionsSection(body: string): boolean {
+  return splitLinesLikePython(body).some(
+    (line) => line.trim().startsWith("## Connections"),
+  );
+}
+
 /**
  * Validate a connection target for both write paths (add_connection and
  * create_note's structured-connections loop). One definition so the two sites
@@ -1949,7 +1959,7 @@ export async function create_concept(
       const tagsError = validateTags(args.tags, "tags");
       if (tagsError !== null) return tagsError;
     }
-    if (splitLinesLikePython(args.body).some((line) => line.trim().startsWith("## Connections"))) {
+    if (hasConnectionsSection(args.body)) {
       return {
         error: "VALIDATION_ERROR",
         message: "Concept nodes cannot contain an outgoing ## Connections section.",
@@ -2048,6 +2058,12 @@ export async function add_connection(
     if (args.context != null) args.context = String(args.context);
     const srcIdError = validateNoteId(args.source, config);
     if (srcIdError !== null) return srcIdError;
+    if (isConceptNoteId(args.source)) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: "Concept nodes cannot be connection sources; connections point to concepts.",
+      } satisfies ToolError;
+    }
     const filePath = path.join(vaultRoot, args.source);
     const absVaultRoot = path.resolve(vaultRoot);
     const absFilePath = path.resolve(filePath);
@@ -2487,6 +2503,34 @@ export async function update_note(
 
     const idError = validateNoteId(args.id, config);
     if (idError !== null) return idError;
+    const isConcept = isConceptNoteId(args.id);
+    if (isConcept && args.frontmatter_patch !== undefined) {
+      const legacyDocumentFields = new Set([
+        "date", "status", "concepts", "confidence", "file_ref",
+      ]);
+      for (const [key, value] of Object.entries(args.frontmatter_patch)) {
+        if (key === "title" && value === null) {
+          return {
+            error: "VALIDATION_ERROR",
+            message: "Concept title is required and cannot be deleted.",
+          } satisfies ToolError;
+        }
+        if (key === "title" || key === "tags") continue;
+        if (legacyDocumentFields.has(key) && value === null) continue;
+        return {
+          error: "VALIDATION_ERROR",
+          message:
+            "Concept frontmatter may only update title/tags or delete legacy " +
+            `document fields; cannot set '${key}'.`,
+        } satisfies ToolError;
+      }
+    }
+    if (isConcept && args.body !== undefined && hasConnectionsSection(args.body)) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: "Concept nodes cannot contain an outgoing ## Connections section.",
+      } satisfies ToolError;
+    }
 
     const filePath = path.join(vaultRoot, args.id);
     const absVaultRoot = path.resolve(vaultRoot);

@@ -125,7 +125,10 @@ describe("frontmatter contract fixture", () => {
     const APPLIES_TO = new Set(["documents", "concepts", "papers"]);
     // cli_add is enforced by the Python conformance suite; keep it in this
     // shared vocabulary so either suite catches a misspelled writer id.
-    const WRITTEN_BY = new Set(["create_note", "create_concept", "update_note", "cli_add"]);
+    const WRITTEN_BY = new Set([
+      "create_note", "create_concept", "update_note",
+      "cli_add", "cli_add_concept",
+    ]);
     const READ_BY = new Set(["ingest", "parseNote"]);
     const INVALID = new Set([
       "coerce-null", "coerce-int-or-null", "stringify", "stringify-scalar",

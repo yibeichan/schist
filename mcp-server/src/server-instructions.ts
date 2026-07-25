@@ -4,8 +4,10 @@ export const SERVER_INSTRUCTIONS =
   "query_graph, and get_context over filesystem grep/find because they use the " +
   "indexed graph, respect scopes, and return snippets with stable note ids. Use " +
   "filesystem tools only for structural questions the index cannot answer, such as " +
-  "directory layout, line counts, or symlinks. Use create_note and add_memory to " +
-  "persist new knowledge instead of writing vault or memory files directly. " +
+  "directory layout, line counts, or symlinks. Use create_note, create_concept, " +
+  "and add_memory to persist new knowledge instead of writing vault or memory " +
+  "files directly. create_concept is the only writer for stable concepts/ nodes; " +
+  "create_note must not target that directory. " +
   // Memory-vs-note decision boundary (docs/data-model.md D4, slice C).
   "Choose the store deliberately: add_memory is for frequent, small, " +
   "session-scoped facts — decisions made, blockers hit, current working state; " +

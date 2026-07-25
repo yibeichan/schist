@@ -174,9 +174,10 @@ This gives the agent a snapshot of graph stats, recent notes, and hot concepts.
 | `search_notes` | Full-text search across all notes |
 | `get_note` | Get a note with full content and connections |
 | `create_note` | Create a new note (auto-commits to git) |
+| `create_concept` | Create a stable concept node (auto-commits to git) |
 | `update_note` | Update a note's body and/or frontmatter (auto-commits) |
 | `delete_note` | Delete a note via git rm; refuses on inbound edges unless `cascade` |
-| `add_connection` | Add a typed edge between two nodes |
+| `add_connection` | Add a typed edge from a document to another document or concept |
 | `list_concepts` | List all concept nodes |
 | `query_graph` | Run read-only SQL against the graph database |
 | `compose_brief` | Compose a context-rich markdown brief for external filing |
@@ -191,7 +192,8 @@ This gives the agent a snapshot of graph stats, recent notes, and hot concepts.
 | `schist init` | Create a new vault |
 | `schist doctor` | Verify setup health |
 | `schist add` | Create a new note |
-| `schist link` | Add a connection between nodes |
+| `schist add-concept` | Create a stable concept node |
+| `schist link` | Add a connection from a document to another document or concept |
 | `schist search` | Full-text search |
 | `schist query` | Raw SQL query |
 | `schist build` | Generate static viewer data |

@@ -161,6 +161,15 @@ def _statuses(vault_path: str) -> list:
     return [s for x in st if (s := str(x))]
 
 
+def _directories(vault_path: str) -> list:
+    """Resolve configured directory names with MCP loadVaultConfig parity."""
+    directories = _load_schema_config(vault_path).get('directories')
+    if not isinstance(directories, list):
+        canonical = _load_default_config().get('directories') or {}
+        directories = list(canonical.values()) if isinstance(canonical, dict) else canonical
+    return [str(value).rstrip('/') for value in directories if str(value).rstrip('/')]
+
+
 def add(args, vault_path: str, db_path: str):
     """Create a new note in the vault."""
     # Validate the status against the configured vocabulary before writing
@@ -225,6 +234,13 @@ def add(args, vault_path: str, db_path: str):
     # MCP has enforced both halves since #323; the CLI had neither.
     directory = str(args.directory)
     _reject_escaping_relpath(directory, 'directory')
+    if directory.split('/')[0] == 'concepts':
+        print(
+            'Error: schist add writes document-shaped notes and cannot target '
+            "'concepts'; use schist add-concept",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     today_str = date.today().isoformat()
     dest_dir = os.path.join(vault_path, directory)
     _assert_resolves_inside_vault(vault_path, dest_dir, 'directory')
@@ -345,6 +361,80 @@ def add(args, vault_path: str, db_path: str):
     print(rel_path)
 
 
+def add_concept(args, vault_path: str, db_path: str):
+    """Create a stable concept node in concepts/<slug>.md."""
+    if 'concepts' not in _directories(vault_path):
+        print(
+            "Error: concept creation is disabled because 'concepts' is not "
+            'a configured directory',
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    slug = str(args.slug)
+    if re.fullmatch(r'[a-z0-9-]+', slug) is None:
+        print('Error: slug must match [a-z0-9-]+ exactly', file=sys.stderr)
+        sys.exit(1)
+
+    title = str(args.title)
+    if not title.strip():
+        print('Error: title must be a non-empty string', file=sys.stderr)
+        sys.exit(1)
+
+    body = args.body
+    if body is None and not sys.stdin.isatty():
+        body = sys.stdin.read()
+    if body is None:
+        body = ''
+    if any(line.strip().startswith('## Connections') for line in body.splitlines()):
+        print(
+            'Error: concept nodes cannot contain an outgoing '
+            '## Connections section',
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    directory = 'concepts'
+    dest_dir = os.path.join(vault_path, directory)
+    _assert_resolves_inside_vault(vault_path, dest_dir, 'concept directory')
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except (FileExistsError, NotADirectoryError):
+        print(
+            "Error: concept directory path 'concepts' is occupied by a "
+            'non-directory',
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    fm = {'title': title}
+    if args.tags:
+        fm['tags'] = [tag for value in args.tags.split(',') if (tag := _normalize_tag(value))]
+
+    rel_path = f'concepts/{slug}.md'
+    filepath = os.path.join(vault_path, rel_path)
+    with git_ops.vault_write_lock(vault_path):
+        try:
+            markdown_io.write_note(filepath, fm, body, exclusive=True)
+        except FileExistsError:
+            print(f'Error: concept already exists: {rel_path}', file=sys.stderr)
+            sys.exit(1)
+        except OSError as e:
+            print(f'Error: could not write concept: {e}', file=sys.stderr)
+            sys.exit(1)
+        ok, output = git_ops.commit(
+            vault_path,
+            f'add concept: {rel_path}',
+            [rel_path],
+        )
+
+    if not ok:
+        print(f'Warning: git commit failed: {output}', file=sys.stderr)
+    elif output.startswith(git_ops.HOOK_STALL_WARNING_PREFIX):
+        print(f'Warning: {output}', file=sys.stderr)
+    print(rel_path)
+
+
 def link(args, vault_path: str, db_path: str):
     """Add a connection between two documents."""
     # Validate the connection type against the configured vocabulary before
@@ -412,6 +502,13 @@ def link(args, vault_path: str, db_path: str):
     # add_connection has enforced both since #323.
     source_rel = str(args.source)
     _reject_escaping_relpath(source_rel, 'source')
+    if source_rel.split('/')[0] == 'concepts':
+        print(
+            'Error: concept nodes cannot be connection sources; connections '
+            'point to concepts',
+            file=sys.stderr,
+        )
+        sys.exit(1)
     source_path = os.path.join(vault_path, source_rel)
     if not os.path.exists(source_path):
         print(f'Error: source not found: {args.source}', file=sys.stderr)
@@ -636,6 +733,33 @@ def schema(args, vault_path: str, db_path: str):
         fm = note['frontmatter']
         if not fm.get('title') and not fm.get('topic') and not fm.get('concept'):
             violations.append(f'{rel}: missing title/topic/concept in frontmatter')
+        is_concept_path = len(rel.parts) > 1 and rel.parts[0] == 'concepts'
+        if is_concept_path:
+            if re.fullmatch(r'[a-z0-9-]+', rel.stem) is None:
+                violations.append(
+                    f'{rel}: concept filename stem must match [a-z0-9-]+',
+                )
+            forbidden = sorted({
+                'date', 'status', 'concepts', 'confidence', 'file_ref',
+            } & fm.keys())
+            if forbidden:
+                violations.append(
+                    f"{rel}: concept frontmatter contains document-only "
+                    f"field(s): {', '.join(forbidden)}",
+                )
+            body = note['body']
+            if any(
+                line.strip().startswith('## Connections')
+                for line in body.splitlines()
+            ):
+                violations.append(
+                    f'{rel}: concept nodes cannot have outgoing '
+                    '## Connections sections',
+                )
+        elif 'concept' in fm:
+            violations.append(
+                f'{rel}: concept nodes must live under concepts/',
+            )
 
     if violations:
         print(f'{len(violations)} violation(s):')

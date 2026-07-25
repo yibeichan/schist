@@ -2,7 +2,7 @@
 
 Status: **all three slices implemented (2026-07-06)** — D2's
 `schema/frontmatter-contract.json` + both-language conformance tests
-(including the Python `cli_add` writer since 2026-07-23), D3's
+(including the Python `cli_add` / `cli_add_concept` writers), D3's
 `schema/index-contract.json` (`INDEX_SCHEMA_VERSION` stamped via
 `user_version`, single-sourced required tables; fixed #339), and D4's memory
 contract (`related_doc` shape validation, `recentMemory` in `get_context`,
@@ -93,8 +93,9 @@ descriptor per field, e.g.
 ```
 
 - Both suites load it: a TS test asserts `create_note`'s written fields and
-  `PATCHABLE_FRONTMATTER_KEYS` match the contract; Python tests assert
-  `cli_add`'s written fields plus ingest's read set and coercion rules
+  `create_concept`'s written fields and `PATCHABLE_FRONTMATTER_KEYS` match the
+  contract; Python tests assert both CLI writers' fields plus ingest's read set
+  and coercion rules
   (`confidence` → NULL on invalid, etc.) match. Drift in either language fails
   that language's CI.
 - `schema/SCHEMA.md` keeps the prose (human spec) and gains a line per table
@@ -102,6 +103,13 @@ descriptor per field, e.g.
 - Scope: document + concept + paper fields, including nested
   `verification.*`. NOT a general YAML schema — only the fields the two
   parsers actually handle, which is what can drift.
+
+**Concept-node boundary (#454):** concepts remain a distinct stable node type.
+MCP `create_concept` and CLI `schist add-concept` write `concepts/<slug>.md`;
+generic document writers reject that axis. Concept nodes omit document-only
+frontmatter and outgoing Connections sections. Legacy document-shaped concept
+files remain readable and deletable, and updates may remove their invalid
+fields without allowing new ones.
 
 ### D3 — Index model: schema version + shared required-tables (slice B)
 

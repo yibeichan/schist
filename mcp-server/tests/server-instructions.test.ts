@@ -9,7 +9,12 @@ describe("MCP server instructions", () => {
     expect(SERVER_INSTRUCTIONS).toContain("query_graph");
     expect(SERVER_INSTRUCTIONS).toContain("get_context");
     expect(SERVER_INSTRUCTIONS).toContain("over filesystem grep/find");
-    expect(SERVER_INSTRUCTIONS).toContain("Use create_note and add_memory");
+    expect(SERVER_INSTRUCTIONS).toContain(
+      "Use create_note, create_concept, and add_memory",
+    );
+    expect(SERVER_INSTRUCTIONS).toContain(
+      "create_concept is the only writer for stable concepts/ nodes",
+    );
   });
 
   test("are wired into the MCP Server options", () => {

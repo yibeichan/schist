@@ -1037,6 +1037,108 @@ describe("create_concept", () => {
     expect(result.error).toBe("VALIDATION_ERROR");
     expect(result.message).toContain("not a configured directory");
   });
+
+  test("concept mutations allow curation but reject document fields and outgoing edges", async () => {
+    const vault = await makeConceptVault();
+    const config = await loadVaultConfig(vault);
+    const concept = await create_concept(
+      vault,
+      { owner: TEST_AGENT, slug: "curated", title: "Curated", body: "definition" },
+      config,
+    ) as { id: string };
+
+    const documentField = await update_note(
+      vault,
+      { owner: TEST_AGENT, id: concept.id, frontmatter_patch: { status: "draft" } },
+      config,
+    ) as { error: string; message: string };
+    expect(documentField.error).toBe("VALIDATION_ERROR");
+    expect(documentField.message).toContain("cannot set 'status'");
+
+    const outgoingBody = await update_note(
+      vault,
+      {
+        owner: TEST_AGENT,
+        id: concept.id,
+        body: "definition\n\n## Connections\n\n- extends: concepts/other",
+      },
+      config,
+    ) as { error: string; message: string };
+    expect(outgoingBody.error).toBe("VALIDATION_ERROR");
+    expect(outgoingBody.message).toContain("cannot contain");
+
+    const outgoingTool = await add_connection(
+      vault,
+      {
+        owner: TEST_AGENT,
+        source: concept.id,
+        target: "concepts/other.md",
+        type: "extends",
+      },
+      config,
+    ) as { error: string; message: string };
+    expect(outgoingTool.error).toBe("VALIDATION_ERROR");
+    expect(outgoingTool.message).toContain("connections point to concepts");
+
+    const curated = await update_note(
+      vault,
+      {
+        owner: TEST_AGENT,
+        id: concept.id,
+        frontmatter_patch: { title: "Curated Concept", tags: ["#graph"] },
+      },
+      config,
+    ) as { error?: string; updated: boolean };
+    expect(curated.error).toBeUndefined();
+    expect(curated.updated).toBe(true);
+    const parsed = parseNote(await fs.readFile(path.join(vault, concept.id), "utf-8"));
+    expect(parsed.metadata.title).toBe("Curated Concept");
+    expect(parsed.metadata.tags).toEqual(["graph"]);
+  }, 30000);
+
+  test("concept update can delete legacy document-only fields", async () => {
+    const vault = await makeConceptVault();
+    const config = await loadVaultConfig(vault);
+    const concept = await create_concept(
+      vault,
+      { owner: TEST_AGENT, slug: "legacy", title: "Legacy", body: "definition" },
+      config,
+    ) as { id: string };
+    const conceptPath = path.join(vault, concept.id);
+    const parsed = parseNote(await fs.readFile(conceptPath, "utf-8"));
+    await fs.writeFile(
+      conceptPath,
+      [
+        "---",
+        `title: ${parsed.metadata.title}`,
+        "date: 2026-07-24",
+        "status: draft",
+        "tags: []",
+        `source_agent: ${TEST_AGENT}`,
+        "---",
+        "",
+        "definition",
+        "",
+      ].join("\n"),
+    );
+    await execFile("git", ["add", concept.id], { cwd: vault });
+    await execFile("git", ["commit", "-m", "seed legacy fields"], { cwd: vault });
+
+    const result = await update_note(
+      vault,
+      {
+        owner: TEST_AGENT,
+        id: concept.id,
+        frontmatter_patch: { date: null, status: null },
+      },
+      config,
+    ) as { error?: string; updated: boolean };
+    expect(result.error).toBeUndefined();
+    expect(result.updated).toBe(true);
+    const cleaned = parseNote(await fs.readFile(conceptPath, "utf-8")).metadata;
+    expect(cleaned).not.toHaveProperty("date");
+    expect(cleaned).not.toHaveProperty("status");
+  }, 30000);
 });
 
 // ---------------------------------------------------------------------------

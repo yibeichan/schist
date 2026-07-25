@@ -30,8 +30,22 @@ def main():
                        help="Note status (default: draft, or the vault's first configured status)")
     p_add.add_argument('--dir', default='notes', dest='directory')
 
+    # add-concept
+    p_add_concept = sub.add_parser(
+        'add-concept',
+        help='Create a stable concept node',
+    )
+    p_add_concept.add_argument('--slug', required=True,
+                               help='Stable lowercase identifier matching [a-z0-9-]+')
+    p_add_concept.add_argument('--title', required=True)
+    p_add_concept.add_argument('--body', default=None)
+    p_add_concept.add_argument('--tags', default=None, help='Comma-separated tags')
+
     # link
-    p_link = sub.add_parser('link', help='Add a connection between documents')
+    p_link = sub.add_parser(
+        'link',
+        help='Add a connection from a document to another document or concept',
+    )
     p_link.add_argument('--source', required=True)
     p_link.add_argument('--target', required=True)
     p_link.add_argument('--type', required=True, dest='link_type')
@@ -241,6 +255,7 @@ def main():
 
     dispatch = {
         'add': commands.add,
+        'add-concept': commands.add_concept,
         'link': commands.link,
         'search': commands.search,
         'query': commands.query,
