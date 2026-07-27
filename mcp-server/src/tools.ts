@@ -1937,10 +1937,26 @@ export async function create_concept(
         message: 'Concept creation is disabled because "concepts" is not a configured directory.',
       } satisfies ToolError;
     }
-    if (typeof args.slug !== "string" || !/^[a-z0-9-]+$/.test(args.slug)) {
+    // Reject degenerate hyphen slugs (`-`, `--`, `-foo`, `foo-`) that the
+    // permissive `[a-z0-9-]+` accepted but create_note's slugify never emits:
+    // require alphanumeric words joined by single interior hyphens.
+    if (typeof args.slug !== "string" || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(args.slug)) {
       return {
         error: "VALIDATION_ERROR",
-        message: "slug must match [a-z0-9-]+ exactly",
+        message:
+          "slug must be lowercase alphanumeric words joined by single hyphens " +
+          "(pattern [a-z0-9]+(-[a-z0-9]+)*): no leading, trailing, or repeated hyphens",
+      } satisfies ToolError;
+    }
+    // Cap before the filename hits the filesystem: an over-long slug otherwise
+    // throws ENAMETOOLONG inside writeNote, which normalizeError mislabels as a
+    // GIT_ERROR (nothing git failed) leaking the absolute vault path. NAME_MAX
+    // is 255 bytes on ext4/APFS; 200 leaves headroom for the `.md` stem and
+    // shorter limits on other filesystems.
+    if (args.slug.length > 200) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: `slug must be at most 200 characters (got ${args.slug.length})`,
       } satisfies ToolError;
     }
     if (typeof args.title !== "string" || !args.title.trim()) {

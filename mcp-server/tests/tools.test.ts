@@ -974,7 +974,13 @@ describe("create_concept", () => {
     expect(parsed.connections).toEqual([]);
   }, 30000);
 
-  test.each(["Stable Concept", "stable_concept", "../stable", "", "é"])(
+  test.each([
+    "Stable Concept", "stable_concept", "../stable", "", "é",
+    // Degenerate hyphen slugs: the old `[a-z0-9-]+` accepted these, but they
+    // are identities create_note's slugify would never emit (leading/trailing/
+    // repeated hyphens, or pure hyphens minting `concepts/-.md`).
+    "-", "--", "-foo", "foo-", "a--b",
+  ])(
     "rejects a non-canonical stable slug: %j",
     async (slug) => {
       const vault = await makeConceptVault();
@@ -985,9 +991,21 @@ describe("create_concept", () => {
         config,
       ) as { error: string; message: string };
       expect(result.error).toBe("VALIDATION_ERROR");
-      expect(result.message).toContain("[a-z0-9-]+");
+      expect(result.message).toContain("[a-z0-9]+(-[a-z0-9]+)*");
     },
   );
+
+  test("rejects an over-long slug with a typed error, not a GIT_ERROR", async () => {
+    const vault = await makeConceptVault();
+    const config = await loadVaultConfig(vault);
+    const result = await create_concept(
+      vault,
+      { owner: TEST_AGENT, slug: "a".repeat(201), title: "Too Long", body: "definition" },
+      config,
+    ) as { error: string; message: string };
+    expect(result.error).toBe("VALIDATION_ERROR");
+    expect(result.message).toContain("at most 200 characters");
+  });
 
   test("refuses an outgoing Connections section", async () => {
     const vault = await makeConceptVault();

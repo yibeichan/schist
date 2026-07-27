@@ -128,6 +128,6 @@ describe("listAllTools — unconditional tool exposure", () => {
     }).properties;
 
     expect(noteProperties.directory.enum).toEqual(["notes"]);
-    expect(conceptProperties.slug.pattern).toBe("^[a-z0-9-]+$");
+    expect(conceptProperties.slug.pattern).toBe("^[a-z0-9]+(-[a-z0-9]+)*$");
   });
 });

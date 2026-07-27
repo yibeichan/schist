@@ -223,7 +223,8 @@ export function makeWriteTools(config: VaultConfig) {
           },
           slug: {
             type: "string",
-            pattern: "^[a-z0-9-]+$",
+            pattern: "^[a-z0-9]+(-[a-z0-9]+)*$",
+            maxLength: 200,
             description: "Stable lowercase concept identifier and filename stem.",
           },
           title: { type: "string", description: "Human-readable display title." },
