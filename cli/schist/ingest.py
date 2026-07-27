@@ -580,7 +580,14 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
                 desc = body.split('\n\n')[0].strip() if body else None
                 concept_tags = json.dumps(tags) if tags else None
                 conn.execute(
-                    'INSERT OR IGNORE INTO concepts (slug, title, description, tags) VALUES (?, ?, ?, ?)',
+                    """
+                    INSERT INTO concepts (slug, title, description, tags)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(slug) DO UPDATE SET
+                        title = excluded.title,
+                        description = excluded.description,
+                        tags = excluded.tags
+                    """,
                     (slug, title, desc, concept_tags),
                 )
                 file_concepts += 1

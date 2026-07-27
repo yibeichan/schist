@@ -315,6 +315,61 @@ def test_ingest_normalizes_frontmatter_concept_slugs(tmp_path: Path) -> None:
     assert machine_learning_edge_count == 1
 
 
+@pytest.mark.parametrize("reference_dir", ["archive", "notes"])
+def test_real_concept_metadata_wins_over_reference_stub(
+    tmp_path: Path, reference_dir: str
+) -> None:
+    """A real concept definition is authoritative regardless of file sort order."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    reference_path = vault / reference_dir / "reference.md"
+    reference_path.parent.mkdir()
+    reference_path.write_text(
+        "---\n"
+        "title: Reference\n"
+        "concepts: [backprop]\n"
+        "---\n"
+        "\n"
+        "References the concept.\n",
+        encoding="utf-8",
+    )
+    concepts_dir = vault / "concepts"
+    concepts_dir.mkdir()
+    (concepts_dir / "backprop.md").write_text(
+        "---\n"
+        "concept: backprop\n"
+        "title: Backpropagation\n"
+        "tags: [machine-learning, optimization]\n"
+        "---\n"
+        "\n"
+        "The algorithm for propagating gradients.\n"
+        "\n"
+        "Additional detail.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT title, description, tags FROM concepts WHERE slug = ?",
+            ("backprop",),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row == (
+        "Backpropagation",
+        "The algorithm for propagating gradients.",
+        json.dumps(["machine-learning", "optimization"]),
+    )
+
+
 def test_ingest_indexes_file_ref_frontmatter(tmp_path: Path) -> None:
     """`file_ref` is stored as a nullable docs column for query_graph lookup."""
     from schist.ingest import ingest
