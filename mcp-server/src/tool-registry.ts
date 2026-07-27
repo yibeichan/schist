@@ -223,7 +223,8 @@ export function makeWriteTools(config: VaultConfig) {
           },
           slug: {
             type: "string",
-            pattern: "^[a-z0-9-]+$",
+            pattern: "^[a-z0-9]+(-[a-z0-9]+)*$",
+            maxLength: 200,
             description: "Stable lowercase concept identifier and filename stem.",
           },
           title: { type: "string", description: "Human-readable display title." },
@@ -235,7 +236,7 @@ export function makeWriteTools(config: VaultConfig) {
     },
     {
       name: "update_note",
-      description: "Update an existing note: replace its body and/or patch frontmatter fields. Auto-commits to git. At least one of body/frontmatter_patch is required; a no-op update is deduplicated. Does not rename the file when the title changes.",
+      description: "Update an existing note: replace its body and/or patch frontmatter fields. Concept nodes only allow title/tags changes, body prose without outgoing Connections, or deletion of legacy document-only fields. Auto-commits to git. At least one of body/frontmatter_patch is required; a no-op update is deduplicated. Does not rename the file when the title changes.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -265,7 +266,7 @@ export function makeWriteTools(config: VaultConfig) {
     },
     {
       name: "add_connection",
-      description: "Add a typed connection between two notes or concepts",
+      description: "Add a typed connection from a document note to another note or concept. Concepts cannot be connection sources.",
       inputSchema: {
         type: "object" as const,
         properties: {

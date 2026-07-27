@@ -1505,6 +1505,16 @@ function validateBodyConnectionTypes(
   return null;
 }
 
+function isConceptNoteId(id: string): boolean {
+  return id.split("/")[0] === "concepts";
+}
+
+function hasConnectionsSection(body: string): boolean {
+  return splitLinesLikePython(body).some(
+    (line) => line.trim().startsWith("## Connections"),
+  );
+}
+
 /**
  * Validate a connection target for both write paths (add_connection and
  * create_note's structured-connections loop). One definition so the two sites
@@ -1927,10 +1937,26 @@ export async function create_concept(
         message: 'Concept creation is disabled because "concepts" is not a configured directory.',
       } satisfies ToolError;
     }
-    if (typeof args.slug !== "string" || !/^[a-z0-9-]+$/.test(args.slug)) {
+    // Reject degenerate hyphen slugs (`-`, `--`, `-foo`, `foo-`) that the
+    // permissive `[a-z0-9-]+` accepted but create_note's slugify never emits:
+    // require alphanumeric words joined by single interior hyphens.
+    if (typeof args.slug !== "string" || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(args.slug)) {
       return {
         error: "VALIDATION_ERROR",
-        message: "slug must match [a-z0-9-]+ exactly",
+        message:
+          "slug must be lowercase alphanumeric words joined by single hyphens " +
+          "(pattern [a-z0-9]+(-[a-z0-9]+)*): no leading, trailing, or repeated hyphens",
+      } satisfies ToolError;
+    }
+    // Cap before the filename hits the filesystem: an over-long slug otherwise
+    // throws ENAMETOOLONG inside writeNote, which normalizeError mislabels as a
+    // GIT_ERROR (nothing git failed) leaking the absolute vault path. NAME_MAX
+    // is 255 bytes on ext4/APFS; 200 leaves headroom for the `.md` stem and
+    // shorter limits on other filesystems.
+    if (args.slug.length > 200) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: `slug must be at most 200 characters (got ${args.slug.length})`,
       } satisfies ToolError;
     }
     if (typeof args.title !== "string" || !args.title.trim()) {
@@ -1949,7 +1975,7 @@ export async function create_concept(
       const tagsError = validateTags(args.tags, "tags");
       if (tagsError !== null) return tagsError;
     }
-    if (splitLinesLikePython(args.body).some((line) => line.trim().startsWith("## Connections"))) {
+    if (hasConnectionsSection(args.body)) {
       return {
         error: "VALIDATION_ERROR",
         message: "Concept nodes cannot contain an outgoing ## Connections section.",
@@ -2048,6 +2074,12 @@ export async function add_connection(
     if (args.context != null) args.context = String(args.context);
     const srcIdError = validateNoteId(args.source, config);
     if (srcIdError !== null) return srcIdError;
+    if (isConceptNoteId(args.source)) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: "Concept nodes cannot be connection sources; connections point to concepts.",
+      } satisfies ToolError;
+    }
     const filePath = path.join(vaultRoot, args.source);
     const absVaultRoot = path.resolve(vaultRoot);
     const absFilePath = path.resolve(filePath);
@@ -2487,6 +2519,40 @@ export async function update_note(
 
     const idError = validateNoteId(args.id, config);
     if (idError !== null) return idError;
+    const isConcept = isConceptNoteId(args.id);
+    if (isConcept && args.frontmatter_patch !== undefined) {
+      const legacyDocumentFields = new Set([
+        "date", "status", "concepts", "confidence", "file_ref",
+      ]);
+      for (const [key, value] of Object.entries(args.frontmatter_patch)) {
+        if (key === "title") {
+          // Concepts require a non-empty title at creation (create_concept);
+          // update_note must not be a backdoor to null OR "" it, which would
+          // leave a writable-but-invalid concept schema --validate then flags.
+          if (typeof value !== "string" || !value.trim()) {
+            return {
+              error: "VALIDATION_ERROR",
+              message: "Concept title is required and cannot be deleted or blanked.",
+            } satisfies ToolError;
+          }
+          continue;
+        }
+        if (key === "tags") continue;
+        if (legacyDocumentFields.has(key) && value === null) continue;
+        return {
+          error: "VALIDATION_ERROR",
+          message:
+            "Concept frontmatter may only update title/tags or delete legacy " +
+            `document fields; cannot set '${key}'.`,
+        } satisfies ToolError;
+      }
+    }
+    if (isConcept && args.body !== undefined && hasConnectionsSection(args.body)) {
+      return {
+        error: "VALIDATION_ERROR",
+        message: "Concept nodes cannot contain an outgoing ## Connections section.",
+      } satisfies ToolError;
+    }
 
     const filePath = path.join(vaultRoot, args.id);
     const absVaultRoot = path.resolve(vaultRoot);

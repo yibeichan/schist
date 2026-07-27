@@ -2,10 +2,10 @@
 
 The frontmatter field lists used to live independently in create_note's and
 create_concept's written metadata, update_note's PATCHABLE_FRONTMATTER_KEYS (TS),
-cli_add's written metadata, and ingest's read set here — prose-only in
+cli_add/cli_add_concept written metadata, and ingest's read set here — prose-only in
 schema/SCHEMA.md, with no machine check that they agree. The contract JSON is
 the single source of truth; this suite pins ingest's read set and coercion
-rules plus cli_add's written set to it, and
+rules plus both CLI writers' written sets to it, and
 mcp-server/tests/frontmatter-contract.test.ts pins the TS write sets. A
 field added on either side without updating the contract fails that language's
 CI.
@@ -23,8 +23,9 @@ Three layers:
    ``invalid`` coercion policy against the resulting SQLite columns
    (e.g. off-enum ``confidence`` -> NULL, digit-string ``year`` -> int).
 
-3. **CLI writer** — scan ``commands.add`` for every key assigned to its
-   frontmatter dict and require set equality with ``writtenBy: cli_add``.
+3. **CLI writers** — scan ``commands.add`` / ``commands.add_concept`` for
+   every key assigned to their frontmatter dict and require set equality with
+   ``writtenBy: cli_add`` / ``cli_add_concept``.
    Value normalization and validation stay behaviorally pinned in
    ``test_commands.py``.
 
@@ -66,8 +67,8 @@ def _ingest_read_fields() -> set[str]:
     return {d["field"] for d in _contract() if "ingest" in d["readBy"]}
 
 
-def _cli_add_written_fields() -> set[str]:
-    """Return literal keys written to cli_add's ``fm`` frontmatter dict.
+def _cli_written_fields(function_name: str) -> set[str]:
+    """Return literal keys written to a CLI writer's ``fm`` frontmatter dict.
 
     Fail closed on mutation shapes this scanner does not understand. Otherwise
     a future ``fm.update(...)`` or dynamic subscript could add an on-disk field
@@ -78,7 +79,7 @@ def _cli_add_written_fields() -> set[str]:
     add_fn = next(
         node for node in tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "add"
+        and node.name == function_name
     )
     fields: set[str] = set()
     initializers = 0
@@ -129,10 +130,12 @@ def _cli_add_written_fields() -> set[str]:
                 unsupported.append(f"line {node.lineno}: unsupported fm assignment")
 
     assert initializers == 1, (
-        f"expected exactly one literal fm initializer in commands.add, got {initializers}"
+        f"expected exactly one literal fm initializer in commands.{function_name}, "
+        f"got {initializers}"
     )
     assert not unsupported, (
-        "commands.add mutates fm in forms the contract scanner cannot prove: "
+        f"commands.{function_name} mutates fm in forms the contract scanner "
+        "cannot prove: "
         + "; ".join(unsupported)
     )
     return fields
@@ -170,7 +173,10 @@ def test_contract_descriptors_use_known_vocabulary() -> None:
     """Typos in enum-like descriptor values would silently drop a field from
     the filtered sets both suites assert against — fail them here instead."""
     applies_to = {"documents", "concepts", "papers"}
-    written_by = {"create_note", "create_concept", "update_note", "cli_add"}
+    written_by = {
+        "create_note", "create_concept", "update_note",
+        "cli_add", "cli_add_concept",
+    }
     read_by = {"ingest", "parseNote"}
     invalid_policies = {
         "coerce-null", "coerce-int-or-null", "stringify", "stringify-scalar",
@@ -191,7 +197,7 @@ def test_contract_descriptors_use_known_vocabulary() -> None:
 
 def test_cli_add_written_set_matches_contract() -> None:
     """The Python CLI writer is an enforced contract consumer, not prose-only."""
-    scanned = _cli_add_written_fields()
+    scanned = _cli_written_fields("add")
     contract_fields = {
         d["field"] for d in _contract()
         if "cli_add" in d["writtenBy"]
@@ -203,6 +209,21 @@ def test_cli_add_written_set_matches_contract() -> None:
         f"in contract but never written by commands.add: {missing}; "
         f"written by commands.add but missing from the contract: {extra}. "
         "Update the contract before changing CLI frontmatter fields."
+    )
+
+
+def test_cli_add_concept_written_set_matches_contract() -> None:
+    scanned = _cli_written_fields("add_concept")
+    contract_fields = {
+        d["field"] for d in _contract()
+        if "cli_add_concept" in d["writtenBy"]
+    }
+    missing = sorted(contract_fields - scanned)
+    extra = sorted(scanned - contract_fields)
+    assert not missing and not extra, (
+        "cli_add_concept write-set drift vs schema/frontmatter-contract.json — "
+        f"in contract but never written: {missing}; "
+        f"written but missing from contract: {extra}."
     )
 
 

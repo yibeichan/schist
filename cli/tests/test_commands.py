@@ -37,6 +37,11 @@ def _add_args(title, *, body="body", tags=None, concepts=None, file_ref=None,
     )
 
 
+def _add_concept_args(slug="stable-concept", *, title="Stable Concept",
+                      body="definition", tags=None) -> Namespace:
+    return Namespace(slug=slug, title=title, body=body, tags=tags)
+
+
 def _link_args(source, target, link_type, context=None) -> Namespace:
     return Namespace(source=source, target=target, link_type=link_type, context=context)
 
@@ -81,6 +86,105 @@ class TestAddNormalization:
         fm = _written_frontmatter(tmp_path)
         assert fm["tags"] == ["fmri"]
         assert fm["concepts"] == ["foo"]
+
+
+class TestAddConcept:
+    def test_writes_stable_concept_shape(self, tmp_path, capsys):
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.add_concept(
+                _add_concept_args(tags="#Graph, reference "),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert capsys.readouterr().out.strip() == "concepts/stable-concept.md"
+        concept_path = tmp_path / "concepts" / "stable-concept.md"
+        note = markdown_io.read_note(str(concept_path))
+        assert note["frontmatter"] == {
+            "title": "Stable Concept",
+            "tags": ["Graph", "reference"],
+        }
+        assert note["body"] == "definition"
+
+    @pytest.mark.parametrize("slug", [
+        "Stable Concept", "stable_concept", "../stable", "", "é",
+        # Degenerate hyphen slugs: parity with MCP create_concept, which the
+        # old permissive [a-z0-9-]+ let through.
+        "-", "--", "-foo", "foo-", "a--b",
+    ])
+    def test_rejects_noncanonical_slug(self, tmp_path, capsys, slug):
+        with pytest.raises(SystemExit) as exc:
+            commands.add_concept(
+                _add_concept_args(slug=slug),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert exc.value.code == 1
+        assert "[a-z0-9]+(-[a-z0-9]+)*" in capsys.readouterr().err
+        assert not (tmp_path / "concepts").exists()
+
+    def test_rejects_over_long_slug(self, tmp_path, capsys):
+        with pytest.raises(SystemExit) as exc:
+            commands.add_concept(
+                _add_concept_args(slug="a" * 201),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert exc.value.code == 1
+        assert "at most 200 characters" in capsys.readouterr().err
+        assert not (tmp_path / "concepts").exists()
+
+    def test_rejects_connections_section(self, tmp_path, capsys):
+        with pytest.raises(SystemExit):
+            commands.add_concept(
+                _add_concept_args(
+                    body="definition\n\n## Connections\n\n- extends: concepts/other",
+                ),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert "cannot contain" in capsys.readouterr().err
+        assert not (tmp_path / "concepts").exists()
+
+    def test_refuses_to_overwrite_stable_slug(self, tmp_path, capsys):
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.add_concept(
+                _add_concept_args(body="original"),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        capsys.readouterr()
+        with pytest.raises(SystemExit):
+            commands.add_concept(
+                _add_concept_args(title="Replacement", body="replacement"),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert "already exists" in capsys.readouterr().err
+        content = (tmp_path / "concepts" / "stable-concept.md").read_text()
+        assert "original" in content
+        assert "replacement" not in content
+
+    def test_requires_concepts_directory_configuration(self, tmp_path, capsys):
+        (tmp_path / "schist.yaml").write_text(
+            "directories: [notes]\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(SystemExit):
+            commands.add_concept(
+                _add_concept_args(),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert "not a configured directory" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("directory", [
+        "concepts", "concepts/nested",
+        # Bypass variants a bare prefix check missed: "./" normalization and
+        # (on case-insensitive filesystems) capitalized spellings both resolve
+        # to the reserved concept axis.
+        "./concepts", "concepts/", "Concepts", "./Concepts",
+    ])
+    def test_generic_add_rejects_concept_axis(self, tmp_path, capsys, directory):
+        with pytest.raises(SystemExit):
+            commands.add(
+                _add_args("Wrong Shape", directory=directory),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert "add-concept" in capsys.readouterr().err
+        assert not (tmp_path / "concepts").exists()
 
 
 def _vault_with_types(tmp_path, types="[extends, supports]"):
@@ -617,6 +721,15 @@ class TestLinkSourceContainment:
             )
         assert exc.value.code == 1
         assert "invalid source" in capsys.readouterr().err
+
+    def test_rejects_concept_as_connection_source(self, tmp_path, capsys):
+        _vault_with_types(tmp_path)
+        with pytest.raises(SystemExit):
+            commands.link(
+                _link_args("concepts/source.md", "notes/dst.md", "extends"),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert "connections point to concepts" in capsys.readouterr().err
 
     def test_rejects_symlinked_source_escaping_vault(self, tmp_path, capsys):
         _vault_with_types(tmp_path)

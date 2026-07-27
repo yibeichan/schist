@@ -69,12 +69,13 @@ writer in the `agent_memory.owner` column.
 
 ### Frontmatter Fields
 
-> Enforced source of truth: the concept fields both parsers handle (`concept`, `title`, `tags`) are pinned in [`schema/frontmatter-contract.json`](frontmatter-contract.json). `aliases` is managed through the `concept_aliases` table (via `add_concept_alias`), not by the frontmatter parsers, so it is documented here only.
+> Enforced source of truth: the concept fields both parsers handle (`concept`, `title`, `tags`, `source_agent`) are pinned in [`schema/frontmatter-contract.json`](frontmatter-contract.json). `aliases` is managed through the `concept_aliases` table (via `add_concept_alias`), not by the frontmatter parsers, so it is documented here only.
 
 | Field         | Type       | Required | Default | Description |
 |---------------|------------|----------|---------|-------------|
 | `title`       | string     | yes      | —       | Display name (can contain spaces, caps) |
 | `tags`        | string[]   | no       | `[]`    | Lowercase, hyphenated tags |
+| `source_agent` | string    | no       | `null`  | Original MCP author; immutable after creation |
 | `aliases`     | string[]   | no       | `[]`    | Alternative names for this concept |
 
 ### Example
@@ -83,6 +84,7 @@ writer in the `agent_memory.owner` column.
 ---
 title: "Self-Attention"
 tags: [mechanism, neural-network, attention]
+source_agent: claude
 aliases: [self-attn, intra-attention, self-attention-mechanism]
 ---
 
@@ -96,6 +98,20 @@ A mechanism where each element in a sequence attends to all other elements to co
 - Concept files have **no `## Connections` section** (connections point TO concepts, not FROM them)
 - The filename slug IS the concept's stable identifier: `self-attention.md` → slug `self-attention`
 - Slugs are lowercase, hyphen-separated, no special characters: `[a-z0-9-]+`
+- Create concepts through MCP `create_concept` or CLI `schist add-concept`.
+  Generic `create_note` / `schist add --dir concepts` writes are rejected.
+- Concept updates may change `title`, `tags`, and body prose. They may delete
+  legacy document-only fields, but cannot add them or add outgoing connections.
+
+### Legacy compatibility
+
+Older writers could create date-prefixed, document-shaped files under
+`concepts/`. Ingest continues to read those files and mutation/delete tools
+continue to address them, so upgrading never rewrites or strands existing
+vault history. `schist schema --validate` reports their document-only fields
+and outgoing connection sections. To migrate one, remove `date`, `status`,
+`concepts`, `confidence`, and `file_ref`, remove any outgoing Connections
+section, then rename the file to its intended stable slug with git.
 
 ## Citation-Grade Frontmatter (`papers/`)
 

@@ -70,6 +70,57 @@ class TestSchemaCommand:
         assert "1 violation(s):" in out
         assert "notes/bad.md: missing title/topic/concept in frontmatter" in out
 
+    def test_validate_accepts_stable_concept_shape(self, tmp_path, capsys):
+        concepts_dir = tmp_path / "concepts"
+        concepts_dir.mkdir()
+        (concepts_dir / "stable-concept.md").write_text(
+            "---\ntitle: Stable Concept\ntags: [graph]\n---\n\nDefinition.\n",
+            encoding="utf-8",
+        )
+
+        commands.schema(
+            _schema_args(validate=True),
+            str(tmp_path),
+            str(tmp_path / ".schist" / "schist.db"),
+        )
+        assert capsys.readouterr().out.strip() == "All documents valid."
+
+    def test_validate_reports_document_shaped_concept(self, tmp_path, capsys):
+        concepts_dir = tmp_path / "concepts"
+        concepts_dir.mkdir()
+        (concepts_dir / "2026-07-24-legacy.md").write_text(
+            "---\ntitle: Legacy\ndate: 2026-07-24\nstatus: draft\n---\n\n"
+            "Definition.\n\n## Connections\n\n- extends: concepts/other\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            commands.schema(
+                _schema_args(validate=True),
+                str(tmp_path),
+                str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "concept frontmatter contains document-only field(s): date, status" in out
+        assert "concept nodes cannot have outgoing ## Connections sections" in out
+
+    def test_validate_reports_concept_marker_outside_concepts(self, tmp_path, capsys):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir()
+        (notes_dir / "misplaced.md").write_text(
+            "---\ntitle: Misplaced\nconcept: misplaced\n---\n\nDefinition.\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(SystemExit):
+            commands.schema(
+                _schema_args(validate=True),
+                str(tmp_path),
+                str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert "concept nodes must live under concepts/" in capsys.readouterr().out
+
     def test_validate_skips_file_symlink_escaping_vault(self, tmp_path, capsys):
         # #342 parity: rglob follows symlinks, so a note symlink whose target
         # lives outside the vault would otherwise be read and validated,

@@ -23,6 +23,7 @@ import {
 const execFile = promisify(execFileCb);
 
 const createdDirs = new Set<string>();
+const originalIngestBin = process.env.SCHIST_INGEST_BIN;
 
 async function makeTempVault(extraYaml = ""): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-vw-identity-"));
@@ -54,9 +55,15 @@ describe("#63 vault-write identity enforcement", () => {
     for (const dir of createdDirs) {
       await fs.rm(dir, { recursive: true, force: true });
     }
+    if (originalIngestBin === undefined) delete process.env.SCHIST_INGEST_BIN;
+    else process.env.SCHIST_INGEST_BIN = originalIngestBin;
   });
 
   beforeEach(() => {
+    // This suite tests identity and attribution, not ingestion. Using the real
+    // detached ingester lets it recreate .schist while afterAll removes the
+    // temp vault, intermittently failing cleanup with ENOTEMPTY.
+    process.env.SCHIST_INGEST_BIN = "true";
     delete process.env.SCHIST_AGENT_ID;
     delete process.env.SCHIST_ALLOWED_AGENTS;
   });
