@@ -234,7 +234,12 @@ def add(args, vault_path: str, db_path: str):
     # MCP has enforced both halves since #323; the CLI had neither.
     directory = str(args.directory)
     _reject_escaping_relpath(directory, 'directory')
-    if directory.split('/')[0] == 'concepts':
+    # Normalize + case-fold before the axis check: a bare prefix test lets
+    # `--dir ./concepts` (top segment ".") and, on case-insensitive
+    # filesystems, `--dir Concepts` slip a document-shaped note into the
+    # reserved concept axis. normpath collapses "./" and casefold matches the
+    # physical directory macOS/APFS would resolve to.
+    if os.path.normpath(directory).split(os.sep)[0].casefold() == 'concepts':
         print(
             'Error: schist add writes document-shaped notes and cannot target '
             "'concepts'; use schist add-concept",
@@ -372,8 +377,22 @@ def add_concept(args, vault_path: str, db_path: str):
         sys.exit(1)
 
     slug = str(args.slug)
-    if re.fullmatch(r'[a-z0-9-]+', slug) is None:
-        print('Error: slug must match [a-z0-9-]+ exactly', file=sys.stderr)
+    # Parity with MCP create_concept: reject degenerate hyphen slugs (`-`,
+    # `--foo`, `foo-`) and cap length so an over-long stem fails with a clear
+    # message instead of an ENAMETOOLONG on write.
+    if re.fullmatch(r'[a-z0-9]+(-[a-z0-9]+)*', slug) is None:
+        print(
+            'Error: slug must be lowercase alphanumeric words joined by single '
+            'hyphens (pattern [a-z0-9]+(-[a-z0-9]+)*): no leading, trailing, or '
+            'repeated hyphens',
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if len(slug) > 200:
+        print(
+            f'Error: slug must be at most 200 characters (got {len(slug)})',
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     title = str(args.title)
@@ -735,9 +754,10 @@ def schema(args, vault_path: str, db_path: str):
             violations.append(f'{rel}: missing title/topic/concept in frontmatter')
         is_concept_path = len(rel.parts) > 1 and rel.parts[0] == 'concepts'
         if is_concept_path:
-            if re.fullmatch(r'[a-z0-9-]+', rel.stem) is None:
+            if re.fullmatch(r'[a-z0-9]+(-[a-z0-9]+)*', rel.stem) is None:
                 violations.append(
-                    f'{rel}: concept filename stem must match [a-z0-9-]+',
+                    f'{rel}: concept filename stem must match '
+                    '[a-z0-9]+(-[a-z0-9]+)*',
                 )
             forbidden = sorted({
                 'date', 'status', 'concepts', 'confidence', 'file_ref',

@@ -104,7 +104,12 @@ class TestAddConcept:
         }
         assert note["body"] == "definition"
 
-    @pytest.mark.parametrize("slug", ["Stable Concept", "stable_concept", "../stable", "", "é"])
+    @pytest.mark.parametrize("slug", [
+        "Stable Concept", "stable_concept", "../stable", "", "é",
+        # Degenerate hyphen slugs: parity with MCP create_concept, which the
+        # old permissive [a-z0-9-]+ let through.
+        "-", "--", "-foo", "foo-", "a--b",
+    ])
     def test_rejects_noncanonical_slug(self, tmp_path, capsys, slug):
         with pytest.raises(SystemExit) as exc:
             commands.add_concept(
@@ -112,7 +117,17 @@ class TestAddConcept:
                 str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
             )
         assert exc.value.code == 1
-        assert "[a-z0-9-]+" in capsys.readouterr().err
+        assert "[a-z0-9]+(-[a-z0-9]+)*" in capsys.readouterr().err
+        assert not (tmp_path / "concepts").exists()
+
+    def test_rejects_over_long_slug(self, tmp_path, capsys):
+        with pytest.raises(SystemExit) as exc:
+            commands.add_concept(
+                _add_concept_args(slug="a" * 201),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert exc.value.code == 1
+        assert "at most 200 characters" in capsys.readouterr().err
         assert not (tmp_path / "concepts").exists()
 
     def test_rejects_connections_section(self, tmp_path, capsys):
@@ -155,7 +170,13 @@ class TestAddConcept:
             )
         assert "not a configured directory" in capsys.readouterr().err
 
-    @pytest.mark.parametrize("directory", ["concepts", "concepts/nested"])
+    @pytest.mark.parametrize("directory", [
+        "concepts", "concepts/nested",
+        # Bypass variants a bare prefix check missed: "./" normalization and
+        # (on case-insensitive filesystems) capitalized spellings both resolve
+        # to the reserved concept axis.
+        "./concepts", "concepts/", "Concepts", "./Concepts",
+    ])
     def test_generic_add_rejects_concept_axis(self, tmp_path, capsys, directory):
         with pytest.raises(SystemExit):
             commands.add(

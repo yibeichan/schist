@@ -36,7 +36,7 @@ def main():
         help='Create a stable concept node',
     )
     p_add_concept.add_argument('--slug', required=True,
-                               help='Stable lowercase identifier matching [a-z0-9-]+')
+                               help='Stable lowercase identifier matching [a-z0-9]+(-[a-z0-9]+)*')
     p_add_concept.add_argument('--title', required=True)
     p_add_concept.add_argument('--body', default=None)
     p_add_concept.add_argument('--tags', default=None, help='Comma-separated tags')

@@ -2525,13 +2525,19 @@ export async function update_note(
         "date", "status", "concepts", "confidence", "file_ref",
       ]);
       for (const [key, value] of Object.entries(args.frontmatter_patch)) {
-        if (key === "title" && value === null) {
-          return {
-            error: "VALIDATION_ERROR",
-            message: "Concept title is required and cannot be deleted.",
-          } satisfies ToolError;
+        if (key === "title") {
+          // Concepts require a non-empty title at creation (create_concept);
+          // update_note must not be a backdoor to null OR "" it, which would
+          // leave a writable-but-invalid concept schema --validate then flags.
+          if (typeof value !== "string" || !value.trim()) {
+            return {
+              error: "VALIDATION_ERROR",
+              message: "Concept title is required and cannot be deleted or blanked.",
+            } satisfies ToolError;
+          }
+          continue;
         }
-        if (key === "title" || key === "tags") continue;
+        if (key === "tags") continue;
         if (legacyDocumentFields.has(key) && value === null) continue;
         return {
           error: "VALIDATION_ERROR",

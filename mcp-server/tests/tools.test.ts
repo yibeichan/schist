@@ -1157,6 +1157,30 @@ describe("create_concept", () => {
     expect(cleaned).not.toHaveProperty("date");
     expect(cleaned).not.toHaveProperty("status");
   }, 30000);
+
+  test.each([null, "", "   "])(
+    "concept update refuses to delete or blank the required title: %j",
+    async (badTitle) => {
+      const vault = await makeConceptVault();
+      const config = await loadVaultConfig(vault);
+      const concept = await create_concept(
+        vault,
+        { owner: TEST_AGENT, slug: "keep-title", title: "Keep", body: "definition" },
+        config,
+      ) as { id: string };
+      const result = await update_note(
+        vault,
+        { owner: TEST_AGENT, id: concept.id, frontmatter_patch: { title: badTitle } },
+        config,
+      ) as { error?: string; message?: string };
+      expect(result.error).toBe("VALIDATION_ERROR");
+      expect(result.message).toContain("cannot be deleted or blanked");
+      // The on-disk title must survive the rejected patch.
+      const parsed = parseNote(await fs.readFile(path.join(vault, concept.id), "utf-8"));
+      expect(parsed.metadata.title).toBe("Keep");
+    },
+    30000,
+  );
 });
 
 // ---------------------------------------------------------------------------
