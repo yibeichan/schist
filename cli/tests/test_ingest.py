@@ -1007,6 +1007,43 @@ def test_ingest_prunes_concept_aliases_for_missing_concepts(tmp_path: Path) -> N
     assert rows == [("dupe", "canonical", "valid alias")]
 
 
+@pytest.mark.parametrize("directory", ["concepts", "Concepts"])
+def test_ingest_classifies_concept_dir_casefolded(
+    tmp_path: Path, directory: str,
+) -> None:
+    """A file under the concept axis indexes as a concept regardless of the
+    directory's casing (#472 family). A byte-exact `rel.parts[0] ==
+    'concepts'` test stored `Concepts/<slug>.md` as a plain document while
+    `schema --validate` — which case-folds — reported it as a malformed
+    concept, so the linter and the indexer disagreed about the same file.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    concepts_dir = vault / directory
+    concepts_dir.mkdir()
+    # No `concept:` key — the directory alone must drive classification.
+    (concepts_dir / "machine-learning.md").write_text(
+        "---\ntitle: Machine Learning\n---\n\nCanonical concept.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute(
+            "SELECT slug, title FROM concepts",
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [("machine-learning", "Machine Learning")]
+
+
 def test_exact_concept_axis_outranks_earlier_sorting_claimant(
     tmp_path: Path,
 ) -> None:
@@ -1070,6 +1107,45 @@ def test_casefold_axis_outranks_off_axis_claimant(tmp_path: Path) -> None:
     (vault / "Concepts").mkdir()
     (vault / "Concepts" / "ml.md").write_text(
         "---\nconcept: ml\ntitle: AUTHORITATIVE\n---\n\nReal definition.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT slug, title FROM concepts").fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [("ml", "AUTHORITATIVE")]
+
+
+def test_casefold_axis_without_concept_key_outranks_off_axis_claimant(
+    tmp_path: Path,
+) -> None:
+    """A modern concept under `Concepts/` — no legacy `concept:` key, so it is
+    classified purely by the case-folded directory test — still outranks an
+    earlier-sorting off-axis claimant.
+
+    This is the shape `add-concept`/`create_concept` actually write (title and
+    tags only), so it is the case that matters in practice; the `concept:`-keyed
+    variant is the legacy one.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "Archive").mkdir()
+    (vault / "Archive" / "ml.md").write_text(
+        "---\nconcept: ml\ntitle: HIJACKER\n---\n\nStale copy.\n",
+        encoding="utf-8",
+    )
+    (vault / "Concepts").mkdir()
+    (vault / "Concepts" / "ml.md").write_text(
+        "---\ntitle: AUTHORITATIVE\n---\n\nReal definition.\n",
         encoding="utf-8",
     )
     db = vault / ".schist" / "schist.db"

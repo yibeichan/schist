@@ -725,6 +725,12 @@ class TestLinkSourceContainment:
     @pytest.mark.parametrize("source", [
         "concepts/source.md",
         "Concepts/source.md",
+        # Same bypass variants the add --dir guard covers (#454): "./" and
+        # duplicated separators need normpath, capitalized spellings need
+        # casefold, and all of them resolve to the reserved concept axis.
+        "./concepts/source.md",
+        "./Concepts/source.md",
+        "concepts//source.md",
     ])
     def test_rejects_concept_as_connection_source(self, tmp_path, capsys, source):
         _vault_with_types(tmp_path)
