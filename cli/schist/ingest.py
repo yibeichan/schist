@@ -408,6 +408,15 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     # stdout-only WARN vanishes without trace.
     skipped_count = 0
 
+    # Slugs already claimed by a REAL concept definition this run. The concept
+    # UPSERT (below) overwrites placeholder stub rows to fix #468, but it must
+    # not let a second is_concept file silently clobber the first: is_concept is
+    # true for any `concept:`-keyed file anywhere (not just concepts/), and files
+    # are processed in sort order, so a stray `concept: x` in notes/ (which sorts
+    # after concepts/) would otherwise overwrite concepts/x.md. First real
+    # definition wins; placeholders always yield.
+    real_concept_slugs: set = set()
+
     # rglob('*.md') follows symlinks — a *.md FILE symlink is yielded on
     # every Python version, and on 3.12 patch releases predating the glob
     # reimplementation backport rglob also RECURSES INTO symlinked
@@ -579,10 +588,25 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
                 concept_slug = slug
                 desc = body.split('\n\n')[0].strip() if body else None
                 concept_tags = json.dumps(tags) if tags else None
-                conn.execute(
-                    'INSERT OR IGNORE INTO concepts (slug, title, description, tags) VALUES (?, ?, ?, ?)',
-                    (slug, title, desc, concept_tags),
-                )
+                if slug in real_concept_slugs:
+                    # A real definition earlier in sort order already claimed
+                    # this slug — keep it authoritative (first-definition-wins,
+                    # matching pre-#470 behavior) instead of clobbering it with
+                    # a later duplicate is_concept file.
+                    pass
+                else:
+                    real_concept_slugs.add(slug)
+                    conn.execute(
+                        """
+                        INSERT INTO concepts (slug, title, description, tags)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(slug) DO UPDATE SET
+                            title = excluded.title,
+                            description = excluded.description,
+                            tags = excluded.tags
+                        """,
+                        (slug, title, desc, concept_tags),
+                    )
                 file_concepts += 1
 
             # Also insert concepts referenced in frontmatter

@@ -315,6 +315,116 @@ def test_ingest_normalizes_frontmatter_concept_slugs(tmp_path: Path) -> None:
     assert machine_learning_edge_count == 1
 
 
+@pytest.mark.parametrize("reference_dir", ["archive", "notes"])
+def test_real_concept_metadata_wins_over_reference_stub(
+    tmp_path: Path, reference_dir: str
+) -> None:
+    """A real concept definition is authoritative regardless of file sort order."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    reference_path = vault / reference_dir / "reference.md"
+    reference_path.parent.mkdir()
+    reference_path.write_text(
+        "---\n"
+        "title: Reference\n"
+        "concepts: [backprop]\n"
+        "---\n"
+        "\n"
+        "References the concept.\n",
+        encoding="utf-8",
+    )
+    concepts_dir = vault / "concepts"
+    concepts_dir.mkdir()
+    (concepts_dir / "backprop.md").write_text(
+        "---\n"
+        "concept: backprop\n"
+        "title: Backpropagation\n"
+        "tags: [machine-learning, optimization]\n"
+        "---\n"
+        "\n"
+        "The algorithm for propagating gradients.\n"
+        "\n"
+        "Additional detail.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT title, description, tags FROM concepts WHERE slug = ?",
+            ("backprop",),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row == (
+        "Backpropagation",
+        "The algorithm for propagating gradients.",
+        json.dumps(["machine-learning", "optimization"]),
+    )
+
+
+def test_canonical_concept_not_clobbered_by_later_duplicate(tmp_path: Path) -> None:
+    """A later duplicate `concept:` file must not overwrite the first real
+    definition. `concepts/` sorts before `notes/`, so without the
+    first-definition-wins guard the notes stub would clobber the canonical
+    row's description/tags (a regression introduced by the #468 upsert)."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    concepts_dir = vault / "concepts"
+    concepts_dir.mkdir()
+    (concepts_dir / "backprop.md").write_text(
+        "---\n"
+        "concept: backprop\n"
+        "title: Backpropagation\n"
+        "tags: [machine-learning, optimization]\n"
+        "---\n"
+        "\n"
+        "The algorithm for propagating gradients.\n",
+        encoding="utf-8",
+    )
+    notes_dir = vault / "notes"
+    notes_dir.mkdir()
+    # A stray duplicate `concept:` key in notes/ (sorts AFTER concepts/): bare
+    # title, no tags, empty body — exactly the row that would blank the
+    # canonical definition under last-wins.
+    (notes_dir / "stub.md").write_text(
+        "---\n"
+        "concept: backprop\n"
+        "title: BP\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT title, description, tags FROM concepts WHERE slug = ?",
+            ("backprop",),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    # The canonical concepts/ definition survives intact.
+    assert row == (
+        "Backpropagation",
+        "The algorithm for propagating gradients.",
+        json.dumps(["machine-learning", "optimization"]),
+    )
+
+
 def test_ingest_indexes_file_ref_frontmatter(tmp_path: Path) -> None:
     """`file_ref` is stored as a nullable docs column for query_graph lookup."""
     from schist.ingest import ingest
