@@ -722,11 +722,15 @@ class TestLinkSourceContainment:
         assert exc.value.code == 1
         assert "invalid source" in capsys.readouterr().err
 
-    def test_rejects_concept_as_connection_source(self, tmp_path, capsys):
+    @pytest.mark.parametrize("source", [
+        "concepts/source.md",
+        "Concepts/source.md",
+    ])
+    def test_rejects_concept_as_connection_source(self, tmp_path, capsys, source):
         _vault_with_types(tmp_path)
         with pytest.raises(SystemExit):
             commands.link(
-                _link_args("concepts/source.md", "notes/dst.md", "extends"),
+                _link_args(source, "notes/dst.md", "extends"),
                 str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
             )
         assert "connections point to concepts" in capsys.readouterr().err

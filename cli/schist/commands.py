@@ -521,7 +521,7 @@ def link(args, vault_path: str, db_path: str):
     # add_connection has enforced both since #323.
     source_rel = str(args.source)
     _reject_escaping_relpath(source_rel, 'source')
-    if source_rel.split('/')[0] == 'concepts':
+    if os.path.normpath(source_rel).split(os.sep)[0].casefold() == 'concepts':
         print(
             'Error: concept nodes cannot be connection sources; connections '
             'point to concepts',
@@ -752,7 +752,10 @@ def schema(args, vault_path: str, db_path: str):
         fm = note['frontmatter']
         if not fm.get('title') and not fm.get('topic') and not fm.get('concept'):
             violations.append(f'{rel}: missing title/topic/concept in frontmatter')
-        is_concept_path = len(rel.parts) > 1 and rel.parts[0] == 'concepts'
+        is_concept_path = (
+            len(rel.parts) > 1
+            and rel.parts[0].casefold() == 'concepts'
+        )
         if is_concept_path:
             if re.fullmatch(r'[a-z0-9]+(-[a-z0-9]+)*', rel.stem) is None:
                 violations.append(

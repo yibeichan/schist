@@ -85,8 +85,11 @@ class TestSchemaCommand:
         )
         assert capsys.readouterr().out.strip() == "All documents valid."
 
-    def test_validate_reports_document_shaped_concept(self, tmp_path, capsys):
-        concepts_dir = tmp_path / "concepts"
+    @pytest.mark.parametrize("directory", ["concepts", "Concepts"])
+    def test_validate_reports_document_shaped_concept(
+        self, tmp_path, capsys, directory,
+    ):
+        concepts_dir = tmp_path / directory
         concepts_dir.mkdir()
         (concepts_dir / "2026-07-24-legacy.md").write_text(
             "---\ntitle: Legacy\ndate: 2026-07-24\nstatus: draft\n---\n\n"
