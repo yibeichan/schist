@@ -416,6 +416,15 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     # after concepts/) would otherwise overwrite concepts/x.md. First real
     # definition wins; placeholders always yield.
     real_concept_slugs: set = set()
+    # Subset of the above claimed from the EXACT `concepts/` axis. The sort-order
+    # assumption above holds only for `notes/`: ANY directory sorting before
+    # `concepts/` — `Archive/`, `Papers/`, `2026-inbox/`, anything capitalized,
+    # since uppercase precedes lowercase in ASCII — gets its `concept:`-keyed
+    # file processed FIRST, and plain first-definition-wins then locks the slug
+    # to that file and skips the real `concepts/<slug>.md` definition. An
+    # exact-axis definition therefore outranks an off-axis claimant regardless
+    # of processing order; among exact-axis files, first still wins.
+    exact_axis_slugs: set = set()
 
     # rglob('*.md') follows symlinks — a *.md FILE symlink is yielded on
     # every Python version, and on 3.12 patch releases predating the glob
@@ -588,14 +597,22 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
                 concept_slug = slug
                 desc = body.split('\n\n')[0].strip() if body else None
                 concept_tags = json.dumps(tags) if tags else None
-                if slug in real_concept_slugs:
+                exact_axis = len(rel.parts) > 1 and rel.parts[0] == 'concepts'
+                if slug in exact_axis_slugs or (
+                    slug in real_concept_slugs and not exact_axis
+                ):
                     # A real definition earlier in sort order already claimed
                     # this slug — keep it authoritative (first-definition-wins,
                     # matching pre-#470 behavior) instead of clobbering it with
-                    # a later duplicate is_concept file.
+                    # a later duplicate is_concept file. An exact-axis
+                    # definition is the one exception: it takes the slug back
+                    # from an off-axis claimant that merely sorted earlier
+                    # (see exact_axis_slugs above).
                     pass
                 else:
                     real_concept_slugs.add(slug)
+                    if exact_axis:
+                        exact_axis_slugs.add(slug)
                     conn.execute(
                         """
                         INSERT INTO concepts (slug, title, description, tags)

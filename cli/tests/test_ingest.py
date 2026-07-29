@@ -1007,6 +1007,46 @@ def test_ingest_prunes_concept_aliases_for_missing_concepts(tmp_path: Path) -> N
     assert rows == [("dupe", "canonical", "valid alias")]
 
 
+def test_exact_concept_axis_outranks_earlier_sorting_claimant(
+    tmp_path: Path,
+) -> None:
+    """An off-axis `concept:`-keyed file cannot take a slug from the real
+    `concepts/<slug>.md` definition just by being processed first.
+
+    #470's first-definition-wins rule assumed competing claimants sort AFTER
+    `concepts/`, which is only true for `notes/`. Any directory sorting before
+    it — `Archive/`, `Papers/`, `2026-inbox/`, anything capitalized — claimed
+    the slug and left the authoritative definition unindexed.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "concepts").mkdir()
+    (vault / "concepts" / "ml.md").write_text(
+        "---\nconcept: ml\ntitle: AUTHORITATIVE\n---\n\nReal definition.\n",
+        encoding="utf-8",
+    )
+    # "Archive" < "concepts" in ASCII, so this file is processed first.
+    (vault / "Archive").mkdir()
+    (vault / "Archive" / "ml.md").write_text(
+        "---\nconcept: ml\ntitle: HIJACKER\n---\n\nStale copy.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT slug, title FROM concepts").fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [("ml", "AUTHORITATIVE")]
+
+
 def test_ingest_indexes_paper_metadata(tmp_path: Path) -> None:
     """Citation-grade paper frontmatter populates the paper_metadata side table."""
     from schist.ingest import ingest
