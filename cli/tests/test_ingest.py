@@ -1047,6 +1047,65 @@ def test_exact_concept_axis_outranks_earlier_sorting_claimant(
     assert rows == [("ml", "AUTHORITATIVE")]
 
 
+def test_casefold_axis_outranks_off_axis_claimant(tmp_path: Path) -> None:
+    """`Concepts/` outranks an off-axis claimant that sorted earlier.
+
+    On a case-insensitive filesystem `Concepts/` IS the reserved axis, so a
+    two-tier rank (literal `concepts/` vs everything else) left it tied with
+    `Archive/` and arrival order decided — silently preserving the wrong
+    metadata. It still yields to a literal `concepts/` definition, which is why
+    the tiers cannot be collapsed: on a case-SENSITIVE filesystem the two are
+    distinct directories and `Concepts/` sorts first.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "Archive").mkdir()
+    (vault / "Archive" / "ml.md").write_text(
+        "---\nconcept: ml\ntitle: HIJACKER\n---\n\nStale copy.\n",
+        encoding="utf-8",
+    )
+    # "Archive" < "Concepts" in ASCII, so the hijacker is processed first.
+    (vault / "Concepts").mkdir()
+    (vault / "Concepts" / "ml.md").write_text(
+        "---\nconcept: ml\ntitle: AUTHORITATIVE\n---\n\nReal definition.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT slug, title FROM concepts").fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [("ml", "AUTHORITATIVE")]
+
+
+@pytest.mark.parametrize(
+    "rel, expected",
+    [
+        ("concepts/ml.md", 1),
+        ("Concepts/ml.md", 2),
+        ("CONCEPTS/ml.md", 2),
+        ("Archive/ml.md", 3),
+        ("notes/ml.md", 3),
+        ("conceptsx/ml.md", 3),
+        ("ml.md", 3),  # vault root — no directory component at all
+    ],
+)
+def test_concept_axis_rank_tiers(rel: str, expected: int) -> None:
+    """The ranking itself, independent of ingest, so the tier boundaries are
+    pinned rather than inferred from end-to-end fixtures."""
+    from schist.ingest import _concept_axis_rank
+
+    assert _concept_axis_rank(Path(rel)) == expected
+
+
 def test_ingest_indexes_paper_metadata(tmp_path: Path) -> None:
     """Citation-grade paper frontmatter populates the paper_metadata side table."""
     from schist.ingest import ingest

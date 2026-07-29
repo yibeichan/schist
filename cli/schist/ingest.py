@@ -112,6 +112,36 @@ def _normalize_tag(value: str) -> str:
     return value.strip().lstrip('#').strip()
 
 
+# Authority tiers for a concept definition, LOWER wins. Three tiers and not
+# two, because `concepts/` and `Concepts/` are the SAME directory on a
+# case-insensitive filesystem (APFS/HFS+) but DIFFERENT ones on a
+# case-sensitive filesystem (ext4 — the hub). Collapsing the two axis tiers
+# into one would let `Concepts/x.md`, which sorts BEFORE `concepts/x.md`, take
+# the slug from the literal axis on ext4 — the very hijack this ranking exists
+# to prevent.
+CONCEPT_AXIS_EXACT = 1      # `concepts/` — the reserved axis, always wins
+CONCEPT_AXIS_CASEFOLD = 2   # `Concepts/` — the reserved axis on APFS/HFS+ only
+CONCEPT_AXIS_NONE = 3       # a `concept:`-keyed file anywhere else
+
+
+def _concept_axis_rank(rel: Path) -> int:
+    """Authority rank of the concept definition at `rel` (lower wins).
+
+    Sort order is NOT a proxy for authority: ANY directory sorting before
+    `concepts/` — `Archive/`, `Papers/`, `2026-inbox/`, anything capitalized,
+    since uppercase precedes lowercase in ASCII — is processed first. Ranking
+    by path instead of arrival order is what keeps the reserved axis
+    authoritative regardless of what else claims the slug.
+    """
+    if len(rel.parts) > 1:
+        top = rel.parts[0]
+        if top == 'concepts':
+            return CONCEPT_AXIS_EXACT
+        if top.casefold() == 'concepts':
+            return CONCEPT_AXIS_CASEFOLD
+    return CONCEPT_AXIS_NONE
+
+
 def _opens_quoted_scalar(last_significant: str) -> bool:
     return last_significant in {'', '[', '{', ',', ':'}
 
@@ -408,23 +438,16 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     # stdout-only WARN vanishes without trace.
     skipped_count = 0
 
-    # Slugs already claimed by a REAL concept definition this run. The concept
-    # UPSERT (below) overwrites placeholder stub rows to fix #468, but it must
-    # not let a second is_concept file silently clobber the first: is_concept is
-    # true for any `concept:`-keyed file anywhere (not just concepts/), and files
-    # are processed in sort order, so a stray `concept: x` in notes/ (which sorts
-    # after concepts/) would otherwise overwrite concepts/x.md. First real
-    # definition wins; placeholders always yield.
-    real_concept_slugs: set = set()
-    # Subset of the above claimed from the EXACT `concepts/` axis. The sort-order
-    # assumption above holds only for `notes/`: ANY directory sorting before
-    # `concepts/` — `Archive/`, `Papers/`, `2026-inbox/`, anything capitalized,
-    # since uppercase precedes lowercase in ASCII — gets its `concept:`-keyed
-    # file processed FIRST, and plain first-definition-wins then locks the slug
-    # to that file and skips the real `concepts/<slug>.md` definition. An
-    # exact-axis definition therefore outranks an off-axis claimant regardless
-    # of processing order; among exact-axis files, first still wins.
-    exact_axis_slugs: set = set()
+    # Slug -> best _concept_axis_rank claimed by a REAL concept definition this
+    # run. The concept UPSERT (below) overwrites placeholder stub rows to fix
+    # #468, but it must not let a second is_concept file silently clobber a
+    # MORE AUTHORITATIVE one: is_concept is true for any `concept:`-keyed file
+    # anywhere, not just under concepts/. #470 resolved that by arrival order,
+    # which is wrong whenever a claimant sorts before the axis it is competing
+    # with (see _concept_axis_rank). A definition is replaced only by a
+    # STRICTLY better rank, so within one tier the first still wins and #470's
+    # duplicate-definition behavior is unchanged; placeholders always yield.
+    concept_slug_rank: dict = {}
 
     # rglob('*.md') follows symlinks — a *.md FILE symlink is yielded on
     # every Python version, and on 3.12 patch releases predating the glob
@@ -597,22 +620,17 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
                 concept_slug = slug
                 desc = body.split('\n\n')[0].strip() if body else None
                 concept_tags = json.dumps(tags) if tags else None
-                exact_axis = len(rel.parts) > 1 and rel.parts[0] == 'concepts'
-                if slug in exact_axis_slugs or (
-                    slug in real_concept_slugs and not exact_axis
-                ):
-                    # A real definition earlier in sort order already claimed
-                    # this slug — keep it authoritative (first-definition-wins,
-                    # matching pre-#470 behavior) instead of clobbering it with
-                    # a later duplicate is_concept file. An exact-axis
-                    # definition is the one exception: it takes the slug back
-                    # from an off-axis claimant that merely sorted earlier
-                    # (see exact_axis_slugs above).
+                axis_rank = _concept_axis_rank(rel)
+                prior_rank = concept_slug_rank.get(slug)
+                if prior_rank is not None and prior_rank <= axis_rank:
+                    # An equally- or more-authoritative definition already
+                    # claimed this slug — keep it (first-definition-wins within
+                    # a tier, matching pre-#470 behavior) instead of clobbering
+                    # it with a later duplicate is_concept file. Only a
+                    # strictly better tier takes the slug back.
                     pass
                 else:
-                    real_concept_slugs.add(slug)
-                    if exact_axis:
-                        exact_axis_slugs.add(slug)
+                    concept_slug_rank[slug] = axis_rank
                     conn.execute(
                         """
                         INSERT INTO concepts (slug, title, description, tags)
