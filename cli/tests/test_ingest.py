@@ -1106,6 +1106,77 @@ def test_concept_axis_rank_tiers(rel: str, expected: int) -> None:
     assert _concept_axis_rank(Path(rel)) == expected
 
 
+def test_matching_stem_outranks_mismatched_concept_key_in_axis(
+    tmp_path: Path,
+) -> None:
+    """Within `concepts/`, a file whose `concept:` key disagrees with its own
+    filename cannot block the canonical file that agrees (#479).
+
+    Both files are tier 1, so the axis rank alone cannot separate them and
+    arrival order decided: `concepts/aaa.md` carrying `concept: zzz` claimed the
+    slug and canonical `concepts/zzz.md`, which sorts later, was dropped from
+    the index entirely.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "concepts").mkdir()
+    # "aaa" sorts before "zzz", so the squatter is processed first.
+    (vault / "concepts" / "aaa.md").write_text(
+        "---\nconcept: zzz\ntitle: MISMATCHED KEY\n---\n\nSquatter.\n",
+        encoding="utf-8",
+    )
+    (vault / "concepts" / "zzz.md").write_text(
+        "---\nconcept: zzz\ntitle: CANONICAL\n---\n\nReal definition.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT slug, title FROM concepts").fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [("zzz", "CANONICAL")]
+
+
+def test_concept_count_counts_slugs_not_files(tmp_path: Path, capsys) -> None:
+    """`Ingested: N concepts` counts distinct slugs. A duplicate that loses the
+    rank contest writes no row, so counting every is_concept file overstated the
+    table (#479)."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "concepts").mkdir()
+    (vault / "concepts" / "aaa.md").write_text(
+        "---\nconcept: zzz\ntitle: MISMATCHED KEY\n---\n\nSquatter.\n",
+        encoding="utf-8",
+    )
+    (vault / "concepts" / "zzz.md").write_text(
+        "---\nconcept: zzz\ntitle: CANONICAL\n---\n\nReal definition.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT count(*) FROM concepts").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert rows == 1
+    assert "1 concepts" in capsys.readouterr().out
+
+
 def test_ingest_indexes_paper_metadata(tmp_path: Path) -> None:
     """Citation-grade paper frontmatter populates the paper_metadata side table."""
     from schist.ingest import ingest
