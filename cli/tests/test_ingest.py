@@ -1007,6 +1007,176 @@ def test_ingest_prunes_concept_aliases_for_missing_concepts(tmp_path: Path) -> N
     assert rows == [("dupe", "canonical", "valid alias")]
 
 
+def test_exact_concept_axis_outranks_earlier_sorting_claimant(
+    tmp_path: Path,
+) -> None:
+    """An off-axis `concept:`-keyed file cannot take a slug from the real
+    `concepts/<slug>.md` definition just by being processed first.
+
+    #470's first-definition-wins rule assumed competing claimants sort AFTER
+    `concepts/`, which is only true for `notes/`. Any directory sorting before
+    it — `Archive/`, `Papers/`, `2026-inbox/`, anything capitalized — claimed
+    the slug and left the authoritative definition unindexed.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "concepts").mkdir()
+    (vault / "concepts" / "ml.md").write_text(
+        "---\nconcept: ml\ntitle: AUTHORITATIVE\n---\n\nReal definition.\n",
+        encoding="utf-8",
+    )
+    # "Archive" < "concepts" in ASCII, so this file is processed first.
+    (vault / "Archive").mkdir()
+    (vault / "Archive" / "ml.md").write_text(
+        "---\nconcept: ml\ntitle: HIJACKER\n---\n\nStale copy.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT slug, title FROM concepts").fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [("ml", "AUTHORITATIVE")]
+
+
+def test_casefold_axis_outranks_off_axis_claimant(tmp_path: Path) -> None:
+    """`Concepts/` outranks an off-axis claimant that sorted earlier.
+
+    On a case-insensitive filesystem `Concepts/` IS the reserved axis, so a
+    two-tier rank (literal `concepts/` vs everything else) left it tied with
+    `Archive/` and arrival order decided — silently preserving the wrong
+    metadata. It still yields to a literal `concepts/` definition, which is why
+    the tiers cannot be collapsed: on a case-SENSITIVE filesystem the two are
+    distinct directories and `Concepts/` sorts first.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "Archive").mkdir()
+    (vault / "Archive" / "ml.md").write_text(
+        "---\nconcept: ml\ntitle: HIJACKER\n---\n\nStale copy.\n",
+        encoding="utf-8",
+    )
+    # "Archive" < "Concepts" in ASCII, so the hijacker is processed first.
+    (vault / "Concepts").mkdir()
+    (vault / "Concepts" / "ml.md").write_text(
+        "---\nconcept: ml\ntitle: AUTHORITATIVE\n---\n\nReal definition.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT slug, title FROM concepts").fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [("ml", "AUTHORITATIVE")]
+
+
+@pytest.mark.parametrize(
+    "rel, expected",
+    [
+        ("concepts/ml.md", 1),
+        ("Concepts/ml.md", 2),
+        ("CONCEPTS/ml.md", 2),
+        ("Archive/ml.md", 3),
+        ("notes/ml.md", 3),
+        ("conceptsx/ml.md", 3),
+        ("ml.md", 3),  # vault root — no directory component at all
+    ],
+)
+def test_concept_axis_rank_tiers(rel: str, expected: int) -> None:
+    """The ranking itself, independent of ingest, so the tier boundaries are
+    pinned rather than inferred from end-to-end fixtures."""
+    from schist.ingest import _concept_axis_rank
+
+    assert _concept_axis_rank(Path(rel)) == expected
+
+
+def test_matching_stem_outranks_mismatched_concept_key_in_axis(
+    tmp_path: Path,
+) -> None:
+    """Within `concepts/`, a file whose `concept:` key disagrees with its own
+    filename cannot block the canonical file that agrees (#479).
+
+    Both files are tier 1, so the axis rank alone cannot separate them and
+    arrival order decided: `concepts/aaa.md` carrying `concept: zzz` claimed the
+    slug and canonical `concepts/zzz.md`, which sorts later, was dropped from
+    the index entirely.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "concepts").mkdir()
+    # "aaa" sorts before "zzz", so the squatter is processed first.
+    (vault / "concepts" / "aaa.md").write_text(
+        "---\nconcept: zzz\ntitle: MISMATCHED KEY\n---\n\nSquatter.\n",
+        encoding="utf-8",
+    )
+    (vault / "concepts" / "zzz.md").write_text(
+        "---\nconcept: zzz\ntitle: CANONICAL\n---\n\nReal definition.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT slug, title FROM concepts").fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [("zzz", "CANONICAL")]
+
+
+def test_concept_count_counts_slugs_not_files(tmp_path: Path, capsys) -> None:
+    """`Ingested: N concepts` counts distinct slugs. A duplicate that loses the
+    rank contest writes no row, so counting every is_concept file overstated the
+    table (#479)."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "concepts").mkdir()
+    (vault / "concepts" / "aaa.md").write_text(
+        "---\nconcept: zzz\ntitle: MISMATCHED KEY\n---\n\nSquatter.\n",
+        encoding="utf-8",
+    )
+    (vault / "concepts" / "zzz.md").write_text(
+        "---\nconcept: zzz\ntitle: CANONICAL\n---\n\nReal definition.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT count(*) FROM concepts").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert rows == 1
+    assert "1 concepts" in capsys.readouterr().out
+
+
 def test_ingest_indexes_paper_metadata(tmp_path: Path) -> None:
     """Citation-grade paper frontmatter populates the paper_metadata side table."""
     from schist.ingest import ingest

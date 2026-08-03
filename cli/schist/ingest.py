@@ -112,6 +112,36 @@ def _normalize_tag(value: str) -> str:
     return value.strip().lstrip('#').strip()
 
 
+# Authority tiers for a concept definition, LOWER wins. Three tiers and not
+# two, because `concepts/` and `Concepts/` are the SAME directory on a
+# case-insensitive filesystem (APFS/HFS+) but DIFFERENT ones on a
+# case-sensitive filesystem (ext4 — the hub). Collapsing the two axis tiers
+# into one would let `Concepts/x.md`, which sorts BEFORE `concepts/x.md`, take
+# the slug from the literal axis on ext4 — the very hijack this ranking exists
+# to prevent.
+CONCEPT_AXIS_EXACT = 1      # `concepts/` — the reserved axis, always wins
+CONCEPT_AXIS_CASEFOLD = 2   # `Concepts/` — the reserved axis on APFS/HFS+ only
+CONCEPT_AXIS_NONE = 3       # a `concept:`-keyed file anywhere else
+
+
+def _concept_axis_rank(rel: Path) -> int:
+    """Authority rank of the concept definition at `rel` (lower wins).
+
+    Sort order is NOT a proxy for authority: ANY directory sorting before
+    `concepts/` — `Archive/`, `Papers/`, `2026-inbox/`, anything capitalized,
+    since uppercase precedes lowercase in ASCII — is processed first. Ranking
+    by path instead of arrival order is what keeps the reserved axis
+    authoritative regardless of what else claims the slug.
+    """
+    if len(rel.parts) > 1:
+        top = rel.parts[0]
+        if top == 'concepts':
+            return CONCEPT_AXIS_EXACT
+        if top.casefold() == 'concepts':
+            return CONCEPT_AXIS_CASEFOLD
+    return CONCEPT_AXIS_NONE
+
+
 def _opens_quoted_scalar(last_significant: str) -> bool:
     return last_significant in {'', '[', '{', ',', ':'}
 
@@ -408,14 +438,19 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     # stdout-only WARN vanishes without trace.
     skipped_count = 0
 
-    # Slugs already claimed by a REAL concept definition this run. The concept
-    # UPSERT (below) overwrites placeholder stub rows to fix #468, but it must
-    # not let a second is_concept file silently clobber the first: is_concept is
-    # true for any `concept:`-keyed file anywhere (not just concepts/), and files
-    # are processed in sort order, so a stray `concept: x` in notes/ (which sorts
-    # after concepts/) would otherwise overwrite concepts/x.md. First real
-    # definition wins; placeholders always yield.
-    real_concept_slugs: set = set()
+    # Slug -> best (axis tier, stem agreement) pair claimed by a REAL concept
+    # definition this run; see _concept_axis_rank for the tiers and the loop for
+    # the stem component. Compared as a tuple, so the axis dominates and the
+    # filename only breaks ties WITHIN a tier.
+    # The concept UPSERT (below) overwrites placeholder stub rows to fix
+    # #468, but it must not let a second is_concept file silently clobber a
+    # MORE AUTHORITATIVE one: is_concept is true for any `concept:`-keyed file
+    # anywhere, not just under concepts/. #470 resolved that by arrival order,
+    # which is wrong whenever a claimant sorts before the axis it is competing
+    # with (see _concept_axis_rank). A definition is replaced only by a
+    # STRICTLY better rank, so within one tier the first still wins and #470's
+    # duplicate-definition behavior is unchanged; placeholders always yield.
+    concept_slug_rank: dict = {}
 
     # rglob('*.md') follows symlinks — a *.md FILE symlink is yielded on
     # every Python version, and on 3.12 patch releases predating the glob
@@ -588,14 +623,25 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
                 concept_slug = slug
                 desc = body.split('\n\n')[0].strip() if body else None
                 concept_tags = json.dumps(tags) if tags else None
-                if slug in real_concept_slugs:
-                    # A real definition earlier in sort order already claimed
-                    # this slug — keep it authoritative (first-definition-wins,
-                    # matching pre-#470 behavior) instead of clobbering it with
-                    # a later duplicate is_concept file.
+                # Second component: does the FILENAME agree with the slug? A
+                # `concept:` key that disagrees with its own stem is a squatter
+                # — `concepts/aaa.md` carrying `concept: zzz` claimed `zzz` and
+                # blocked canonical `concepts/zzz.md`, which sorts later (#479).
+                # Both are tier 1, so the axis rank alone cannot separate them.
+                # 0 = stem agrees (the shape add-concept/create_concept write,
+                # and every file with no `concept:` key at all), 1 = mismatch.
+                stem_rank = 0 if slug == _normalize_concept_slug(rel.stem) else 1
+                axis_rank = (_concept_axis_rank(rel), stem_rank)
+                prior_rank = concept_slug_rank.get(slug)
+                if prior_rank is not None and prior_rank <= axis_rank:
+                    # An equally- or more-authoritative definition already
+                    # claimed this slug — keep it (first-definition-wins within
+                    # a rank, matching pre-#470 behavior) instead of clobbering
+                    # it with a later duplicate is_concept file. Only a
+                    # strictly better rank takes the slug back.
                     pass
                 else:
-                    real_concept_slugs.add(slug)
+                    concept_slug_rank[slug] = axis_rank
                     conn.execute(
                         """
                         INSERT INTO concepts (slug, title, description, tags)
@@ -607,7 +653,13 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
                         """,
                         (slug, title, desc, concept_tags),
                     )
-                file_concepts += 1
+                # Count distinct concept SLUGS, not concept files (#479): a
+                # squatter or duplicate that loses the rank contest writes no
+                # row, and a winner that REPLACES an earlier claim is still the
+                # same one concept. Counting every is_concept file made
+                # `Ingested: N concepts` overstate the table.
+                if prior_rank is None:
+                    file_concepts += 1
 
             # Also insert concepts referenced in frontmatter
             for c in concepts:
