@@ -565,8 +565,16 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
 
             doc_id = str(rel)
 
-            # Determine if this is a concept file (in concepts/ dir or has 'concept' key)
-            is_concept = 'concept' in meta or (rel.parts[0] == 'concepts' if len(rel.parts) > 1 else False)
+            # Determine if this is a concept file (in concepts/ dir or has
+            # 'concept' key). Case-folded to match the write guards (add/link,
+            # #454/#472) and `schema --validate`: on a case-insensitive
+            # filesystem `Concepts/` IS the reserved axis, and a byte-exact
+            # test here made the indexer store as a plain document exactly the
+            # files the validator reports as malformed concepts.
+            is_concept = 'concept' in meta or (
+                rel.parts[0].casefold() == 'concepts'
+                if len(rel.parts) > 1 else False
+            )
 
             # Title: explicit title > topic > concept key > derive from filename.
             # Each candidate must be a NON-EMPTY STRING to be picked: a truthy
