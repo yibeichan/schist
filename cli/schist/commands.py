@@ -762,6 +762,32 @@ def schema(args, vault_path: str, db_path: str):
                     f'{rel}: concept filename stem must match '
                     '[a-z0-9]+(-[a-z0-9]+)*',
                 )
+            # ingest resolves the slug from the `concept:` key when present and
+            # only falls back to the stem otherwise, so a key that disagrees
+            # with its own filename indexes the file under a DIFFERENT slug
+            # than its name advertises (#478). That is the input that made
+            # `concepts/aaa.md` carrying `concept: zzz` contend for `zzz`
+            # (#479) — ingest now ranks the agreeing file higher, but validate
+            # is the tool meant to surface the inconsistency rather than
+            # silently resolve it. A blank key is reported too: ingest treats
+            # it as "no key" on-axis, which is recoverable but not intended
+            # (#482), and staying silent would leave the two tools disagreeing
+            # about whether the file is well-formed.
+            if 'concept' in fm:
+                raw_key = fm['concept']
+                if not isinstance(raw_key, str) or not _normalize_concept_slug(raw_key):
+                    violations.append(
+                        f'{rel}: concept: key is empty or not a string — '
+                        f'remove it or set it to {rel.stem!r}',
+                    )
+                else:
+                    key_slug = _normalize_concept_slug(raw_key)
+                    if key_slug != rel.stem:
+                        violations.append(
+                            f'{rel}: concept: key {key_slug!r} does not match '
+                            f'filename stem {rel.stem!r} — ingest would index '
+                            f'this file under {key_slug!r}',
+                        )
             forbidden = sorted({
                 'date', 'status', 'concepts', 'confidence', 'file_ref',
             } & fm.keys())
