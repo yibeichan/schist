@@ -108,6 +108,95 @@ class TestSchemaCommand:
         assert "concept frontmatter contains document-only field(s): date, status" in out
         assert "concept nodes cannot have outgoing ## Connections sections" in out
 
+    @pytest.mark.parametrize("stem", [
+        "invalid_slug",   # underscore
+        "Invalid",        # uppercase
+        "double--dash",   # empty segment
+        "-leading",       # edge dash
+    ])
+    def test_validate_reports_invalid_concept_slug_stem(
+        self, tmp_path, capsys, stem,
+    ):
+        """#474 — the stem-pattern branch had no test. The existing
+        document-shaped fixture uses `2026-07-24-legacy`, whose stem MATCHES
+        `[a-z0-9]+(-[a-z0-9]+)*`, so a regex regression here passed silently."""
+        concepts_dir = tmp_path / "concepts"
+        concepts_dir.mkdir()
+        (concepts_dir / f"{stem}.md").write_text(
+            "---\ntitle: Invalid\n---\n\nDefinition.\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            commands.schema(
+                _schema_args(validate=True),
+                str(tmp_path),
+                str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert exc.value.code == 1
+        assert "concept filename stem must match" in capsys.readouterr().out
+
+    def test_validate_reports_concept_key_not_matching_stem(self, tmp_path, capsys):
+        """#478 — ingest resolves the slug from `concept:` when present, so a
+        key disagreeing with the filename indexes the file under a different
+        slug than its name advertises."""
+        concepts_dir = tmp_path / "concepts"
+        concepts_dir.mkdir()
+        (concepts_dir / "foo.md").write_text(
+            "---\nconcept: bar\ntitle: Foo\n---\n\nDefinition.\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            commands.schema(
+                _schema_args(validate=True),
+                str(tmp_path),
+                str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "concept: key 'bar' does not match filename stem 'foo'" in out
+
+    def test_validate_accepts_concept_key_matching_stem(self, tmp_path, capsys):
+        """The legacy-but-consistent shape must stay valid — the check targets
+        disagreement, not the presence of a `concept:` key."""
+        concepts_dir = tmp_path / "concepts"
+        concepts_dir.mkdir()
+        (concepts_dir / "machine-learning.md").write_text(
+            "---\nconcept: Machine Learning\ntitle: Machine Learning\n---\n\nDef.\n",
+            encoding="utf-8",
+        )
+
+        commands.schema(
+            _schema_args(validate=True),
+            str(tmp_path),
+            str(tmp_path / ".schist" / "schist.db"),
+        )
+        assert capsys.readouterr().out.strip() == "All documents valid."
+
+    @pytest.mark.parametrize("value", ['""', "'   '", "[]"])
+    def test_validate_reports_empty_or_non_string_concept_key(
+        self, tmp_path, capsys, value,
+    ):
+        """#482 — ingest treats a blank key as "no key" on-axis, which is
+        recoverable but unintended; validate must not stay silent or the two
+        tools disagree about whether the file is well-formed."""
+        concepts_dir = tmp_path / "concepts"
+        concepts_dir.mkdir()
+        (concepts_dir / "blank.md").write_text(
+            f"---\nconcept: {value}\ntitle: Blank\n---\n\nDefinition.\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            commands.schema(
+                _schema_args(validate=True),
+                str(tmp_path),
+                str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert exc.value.code == 1
+        assert "concept: key is empty or not a string" in capsys.readouterr().out
+
     def test_validate_reports_concept_marker_outside_concepts(self, tmp_path, capsys):
         notes_dir = tmp_path / "notes"
         notes_dir.mkdir()
