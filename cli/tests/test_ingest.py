@@ -1221,6 +1221,107 @@ def test_matching_stem_outranks_mismatched_concept_key_in_axis(
     assert rows == [("zzz", "CANONICAL")]
 
 
+@pytest.mark.parametrize("value", ['""', "'   '"])
+def test_blank_concept_key_on_axis_falls_back_to_stem(
+    tmp_path: Path, value: str,
+) -> None:
+    """`concept: ""` under the concept axis indexes under the filename stem.
+
+    #482: the blank value normalized to "" and landed a slug-"" row — the
+    `isinstance(str)` stem fallback never fires because "" IS a str. The
+    directory already declares this a concept, so the stem is the right name;
+    refusing would drop a real concept out of the graph over a blank field.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "concepts").mkdir()
+    (vault / "concepts" / "machine-learning.md").write_text(
+        f"---\nconcept: {value}\ntitle: Machine Learning\n---\n\nDefinition.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT slug, title FROM concepts").fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [("machine-learning", "Machine Learning")]
+
+
+def test_blank_concept_key_off_axis_is_skipped_with_warning(
+    tmp_path: Path, capsys,
+) -> None:
+    """Off-axis, the empty `concept:` key was the ONLY thing marking the file a
+    concept, so there is no name to give it — skip and warn rather than invent
+    a slug from an arbitrary filename (#482)."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "notes").mkdir()
+    (vault / "notes" / "2026-08-01-scratch.md").write_text(
+        '---\nconcept: ""\ntitle: Scratch\n---\n\nNot a concept.\n',
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        concepts = conn.execute("SELECT slug FROM concepts").fetchall()
+        doc_concepts = conn.execute(
+            "SELECT concepts FROM docs WHERE id = ?",
+            ("notes/2026-08-01-scratch.md",),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    # No empty-slug row, and the doc's own concepts array stays clean.
+    assert concepts == []
+    assert doc_concepts in (None, "[]")
+    assert "`concept:` is empty" in capsys.readouterr().err
+
+
+def test_blank_concept_key_does_not_suppress_later_files(tmp_path: Path) -> None:
+    """Two blank-key files off-axis: the first used to claim slug "" and the
+    second was then silently dropped by first-wins. Neither should register,
+    and neither should mask the other (#482)."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "notes").mkdir()
+    for name in ("aaa", "bbb"):
+        (vault / "notes" / f"{name}.md").write_text(
+            f'---\nconcept: ""\ntitle: {name.upper()}\n---\n\nBody.\n',
+            encoding="utf-8",
+        )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        concepts = conn.execute("SELECT slug FROM concepts").fetchall()
+        docs = sorted(r[0] for r in conn.execute("SELECT id FROM docs").fetchall())
+    finally:
+        conn.close()
+
+    assert concepts == []
+    # Both files still index as ordinary documents.
+    assert docs == ["notes/aaa.md", "notes/bbb.md"]
+
+
 def test_concept_count_counts_slugs_not_files(tmp_path: Path, capsys) -> None:
     """`Ingested: N concepts` counts distinct slugs. A duplicate that loses the
     rank contest writes no row, so counting every is_concept file overstated the

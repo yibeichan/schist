@@ -625,9 +625,39 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
 
             # Insert concept record if this is a concept file
             concept_slug = None
+            slug = ''
             if is_concept:
-                slug = meta.get('concept', rel.stem)
-                slug = _normalize_concept_slug(slug if isinstance(slug, str) else rel.stem)
+                raw_slug = meta.get('concept', rel.stem)
+                slug = _normalize_concept_slug(
+                    raw_slug if isinstance(raw_slug, str) else rel.stem
+                )
+                # `concept: ""` (or all-whitespace) normalizes to "" and used to
+                # land a slug-"" row in the concepts table, poison that doc's
+                # `concepts` array, and — because "" was recorded as claimed —
+                # silently drop every LATER blank-key file too (#482). The
+                # `isinstance(str)` fallback above cannot catch it: "" IS a str,
+                # so `rel.stem` is never reached. What to do depends on why the
+                # file counts as a concept at all.
+                if not slug and _concept_axis_rank(rel) < CONCEPT_AXIS_NONE:
+                    # It lives ON the concept axis, so the directory already
+                    # declares it a concept — fall back to the stem exactly as a
+                    # file carrying no `concept:` key would. Refusing here would
+                    # drop a real concept out of the graph over a blank field.
+                    slug = _normalize_concept_slug(rel.stem)
+                if not slug:
+                    # Off-axis with a blank key, or on-axis with a stem that
+                    # yields nothing either: the only thing marking this a
+                    # concept was the empty key, so there is no name to give it.
+                    # Skip rather than invent one, and say so on stderr — the
+                    # channel the agent-driven ingest paths actually surface.
+                    print(
+                        f'  WARN: {rel} — `concept:` is empty and no slug can be '
+                        f'derived from the filename; not indexed as a concept',
+                        file=sys.stderr,
+                    )
+                    is_concept = False
+
+            if is_concept:
                 concept_slug = slug
                 desc = body.split('\n\n')[0].strip() if body else None
                 concept_tags = json.dumps(tags) if tags else None
