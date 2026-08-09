@@ -1422,6 +1422,22 @@ export async function get_note(
     } catch {
       return { error: "NOT_FOUND", message: `Note not found: ${args.id}` } satisfies ToolError;
     }
+    // The lexical check above resolves ".." but does NOT follow symlinks, while
+    // the readFile that just ran DOES — so a symlink planted anywhere along the
+    // path disclosed its target (#480). Same realpath containment the write
+    // tools have used since #323; this is the read-side parity fix, and
+    // get_note is the one read tool with no owner parameter.
+    //
+    // Ordering: AFTER the read, deliberately. resolvesInsideVault returns false
+    // on any resolution failure including ENOENT, so checking first would report
+    // every missing note as PATH_TRAVERSAL. Reading a file whose bytes we then
+    // refuse to return discloses nothing.
+    if (!(await resolvesInsideVault(vaultRoot, args.id))) {
+      return {
+        error: "PATH_TRAVERSAL",
+        message: "Note path resolves outside the vault (symlink?)",
+      } satisfies ToolError;
+    }
 
     const { parseNote } = await import("./markdown-parser.js");
     const { metadata, body, connections } = parseNote(content);
