@@ -1416,27 +1416,35 @@ export async function get_note(
       return { error: "PATH_TRAVERSAL", message: "Note path is outside vault root" } satisfies ToolError;
     }
 
-    let content: string;
+    // The lexical check above resolves ".." but does NOT follow symlinks, so a
+    // symlink planted anywhere along the path could disclose its target (#480).
+    // Resolve symlinks ONCE with realpath, verify containment against that
+    // resolved path, then read the RESOLVED path — content and the check must
+    // come from a single resolution or a symlink swapped between them races
+    // (TOCTOU). Same realpath containment the write tools have used since #323;
+    // this is the read-side parity fix, and get_note is the one read tool with
+    // no owner parameter. realpath's ENOENT is the ordinary missing-note case,
+    // so it maps to NOT_FOUND, not PATH_TRAVERSAL.
+    let realRoot: string;
+    let realTarget: string;
     try {
-      content = await fs.readFile(filePath, "utf-8");
+      realRoot = await fs.realpath(vaultRoot);
+      realTarget = await fs.realpath(filePath);
     } catch {
       return { error: "NOT_FOUND", message: `Note not found: ${args.id}` } satisfies ToolError;
     }
-    // The lexical check above resolves ".." but does NOT follow symlinks, while
-    // the readFile that just ran DOES — so a symlink planted anywhere along the
-    // path disclosed its target (#480). Same realpath containment the write
-    // tools have used since #323; this is the read-side parity fix, and
-    // get_note is the one read tool with no owner parameter.
-    //
-    // Ordering: AFTER the read, deliberately. resolvesInsideVault returns false
-    // on any resolution failure including ENOENT, so checking first would report
-    // every missing note as PATH_TRAVERSAL. Reading a file whose bytes we then
-    // refuse to return discloses nothing.
-    if (!(await resolvesInsideVault(vaultRoot, args.id))) {
+    if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) {
       return {
         error: "PATH_TRAVERSAL",
         message: "Note path resolves outside the vault (symlink?)",
       } satisfies ToolError;
+    }
+
+    let content: string;
+    try {
+      content = await fs.readFile(realTarget, "utf-8");
+    } catch {
+      return { error: "NOT_FOUND", message: `Note not found: ${args.id}` } satisfies ToolError;
     }
 
     const { parseNote } = await import("./markdown-parser.js");
