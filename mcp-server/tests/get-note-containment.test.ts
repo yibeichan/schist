@@ -17,6 +17,7 @@ import { get_note, add_connection, loadVaultConfig } from "../src/tools.js";
 
 let vault: string;
 let outside: string;
+let config: Awaited<ReturnType<typeof loadVaultConfig>>;
 
 beforeEach(async () => {
   vault = await fs.mkdtemp(path.join(os.tmpdir(), "schist-getnote-vault-"));
@@ -42,6 +43,7 @@ beforeEach(async () => {
     ].join("\n"),
     "utf-8",
   );
+  config = await loadVaultConfig(vault);
 });
 
 afterEach(async () => {
@@ -51,7 +53,7 @@ afterEach(async () => {
 
 describe("get_note vault containment", () => {
   it("reads a genuine in-vault note", async () => {
-    const res = (await get_note(vault, { id: "notes/real.md" })) as Record<string, unknown>;
+    const res = (await get_note(vault, { id: "notes/real.md" }, config)) as Record<string, unknown>;
     expect(res.error).toBeUndefined();
     expect(res.title).toBe("Real");
     expect(res.body).toContain("In-vault body");
@@ -62,7 +64,7 @@ describe("get_note vault containment", () => {
     await fs.writeFile(secret, "---\ntitle: Secret\n---\n\nTOP SECRET PAYLOAD\n", "utf-8");
     await fs.symlink(secret, path.join(vault, "notes", "link.md"));
 
-    const res = (await get_note(vault, { id: "notes/link.md" })) as Record<string, unknown>;
+    const res = (await get_note(vault, { id: "notes/link.md" }, config)) as Record<string, unknown>;
 
     expect(res.error).toBe("PATH_TRAVERSAL");
     // The disclosure itself, not just the error code: no field may carry the
@@ -83,21 +85,23 @@ describe("get_note vault containment", () => {
     );
     await fs.symlink(outDir, path.join(vault, "notes", "hop"));
 
-    const res = (await get_note(vault, { id: "notes/hop/leaf.md" })) as Record<string, unknown>;
+    const res = (await get_note(vault, { id: "notes/hop/leaf.md" }, config)) as Record<string, unknown>;
 
     expect(res.error).toBe("PATH_TRAVERSAL");
     expect(JSON.stringify(res)).not.toContain("DIRECTORY ESCAPE PAYLOAD");
   });
 
-  it("still refuses a lexical .. escape", async () => {
-    const res = (await get_note(vault, { id: "../escape.md" })) as Record<string, unknown>;
-    expect(res.error).toBe("PATH_TRAVERSAL");
+  it("refuses a lexical .. escape at the id-shape guard", async () => {
+    // noteIdShapeError now rejects ".." before any filesystem access, so this
+    // is a VALIDATION_ERROR (id guard) rather than a PATH_TRAVERSAL (containment).
+    const res = (await get_note(vault, { id: "../escape.md" }, config)) as Record<string, unknown>;
+    expect(res.error).toBe("VALIDATION_ERROR");
   });
 
   it("reports a missing note as NOT_FOUND, not PATH_TRAVERSAL", async () => {
-    // resolvesInsideVault returns false on ENOENT too, so the containment check
-    // must not swallow the ordinary missing-file case into a scary error code.
-    const res = (await get_note(vault, { id: "notes/absent.md" })) as Record<string, unknown>;
+    // realpath fails with ENOENT on a missing note too; the guard must map that
+    // ordinary case to NOT_FOUND rather than a scary containment error.
+    const res = (await get_note(vault, { id: "notes/absent.md" }, config)) as Record<string, unknown>;
     expect(res.error).toBe("NOT_FOUND");
   });
 
@@ -108,9 +112,60 @@ describe("get_note vault containment", () => {
       path.join(vault, "notes", "real.md"),
       path.join(vault, "notes", "alias.md"),
     );
-    const res = (await get_note(vault, { id: "notes/alias.md" })) as Record<string, unknown>;
+    const res = (await get_note(vault, { id: "notes/alias.md" }, config)) as Record<string, unknown>;
     expect(res.error).toBeUndefined();
     expect(res.title).toBe("Real");
+  });
+});
+
+describe("get_note id-shape guard: parity with the write tools (#488)", () => {
+  // get_note used to read any path that merely resolved inside the vault, so an
+  // id that is inside the vault but is NOT a note — the SQLite index, the
+  // config, any dot-prefixed segment — was disclosed. validateNoteId (the same
+  // guard update_note / delete_note / add_connection run) now closes it.
+
+  it("refuses the vault's own SQLite index (.schist/schist.db)", async () => {
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(path.join(vault, ".schist", "schist.db"), "SQLITE SECRET BYTES", "utf-8");
+
+    const res = (await get_note(vault, { id: ".schist/schist.db" }, config)) as Record<string, unknown>;
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(JSON.stringify(res)).not.toContain("SQLITE SECRET BYTES");
+  });
+
+  it("refuses a root config file (vault.yaml) — not under a note directory", async () => {
+    await fs.writeFile(path.join(vault, "vault.yaml"), "identity: pi\n", "utf-8");
+
+    const res = (await get_note(vault, { id: "vault.yaml" }, config)) as Record<string, unknown>;
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(JSON.stringify(res)).not.toContain("identity: pi");
+  });
+
+  it("refuses a non-.md file even under a configured directory", async () => {
+    await fs.writeFile(path.join(vault, "notes", "data.json"), "{\"secret\":true}", "utf-8");
+
+    const res = (await get_note(vault, { id: "notes/data.json" }, config)) as Record<string, unknown>;
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+  });
+});
+
+describe("get_note error fidelity: non-ENOENT is not NOT_FOUND (#455)", () => {
+  // A bare `catch { NOT_FOUND }` masked every read failure as a missing note.
+  // Only ENOENT is "missing"; a symlink cycle (ELOOP) is a real fault and must
+  // surface as such, not be silently reported as absent.
+  it("does not report a symlink loop as NOT_FOUND", async () => {
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    // a -> b -> a: realpath rejects with ELOOP, never ENOENT.
+    await fs.symlink(path.join(vault, "notes", "loop-b.md"), path.join(vault, "notes", "loop-a.md"));
+    await fs.symlink(path.join(vault, "notes", "loop-a.md"), path.join(vault, "notes", "loop-b.md"));
+
+    const res = (await get_note(vault, { id: "notes/loop-a.md" }, config)) as Record<string, unknown>;
+
+    expect(res.error).toBeDefined();
+    expect(res.error).not.toBe("NOT_FOUND");
   });
 });
 

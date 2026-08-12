@@ -109,7 +109,7 @@ async function main() {
           result = await search_notes(vaultRoot, toolArgs as Parameters<typeof search_notes>[1]);
           break;
         case "get_note":
-          result = await get_note(vaultRoot, toolArgs as Parameters<typeof get_note>[1]);
+          result = await get_note(vaultRoot, toolArgs as Parameters<typeof get_note>[1], config);
           break;
         case "create_note":
           result = await create_note(vaultRoot, toolArgs as Parameters<typeof create_note>[1], config);

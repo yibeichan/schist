@@ -1406,9 +1406,18 @@ export async function search_notes(
 
 export async function get_note(
   vaultRoot: string,
-  args: { id: string }
+  args: { id: string },
+  config: VaultConfig
 ): Promise<unknown> {
   try {
+    // #488: apply the same id guard the write tools use. Without it, get_note
+    // read any path that merely resolved inside the vault — including
+    // `.schist/schist.db`, `vault.yaml`, and dot-prefixed segments — because
+    // containment alone never enforced note-directory membership or `.md`
+    // shape. validateNoteId is config-aware, so it pins both.
+    const idError = validateNoteId(args.id, config);
+    if (idError !== null) return idError;
+
     const filePath = path.join(vaultRoot, args.id);
     const absVaultRoot = path.resolve(vaultRoot);
     const absFilePath = path.resolve(filePath);
@@ -1423,15 +1432,21 @@ export async function get_note(
     // come from a single resolution or a symlink swapped between them races
     // (TOCTOU). Same realpath containment the write tools have used since #323;
     // this is the read-side parity fix, and get_note is the one read tool with
-    // no owner parameter. realpath's ENOENT is the ordinary missing-note case,
-    // so it maps to NOT_FOUND, not PATH_TRAVERSAL.
+    // no owner parameter.
+    //
+    // #455: only ENOENT is the ordinary missing-note case. Any other error
+    // (EACCES on a permission flip, ELOOP on a symlink cycle, EIO) is a real
+    // fault and must surface, not be masked as NOT_FOUND.
     let realRoot: string;
     let realTarget: string;
     try {
       realRoot = await fs.realpath(vaultRoot);
       realTarget = await fs.realpath(filePath);
-    } catch {
-      return { error: "NOT_FOUND", message: `Note not found: ${args.id}` } satisfies ToolError;
+    } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+        return { error: "NOT_FOUND", message: `Note not found: ${args.id}` } satisfies ToolError;
+      }
+      return normalizeError(e, "INGEST_ERROR");
     }
     if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) {
       return {
@@ -1443,8 +1458,11 @@ export async function get_note(
     let content: string;
     try {
       content = await fs.readFile(realTarget, "utf-8");
-    } catch {
-      return { error: "NOT_FOUND", message: `Note not found: ${args.id}` } satisfies ToolError;
+    } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+        return { error: "NOT_FOUND", message: `Note not found: ${args.id}` } satisfies ToolError;
+      }
+      return normalizeError(e, "INGEST_ERROR");
     }
 
     const { parseNote } = await import("./markdown-parser.js");
