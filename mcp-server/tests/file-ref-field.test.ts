@@ -121,7 +121,7 @@ describe("get_note file_ref round-trip", () => {
       config,
     )) as { id: string };
 
-    const fetched = (await get_note(vault, { id: written.id })) as { file_ref?: string };
+    const fetched = (await get_note(vault, { id: written.id }, config)) as { file_ref?: string };
     expect(fetched.file_ref).toBe("/mnt/data/round-trip.pdf");
   });
 });

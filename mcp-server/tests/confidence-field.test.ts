@@ -134,7 +134,7 @@ describe("get_note confidence round-trip", () => {
       { owner: TEST_AGENT, title: "With confidence", body: "body", confidence: "high" },
       config,
     )) as { id: string };
-    const fetched = (await get_note(vault, { id: written.id })) as { confidence?: string };
+    const fetched = (await get_note(vault, { id: written.id }, config)) as { confidence?: string };
     expect(fetched.confidence).toBe("high");
   });
 
@@ -146,7 +146,7 @@ describe("get_note confidence round-trip", () => {
       { owner: TEST_AGENT, title: "No confidence", body: "body" },
       config,
     )) as { id: string };
-    const fetched = (await get_note(vault, { id: written.id })) as Record<string, unknown>;
+    const fetched = (await get_note(vault, { id: written.id }, config)) as Record<string, unknown>;
     // Field absent from response — preserves the NULL distinction.
     expect("confidence" in fetched).toBe(false);
   });
