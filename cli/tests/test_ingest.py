@@ -1354,6 +1354,80 @@ def test_concept_count_counts_slugs_not_files(tmp_path: Path, capsys) -> None:
     assert "1 concepts" in capsys.readouterr().out
 
 
+def test_concept_count_not_inflated_by_references_after_definition(
+    tmp_path: Path, capsys,
+) -> None:
+    """#486: a concept defined once and then referenced by many notes is ONE
+    concept. The definition sorts first (`concepts/` < `notes/`), so each later
+    reference's INSERT OR IGNORE is a no-op — the printed count must not add one
+    per referencing note."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    (vault / "concepts").mkdir(parents=True)
+    (vault / "notes").mkdir()
+    (vault / "concepts" / "ml.md").write_text(
+        "---\nconcept: ml\ntitle: Machine Learning\n---\n\nDefinition.\n",
+        encoding="utf-8",
+    )
+    for i in range(5):
+        (vault / "notes" / f"note-{i}.md").write_text(
+            f"---\ntitle: Note {i}\nconcepts: [ml]\n---\n\nReferences ml.\n",
+            encoding="utf-8",
+        )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT count(*) FROM concepts").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert rows == 1
+    # The report must equal the table, not 1 + (number of referencing notes).
+    assert "1 concepts" in capsys.readouterr().out
+
+
+def test_concept_count_not_doubled_by_stub_before_definition(
+    tmp_path: Path, capsys,
+) -> None:
+    """#492: when a frontmatter reference is processed BEFORE the concept's own
+    definition file (`archive/` sorts before `concepts/`), a stub row is created
+    first and the definition then upgrades it. That is still ONE concept — the
+    stub-then-definition ordering must not double-count."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    (vault / "archive").mkdir(parents=True)
+    (vault / "concepts").mkdir()
+    # 'archive' < 'concepts', so this reference is ingested first and plants the
+    # stub row before concepts/ml.md is seen.
+    (vault / "archive" / "foo.md").write_text(
+        "---\ntitle: Foo\nconcepts: [ml]\n---\n\nReferences ml before it is defined.\n",
+        encoding="utf-8",
+    )
+    (vault / "concepts" / "ml.md").write_text(
+        "---\nconcept: ml\ntitle: Machine Learning\n---\n\nCanonical definition.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT count(*) FROM concepts").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert rows == 1
+    assert "1 concepts" in capsys.readouterr().out
+
+
 def test_ingest_indexes_paper_metadata(tmp_path: Path) -> None:
     """Citation-grade paper frontmatter populates the paper_metadata side table."""
     from schist.ingest import ingest

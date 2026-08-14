@@ -429,7 +429,6 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     conn.execute('BEGIN')
 
     doc_count = 0
-    concept_count = 0
     edge_count = 0
     # WARN-skipped files (surfaced in the summary line). WARNs themselves go
     # to STDERR: every agent-driven ingest channel discards stdout
@@ -505,9 +504,10 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
             meta = post.metadata
             body = post.content
 
-            # Per-file counters, folded into the totals only after RELEASE —
-            # a rolled-back file must not inflate the printed counts.
-            file_concepts = 0
+            # Per-file edge counter, folded into the total only after RELEASE —
+            # a rolled-back file must not inflate the printed count. Concepts
+            # are counted authoritatively after the loop (SELECT count) so the
+            # tally can't drift with file-processing order (#486, #492).
             file_edges = 0
 
             # Frontmatter reads (here and in paper_metadata_from_frontmatter) must
@@ -624,7 +624,6 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
                 )
 
             # Insert concept record if this is a concept file
-            concept_slug = None
             slug = ''
             if is_concept:
                 raw_slug = meta.get('concept', rel.stem)
@@ -658,7 +657,6 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
                     is_concept = False
 
             if is_concept:
-                concept_slug = slug
                 desc = body.split('\n\n')[0].strip() if body else None
                 concept_tags = json.dumps(tags) if tags else None
                 # Second component: does the FILENAME agree with the slug? A
@@ -691,23 +689,12 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
                         """,
                         (slug, title, desc, concept_tags),
                     )
-                # Count distinct concept SLUGS, not concept files (#479): a
-                # squatter or duplicate that loses the rank contest writes no
-                # row, and a winner that REPLACES an earlier claim is still the
-                # same one concept. Counting every is_concept file made
-                # `Ingested: N concepts` overstate the table.
-                if prior_rank is None:
-                    file_concepts += 1
-
             # Also insert concepts referenced in frontmatter
             for c in concepts:
                 conn.execute(
                     'INSERT OR IGNORE INTO concepts (slug, title) VALUES (?, ?)',
                     (c, c.replace('-', ' ').title()),
                 )
-                # Don't double-count if already counted above
-                if not (is_concept and concept_slug is not None and c == concept_slug):
-                    file_concepts += 1
                 if not is_concept:
                     result = conn.execute(
                         'INSERT OR IGNORE INTO edges (source, target, type, context) VALUES (?, ?, ?, ?)',
@@ -728,7 +715,6 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
 
             conn.execute('RELEASE SAVEPOINT file_sp')
             doc_count += 1
-            concept_count += file_concepts
             edge_count += file_edges
         except Exception as e:
             # Only CONTENT-shaped failures may be skipped per-file: bad
@@ -781,6 +767,14 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     # guarantees an int lands in the statement.
     conn.execute(f'PRAGMA user_version = {INDEX_SCHEMA_VERSION:d}')
     conn.commit()
+    # Authoritative concept tally: the concepts table is DROP/CREATEd every run
+    # and ends holding exactly the distinct slugs this ingest produced (concept
+    # definitions + first-seen frontmatter references). Counting the table
+    # directly is immune to file-processing order — the per-file accumulator
+    # double-counted in BOTH orderings (definition-before-reference #486,
+    # stub-before-definition #492), because the INSERT OR IGNORE / ON CONFLICT
+    # dedup that collapses duplicates happens in the table, not in the loop.
+    concept_count = conn.execute('SELECT count(*) FROM concepts').fetchone()[0]
     summary = f'Ingested: {doc_count} docs, {concept_count} concepts, {edge_count} edges'
     if skipped_count:
         summary += f' ({skipped_count} skipped)'
