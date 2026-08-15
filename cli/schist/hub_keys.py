@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
+import fcntl
 import hashlib
 import os
 import re
-import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,9 +31,10 @@ from schist.acl import NAME_RE, ACLError, parse_vault_data
 from schist.hub_admin import HubAdminError, read_hub_vault
 
 # Matches the pinned forced command, tolerating an absolute path to the
-# wrapper (command="/usr/local/bin/schist-shell pi").
+# wrapper (command="/usr/local/bin/schist-shell pi") and an optional baked
+# repo-confinement argument (command="schist-shell pi '/srv/git/vault.git'").
 _PINNED_COMMAND_RE = re.compile(
-    r'command="(?:[^"]*/)?schist-shell ([a-z][a-z0-9-]*)"'
+    r'command="(?:[^"]*/)?schist-shell ([a-z][a-z0-9-]*)( [^"]+)?"'
 )
 
 # authorized_keys key types (OpenSSH sshkey.c): ssh-*, ecdsa-*, and the
@@ -150,12 +152,34 @@ def parse_public_key(pubkey: str) -> tuple[str, str, str]:
     return entry.keytype, entry.blob, entry.comment
 
 
-def pinned_options(identity: str) -> str:
-    return f'restrict,command="schist-shell {identity}"'
+def pinned_options(identity: str, repo: str | None = None) -> str:
+    """Forced-command options pinning `identity` (and optionally one repo).
+
+    The command option's value is parsed by the login shell (`shell -c`), so
+    the repo argument is shell-quoted. Double quotes and backslashes are
+    rejected outright — inside sshd's double-quoted option value they would
+    need a second escaping layer that different sshd versions treat
+    differently, and no sane repo path contains them.
+    """
+    if repo is None:
+        return f'restrict,command="schist-shell {identity}"'
+    if '"' in repo or "\\" in repo:
+        raise HubAdminError(
+            f"repo path {repo!r} contains a quote/backslash — cannot be baked "
+            f"into an authorized_keys command option. Use --any-repo or a "
+            f"saner path."
+        )
+    quoted = "'" + repo.replace("'", "'\\''") + "'" if any(
+        c.isspace() or c == "'" for c in repo
+    ) else repo
+    return f'restrict,command="schist-shell {identity} {quoted}"'
 
 
-def key_add(text: str, identity: str, pubkey: str) -> tuple[str, str]:
-    """Pin `pubkey` to `identity`; return (new_text, action).
+def key_add(
+    text: str, identity: str, pubkey: str, repo: str | None = None
+) -> tuple[str, str]:
+    """Pin `pubkey` to `identity` (confined to `repo` if given); return
+    (new_text, action).
 
     action is 'added' for a new key or 'repinned' when the same key blob was
     already present (its line is replaced — including any previous pin or
@@ -167,15 +191,24 @@ def key_add(text: str, identity: str, pubkey: str) -> tuple[str, str]:
             f"invalid participant name '{identity}': must match {NAME_RE.pattern}"
         )
     keytype, blob, comment = parse_public_key(pubkey)
-    new_entry = KeyEntry(pinned_options(identity), keytype, blob, comment, 0)
+    new_entry = KeyEntry(pinned_options(identity, repo), keytype, blob, comment, 0)
 
     lines = text.splitlines()
-    for existing in parse_authorized_keys(text):
-        if existing.blob == blob:
-            if not new_entry.comment:
-                new_entry.comment = existing.comment
-            lines[existing.line_no - 1] = new_entry.render()
-            return _join(lines), "repinned"
+    matches = [e for e in parse_authorized_keys(text) if e.blob == blob]
+    if matches:
+        # Replace the first line carrying this blob and drop any duplicates —
+        # a leftover duplicate would keep whatever stale pin (or no pin) it
+        # had, and sshd uses the FIRST matching key line, so the stale copy
+        # could shadow or survive the re-pin.
+        if not new_entry.comment:
+            new_entry.comment = matches[0].comment
+        lines[matches[0].line_no - 1] = new_entry.render()
+        doomed = {e.line_no for e in matches[1:]}
+        if doomed:
+            lines = [
+                line for i, line in enumerate(lines, start=1) if i not in doomed
+            ]
+        return _join(lines), "repinned"
 
     lines.append(new_entry.render())
     return _join(lines), "added"
@@ -210,6 +243,28 @@ def _join(lines: list[str]) -> str:
 
 def default_authorized_keys_path() -> Path:
     return Path.home() / ".ssh" / "authorized_keys"
+
+
+@contextlib.contextmanager
+def _locked(path: Path):
+    """Serialize read→mutate→replace cycles on an authorized_keys file.
+
+    Without this, parallel `schist hub key add` runs (e.g. scripted
+    provisioning with xargs -P) silently drop each other's keys: both read
+    the same base text, both write, last replace wins. The flock lives on a
+    stable sidecar — locking the target itself would pin the lock to an
+    inode that os.replace is about to swap out from under the next waiter.
+    """
+    parent = path.parent
+    if not parent.exists():
+        parent.mkdir(parents=True, mode=0o700)
+    lock_path = path.with_name(f".{path.name}.schist-lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # closing the fd releases the flock
 
 
 def _read_authorized_keys(path: Path) -> str:
@@ -278,9 +333,18 @@ def cmd_key_add(args) -> None:
     else:
         raise HubAdminError("pass the public key via --key-file <path> or --key '<line>'")
 
+    # Bake the hub repo into the forced command so the key can't reach other
+    # repos this account hosts; --any-repo restores the identity-only pin.
+    repo = None
+    if not getattr(args, "any_repo", False):
+        repo = str(Path(args.hub_path).resolve())
+
     ak_path = _resolve_ak_path(args)
-    new_text, action = key_add(_read_authorized_keys(ak_path), identity, pubkey)
-    _write_authorized_keys(ak_path, new_text)
+    with _locked(ak_path):
+        new_text, action = key_add(
+            _read_authorized_keys(ak_path), identity, pubkey, repo=repo
+        )
+        _write_authorized_keys(ak_path, new_text)
     keytype, blob, _ = parse_public_key(pubkey)
     fp = KeyEntry(None, keytype, blob, "", 0).fingerprint
     print(f"{action}: {fp} pinned to '{identity}' in {ak_path}")
@@ -320,15 +384,11 @@ def cmd_key_list(args) -> None:
 def cmd_key_remove(args) -> None:
     identity = args.participant
     ak_path = _resolve_ak_path(args)
-    text = _read_authorized_keys(ak_path)
-    new_text, removed = key_remove(text, identity)
-    if removed == 0:
-        print(f"No keys pinned to '{identity}' in {ak_path}; no change.")
-        return
-    _write_authorized_keys(ak_path, new_text)
+    with _locked(ak_path):
+        text = _read_authorized_keys(ak_path)
+        new_text, removed = key_remove(text, identity)
+        if removed == 0:
+            print(f"No keys pinned to '{identity}' in {ak_path}; no change.")
+            return
+        _write_authorized_keys(ak_path, new_text)
     print(f"Removed {removed} key(s) pinned to '{identity}' from {ak_path}.")
-
-
-def main() -> None:  # pragma: no cover — dispatched from __main__.py
-    print("use `schist hub key {add|list|remove}`", file=sys.stderr)
-    sys.exit(2)

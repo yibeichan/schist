@@ -731,91 +731,166 @@ def check_hub_key_pinning(hub_path: Optional[str],
                      - participants - {None})
     keyed = {e.pinned_identity for e in entries}
     unkeyed = sorted(participants - keyed)
+    enforced = acl.security.require_pinned_identity
 
-    if unpinned:
+    # An un-pinned key is only a spoofing hole while enforcement is OFF —
+    # once require_pinned_identity is on, pre-receive rejects its pushes, and
+    # an un-pinned shell-capable key is the normal shape of the admin's own
+    # login key. Severity tracks that distinction.
+    if unpinned and not enforced:
         lines = ", ".join(f"line {e.line_no}" for e in unpinned)
         return CheckResult(
             "FAIL", label,
             f"{len(unpinned)} key(s) in {ak_path} lack a schist-shell forced "
-            f"command ({lines}) — any of them can push as ANY identity",
-            fix="Re-add each key pinned: `schist hub key add <participant> "
-                "--key '<line>' --hub-path <hub>` (then remove the old line).",
+            f"command ({lines}) and require_pinned_identity is off — any of "
+            f"them can push as ANY identity",
+            fix="Pin each pushing spoke's key (`schist hub key add "
+                "<participant> --key '<line>' --hub-path <hub>`), then enable "
+                "enforcement: `schist hub security require-pinned-identity on "
+                "--hub-path <hub>`.",
         )
 
     problems: list[str] = []
     if unknown:
         problems.append(f"pinned to unknown participants: {', '.join(unknown)}")
-    if not acl.security.require_pinned_identity:
+    if not enforced:
         problems.append(
             "security.require_pinned_identity is off — pre-receive still "
             "trusts client-sent SCHIST_IDENTITY"
         )
+    if unpinned:
+        lines = ", ".join(f"line {e.line_no}" for e in unpinned)
+        problems.append(
+            f"{len(unpinned)} un-pinned shell-capable key(s) ({lines}) — "
+            f"enforcement rejects their pushes, but verify each is an "
+            f"intentional admin login key"
+        )
     if unkeyed:
         problems.append(f"participants with no pinned key: {', '.join(unkeyed)}")
 
+    hint = _foreign_hub_owner_hint(hub, authorized_keys)
     if problems:
         return CheckResult(
-            "WARN", label, "; ".join(problems),
+            "WARN", label, "; ".join(problems) + hint,
             fix="Pin keys with `schist hub key add`, prune stale pins with "
                 "`schist hub key remove`, and set security.require_pinned_identity: "
                 "true in vault.yaml once every pushing spoke is pinned.",
         )
     return CheckResult(
         "PASS", label,
-        f"{len(entries)} key(s) pinned, enforcement on",
+        f"{len(entries)} key(s) in {ak_path} pinned, enforcement on{hint}",
     )
 
 
+def _foreign_hub_owner_hint(hub: Path, authorized_keys: Optional[str]) -> str:
+    """Warn text when doctor scans its own user's keys but the hub belongs to
+    another user (spokes SSH in as the hub owner, so THAT user's
+    authorized_keys is the enforcement surface)."""
+    if authorized_keys:
+        return ""  # explicit path — the operator chose the surface
+    try:
+        if os.stat(hub).st_uid != os.geteuid():
+            return (
+                " [note: hub repo is owned by another user — this scanned "
+                "YOUR ~/.ssh/authorized_keys; pass --authorized-keys for the "
+                "hub user's file]"
+            )
+    except OSError:
+        pass
+    return ""
+
+
 # sshd_config locations scanned by check_hub_sshd_acceptenv. Module-level so
-# tests can point them at fixtures.
+# tests can point them at fixtures (SSHD_BINARY at a nonexistent path forces
+# the file-scan fallback instead of the machine's real `sshd -T`).
+SSHD_BINARY = "sshd"
 SSHD_CONFIG_PATHS = ["/etc/ssh/sshd_config"]
 SSHD_CONFIG_GLOB = "/etc/ssh/sshd_config.d/*.conf"
 
 _ACCEPTENV_RE = re.compile(r"^\s*AcceptEnv\s+(.+)$", re.IGNORECASE | re.MULTILINE)
 
 
+def _acceptenv_offender(token: str) -> bool:
+    """True if an AcceptEnv name/glob can undermine identity pinning.
+
+    SCHIST_* fakes the identity or the pinned marker; PATH / LD_* / DYLD_* /
+    PYTHON* / BASH_ENV / ENV let a client redirect what the forced command
+    (or the pre-receive hook's python3) executes; GIT_* covers config/exec
+    redirection — except GIT_PROTOCOL, which git's own transport uses and is
+    harmless.
+    """
+    t = token.upper()
+    if t == "*" or t.startswith("SCHIST"):
+        return True
+    if t in {"PATH", "BASH_ENV", "ENV"}:
+        return True
+    if t.startswith(("LD_", "DYLD_", "PYTHON")):
+        return True
+    if t.startswith("GIT_") and t != "GIT_PROTOCOL":
+        return True
+    return False
+
+
 def check_hub_sshd_acceptenv(hub_path: Optional[str]) -> CheckResult:
-    """Warn if sshd forwards SCHIST_* client env vars to forced commands.
+    """Warn if sshd forwards client env vars that can undermine key pinning.
 
     Key pinning overrides a forwarded SCHIST_IDENTITY, but an AcceptEnv that
     matches SCHIST_IDENTITY_PINNED would let a client fake the pinned marker
-    on any *un*-pinned key, so the two checks belong together (#502).
+    on any *un*-pinned key, and PATH/LD_*/GIT_* forwarding can redirect what
+    the forced command executes, so the checks belong together (#502).
+
+    Prefers `sshd -T` (the EFFECTIVE config — resolves Include and Match
+    blocks); falls back to scanning the config files, which misses non-default
+    Include targets.
     """
     label = "Hub sshd AcceptEnv"
     if not hub_path:
         return CheckResult("SKIP", label, "no --hub-path supplied")
 
-    import glob as _glob
-    paths = [Path(p) for p in SSHD_CONFIG_PATHS]
-    paths += [Path(p) for p in sorted(_glob.glob(SSHD_CONFIG_GLOB))]
-
+    # Effective config first: `sshd -T` needs root (host keys), so it
+    # usually fails for a non-root doctor run — that's fine, fall through.
     offenders: list[str] = []
-    scanned = 0
-    for path in paths:
-        try:
-            text = path.read_text()
-        except (FileNotFoundError, PermissionError, OSError):
-            continue
-        scanned += 1
-        for m in _ACCEPTENV_RE.finditer(text):
-            patterns = m.group(1).split()
-            bad = [p for p in patterns
-                   if p == "*" or p.upper().startswith("SCHIST")]
+    try:
+        eff = subprocess.run([SSHD_BINARY, "-T"], capture_output=True, text=True,
+                             timeout=10)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        eff = None
+    if eff is not None and eff.returncode == 0:
+        for m in _ACCEPTENV_RE.finditer(eff.stdout):
+            bad = [p for p in m.group(1).split() if _acceptenv_offender(p)]
             if bad:
-                offenders.append(f"{path}: AcceptEnv {' '.join(bad)}")
+                offenders.append(f"sshd -T: acceptenv {' '.join(bad)}")
+        scanned_desc = "effective config (sshd -T)"
+        scanned = 1
+    else:
+        import glob as _glob
+        paths = [Path(p) for p in SSHD_CONFIG_PATHS]
+        paths += [Path(p) for p in sorted(_glob.glob(SSHD_CONFIG_GLOB))]
+        scanned = 0
+        for path in paths:
+            try:
+                text = path.read_text()
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+            scanned += 1
+            for m in _ACCEPTENV_RE.finditer(text):
+                bad = [p for p in m.group(1).split() if _acceptenv_offender(p)]
+                if bad:
+                    offenders.append(f"{path}: AcceptEnv {' '.join(bad)}")
+        scanned_desc = f"{scanned} config file(s); Include/Match not resolved"
 
     if scanned == 0:
         return CheckResult("SKIP", label, "no readable sshd_config found")
     if offenders:
         return CheckResult(
             "WARN", label,
-            "sshd forwards client env that can carry schist identity: "
+            "sshd forwards client env that can undermine identity pinning: "
             + "; ".join(offenders),
-            fix="Remove SCHIST_* (and bare *) from AcceptEnv in sshd_config — "
-                "pinned keys get their identity from schist-shell, not the client "
-                "— then `systemctl reload sshd`.",
+            fix="Remove the flagged names from AcceptEnv in sshd_config "
+                "(GIT_PROTOCOL alone is fine) — pinned keys get their identity "
+                "from schist-shell, not the client — then `systemctl reload sshd`.",
         )
-    return CheckResult("PASS", label, f"no SCHIST_* AcceptEnv in {scanned} config file(s)")
+    return CheckResult("PASS", label, f"no risky AcceptEnv in {scanned_desc}")
 
 
 def _auto_detect_mcp_path() -> Optional[str]:

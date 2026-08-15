@@ -62,6 +62,12 @@ def pinning_rejection(
     Note this check is only as strong as the hub's sshd config: AcceptEnv
     must not forward SCHIST_* variables, or a client could ship the pinned
     marker itself (`schist doctor --hub-path` checks for that).
+
+    Transport assumption: schist hubs are SSH-or-local only (docs require an
+    SSH box precisely because hosted git doesn't run pre-receive). If a hub
+    is ever exposed over smart-HTTP or git-daemon, those transports set
+    neither SSH_* var and would take the local-admin exemption — do not
+    front a schist hub with another transport without revisiting this gate.
     """
     if not acl.security.require_pinned_identity:
         return None
@@ -77,7 +83,12 @@ def pinning_rejection(
         "SCHIST_IDENTITY is not trusted.\n"
         "Ask the hub admin to pin your key:\n"
         "  schist hub key add <participant> --key-file <your .pub> "
-        "--hub-path <hub>"
+        "--hub-path <hub>\n"
+        "(Pushing locally on the hub host from an SSH login session? The\n"
+        "session's SSH_CONNECTION env triggers this guard; admin pushes can\n"
+        "run `env -u SSH_CONNECTION -u SSH_CLIENT git push ...` — that only\n"
+        "helps with shell-inherited env, not the transport env sshd sets\n"
+        "server-side for remote pushes.)"
     )
 
 

@@ -127,6 +127,16 @@ class TestKeyAdd:
         assert text.startswith("# comment\n")
         assert len(parse_authorized_keys(text)) == 2
 
+    def test_repin_collapses_duplicate_blob_lines(self):
+        # sshd uses the first matching key line, so a stale duplicate could
+        # shadow the re-pin — key_add must drop every other line with the blob.
+        text = f"{KEY_A}\n{KEY_B}\n{KEY_A}\n"
+        text, action = key_add(text, "alpha", KEY_A)
+        assert action == "repinned"
+        entries = parse_authorized_keys(text)
+        assert [e.blob for e in entries] == [BLOB_A, BLOB_B]
+        assert entries[0].pinned_identity == "alpha"
+
     def test_invalid_identity_rejected(self):
         with pytest.raises(HubAdminError, match="invalid participant name"):
             key_add("", "Not-Valid", KEY_A)
@@ -225,3 +235,53 @@ class TestCmdLayer:
         ak.write_text(KEY_A + "\n")
         cmd_key_remove(SimpleNamespace(participant="alpha", authorized_keys=str(ak)))
         assert "no change" in capsys.readouterr().out
+
+
+class TestRepoBinding:
+    """Repo confinement baked into the forced command (#502 hardening)."""
+
+    def test_pinned_options_with_repo(self):
+        assert (pinned_options("alpha", "/srv/git/vault.git")
+                == 'restrict,command="schist-shell alpha /srv/git/vault.git"')
+
+    def test_pinned_options_repo_with_space_is_shell_quoted(self):
+        opts = pinned_options("alpha", "/srv/git/my vault.git")
+        assert opts == 'restrict,command="schist-shell alpha \'/srv/git/my vault.git\'"'
+
+    def test_pinned_options_rejects_double_quote_in_repo(self):
+        with pytest.raises(HubAdminError, match="quote/backslash"):
+            pinned_options("alpha", '/srv/"x".git')
+
+    def test_key_add_with_repo_still_pins_identity(self):
+        text, _ = key_add("", "alpha", KEY_A, repo="/srv/git/vault.git")
+        e = parse_authorized_keys(text)[0]
+        assert e.pinned_identity == "alpha"
+        assert "/srv/git/vault.git" in e.options
+
+    def test_cmd_add_bakes_hub_path(self, tmp_path):
+        import shutil
+        if shutil.which("git") is None:
+            pytest.skip("git not available")
+        from schist.sync import init_hub
+        hub = tmp_path / "hub.git"
+        init_hub(SimpleNamespace(name="v", participant=["alpha"]), str(hub))
+        ak = tmp_path / "ak"
+        cmd_key_add(SimpleNamespace(participant="alpha", key=KEY_A, key_file=None,
+                                    hub_path=str(hub), authorized_keys=str(ak)))
+        e = parse_authorized_keys(ak.read_text())[0]
+        assert e.pinned_identity == "alpha"
+        assert str(hub.resolve()) in e.options
+
+    def test_cmd_add_any_repo_skips_baking(self, tmp_path):
+        import shutil
+        if shutil.which("git") is None:
+            pytest.skip("git not available")
+        from schist.sync import init_hub
+        hub = tmp_path / "hub.git"
+        init_hub(SimpleNamespace(name="v", participant=["alpha"]), str(hub))
+        ak = tmp_path / "ak"
+        cmd_key_add(SimpleNamespace(participant="alpha", key=KEY_A, key_file=None,
+                                    hub_path=str(hub), authorized_keys=str(ak),
+                                    any_repo=True))
+        e = parse_authorized_keys(ak.read_text())[0]
+        assert e.options == pinned_options("alpha")

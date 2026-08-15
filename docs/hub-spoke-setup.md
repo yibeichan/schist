@@ -265,17 +265,19 @@ carry the identity (#502).
 `~/.ssh/authorized_keys`:
 
 ```
-restrict,command="schist-shell laptop" ssh-ed25519 AAAA... laptop@dev
+restrict,command="schist-shell laptop /srv/git/vault.git" ssh-ed25519 AAAA... laptop@dev
 ```
 
-For every connection made with that key, sshd runs `schist-shell laptop`
-regardless of what command the client asked for. The wrapper sets
+For every connection made with that key, sshd runs the pinned command
+regardless of what the client asked for. The wrapper sets
 `SCHIST_IDENTITY=laptop` itself (overwriting anything the client sent), marks
-the push as pinned (`SCHIST_IDENTITY_PINNED=1`), and confines the key to git
-transport commands (`git-receive-pack` / `git-upload-pack` /
-`git-upload-archive`) via `git shell`. No `sshd_config` changes are needed —
-but `schist-shell` must be on the PATH sshd uses, which a normal
-`pip install -e <schist>/cli` on the hub provides.
+the push as pinned (`SCHIST_IDENTITY_PINNED=1`), strips linker-injection env
+(`LD_*`/`DYLD_*`/`BASH_ENV`), and confines the key to `git-receive-pack` /
+`git-upload-pack` on **that one repository** via `git shell` — a key pinned
+for vault-A cannot touch another vault the same account hosts (pass
+`--any-repo` to `key add` if you really run one key across several vaults).
+No `sshd_config` changes are needed — but `schist-shell` must be on the PATH
+sshd uses, which a normal `pip install -e <schist>/cli` on the hub provides.
 
 Rollout:
 
@@ -296,10 +298,20 @@ Rollout:
    already admin authority (same trust model as `schist hub`).
 3. Remove `AcceptEnv SCHIST_IDENTITY` from the hub's `sshd_config` — pinned
    keys don't need it, and an `AcceptEnv` that matches `SCHIST_*` would let a
-   client fake the pinned marker on any un-pinned key.
+   client fake the pinned marker on any un-pinned key. While you're there,
+   don't forward `PATH`, `LD_*`, `PYTHON*`, `BASH_ENV`, or `GIT_*` either
+   (`GIT_PROTOCOL` alone is fine) — those can redirect what the forced
+   command executes.
 4. Check the result: `schist doctor --hub-path <hub>` FAILs on un-pinned
-   keys and WARNs on unkeyed participants, stale pins, `AcceptEnv SCHIST_*`,
-   and enforcement being left off.
+   keys while enforcement is off (each one can push as any identity), and
+   WARNs on unkeyed participants, stale pins, risky `AcceptEnv` entries, and
+   enforcement being left off. Once enforcement is on, remaining un-pinned
+   keys only WARN — an un-pinned shell-capable key is the normal shape of
+   your own admin login key, and its pushes are rejected anyway.
+
+Note the hub is assumed to be reachable over **SSH only** (that's also what
+makes `pre-receive` run). Don't additionally expose a schist hub over
+smart-HTTP or `git://` — those transports bypass the pinning gate.
 
 To rotate a key, run `schist hub key add` again with the new public key (the
 old line for the same key blob is replaced; a new blob adds a second pinned

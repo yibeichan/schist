@@ -1837,14 +1837,25 @@ class TestHubKeyPinning:
         assert r.status == "WARN"
         assert "not found" in r.message
 
-    def test_fail_on_unpinned_key(self, tmp_path):
+    def test_fail_on_unpinned_key_without_enforcement(self, tmp_path):
         from schist.doctor import check_hub_key_pinning
-        hub = self._make_hub(tmp_path, require_pinned=True)
+        hub = self._make_hub(tmp_path, require_pinned=False)
         ak = tmp_path / "ak"
         ak.write_text(f"{self.PIN_ALPHA}\n{self.UNPINNED}\n")
         r = check_hub_key_pinning(str(hub), str(ak))
         assert r.status == "FAIL"
         assert "line 2" in r.message
+
+    def test_unpinned_key_with_enforcement_is_warn(self, tmp_path):
+        # With enforcement on, pre-receive rejects unpinned pushes, and an
+        # unpinned shell key is the normal shape of the admin's login key.
+        from schist.doctor import check_hub_key_pinning
+        hub = self._make_hub(tmp_path, require_pinned=True)
+        ak = tmp_path / "ak"
+        ak.write_text(f"{self.PIN_ALPHA}\n{self.PIN_BETA}\n{self.UNPINNED}\n")
+        r = check_hub_key_pinning(str(hub), str(ak))
+        assert r.status == "WARN"
+        assert "shell-capable" in r.message
 
     def test_warn_when_enforcement_off(self, tmp_path):
         from schist.doctor import check_hub_key_pinning
@@ -1882,6 +1893,7 @@ class TestHubSshdAcceptEnv:
         from schist import doctor as doctor_mod
         cfg = tmp_path / "sshd_config"
         cfg.write_text(text)
+        monkeypatch.setattr(doctor_mod, "SSHD_BINARY", "/nonexistent-sshd")
         monkeypatch.setattr(doctor_mod, "SSHD_CONFIG_PATHS", [str(cfg)])
         monkeypatch.setattr(doctor_mod, "SSHD_CONFIG_GLOB",
                             str(tmp_path / "sshd_config.d" / "*.conf"))
@@ -1893,6 +1905,7 @@ class TestHubSshdAcceptEnv:
 
     def test_skip_when_unreadable(self, tmp_path, monkeypatch):
         from schist import doctor as doctor_mod
+        monkeypatch.setattr(doctor_mod, "SSHD_BINARY", "/nonexistent-sshd")
         monkeypatch.setattr(doctor_mod, "SSHD_CONFIG_PATHS",
                             [str(tmp_path / "missing")])
         monkeypatch.setattr(doctor_mod, "SSHD_CONFIG_GLOB",
@@ -1913,5 +1926,15 @@ class TestHubSshdAcceptEnv:
         assert r.status == "WARN"
 
     def test_pass_on_benign_acceptenv(self, tmp_path, monkeypatch):
-        r = self._run(tmp_path, monkeypatch, "AcceptEnv LANG LC_ALL\nPermitRootLogin no\n")
+        r = self._run(tmp_path, monkeypatch,
+                      "AcceptEnv LANG LC_ALL GIT_PROTOCOL\nPermitRootLogin no\n")
         assert r.status == "PASS"
+
+    def test_warns_on_path_and_git_acceptenv(self, tmp_path, monkeypatch):
+        r = self._run(tmp_path, monkeypatch, "AcceptEnv PATH GIT_CONFIG_GLOBAL\n")
+        assert r.status == "WARN"
+        assert "PATH" in r.message and "GIT_CONFIG_GLOBAL" in r.message
+
+    def test_warns_on_ld_preload_acceptenv(self, tmp_path, monkeypatch):
+        r = self._run(tmp_path, monkeypatch, "AcceptEnv LD_PRELOAD PYTHONPATH\n")
+        assert r.status == "WARN"

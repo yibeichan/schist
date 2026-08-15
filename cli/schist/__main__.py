@@ -194,6 +194,8 @@ def main():
                            help='Path to the bare hub repo')
     p_key_add.add_argument('--authorized-keys', dest='authorized_keys', default=None,
                            help='authorized_keys file (default: ~/.ssh/authorized_keys)')
+    p_key_add.add_argument('--any-repo', dest='any_repo', action='store_true',
+                           help='Do not confine the key to --hub-path (identity-only pin)')
 
     p_key_list = key_sub.add_parser('list', help='List keys and their pinned identities')
     p_key_list.add_argument('--hub-path', dest='hub_path', default=None,

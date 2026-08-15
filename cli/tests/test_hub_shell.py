@@ -17,9 +17,11 @@ class TestBuildExec:
         argv, _ = build_exec("laptop", "git-upload-pack '/srv/git/vault.git'")
         assert argv[3].startswith("git-upload-pack ")
 
-    def test_upload_archive(self):
-        argv, _ = build_exec("laptop", "git-upload-archive '/srv/git/vault.git'")
-        assert argv[3].startswith("git-upload-archive ")
+    def test_upload_archive_rejected(self):
+        # schist sync never uses `git archive --remote`; keep the surface at
+        # push/fetch only.
+        with pytest.raises(HubShellError, match="not permitted"):
+            build_exec("laptop", "git-upload-archive '/srv/git/vault.git'")
 
     def test_two_word_form_normalized(self):
         argv, _ = build_exec("pi", "git receive-pack '/srv/git/vault.git'")
@@ -70,9 +72,41 @@ class TestBuildExec:
             build_exec("pi", "git-receive-pack 'unterminated")
 
     def test_allowed_verbs_are_transport_only(self):
-        assert ALLOWED_VERBS == {
-            "git-receive-pack", "git-upload-pack", "git-upload-archive",
-        }
+        assert ALLOWED_VERBS == {"git-receive-pack", "git-upload-pack"}
+
+    def test_repo_binding_allows_matching_repo(self, tmp_path):
+        repo = tmp_path / "vault.git"
+        repo.mkdir()
+        argv, _ = build_exec(
+            "pi", f"git-receive-pack '{repo}'", allowed_repo=str(repo))
+        assert argv[3].startswith("git-receive-pack ")
+
+    def test_repo_binding_normalizes_spelling(self, tmp_path, monkeypatch):
+        # Client says '~/vault.git' (relative to the SSH home); the baked pin
+        # is absolute. Same repo, different spelling — must be allowed.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        repo = tmp_path / "vault.git"
+        repo.mkdir()
+        argv, _ = build_exec(
+            "pi", "git-receive-pack 'vault.git'", allowed_repo=str(repo))
+        assert argv[3].startswith("git-receive-pack ")
+
+    def test_repo_binding_rejects_other_repo(self, tmp_path):
+        a = tmp_path / "vault-a.git"; a.mkdir()
+        b = tmp_path / "vault-b.git"; b.mkdir()
+        with pytest.raises(HubShellError, match="confined to repository"):
+            build_exec("pi", f"git-receive-pack '{b}'", allowed_repo=str(a))
+
+    def test_scrub_environ_strips_injection_vectors(self):
+        from schist.hub_shell import scrub_environ
+        env = {"LD_PRELOAD": "/evil.so", "DYLD_INSERT_LIBRARIES": "/e.dylib",
+               "BASH_ENV": "/evil.sh", "ENV": "/evil.sh",
+               "PATH": "/usr/bin", "GIT_PROTOCOL": "version=2",
+               "SCHIST_IDENTITY": "pi"}
+        removed = scrub_environ(env)
+        assert sorted(removed) == ["BASH_ENV", "DYLD_INSERT_LIBRARIES",
+                                   "ENV", "LD_PRELOAD"]
+        assert set(env) == {"PATH", "GIT_PROTOCOL", "SCHIST_IDENTITY"}
 
 
 class TestMain:
@@ -80,8 +114,8 @@ class TestMain:
         assert main([]) == 2
         assert "usage" in capsys.readouterr().err
 
-    def test_usage_with_extra_args(self, capsys):
-        assert main(["pi", "extra"]) == 2
+    def test_usage_with_three_args(self, capsys):
+        assert main(["pi", "repo.git", "extra"]) == 2
 
     def test_rejection_is_clean_error(self, capsys, monkeypatch):
         monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "bash")
