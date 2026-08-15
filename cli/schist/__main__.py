@@ -81,6 +81,9 @@ def main():
                           help='Output results as JSON')
     p_doctor.add_argument('--hub-path', dest='hub_path', default=None,
                           help='(hub) Path to a bare hub repo to run hub-mode checks against')
+    p_doctor.add_argument('--authorized-keys', dest='authorized_keys', default=None,
+                          help='(hub) authorized_keys file for the key-pinning check '
+                               '(default: ~/.ssh/authorized_keys)')
 
     # init
     p_init = sub.add_parser('init', help='Initialize a vault (standalone, hub, or spoke)')
@@ -179,6 +182,41 @@ def main():
     p_part_remove.add_argument('--hub-path', dest='hub_path', required=True,
                                help='Path to the bare hub repo')
 
+    # hub key: pin SSH keys to identities in authorized_keys (#502)
+    p_hub_key = hub_sub.add_parser('key', help='Pin SSH keys to participant identities')
+    key_sub = p_hub_key.add_subparsers(dest='key_action')
+
+    p_key_add = key_sub.add_parser('add', help='Pin a public key to a participant')
+    p_key_add.add_argument('participant', help='Participant name (must exist in hub vault.yaml)')
+    p_key_add.add_argument('--key', help="Public key line ('<keytype> <base64> [comment]')")
+    p_key_add.add_argument('--key-file', dest='key_file', help='Path to a .pub file')
+    p_key_add.add_argument('--hub-path', dest='hub_path', required=True,
+                           help='Path to the bare hub repo')
+    p_key_add.add_argument('--authorized-keys', dest='authorized_keys', default=None,
+                           help='authorized_keys file (default: ~/.ssh/authorized_keys)')
+    p_key_add.add_argument('--any-repo', dest='any_repo', action='store_true',
+                           help='Do not confine the key to --hub-path (identity-only pin)')
+
+    p_key_list = key_sub.add_parser('list', help='List keys and their pinned identities')
+    p_key_list.add_argument('--hub-path', dest='hub_path', default=None,
+                            help='Optional: flag pins missing from hub vault.yaml')
+    p_key_list.add_argument('--authorized-keys', dest='authorized_keys', default=None,
+                            help='authorized_keys file (default: ~/.ssh/authorized_keys)')
+
+    p_key_remove = key_sub.add_parser('remove', help='Remove keys pinned to a participant')
+    p_key_remove.add_argument('participant', help='Participant name')
+    p_key_remove.add_argument('--authorized-keys', dest='authorized_keys', default=None,
+                              help='authorized_keys file (default: ~/.ssh/authorized_keys)')
+
+    # hub security: toggle require_pinned_identity in the hub vault.yaml (#502)
+    p_hub_sec = hub_sub.add_parser(
+        'security', help='Toggle security.require_pinned_identity on the hub')
+    p_hub_sec.add_argument('setting', choices=['require-pinned-identity'],
+                           help='Which security setting to change')
+    p_hub_sec.add_argument('state', choices=['on', 'off'], help='New state')
+    p_hub_sec.add_argument('--hub-path', dest='hub_path', required=True,
+                           help='Path to the bare hub repo')
+
     args = parser.parse_args()
 
     if not args.command:
@@ -214,8 +252,21 @@ def main():
                 else:
                     print('Usage: schist hub participant {add|rename|remove}', file=sys.stderr)
                     sys.exit(1)
+            elif args.hub_action == 'key':
+                from schist import hub_keys
+                if args.key_action == 'add':
+                    hub_keys.cmd_key_add(args)
+                elif args.key_action == 'list':
+                    hub_keys.cmd_key_list(args)
+                elif args.key_action == 'remove':
+                    hub_keys.cmd_key_remove(args)
+                else:
+                    print('Usage: schist hub key {add|list|remove}', file=sys.stderr)
+                    sys.exit(1)
+            elif args.hub_action == 'security':
+                hub_admin.cmd_security(args)
             else:
-                print('Usage: schist hub {grant|revoke|participant}', file=sys.stderr)
+                print('Usage: schist hub {grant|revoke|participant|key|security}', file=sys.stderr)
                 sys.exit(1)
         except hub_admin.HubAdminError as e:
             print(f'Error: {e}', file=sys.stderr)

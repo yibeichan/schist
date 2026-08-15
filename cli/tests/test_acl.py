@@ -567,3 +567,39 @@ class TestStringParticipants:
         })
         acl = parse_vault_data(data)
         assert len(acl.participants) == 2
+
+
+# ---------------------------------------------------------------------------
+# security block (#502)
+# ---------------------------------------------------------------------------
+
+
+class TestSecurityBlock:
+    def test_absent_defaults_off(self):
+        acl = parse_vault_data(_v1())
+        assert acl.security.require_pinned_identity is False
+
+    def test_enabled(self):
+        acl = parse_vault_data(_v1(security={"require_pinned_identity": True}))
+        assert acl.security.require_pinned_identity is True
+
+    def test_explicit_false(self):
+        acl = parse_vault_data(_v1(security={"require_pinned_identity": False}))
+        assert acl.security.require_pinned_identity is False
+
+    def test_empty_mapping_defaults_off(self):
+        acl = parse_vault_data(_v1(security={}))
+        assert acl.security.require_pinned_identity is False
+
+    def test_non_mapping_rejected(self):
+        with pytest.raises(ACLError, match="'security' must be a mapping"):
+            parse_vault_data(_v1(security="yes"))
+
+    def test_unknown_key_rejected(self):
+        # Fail-closed: a typo'd toggle must not silently parse as default-off.
+        with pytest.raises(ACLError, match="unknown key 'require_pined_identity'"):
+            parse_vault_data(_v1(security={"require_pined_identity": True}))
+
+    def test_non_bool_value_rejected(self):
+        with pytest.raises(ACLError, match="must be a boolean"):
+            parse_vault_data(_v1(security={"require_pinned_identity": "true"}))

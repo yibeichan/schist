@@ -171,6 +171,23 @@ def participant_rename(data: dict, old: str, new: str) -> bool:
     return True
 
 
+def set_require_pinned_identity(data: dict, value: bool) -> bool:
+    """Set security.require_pinned_identity. Returns True if changed.
+
+    The only supported way to flip the toggle on a bare hub: root-level
+    vault.yaml writes need a '*' grant that participant_add refuses to hand
+    out, so like every other ACL mutation this goes through git plumbing on
+    the hub host (#502).
+    """
+    security = data.setdefault("security", {})
+    if not isinstance(security, dict):
+        raise HubAdminError("vault.yaml 'security' is not a mapping")
+    if security.get("require_pinned_identity", False) is value:
+        return False
+    security["require_pinned_identity"] = value
+    return True
+
+
 def participant_remove(data: dict, name: str) -> bool:
     """Drop a participant entry + its access entry. Returns True.
 
@@ -338,6 +355,26 @@ def cmd_participant_rename(args) -> None:
     print(f"   update .schist/spoke.yaml identity to '{new}', or its pushes")
     print(f"   will be rejected. Existing notes keep source_agent: {old}")
     print(f"   (history is append-only).")
+
+
+def cmd_security(args) -> None:
+    value = {"on": True, "off": False}[args.state]
+    changed = apply_mutation(
+        args.hub_path,
+        lambda d: set_require_pinned_identity(d, value),
+        f"hub: security require_pinned_identity {'on' if value else 'off'}",
+    )
+    state = "enabled" if value else "disabled"
+    if changed:
+        print(f"require_pinned_identity {state}.")
+        if value:
+            print(
+                "SSH pushes without a schist-shell-pinned key are now rejected. "
+                "Verify every pushing spoke is pinned: schist hub key list "
+                f"--hub-path {args.hub_path}"
+            )
+    else:
+        print(f"require_pinned_identity already {state}; no change.")
 
 
 def cmd_participant_remove(args) -> None:

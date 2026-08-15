@@ -355,3 +355,55 @@ class TestHubCLIDispatch:
         assert r.returncode != 0
         assert "Traceback" not in r.stderr
         assert "Error:" in r.stderr
+
+
+class TestSecurityToggle:
+    """set_require_pinned_identity + cmd_security (#502)."""
+
+    def test_enable_from_absent(self):
+        d = _seed_data()
+        assert hub_admin.set_require_pinned_identity(d, True) is True
+        assert d["security"]["require_pinned_identity"] is True
+
+    def test_enable_is_idempotent(self):
+        d = _seed_data()
+        hub_admin.set_require_pinned_identity(d, True)
+        assert hub_admin.set_require_pinned_identity(d, True) is False
+
+    def test_disable_when_absent_is_noop(self):
+        d = _seed_data()
+        assert hub_admin.set_require_pinned_identity(d, False) is False
+        assert "security" not in d or d["security"] == {}
+
+    def test_non_mapping_security_rejected(self):
+        d = _seed_data()
+        d["security"] = "yes"
+        with pytest.raises(HubAdminError, match="not a mapping"):
+            hub_admin.set_require_pinned_identity(d, True)
+
+    @needs_git
+    def test_cmd_security_commits_valid_yaml(self, tmp_path, capsys):
+        from types import SimpleNamespace
+        import yaml
+        from schist.acl import parse_vault_data
+        hub = _make_hub(tmp_path)
+        hub_admin.cmd_security(SimpleNamespace(
+            setting="require-pinned-identity", state="on", hub_path=str(hub)))
+        out = capsys.readouterr().out
+        assert "enabled" in out
+        acl = parse_vault_data(yaml.safe_load(_hub_vault_text(hub)))
+        assert acl.security.require_pinned_identity is True
+
+    @needs_git
+    def test_cmd_security_off_roundtrip(self, tmp_path, capsys):
+        from types import SimpleNamespace
+        import yaml
+        from schist.acl import parse_vault_data
+        hub = _make_hub(tmp_path)
+        hub_admin.cmd_security(SimpleNamespace(
+            setting="require-pinned-identity", state="on", hub_path=str(hub)))
+        hub_admin.cmd_security(SimpleNamespace(
+            setting="require-pinned-identity", state="off", hub_path=str(hub)))
+        capsys.readouterr()
+        acl = parse_vault_data(yaml.safe_load(_hub_vault_text(hub)))
+        assert acl.security.require_pinned_identity is False

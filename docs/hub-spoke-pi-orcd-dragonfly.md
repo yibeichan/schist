@@ -57,8 +57,11 @@ This creates `~/git/schist-vault.git` as a bare repo, installs `hooks/pre-receiv
 # On each spoke, generate a dedicated key
 ssh-keygen -t ed25519 -f ~/.ssh/schist_spoke
 
-# On Pi, add the public keys
-cat ~/.ssh/schist_spoke.pub >> ~/.ssh/authorized_keys
+# On Pi, pin each public key to its spoke identity (preferred — the key,
+# not a client-sent env var, then determines the push identity; see
+# "Pinning identities to SSH keys" in hub-spoke-setup.md)
+schist hub key add orcd --key-file schist_spoke.pub --hub-path ~/git/schist-vault.git
+# (legacy alternative: cat ~/.ssh/schist_spoke.pub >> ~/.ssh/authorized_keys)
 
 # On each spoke, add to ~/.ssh/config:
 Host schist-hub
@@ -81,6 +84,14 @@ Test it: `ssh schist-hub echo ok` should print `ok` without a password prompt.
 > **Pi behind a home NAT?** If a spoke can't reach the Pi directly (typical when the spoke is on a remote network — an HPC cluster, a coffee-shop laptop, etc.), use a NAT-traversed transport. See the [Tailscale transport appendix](#appendix-network-transport-tailscale).
 
 ### SCHIST_IDENTITY propagation
+
+> **Pinned keys skip this section for pushes.** If you added the spoke's key
+> with `schist hub key add` above, the hub derives the push identity from the
+> key itself and ignores the client-sent variable — steps 2 and 3 below are
+> unnecessary (and step 3 should eventually be *removed*; `schist doctor
+> --hub-path` warns about `AcceptEnv SCHIST_*`). The spoke-side `export` in
+> step 1 is still useful for local tooling (`schist sync push` preflight,
+> MCP config).
 
 The hub's pre-receive hook reads `SCHIST_IDENTITY` (or `GL_USER`) from the *server-side* environment to validate the push. Because spokes run `git push` over SSH, the var must travel across the connection:
 

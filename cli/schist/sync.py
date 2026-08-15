@@ -798,8 +798,11 @@ def init_hub(args, hub_path: str) -> None:
     print()
     print("Next steps:")
     print(f"  1. Edit {hub_path}/hooks/pre-receive's environment if needed")
-    print(f"  2. On each spoke, run: schist init --spoke --hub <url> --scope <scope> --identity <name>")
-    print(f"  3. Review and extend vault.yaml by cloning, editing, and pushing.")
+    print("  2. Pin each spoke's SSH key to its identity:")
+    print(f"     schist hub key add <participant> --key-file <pubkey.pub> --hub-path {hub_path}")
+    print("     (then set security.require_pinned_identity: true in vault.yaml)")
+    print("  3. On each spoke, run: schist init --spoke --hub <url> --scope <scope> --identity <name>")
+    print("  4. Review and extend vault.yaml by cloning, editing, and pushing.")
 
 
 def _build_hub_in_staging(

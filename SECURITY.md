@@ -45,6 +45,15 @@ parseable. The hub pre-receive hook is the authoritative enforcement point for
 git pushes; the MCP-side ACL check is an early local guard for the note-write
 path.
 
+On hub-and-spoke deployments, the pre-receive hook's identity input
+(`SCHIST_IDENTITY`) is client-asserted unless the hub pins identities to SSH
+keys. Pin every spoke key with `schist hub key add` (which installs a
+`schist-shell` forced command deriving the identity from the key) and set
+`security.require_pinned_identity: true` in `vault.yaml` so unpinned SSH
+pushes are rejected. Without pinning, any spoke that can reach the hub can
+push as any participant. See "Pinning identities to SSH keys" in
+`docs/hub-spoke-setup.md`.
+
 The ACL model is write-side only today. `vault.yaml` read grants document scope
 intent for hub policy, but local MCP read tools do not enforce per-caller read
 ACLs.
