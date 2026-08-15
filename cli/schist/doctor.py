@@ -681,6 +681,143 @@ def check_hub_acl_drift(hub_path: Optional[str]) -> CheckResult:
     )
 
 
+def _load_hub_acl(hub: Path):
+    """Parse HEAD:vault.yaml from a bare hub. Raises on any failure."""
+    from schist.acl import parse_vault_data
+    text = subprocess.run(
+        ["git", "--git-dir", str(hub), "show", "HEAD:vault.yaml"],
+        capture_output=True, text=True, check=True, timeout=10,
+    ).stdout
+    return parse_vault_data(yaml.safe_load(text))
+
+
+def check_hub_key_pinning(hub_path: Optional[str],
+                          authorized_keys: Optional[str] = None) -> CheckResult:
+    """Verify every hub SSH key is pinned to an identity via schist-shell.
+
+    An un-pinned key can assert any SCHIST_IDENTITY (including a wildcard
+    writer), making the whole vault.yaml ACL advisory — issue #502. FAILs on
+    un-pinned keys; WARNs on participant/key mismatches and on
+    require_pinned_identity being left off once all keys are pinned.
+    """
+    label = "Hub key pinning"
+    if not hub_path:
+        return CheckResult("SKIP", label, "no --hub-path supplied")
+
+    hub = Path(hub_path)
+    if not (hub / "objects").is_dir():
+        return CheckResult("SKIP", label, f"not a git repository: {hub_path}")
+
+    try:
+        acl = _load_hub_acl(hub)
+    except Exception as e:  # noqa: BLE001 — doctor never crashes
+        return CheckResult("SKIP", label, f"could not read/parse hub vault.yaml: {e}")
+
+    from schist.hub_keys import default_authorized_keys_path, parse_authorized_keys
+    ak_path = Path(authorized_keys) if authorized_keys else default_authorized_keys_path()
+    try:
+        entries = parse_authorized_keys(ak_path.read_text())
+    except FileNotFoundError:
+        return CheckResult(
+            "WARN", label, f"{ak_path} not found — cannot verify key pinning",
+            fix="Pass --authorized-keys <path> if the hub user's key file lives elsewhere.",
+        )
+    except OSError as e:
+        return CheckResult("WARN", label, f"cannot read {ak_path}: {e}")
+
+    participants = {p.name for p in acl.participants}
+    unpinned = [e for e in entries if e.pinned_identity is None]
+    unknown = sorted({e.pinned_identity for e in entries}
+                     - participants - {None})
+    keyed = {e.pinned_identity for e in entries}
+    unkeyed = sorted(participants - keyed)
+
+    if unpinned:
+        lines = ", ".join(f"line {e.line_no}" for e in unpinned)
+        return CheckResult(
+            "FAIL", label,
+            f"{len(unpinned)} key(s) in {ak_path} lack a schist-shell forced "
+            f"command ({lines}) — any of them can push as ANY identity",
+            fix="Re-add each key pinned: `schist hub key add <participant> "
+                "--key '<line>' --hub-path <hub>` (then remove the old line).",
+        )
+
+    problems: list[str] = []
+    if unknown:
+        problems.append(f"pinned to unknown participants: {', '.join(unknown)}")
+    if not acl.security.require_pinned_identity:
+        problems.append(
+            "security.require_pinned_identity is off — pre-receive still "
+            "trusts client-sent SCHIST_IDENTITY"
+        )
+    if unkeyed:
+        problems.append(f"participants with no pinned key: {', '.join(unkeyed)}")
+
+    if problems:
+        return CheckResult(
+            "WARN", label, "; ".join(problems),
+            fix="Pin keys with `schist hub key add`, prune stale pins with "
+                "`schist hub key remove`, and set security.require_pinned_identity: "
+                "true in vault.yaml once every pushing spoke is pinned.",
+        )
+    return CheckResult(
+        "PASS", label,
+        f"{len(entries)} key(s) pinned, enforcement on",
+    )
+
+
+# sshd_config locations scanned by check_hub_sshd_acceptenv. Module-level so
+# tests can point them at fixtures.
+SSHD_CONFIG_PATHS = ["/etc/ssh/sshd_config"]
+SSHD_CONFIG_GLOB = "/etc/ssh/sshd_config.d/*.conf"
+
+_ACCEPTENV_RE = re.compile(r"^\s*AcceptEnv\s+(.+)$", re.IGNORECASE | re.MULTILINE)
+
+
+def check_hub_sshd_acceptenv(hub_path: Optional[str]) -> CheckResult:
+    """Warn if sshd forwards SCHIST_* client env vars to forced commands.
+
+    Key pinning overrides a forwarded SCHIST_IDENTITY, but an AcceptEnv that
+    matches SCHIST_IDENTITY_PINNED would let a client fake the pinned marker
+    on any *un*-pinned key, so the two checks belong together (#502).
+    """
+    label = "Hub sshd AcceptEnv"
+    if not hub_path:
+        return CheckResult("SKIP", label, "no --hub-path supplied")
+
+    import glob as _glob
+    paths = [Path(p) for p in SSHD_CONFIG_PATHS]
+    paths += [Path(p) for p in sorted(_glob.glob(SSHD_CONFIG_GLOB))]
+
+    offenders: list[str] = []
+    scanned = 0
+    for path in paths:
+        try:
+            text = path.read_text()
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+        scanned += 1
+        for m in _ACCEPTENV_RE.finditer(text):
+            patterns = m.group(1).split()
+            bad = [p for p in patterns
+                   if p == "*" or p.upper().startswith("SCHIST")]
+            if bad:
+                offenders.append(f"{path}: AcceptEnv {' '.join(bad)}")
+
+    if scanned == 0:
+        return CheckResult("SKIP", label, "no readable sshd_config found")
+    if offenders:
+        return CheckResult(
+            "WARN", label,
+            "sshd forwards client env that can carry schist identity: "
+            + "; ".join(offenders),
+            fix="Remove SCHIST_* (and bare *) from AcceptEnv in sshd_config — "
+                "pinned keys get their identity from schist-shell, not the client "
+                "— then `systemctl reload sshd`.",
+        )
+    return CheckResult("PASS", label, f"no SCHIST_* AcceptEnv in {scanned} config file(s)")
+
+
 def _auto_detect_mcp_path() -> Optional[str]:
     """Locate `mcp-server/dist/index.js` relative to this checkout.
 
@@ -1403,7 +1540,8 @@ def check_skill_tool_references(vault_path: Optional[str]) -> CheckResult:
 
 
 def run_doctor(vault_path: Optional[str], db_path: Optional[str],
-               as_json: bool = False, hub_path: Optional[str] = None) -> list[CheckResult]:
+               as_json: bool = False, hub_path: Optional[str] = None,
+               authorized_keys: Optional[str] = None) -> list[CheckResult]:
     checks = [
         check_python(),
         check_node(),
@@ -1429,6 +1567,8 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
     ]
     if hub_path:
         checks.append(check_hub_acl_drift(hub_path))
+        checks.append(check_hub_key_pinning(hub_path, authorized_keys))
+        checks.append(check_hub_sshd_acceptenv(hub_path))
 
     if as_json:
         data = []
@@ -1455,7 +1595,9 @@ def doctor(args) -> None:
         db_path = str(Path(vault_path) / ".schist" / "schist.db")
     as_json = getattr(args, "as_json", False)
     hub_path = getattr(args, "hub_path", None)
+    authorized_keys = getattr(args, "authorized_keys", None)
 
-    results = run_doctor(vault_path, db_path, as_json, hub_path=hub_path)
+    results = run_doctor(vault_path, db_path, as_json, hub_path=hub_path,
+                         authorized_keys=authorized_keys)
     if any(r.status == "FAIL" for r in results):
         sys.exit(1)

@@ -50,6 +50,22 @@ class RateLimits:
 
 
 @dataclass
+class SecuritySettings:
+    """Hub-side security toggles (vault.yaml `security:` block).
+
+    Hub-only, like rate_limits: the MCP server's vault-acl.ts deliberately
+    ignores top-level keys other than participants/access, so adding this
+    block does not skew the two parsers (#454 one-sided-parity lesson).
+    """
+
+    # When true, the pre-receive hook rejects SSH pushes whose identity was
+    # not pinned by a schist-shell forced command (SCHIST_IDENTITY_PINNED=1).
+    # Local (non-SSH) pushes stay trusted: filesystem access to the bare hub
+    # is admin authority by design (see hub_admin.py). Issue #502.
+    require_pinned_identity: bool = False
+
+
+@dataclass
 class VaultACL:
     name: str
     vault_version: int
@@ -57,6 +73,7 @@ class VaultACL:
     scope_convention: str
     access: dict[str, AccessEntry]
     rate_limits: dict[str, RateLimits]
+    security: SecuritySettings = field(default_factory=SecuritySettings)
 
     def get_participant(self, name: str) -> Participant | None:
         for p in self.participants:
@@ -327,6 +344,29 @@ def parse_vault_data(data: dict[str, Any]) -> VaultACL:
                 notes_per_sync=lval.get("notes_per_sync", DEFAULT_RATE_LIMITS["notes_per_sync"]),
             )
 
+    # --- security ---
+    # Fail-closed on shape errors: a typo'd security block must not silently
+    # parse as "everything default/off".
+    raw_security = data.get("security")
+    security = SecuritySettings()
+    if raw_security is not None:
+        if not isinstance(raw_security, dict):
+            errors.append("'security' must be a mapping")
+        else:
+            known = {"require_pinned_identity"}
+            for key in raw_security:
+                if key not in known:
+                    errors.append(
+                        f"security: unknown key '{key}' (known: {sorted(known)})"
+                    )
+            rpi = raw_security.get("require_pinned_identity", False)
+            if not isinstance(rpi, bool):
+                errors.append(
+                    f"security.require_pinned_identity must be a boolean, got {rpi!r}"
+                )
+            else:
+                security = SecuritySettings(require_pinned_identity=rpi)
+
     if errors:
         raise ACLError("vault.yaml validation failed:\n  - " + "\n  - ".join(errors))
 
@@ -337,4 +377,5 @@ def parse_vault_data(data: dict[str, Any]) -> VaultACL:
         scope_convention=scope_convention,
         access=access,
         rate_limits=rate_limits,
+        security=security,
     )

@@ -17,6 +17,7 @@ from schist.pre_receive import (
     format_rejection,
     log_rejection,
     main,
+    pinning_rejection,
     resolve_identity,
 )
 
@@ -740,3 +741,93 @@ class TestMainRateLimit:
                 db_path=db_path,
             )
         assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# pinned-identity enforcement (#502)
+# ---------------------------------------------------------------------------
+
+
+def _pinned_vault_data():
+    import copy
+    d = copy.deepcopy(VAULT_DATA)
+    d["security"] = {"require_pinned_identity": True}
+    return d
+
+
+@pytest.fixture()
+def pinned_acl() -> VaultACL:
+    return parse_vault_data(_pinned_vault_data())
+
+
+class TestPinningRejection:
+    def test_disabled_allows_anything(self, acl):
+        env = {"SSH_CONNECTION": "1.2.3.4 5 6.7.8.9 22"}
+        assert pinning_rejection(acl, env) is None
+
+    def test_ssh_push_without_pin_rejected(self, pinned_acl):
+        env = {"SSH_CONNECTION": "1.2.3.4 5 6.7.8.9 22", "SCHIST_IDENTITY": "admin"}
+        msg = pinning_rejection(pinned_acl, env)
+        assert msg is not None
+        assert "require_pinned_identity" in msg
+
+    def test_ssh_client_var_also_counts_as_ssh(self, pinned_acl):
+        msg = pinning_rejection(pinned_acl, {"SSH_CLIENT": "1.2.3.4 5 22"})
+        assert msg is not None
+
+    def test_pinned_ssh_push_allowed(self, pinned_acl):
+        env = {"SSH_CONNECTION": "x", "SCHIST_IDENTITY_PINNED": "1"}
+        assert pinning_rejection(pinned_acl, env) is None
+
+    def test_wrong_pin_value_rejected(self, pinned_acl):
+        env = {"SSH_CONNECTION": "x", "SCHIST_IDENTITY_PINNED": "yes"}
+        assert pinning_rejection(pinned_acl, env) is not None
+
+    def test_local_push_exempt(self, pinned_acl):
+        # No SSH_* env => local push; filesystem access is admin authority
+        # (same trust model as hub_admin.py).
+        assert pinning_rejection(pinned_acl, {"SCHIST_IDENTITY": "admin"}) is None
+
+
+class TestMainPinning:
+    def test_main_rejects_unpinned_ssh_push(self, pinned_acl, tmp_path, capsys,
+                                            monkeypatch):
+        monkeypatch.setenv("SSH_CONNECTION", "1.2.3.4 5 6.7.8.9 22")
+        monkeypatch.delenv("SCHIST_IDENTITY_PINNED", raising=False)
+        log = tmp_path / "rejected.log"
+        rc = main(stdin=["old new refs/heads/main"], acl=pinned_acl,
+                  identity="admin", log_path=log)
+        assert rc == 1
+        assert "require_pinned_identity" in capsys.readouterr().err
+        assert "PINNING_REJECTED identity=admin" in log.read_text()
+
+    def test_main_allows_pinned_ssh_push(self, pinned_acl, tmp_path, monkeypatch):
+        monkeypatch.setenv("SSH_CONNECTION", "1.2.3.4 5 6.7.8.9 22")
+        monkeypatch.setenv("SCHIST_IDENTITY_PINNED", "1")
+        with patch("schist.pre_receive.get_changed_files",
+                   return_value=["research/mario/note.md"]):
+            rc = main(stdin=["old new refs/heads/main"], acl=pinned_acl,
+                      identity="cluster-mario", log_path=tmp_path / "r.log")
+        assert rc == 0
+
+    def test_main_allows_local_push_without_pin(self, pinned_acl, tmp_path,
+                                                monkeypatch):
+        monkeypatch.delenv("SSH_CONNECTION", raising=False)
+        monkeypatch.delenv("SSH_CLIENT", raising=False)
+        monkeypatch.delenv("SCHIST_IDENTITY_PINNED", raising=False)
+        with patch("schist.pre_receive.get_changed_files",
+                   return_value=["research/mario/note.md"]):
+            rc = main(stdin=["old new refs/heads/main"], acl=pinned_acl,
+                      identity="cluster-mario", log_path=tmp_path / "r.log")
+        assert rc == 0
+
+    def test_main_unpinned_rejection_precedes_participant_check(
+            self, pinned_acl, tmp_path, capsys, monkeypatch):
+        # A spoofed unknown identity must hit the pinning wall, not leak the
+        # participant-list error.
+        monkeypatch.setenv("SSH_CONNECTION", "x")
+        monkeypatch.delenv("SCHIST_IDENTITY_PINNED", raising=False)
+        rc = main(stdin=[], acl=pinned_acl, identity="mallory",
+                  log_path=tmp_path / "r.log")
+        assert rc == 1
+        assert "require_pinned_identity" in capsys.readouterr().err

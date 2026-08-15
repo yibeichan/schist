@@ -1797,3 +1797,121 @@ class TestCheckMcpVocabAlignment:
         assert r.status == "FAIL"
         assert "packaged default.yaml" in r.message
         assert r.fix is not None and "Reinstall" in r.fix
+
+
+class TestHubKeyPinning:
+    """check_hub_key_pinning (#502)."""
+
+    PIN_ALPHA = ('restrict,command="schist-shell alpha" '
+                 'ssh-ed25519 a2V5LW1hdGVyaWFsLWE= alice')
+    PIN_BETA = ('restrict,command="schist-shell beta" '
+                'ssh-ed25519 a2V5LW1hdGVyaWFsLWI= bob')
+    UNPINNED = "ssh-ed25519 a2V5LW1hdGVyaWFsLWM= carol"
+
+    def _make_hub(self, tmp_path, require_pinned=False):
+        import shutil
+        if shutil.which("git") is None:
+            pytest.skip("git not available")
+        from types import SimpleNamespace
+        from schist.sync import init_hub
+        hub = tmp_path / "hub.git"
+        init_hub(SimpleNamespace(name="v", participant=["alpha", "beta"]), str(hub))
+        if require_pinned:
+            from schist import hub_admin
+
+            def enable(d):
+                d["security"] = {"require_pinned_identity": True}
+                return True
+
+            hub_admin.apply_mutation(hub, enable, "enable pinning")
+        return hub
+
+    def test_skip_without_hub_path(self):
+        from schist.doctor import check_hub_key_pinning
+        assert check_hub_key_pinning(None).status == "SKIP"
+
+    def test_warn_when_authorized_keys_missing(self, tmp_path):
+        from schist.doctor import check_hub_key_pinning
+        hub = self._make_hub(tmp_path)
+        r = check_hub_key_pinning(str(hub), str(tmp_path / "nope"))
+        assert r.status == "WARN"
+        assert "not found" in r.message
+
+    def test_fail_on_unpinned_key(self, tmp_path):
+        from schist.doctor import check_hub_key_pinning
+        hub = self._make_hub(tmp_path, require_pinned=True)
+        ak = tmp_path / "ak"
+        ak.write_text(f"{self.PIN_ALPHA}\n{self.UNPINNED}\n")
+        r = check_hub_key_pinning(str(hub), str(ak))
+        assert r.status == "FAIL"
+        assert "line 2" in r.message
+
+    def test_warn_when_enforcement_off(self, tmp_path):
+        from schist.doctor import check_hub_key_pinning
+        hub = self._make_hub(tmp_path, require_pinned=False)
+        ak = tmp_path / "ak"
+        ak.write_text(f"{self.PIN_ALPHA}\n{self.PIN_BETA}\n")
+        r = check_hub_key_pinning(str(hub), str(ak))
+        assert r.status == "WARN"
+        assert "require_pinned_identity is off" in r.message
+
+    def test_warn_on_unknown_pin_and_unkeyed_participant(self, tmp_path):
+        from schist.doctor import check_hub_key_pinning
+        hub = self._make_hub(tmp_path, require_pinned=True)
+        ak = tmp_path / "ak"
+        ghost = self.PIN_ALPHA.replace("schist-shell alpha", "schist-shell ghost")
+        ak.write_text(f"{ghost}\n{self.PIN_BETA}\n")
+        r = check_hub_key_pinning(str(hub), str(ak))
+        assert r.status == "WARN"
+        assert "ghost" in r.message
+        assert "alpha" in r.message  # participant with no pinned key
+
+    def test_pass_when_all_pinned_and_enforced(self, tmp_path):
+        from schist.doctor import check_hub_key_pinning
+        hub = self._make_hub(tmp_path, require_pinned=True)
+        ak = tmp_path / "ak"
+        ak.write_text(f"{self.PIN_ALPHA}\n{self.PIN_BETA}\n")
+        r = check_hub_key_pinning(str(hub), str(ak))
+        assert r.status == "PASS"
+
+
+class TestHubSshdAcceptEnv:
+    """check_hub_sshd_acceptenv (#502)."""
+
+    def _run(self, tmp_path, monkeypatch, text):
+        from schist import doctor as doctor_mod
+        cfg = tmp_path / "sshd_config"
+        cfg.write_text(text)
+        monkeypatch.setattr(doctor_mod, "SSHD_CONFIG_PATHS", [str(cfg)])
+        monkeypatch.setattr(doctor_mod, "SSHD_CONFIG_GLOB",
+                            str(tmp_path / "sshd_config.d" / "*.conf"))
+        return doctor_mod.check_hub_sshd_acceptenv("some-hub")
+
+    def test_skip_without_hub_path(self):
+        from schist.doctor import check_hub_sshd_acceptenv
+        assert check_hub_sshd_acceptenv(None).status == "SKIP"
+
+    def test_skip_when_unreadable(self, tmp_path, monkeypatch):
+        from schist import doctor as doctor_mod
+        monkeypatch.setattr(doctor_mod, "SSHD_CONFIG_PATHS",
+                            [str(tmp_path / "missing")])
+        monkeypatch.setattr(doctor_mod, "SSHD_CONFIG_GLOB",
+                            str(tmp_path / "none" / "*.conf"))
+        assert doctor_mod.check_hub_sshd_acceptenv("hub").status == "SKIP"
+
+    def test_warns_on_schist_acceptenv(self, tmp_path, monkeypatch):
+        r = self._run(tmp_path, monkeypatch, "AcceptEnv LANG SCHIST_IDENTITY\n")
+        assert r.status == "WARN"
+        assert "SCHIST_IDENTITY" in r.message
+
+    def test_warns_on_wildcard_acceptenv(self, tmp_path, monkeypatch):
+        r = self._run(tmp_path, monkeypatch, "AcceptEnv *\n")
+        assert r.status == "WARN"
+
+    def test_warns_on_schist_glob(self, tmp_path, monkeypatch):
+        r = self._run(tmp_path, monkeypatch, "acceptenv SCHIST_*\n")
+        assert r.status == "WARN"
+
+    def test_pass_on_benign_acceptenv(self, tmp_path, monkeypatch):
+        r = self._run(tmp_path, monkeypatch, "AcceptEnv LANG LC_ALL\nPermitRootLogin no\n")
+        assert r.status == "PASS"

@@ -32,6 +32,9 @@ Changelog = "https://github.com/yibeichan/schist/blob/main/CHANGELOG.md"
 [project.scripts]
 schist = "schist.__main__:main"
 schist-ingest = "schist.ingest:main"
+# Forced-command SSH wrapper pinning SCHIST_IDENTITY to an authorized key
+# (issue #502). Must resolve on the PATH sshd uses on the hub host.
+schist-shell = "schist.hub_shell:main"
 
 # Explicit package list — without this, setuptools 82+ flat-layout
 # auto-discovery fails when a local `cli/hooks/` directory exists (as

@@ -47,6 +47,57 @@ def resolve_identity() -> str | None:
     return os.environ.get("SCHIST_IDENTITY") or os.environ.get("GL_USER") or None
 
 
+def pinning_rejection(
+    acl: VaultACL, environ: dict[str, str] | None = None
+) -> str | None:
+    """Return a rejection message if pinned-identity enforcement fails, else None.
+
+    When vault.yaml sets security.require_pinned_identity, an SSH push must
+    carry SCHIST_IDENTITY_PINNED=1 — set only by the schist-shell forced
+    command, which derives the identity from the authorized key instead of
+    trusting a client-sent variable (issue #502). Local pushes (no SSH_*
+    env) are exempt: filesystem access to the bare hub is admin authority by
+    design, matching hub_admin.py's trust model.
+
+    Note this check is only as strong as the hub's sshd config: AcceptEnv
+    must not forward SCHIST_* variables, or a client could ship the pinned
+    marker itself (`schist doctor --hub-path` checks for that).
+    """
+    if not acl.security.require_pinned_identity:
+        return None
+    env = os.environ if environ is None else environ
+    if "SSH_CONNECTION" not in env and "SSH_CLIENT" not in env:
+        return None
+    if env.get("SCHIST_IDENTITY_PINNED") == "1":
+        return None
+    return (
+        "REJECTED: this hub requires SSH-key-pinned identities "
+        "(security.require_pinned_identity is enabled in vault.yaml).\n"
+        "Your key is not pinned to a participant — client-asserted "
+        "SCHIST_IDENTITY is not trusted.\n"
+        "Ask the hub admin to pin your key:\n"
+        "  schist hub key add <participant> --key-file <your .pub> "
+        "--hub-path <hub>"
+    )
+
+
+def log_pinning_rejection(identity: str, log_path: Path | None = None) -> None:
+    """Append an unpinned-identity rejection to the audit log."""
+    if log_path is None:
+        git_dir = os.environ.get("GIT_DIR", ".")
+        log_path = Path(git_dir) / "hooks" / "rejected-pushes.log"
+
+    timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+    entry = f"[{timestamp}] PINNING_REJECTED identity={identity} reason=identity-not-key-pinned\n"
+
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as f:
+            f.write(entry)
+    except OSError as e:
+        logger.warning("Failed to write pinning rejection log: %s", e)
+
+
 def derive_scope(filepath: str) -> str:
     """Derive the ACL scope from a file path.
 
@@ -309,6 +360,14 @@ def main(
     if acl is None:
         # No vault.yaml — allow push (vault.yaml is optional per spec)
         return 0
+
+    # Enforce key-pinned identity before even checking the participant list:
+    # an unpinned SSH push is rejected regardless of what identity it claims.
+    pin_msg = pinning_rejection(acl)
+    if pin_msg is not None:
+        print(pin_msg, file=sys.stderr)
+        log_pinning_rejection(identity, log_path=log_path)
+        return 1
 
     # Verify identity is a known participant
     if acl.get_participant(identity) is None:

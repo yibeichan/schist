@@ -87,11 +87,23 @@ Make the hub reachable by SSH. Pseudo-example:
 # On the hub
 sudo useradd -m git
 sudo -u git mkdir -p /home/git/.ssh
-# Add each spoke's public key to /home/git/.ssh/authorized_keys
 sudo chown -R git:git /srv/git/vault.git
 ```
 
 The URL that spokes clone from is then `git@hub.example.com:/srv/git/vault.git`.
+
+Then **pin each spoke's public key to its identity** instead of pasting keys
+into `authorized_keys` by hand:
+
+```bash
+# As the hub user (the one spokes SSH in as)
+schist hub key add laptop      --key-file laptop.pub      --hub-path /srv/git/vault.git
+schist hub key add hpc-cluster --key-file hpc-cluster.pub --hub-path /srv/git/vault.git
+schist hub key add pi          --key-file pi.pub          --hub-path /srv/git/vault.git
+```
+
+See "Pinning identities to SSH keys" below for why this matters and how to
+turn on enforcement.
 
 ## Step 2. Wire each spoke
 
@@ -239,6 +251,62 @@ Not directly — hosted git providers do not run `pre-receive` hooks, so the
 ACL is bypassed. Options: (a) self-host a small hub (a Pi works), (b) run the
 hook in CI on every push (clunky — it's post-push by then), or (c) skip ACLs
 and rely on branch protection + review. Schist is designed around (a).
+
+## Pinning identities to SSH keys
+
+By default the pre-receive hook resolves the pushing identity from
+`SCHIST_IDENTITY` — a variable **the client ships** (`SendEnv` on the spoke,
+`AcceptEnv` on the hub). That value is an assertion, not a credential: any
+spoke that can reach the hub can push as any participant, including one with
+`write: ["*"]`. Key pinning closes that hole by making the SSH key itself
+carry the identity (#502).
+
+`schist hub key add` writes a forced-command entry into the hub user's
+`~/.ssh/authorized_keys`:
+
+```
+restrict,command="schist-shell laptop" ssh-ed25519 AAAA... laptop@dev
+```
+
+For every connection made with that key, sshd runs `schist-shell laptop`
+regardless of what command the client asked for. The wrapper sets
+`SCHIST_IDENTITY=laptop` itself (overwriting anything the client sent), marks
+the push as pinned (`SCHIST_IDENTITY_PINNED=1`), and confines the key to git
+transport commands (`git-receive-pack` / `git-upload-pack` /
+`git-upload-archive`) via `git shell`. No `sshd_config` changes are needed —
+but `schist-shell` must be on the PATH sshd uses, which a normal
+`pip install -e <schist>/cli` on the hub provides.
+
+Rollout:
+
+1. Pin every pushing spoke's key: `schist hub key add <participant>
+   --key-file <pub> --hub-path <hub>`. Verify with `schist hub key list
+   --hub-path <hub>`.
+2. Turn on enforcement so the hook stops trusting client-sent identity for
+   SSH pushes (root-level vault.yaml write, so it runs on the hub host like
+   the other `schist hub` commands):
+
+   ```bash
+   schist hub security require-pinned-identity on --hub-path /srv/git/vault.git
+   ```
+
+   This commits `security: {require_pinned_identity: true}` into the hub's
+   `vault.yaml`. Pushes over SSH without the pinned marker are then rejected. Local pushes
+   on the hub host itself stay exempt: filesystem access to the bare repo is
+   already admin authority (same trust model as `schist hub`).
+3. Remove `AcceptEnv SCHIST_IDENTITY` from the hub's `sshd_config` — pinned
+   keys don't need it, and an `AcceptEnv` that matches `SCHIST_*` would let a
+   client fake the pinned marker on any un-pinned key.
+4. Check the result: `schist doctor --hub-path <hub>` FAILs on un-pinned
+   keys and WARNs on unkeyed participants, stale pins, `AcceptEnv SCHIST_*`,
+   and enforcement being left off.
+
+To rotate a key, run `schist hub key add` again with the new public key (the
+old line for the same key blob is replaced; a new blob adds a second pinned
+key — remove old ones with `schist hub key remove <participant>` and re-add
+the current key). Renaming a participant (`schist hub participant rename`)
+does **not** rewrite `authorized_keys` — re-pin the key after a rename;
+`doctor` flags the stale pin.
 
 ## Administering ACLs
 
