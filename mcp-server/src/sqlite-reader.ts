@@ -657,32 +657,10 @@ export function getNote(vaultRoot: string, id: string): Note | null {
     };
 
     // Concept notes carry their alias links so a reader landing on a
-    // duplicate is redirected to the canonical (#489). Casefolded axis match
-    // (concepts/ vs Concepts/, #473 ladder); slugs in the index are already
-    // normalized lowercase.
-    const parts = note.id.split("/");
-    if (
-      parts.length === 2 &&
-      parts[0].toLowerCase() === "concepts" &&
-      parts[1].toLowerCase().endsWith(".md") &&
-      hasConceptAliases(db)
-    ) {
-      const slug = parts[1].slice(0, -3).toLowerCase();
-      const aliasOf = db
-        .prepare(
-          `SELECT canonical_slug FROM concept_aliases WHERE duplicate_slug = ?
-           ORDER BY created_at DESC, canonical_slug ASC LIMIT 1`
-        )
-        .get(slug) as { canonical_slug: string } | undefined;
-      if (aliasOf) note.alias_of = aliasOf.canonical_slug;
-      const aliases = (db
-        .prepare(
-          "SELECT duplicate_slug FROM concept_aliases WHERE canonical_slug = ? ORDER BY duplicate_slug ASC"
-        )
-        .all(slug) as { duplicate_slug: string }[])
-        .map((r) => r.duplicate_slug);
-      if (aliases.length > 0) note.aliases = aliases;
-    }
+    // duplicate is redirected to the canonical (#489).
+    const alias = conceptNoteAliasInfo(db, note.id);
+    if (alias.alias_of) note.alias_of = alias.alias_of;
+    if (alias.aliases) note.aliases = alias.aliases;
 
     return note;
   } finally {
@@ -732,6 +710,66 @@ function conceptEdgeJoinCondition(edgeAlias: string, conceptAlias: string): stri
     ${edgeAlias}.source = 'concepts/' || ${conceptAlias}.slug || '.md' OR
     ${edgeAlias}.target = 'concepts/' || ${conceptAlias}.slug || '.md'
   )`;
+}
+
+/**
+ * Alias links for a note id when it is a concept note, else {}. Casefolded
+ * axis match (concepts/ vs Concepts/, #473 ladder); slugs in the index are
+ * already normalized lowercase. Shared by getNote and the file-based
+ * get_note tool handler (which never opens the index otherwise).
+ */
+function conceptNoteAliasInfo(
+  db: Database.Database,
+  id: string
+): { alias_of?: string; aliases?: string[] } {
+  const parts = id.split("/");
+  if (
+    parts.length !== 2 ||
+    parts[0].toLowerCase() !== "concepts" ||
+    !parts[1].toLowerCase().endsWith(".md") ||
+    !hasConceptAliases(db)
+  ) {
+    return {};
+  }
+  const slug = parts[1].slice(0, -3).toLowerCase();
+  const out: { alias_of?: string; aliases?: string[] } = {};
+  const aliasOf = db
+    .prepare(
+      `SELECT canonical_slug FROM concept_aliases WHERE duplicate_slug = ?
+       ORDER BY created_at DESC, canonical_slug ASC LIMIT 1`
+    )
+    .get(slug) as { canonical_slug: string } | undefined;
+  if (aliasOf) out.alias_of = aliasOf.canonical_slug;
+  const aliases = (db
+    .prepare(
+      "SELECT duplicate_slug FROM concept_aliases WHERE canonical_slug = ? ORDER BY duplicate_slug ASC"
+    )
+    .all(slug) as { duplicate_slug: string }[])
+    .map((r) => r.duplicate_slug);
+  if (aliases.length > 0) out.aliases = aliases;
+  return out;
+}
+
+/**
+ * Best-effort alias links for a concept note id, opening the index read-only.
+ * For the file-based get_note tool: the note FILE is the source of truth
+ * there, so a missing/locked/rebuilding index degrades to "no alias info"
+ * rather than failing the read.
+ */
+export function tryConceptNoteAliasInfo(
+  vaultRoot: string,
+  id: string
+): { alias_of?: string; aliases?: string[] } {
+  try {
+    const db = openDb(vaultRoot);
+    try {
+      return conceptNoteAliasInfo(db, id);
+    } finally {
+      db.close();
+    }
+  } catch {
+    return {};
+  }
 }
 
 /**

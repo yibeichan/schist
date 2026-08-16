@@ -1484,6 +1484,10 @@ export async function get_note(
         ? { confidence }
         : {}),
       ...(typeof fileRef === "string" && fileRef ? { file_ref: fileRef } : {}),
+      // Index-derived, best-effort (#489): the file is the source of truth
+      // for this tool, so alias links vanish rather than fail the read when
+      // the index is missing or rebuilding.
+      ...sqliteReader.tryConceptNoteAliasInfo(vaultRoot, args.id),
     };
   } catch (e: unknown) {
     return normalizeError(e, "INGEST_ERROR");

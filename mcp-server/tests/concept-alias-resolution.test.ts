@@ -172,3 +172,56 @@ describe("getNote alias annotation on concept notes (#489)", () => {
     expect(dup?.alias_of).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// get_note TOOL handler (file-based — never opened the index before #489):
+// alias info must reach the actual tool response, best-effort from the index.
+// ---------------------------------------------------------------------------
+
+import { get_note, loadVaultConfig } from "../src/tools.js";
+
+describe("get_note tool surfaces alias info for concept notes (#489)", () => {
+  async function makeFileVault(indexed: boolean): Promise<string> {
+    // Reuse makeVault for the index, then lay the real files + schist.yaml
+    // the file-based tool path needs on top.
+    const dir = await makeVault({ withAliasTable: indexed });
+    await fs.mkdir(path.join(dir, "concepts"), { recursive: true });
+    await fs.mkdir(path.join(dir, "notes"), { recursive: true });
+    // schist.yaml (below) flips ensureSchemaCurrent from fixture mode to
+    // auto-heal mode: the hand-built DB lacks paper_metadata, so the first
+    // openDb triggers a REAL ingest rebuild. concept_aliases survives the
+    // rebuild, but its rows are pruned unless both slugs re-index from real
+    // files — so the duplicate AND the canonical need .md files here.
+    await fs.writeFile(
+      path.join(dir, "concepts", "ml.md"),
+      "---\ntitle: ML\nconcept: ml\n---\n\nbody\n", "utf-8");
+    await fs.writeFile(
+      path.join(dir, "concepts", "machine-learning.md"),
+      "---\ntitle: Machine Learning\nconcept: machine-learning\n---\n\nbody\n", "utf-8");
+    await fs.writeFile(
+      path.join(dir, "notes", "seed.md"),
+      "---\ntitle: Seed\n---\n\nbody\n", "utf-8");
+    await fs.writeFile(
+      path.join(dir, "schist.yaml"),
+      "directories:\n  notes: {}\n  concepts: {}\n", "utf-8");
+    return dir;
+  }
+
+  it("includes alias_of in the tool response for a duplicate's note", async () => {
+    const dir = await makeFileVault(true);
+    const config = await loadVaultConfig(dir);
+    const res = (await get_note(dir, { id: "concepts/ml.md" }, config)) as Record<string, unknown>;
+    expect(res.alias_of).toBe("machine-learning");
+    expect(res.title).toBe("ML"); // file content still wins for note fields
+  });
+
+  it("omits alias fields on non-concept notes and degrades without the table", async () => {
+    const dir = await makeFileVault(false);
+    const config = await loadVaultConfig(dir);
+    const note = (await get_note(dir, { id: "notes/seed.md" }, config)) as Record<string, unknown>;
+    expect("alias_of" in note).toBe(false);
+    const concept = (await get_note(dir, { id: "concepts/ml.md" }, config)) as Record<string, unknown>;
+    expect("alias_of" in concept).toBe(false);
+    expect("aliases" in concept).toBe(false);
+  });
+});
