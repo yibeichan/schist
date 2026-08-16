@@ -187,11 +187,10 @@ describe("get_note tool surfaces alias info for concept notes (#489)", () => {
     const dir = await makeVault({ withAliasTable: indexed });
     await fs.mkdir(path.join(dir, "concepts"), { recursive: true });
     await fs.mkdir(path.join(dir, "notes"), { recursive: true });
-    // schist.yaml (below) flips ensureSchemaCurrent from fixture mode to
-    // auto-heal mode: the hand-built DB lacks paper_metadata, so the first
-    // openDb triggers a REAL ingest rebuild. concept_aliases survives the
-    // rebuild, but its rows are pruned unless both slugs re-index from real
-    // files — so the duplicate AND the canonical need .md files here.
+    // The alias lookup opens the DB raw+readonly (never ensureSchemaCurrent —
+    // its auto-heal would block get_note behind a full ingest), so the
+    // hand-built fixture DB is read as-is. Real files exist for both slugs
+    // anyway so the fixture stays valid if a rebuild ever does run.
     await fs.writeFile(
       path.join(dir, "concepts", "ml.md"),
       "---\ntitle: ML\nconcept: ml\n---\n\nbody\n", "utf-8");

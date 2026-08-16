@@ -525,6 +525,28 @@ describe("addConceptAlias", () => {
     ]);
   });
 
+  it("sweeps a legacy self-row on the target canonical instead of rejecting", () => {
+    // Pre-#489 servers could store canon→canon. The chain guard must not
+    // read that row as "canon is a duplicate of canon" and tell the caller
+    // to repeat the exact call it just rejected (adversarial-review P1).
+    process.env.SCHIST_AGENT_ID = "sansan";
+    const db0 = new Database(path.join(vaultDir, ".schist", "schist.db"));
+    db0.prepare(
+      "INSERT INTO concept_aliases (duplicate_slug, canonical_slug, created_by) VALUES (?, ?, ?)"
+    ).run("machine-learning", "machine-learning", "legacy");
+    db0.close();
+
+    const alias = addConceptAlias(vaultDir, "ml", "machine-learning", undefined, "sansan");
+    expect(alias.canonical_slug).toBe("machine-learning");
+
+    const db = new Database(path.join(vaultDir, ".schist", "schist.db"));
+    const rows = db.prepare("SELECT duplicate_slug, canonical_slug FROM concept_aliases").all();
+    db.close();
+    expect(rows).toEqual([
+      { duplicate_slug: "ml", canonical_slug: "machine-learning" },
+    ]);
+  });
+
   it("reversing an alias flips canonical direction without leaving a chain", () => {
     process.env.SCHIST_AGENT_ID = "sansan";
     addConceptAlias(vaultDir, "ml", "machine-learning", undefined, "sansan");

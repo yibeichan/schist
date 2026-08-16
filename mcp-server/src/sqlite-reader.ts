@@ -751,18 +751,36 @@ function conceptNoteAliasInfo(
 }
 
 /**
- * Best-effort alias links for a concept note id, opening the index read-only.
- * For the file-based get_note tool: the note FILE is the source of truth
- * there, so a missing/locked/rebuilding index degrades to "no alias info"
- * rather than failing the read.
+ * Best-effort alias links for a concept note id. For the file-based get_note
+ * tool: the note FILE is the source of truth there, so a missing/locked/
+ * stale index degrades to "no alias info" rather than failing the read.
+ *
+ * Deliberately NOT openDb: that runs ensureSchemaCurrent, whose auto-heal
+ * spawnSyncs a full schist-ingest (up to 120s, blocking the event loop) — on
+ * a persistently skewed index EVERY get_note would pay that before degrading,
+ * in precisely the broken-index scenario this tool must survive. A raw
+ * readonly open reads whatever index exists, stale included. The id-shape
+ * check runs before any I/O so non-concept reads never touch the DB at all.
  */
 export function tryConceptNoteAliasInfo(
   vaultRoot: string,
   id: string
 ): { alias_of?: string; aliases?: string[] } {
+  const parts = id.split("/");
+  if (
+    parts.length !== 2 ||
+    parts[0].toLowerCase() !== "concepts" ||
+    !parts[1].toLowerCase().endsWith(".md")
+  ) {
+    return {};
+  }
   try {
-    const db = openDb(vaultRoot);
+    const db = new Database(path.join(vaultRoot, ".schist", "schist.db"), {
+      readonly: true,
+      fileMustExist: true,
+    });
     try {
+      db.pragma("busy_timeout = 5000");
       return conceptNoteAliasInfo(db, id);
     } finally {
       db.close();
@@ -1473,9 +1491,13 @@ export function addConceptAlias(
   }
   const db = openDb(vaultRoot, { readonly: false });
   try {
-    // Everything below runs in one transaction so the guards check the same
-    // state the write lands on (write-guard rule: validate on the same side
-    // of the lock as the mutation).
+    // Everything below runs in one IMMEDIATE transaction so the guards check
+    // the same state the write lands on (write-guard rule: validate on the
+    // same side of the lock as the mutation). Deferred BEGIN would read a
+    // WAL snapshot and fail SQLITE_BUSY_SNAPSHOT — untouched by busy_timeout
+    // — if another process (second MCP server, ingest) commits between the
+    // guard reads and the write; BEGIN IMMEDIATE takes the write lock up
+    // front so contention waits in busy_timeout instead.
     const result = db.transaction((): ConceptAlias => {
       // Both slugs must exist in the index (#481). FK enforcement would also
       // reject, but with a bare "FOREIGN KEY constraint failed" that doesn't
@@ -1497,17 +1519,33 @@ export function addConceptAlias(
 
       // The alias table is a flat forest (depth 1): a canonical is never
       // itself a duplicate, so readers resolve in a single hop and can't
-      // loop (#495). Aliasing TO a duplicate is therefore redirected to its
-      // root — unless that row is the exact reverse of this request, which
-      // means the caller is deliberately flipping canonical direction.
-      const canonicalsRow = db
-        .prepare("SELECT canonical_slug FROM concept_aliases WHERE duplicate_slug = ?")
-        .get(canonical_slug) as { canonical_slug: string } | undefined;
-      if (canonicalsRow) {
-        if (canonicalsRow.canonical_slug === duplicate_slug) {
-          db.prepare("DELETE FROM concept_aliases WHERE duplicate_slug = ?")
-            .run(canonical_slug);
-        } else {
+      // loop (#495). Rows naming the target canonical as a duplicate are
+      // therefore handled before the insert, in precedence order:
+      //   1. legacy self-row (canon→canon, writable pre-#489): semantically
+      //      void — sweep it and proceed, or the caller gets a rejection
+      //      telling them to make the exact call that was just rejected;
+      //   2. exact reverse of this request (canon→dup): the caller is
+      //      deliberately flipping canonical direction — remove and proceed;
+      //   3. anything else: the target is genuinely a duplicate of some
+      //      other root — reject and point at that root (ORDER BY makes the
+      //      named root deterministic on legacy multi-canonical rows).
+      db.prepare(
+        "DELETE FROM concept_aliases WHERE duplicate_slug = ? AND canonical_slug = ?"
+      ).run(canonical_slug, canonical_slug);
+      const reverse = db
+        .prepare("SELECT 1 FROM concept_aliases WHERE duplicate_slug = ? AND canonical_slug = ?")
+        .get(canonical_slug, duplicate_slug);
+      if (reverse) {
+        db.prepare("DELETE FROM concept_aliases WHERE duplicate_slug = ?")
+          .run(canonical_slug);
+      } else {
+        const canonicalsRow = db
+          .prepare(
+            `SELECT canonical_slug FROM concept_aliases WHERE duplicate_slug = ?
+             ORDER BY created_at DESC, canonical_slug ASC LIMIT 1`
+          )
+          .get(canonical_slug) as { canonical_slug: string } | undefined;
+        if (canonicalsRow) {
           throw Object.assign(
             new Error(
               `canonical_slug '${canonical_slug}' is itself marked as a ` +
@@ -1563,7 +1601,7 @@ export function addConceptAlias(
       if (prior) out.replaced_canonical = prior.canonical_slug;
       if (repointed.length > 0) out.repointed = repointed;
       return out;
-    })();
+    }).immediate();
     return result;
   } finally {
     db.close();

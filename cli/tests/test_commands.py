@@ -1038,6 +1038,10 @@ class TestContextAliasAnnotation:
                 assert "(alias of" not in line
 
     def test_context_survives_missing_alias_table(self, tmp_path, capsys):
+        # get_db would normally auto-heal the dropped table (concept_aliases
+        # is in REQUIRED_TABLES), so exercising the sqlite_master guard needs
+        # a raw connection — otherwise this test only re-proves the rebuild
+        # path and the guard could rot unnoticed.
         import sqlite3
         from types import SimpleNamespace
 
@@ -1046,7 +1050,14 @@ class TestContextAliasAnnotation:
         conn.execute("DROP TABLE concept_aliases")
         conn.commit()
         conn.close()
-        commands.context(SimpleNamespace(depth="standard"), str(tmp_path), str(db))
+
+        def raw_get_db(vault_path, db_path):
+            c = sqlite3.connect(db_path)
+            c.row_factory = sqlite3.Row
+            return c
+
+        with patch("schist.commands.sqlite_query.get_db", side_effect=raw_get_db):
+            commands.context(SimpleNamespace(depth="standard"), str(tmp_path), str(db))
         out = capsys.readouterr().out
         assert "Top 10 concepts" in out
         assert "(alias of" not in out

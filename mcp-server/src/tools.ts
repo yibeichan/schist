@@ -3474,6 +3474,16 @@ export async function add_concept_alias(
     }
     return sqliteReader.addConceptAlias(vaultRoot, duplicateSlug, canonicalSlug, args.reason, createdBy);
   } catch (e: unknown) {
+    // Index contention (second MCP server, ingest mid-rebuild) is transient:
+    // surface it as retryable WRITE_TIMEOUT, not a VALIDATION_ERROR the
+    // caller would treat as a bug in their arguments.
+    const code = (e as { code?: string }).code;
+    if (typeof code === "string" && (code.startsWith("SQLITE_BUSY") || code === "SQLITE_LOCKED")) {
+      return {
+        error: "WRITE_TIMEOUT",
+        message: "index is busy (concurrent write or ingest rebuild) — retry the call",
+      } satisfies ToolError;
+    }
     return normalizeError(e, "VALIDATION_ERROR");
   }
 }
