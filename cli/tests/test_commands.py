@@ -998,3 +998,66 @@ class TestReviewLockHardening:
                     _os.close(fd)
         finally:
             lock.chmod(0o644)
+
+
+class TestContextAliasAnnotation:
+    """CLI `context` mirrors MCP get_context's hot-concept alias flag (#489)."""
+
+    def _vault_with_alias(self, tmp_path):
+        import sqlite3
+        from schist.ingest import ingest
+
+        (tmp_path / "concepts").mkdir()
+        for slug in ("ml", "machine-learning"):
+            (tmp_path / "concepts" / f"{slug}.md").write_text(
+                f"---\nconcept: {slug}\ntitle: {slug}\n---\n\nbody\n",
+                encoding="utf-8",
+            )
+        db = tmp_path / ".schist" / "schist.db"
+        db.parent.mkdir(parents=True, exist_ok=True)
+        ingest(str(tmp_path), str(db))
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "INSERT INTO concept_aliases (duplicate_slug, canonical_slug, created_by)"
+            " VALUES ('ml', 'machine-learning', 'tester')"
+        )
+        conn.commit()
+        conn.close()
+        return db
+
+    def test_context_marks_duplicate_concepts(self, tmp_path, capsys):
+        from types import SimpleNamespace
+
+        db = self._vault_with_alias(tmp_path)
+        commands.context(SimpleNamespace(depth="standard"), str(tmp_path), str(db))
+        out = capsys.readouterr().out
+        assert "(alias of machine-learning)" in out
+        # The canonical itself is not annotated.
+        for line in out.splitlines():
+            if line.strip().startswith("machine-learning:"):
+                assert "(alias of" not in line
+
+    def test_context_survives_missing_alias_table(self, tmp_path, capsys):
+        # get_db would normally auto-heal the dropped table (concept_aliases
+        # is in REQUIRED_TABLES), so exercising the sqlite_master guard needs
+        # a raw connection — otherwise this test only re-proves the rebuild
+        # path and the guard could rot unnoticed.
+        import sqlite3
+        from types import SimpleNamespace
+
+        db = self._vault_with_alias(tmp_path)
+        conn = sqlite3.connect(db)
+        conn.execute("DROP TABLE concept_aliases")
+        conn.commit()
+        conn.close()
+
+        def raw_get_db(vault_path, db_path):
+            c = sqlite3.connect(db_path)
+            c.row_factory = sqlite3.Row
+            return c
+
+        with patch("schist.commands.sqlite_query.get_db", side_effect=raw_get_db):
+            commands.context(SimpleNamespace(depth="standard"), str(tmp_path), str(db))
+        out = capsys.readouterr().out
+        assert "Top 10 concepts" in out
+        assert "(alias of" not in out

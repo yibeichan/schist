@@ -1484,6 +1484,10 @@ export async function get_note(
         ? { confidence }
         : {}),
       ...(typeof fileRef === "string" && fileRef ? { file_ref: fileRef } : {}),
+      // Index-derived, best-effort (#489): the file is the source of truth
+      // for this tool, so alias links vanish rather than fail the read when
+      // the index is missing or rebuilding.
+      ...sqliteReader.tryConceptNoteAliasInfo(vaultRoot, args.id),
     };
   } catch (e: unknown) {
     return normalizeError(e, "INGEST_ERROR");
@@ -3457,8 +3461,29 @@ export async function add_concept_alias(
         message: "duplicate_slug and canonical_slug must be non-empty after normalization",
       } satisfies ToolError;
     }
+    // Compared post-normalization so case/whitespace variants of the same
+    // slug are caught too. A self-alias is semantically void and would loop
+    // any resolver (#490/#495).
+    if (duplicateSlug === canonicalSlug) {
+      return {
+        error: "VALIDATION_ERROR",
+        message:
+          `duplicate_slug and canonical_slug both normalize to '${duplicateSlug}' — ` +
+          `an alias must map one slug to a different canonical slug`,
+      } satisfies ToolError;
+    }
     return sqliteReader.addConceptAlias(vaultRoot, duplicateSlug, canonicalSlug, args.reason, createdBy);
   } catch (e: unknown) {
+    // Index contention (second MCP server, ingest mid-rebuild) is transient:
+    // surface it as retryable WRITE_TIMEOUT, not a VALIDATION_ERROR the
+    // caller would treat as a bug in their arguments.
+    const code = (e as { code?: string }).code;
+    if (typeof code === "string" && (code.startsWith("SQLITE_BUSY") || code === "SQLITE_LOCKED")) {
+      return {
+        error: "WRITE_TIMEOUT",
+        message: "index is busy (concurrent write or ingest rebuild) — retry the call",
+      } satisfies ToolError;
+    }
     return normalizeError(e, "VALIDATION_ERROR");
   }
 }

@@ -910,6 +910,52 @@ class TestRebuildIndexSideTablePreservation:
 
         assert count == 0, "dangling alias survived rebuild — #213 regression"
 
+    def test_self_referential_alias_pruned_on_rebuild(self, tmp_path):
+        """A legacy self-row (x→x) must not be copied back by the rebuild
+        path. ingest's self-row sweep runs BEFORE _preserve_side_tables, so
+        without the mirrored DELETE here the backup would reintroduce the row
+        on every spoke pull (#490/#495, one-sided-parity ladder)."""
+        import sqlite3
+        from schist.sync import _rebuild_index
+
+        vault, db_path = _init_vault_with_schema(tmp_path)
+        concepts = Path(vault) / "concepts"
+        concepts.mkdir(exist_ok=True)
+        (concepts / "backprop.md").write_text(
+            "---\nconcept: backprop\ntitle: Backprop\n---\n\nShort form.\n"
+        )
+        (concepts / "backpropagation.md").write_text(
+            "---\nconcept: backpropagation\ntitle: Backpropagation\n---\n\nCanonical.\n"
+        )
+        _rebuild_index(vault, db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.executemany(
+                "INSERT INTO concept_aliases "
+                "(duplicate_slug, canonical_slug, reason, created_by) "
+                "VALUES (?, ?, ?, ?)",
+                [
+                    ("backprop", "backpropagation", "valid", "tester"),
+                    ("backpropagation", "backpropagation", "legacy self-row", "tester"),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        _rebuild_index(vault, db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT duplicate_slug, canonical_slug FROM concept_aliases"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        assert rows == [("backprop", "backpropagation")]
+
     def test_rebuild_ok_with_no_prior_db(self, tmp_path):
         """First rebuild (no backup) should succeed with no side-table data."""
         import sqlite3

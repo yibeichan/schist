@@ -1433,6 +1433,14 @@ def _preserve_side_tables(backup: Path, new_db: Path) -> None:
                    OR canonical_slug NOT IN (SELECT slug FROM concepts)
                 """
             )
+            # Mirror ingest.py's self-row sweep too (#490/#495): ingest runs
+            # BEFORE this copy-back on the rebuild path, so pruning only there
+            # would let a legacy backup reintroduce x→x rows every spoke pull
+            # — the exact one-sided-parity ladder (#454) between the two
+            # prune sites.
+            conn.execute(
+                "DELETE FROM concept_aliases WHERE duplicate_slug = canonical_slug"
+            )
         except sqlite3.OperationalError as e:
             if "no such table" not in str(e).lower():
                 raise

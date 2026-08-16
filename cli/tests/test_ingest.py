@@ -1007,6 +1007,54 @@ def test_ingest_prunes_concept_aliases_for_missing_concepts(tmp_path: Path) -> N
     assert rows == [("dupe", "canonical", "valid alias")]
 
 
+def test_ingest_prunes_self_referential_concept_aliases(tmp_path: Path) -> None:
+    """A row aliasing a slug to itself (writable by pre-#489 MCP servers) is
+    swept on the next ingest — it would loop any resolver (#490/#495)."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    concepts_dir = vault / "concepts"
+    concepts_dir.mkdir()
+    for slug in ("dupe", "canonical"):
+        (concepts_dir / f"{slug}.md").write_text(
+            f"---\nconcept: {slug}\ntitle: {slug.title()}\n---\n\n{slug}\n",
+            encoding="utf-8",
+        )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+    conn = sqlite3.connect(db)
+    try:
+        conn.executemany(
+            """
+            INSERT INTO concept_aliases
+              (duplicate_slug, canonical_slug, reason, created_by)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                ("dupe", "canonical", "valid alias", "tester"),
+                ("canonical", "canonical", "self-loop", "tester"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute(
+            "SELECT duplicate_slug, canonical_slug FROM concept_aliases ORDER BY duplicate_slug"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [("dupe", "canonical")]
+
+
 @pytest.mark.parametrize("directory", ["concepts", "Concepts"])
 def test_ingest_classifies_concept_dir_casefolded(
     tmp_path: Path, directory: str,

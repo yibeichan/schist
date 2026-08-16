@@ -254,4 +254,40 @@ describe("add_concept_alias normalizes slugs before storage (#338/#317)", () => 
       expect(result.message).toMatch(/non-empty after normalization/);
     }
   });
+
+  it("rejects a self-alias, including case/whitespace variants of one slug (#490/#495)", async () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    await seedAliasDb(tempDir);
+
+    // Distinct raw strings that normalize to the same slug — the check must
+    // run post-normalization or this pair slips through.
+    const result = await add_concept_alias(tempDir, {
+      duplicate_slug: "Machine Learning",
+      canonical_slug: "machine-learning",
+      created_by: "sansan",
+    });
+
+    expect(isErrorResult(result)).toBe(true);
+    if (isErrorResult(result)) {
+      expect(result.error).toBe("VALIDATION_ERROR");
+      expect(result.message).toMatch(/different canonical slug/);
+    }
+  });
+
+  it("returns NOT_FOUND for slugs missing from the index (#481)", async () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    await seedAliasDb(tempDir);
+
+    const result = await add_concept_alias(tempDir, {
+      duplicate_slug: "backpropagtion",
+      canonical_slug: "machine-learning",
+      created_by: "sansan",
+    });
+
+    expect(isErrorResult(result)).toBe(true);
+    if (isErrorResult(result)) {
+      expect(result.error).toBe("NOT_FOUND");
+      expect(result.message).toMatch(/backpropagtion/);
+    }
+  });
 });

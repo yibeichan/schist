@@ -19,6 +19,8 @@ export interface Note {
   source?: "human" | "agent"; // allowed values; omitted means undefined
   confidence?: "low" | "medium" | "high"; // omitted means agent did not declare
   file_ref?: string; // external file pointer; schist does not manage the file
+  alias_of?: string;  // concept notes only: this slug is a duplicate of that canonical (#489)
+  aliases?: string[]; // concept notes only: duplicate slugs pointing at this canonical
 }
 
 export interface Concept {
@@ -27,6 +29,8 @@ export interface Concept {
   description: string;
   tags: string[];
   edgeCount: number;
+  aliasOf?: string;   // set when this slug is marked a duplicate of another (#489)
+  aliases?: string[]; // duplicate slugs pointing at this canonical; omitted when none
 }
 
 export interface SearchResult {
@@ -229,4 +233,7 @@ export interface ConceptAlias {
   reason?: string;
   created_by: string;
   created_at: string;
+  // Set when the write repaired the alias forest to stay flat (#489):
+  replaced_canonical?: string; // duplicate_slug previously pointed here; re-alias repointed it
+  repointed?: string[];        // duplicates that pointed at duplicate_slug, now repointed to canonical_slug
 }
