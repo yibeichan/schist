@@ -657,8 +657,20 @@ def context(args, vault_path: str, db_path: str):
             print(f'  {row["date"] or "no-date"} | {row["title"]} [{row["status"]}]')
 
         print('\n--- Top 10 concepts by edge count ---')
-        rows = db.execute("""
-            SELECT c.slug, c.title, count(e.id) AS cnt
+        # alias_of mirrors MCP get_context's hotConcepts annotation (#489): a
+        # duplicate ranking hot is the signal to consolidate onto its
+        # canonical. Guarded because pre-alias-era indexes lack the table.
+        has_aliases = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'concept_aliases'"
+        ).fetchone() is not None
+        alias_col = (
+            ", (SELECT a.canonical_slug FROM concept_aliases a"
+            "    WHERE a.duplicate_slug = c.slug"
+            "    ORDER BY a.created_at DESC, a.canonical_slug ASC LIMIT 1) AS alias_of"
+            if has_aliases else ", NULL AS alias_of"
+        )
+        rows = db.execute(f"""
+            SELECT c.slug, c.title, count(e.id) AS cnt{alias_col}
             FROM concepts c
             LEFT JOIN edges e ON e.source = c.slug OR e.target = c.slug
             GROUP BY c.slug
@@ -666,7 +678,8 @@ def context(args, vault_path: str, db_path: str):
             LIMIT 10
         """).fetchall()
         for row in rows:
-            print(f'  {row["slug"]}: {row["title"]} ({row["cnt"]} edges)')
+            alias_note = f' (alias of {row["alias_of"]})' if row["alias_of"] else ''
+            print(f'  {row["slug"]}: {row["title"]} ({row["cnt"]} edges){alias_note}')
 
     if args.depth == 'full':
         print('\n--- Tag frequency ---')

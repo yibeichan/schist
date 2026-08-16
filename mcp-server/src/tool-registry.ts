@@ -141,7 +141,11 @@ export function makeMemoryWriteTools(_config: VaultConfig) {
     },
     {
       name: "add_concept_alias",
-      description: "Mark a concept slug as a duplicate of a canonical slug.",
+      description:
+        "Mark a concept slug as a duplicate of a canonical slug. Both concepts must already exist in the index. " +
+        "The alias then surfaces on reads: list_concepts returns aliasOf/aliases, get_context flags hot duplicates, " +
+        "and get_note on a concept note reports alias_of/aliases. One canonical per duplicate (re-aliasing repoints); " +
+        "self-aliases and alias chains are rejected.",
       inputSchema: {
         type: "object" as const,
         properties: {

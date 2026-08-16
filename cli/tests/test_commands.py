@@ -998,3 +998,55 @@ class TestReviewLockHardening:
                     _os.close(fd)
         finally:
             lock.chmod(0o644)
+
+
+class TestContextAliasAnnotation:
+    """CLI `context` mirrors MCP get_context's hot-concept alias flag (#489)."""
+
+    def _vault_with_alias(self, tmp_path):
+        import sqlite3
+        from schist.ingest import ingest
+
+        (tmp_path / "concepts").mkdir()
+        for slug in ("ml", "machine-learning"):
+            (tmp_path / "concepts" / f"{slug}.md").write_text(
+                f"---\nconcept: {slug}\ntitle: {slug}\n---\n\nbody\n",
+                encoding="utf-8",
+            )
+        db = tmp_path / ".schist" / "schist.db"
+        db.parent.mkdir(parents=True, exist_ok=True)
+        ingest(str(tmp_path), str(db))
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "INSERT INTO concept_aliases (duplicate_slug, canonical_slug, created_by)"
+            " VALUES ('ml', 'machine-learning', 'tester')"
+        )
+        conn.commit()
+        conn.close()
+        return db
+
+    def test_context_marks_duplicate_concepts(self, tmp_path, capsys):
+        from types import SimpleNamespace
+
+        db = self._vault_with_alias(tmp_path)
+        commands.context(SimpleNamespace(depth="standard"), str(tmp_path), str(db))
+        out = capsys.readouterr().out
+        assert "(alias of machine-learning)" in out
+        # The canonical itself is not annotated.
+        for line in out.splitlines():
+            if line.strip().startswith("machine-learning:"):
+                assert "(alias of" not in line
+
+    def test_context_survives_missing_alias_table(self, tmp_path, capsys):
+        import sqlite3
+        from types import SimpleNamespace
+
+        db = self._vault_with_alias(tmp_path)
+        conn = sqlite3.connect(db)
+        conn.execute("DROP TABLE concept_aliases")
+        conn.commit()
+        conn.close()
+        commands.context(SimpleNamespace(depth="standard"), str(tmp_path), str(db))
+        out = capsys.readouterr().out
+        assert "Top 10 concepts" in out
+        assert "(alias of" not in out

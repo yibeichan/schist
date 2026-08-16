@@ -758,6 +758,12 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
            OR canonical_slug NOT IN (SELECT slug FROM concepts)
         """
     )
+    # Self-referential rows are semantically void and would loop any resolver.
+    # New MCP writes reject them (#490/#495); this sweeps rows stored by
+    # pre-#489 servers, mirroring the orphan prune above.
+    conn.execute(
+        "DELETE FROM concept_aliases WHERE duplicate_slug = canonical_slug"
+    )
     # user_version lives in the DB header and is transactional, so the
     # completion marker lands atomically with the data commit (#244). The
     # stamped value is the index schema version (schema/index-contract.json;

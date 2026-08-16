@@ -641,7 +641,7 @@ export function getNote(vaultRoot: string, id: string): Note | null {
     const connections = parseConnectionsSync(body);
 
     const conf = row.confidence;
-    return {
+    const note: Note = {
       id: row.id as string,
       title: row.title as string,
       date: (row.date as string) ?? "",
@@ -655,6 +655,36 @@ export function getNote(vaultRoot: string, id: string): Note | null {
       confidence: (conf === "low" || conf === "medium" || conf === "high") ? conf : undefined,
       file_ref: typeof row.file_ref === "string" && row.file_ref ? row.file_ref : undefined,
     };
+
+    // Concept notes carry their alias links so a reader landing on a
+    // duplicate is redirected to the canonical (#489). Casefolded axis match
+    // (concepts/ vs Concepts/, #473 ladder); slugs in the index are already
+    // normalized lowercase.
+    const parts = note.id.split("/");
+    if (
+      parts.length === 2 &&
+      parts[0].toLowerCase() === "concepts" &&
+      parts[1].toLowerCase().endsWith(".md") &&
+      hasConceptAliases(db)
+    ) {
+      const slug = parts[1].slice(0, -3).toLowerCase();
+      const aliasOf = db
+        .prepare(
+          `SELECT canonical_slug FROM concept_aliases WHERE duplicate_slug = ?
+           ORDER BY created_at DESC, canonical_slug ASC LIMIT 1`
+        )
+        .get(slug) as { canonical_slug: string } | undefined;
+      if (aliasOf) note.alias_of = aliasOf.canonical_slug;
+      const aliases = (db
+        .prepare(
+          "SELECT duplicate_slug FROM concept_aliases WHERE canonical_slug = ? ORDER BY duplicate_slug ASC"
+        )
+        .all(slug) as { duplicate_slug: string }[])
+        .map((r) => r.duplicate_slug);
+      if (aliases.length > 0) note.aliases = aliases;
+    }
+
+    return note;
   } finally {
     db.close();
   }
@@ -704,6 +734,32 @@ function conceptEdgeJoinCondition(edgeAlias: string, conceptAlias: string): stri
   )`;
 }
 
+/**
+ * True when this DB has the concept_aliases side table. Production DBs always
+ * do (it sits in requiredTables), but test fixtures and pre-alias-era indexes
+ * may not — alias annotation degrades to "no aliases" instead of erroring.
+ */
+function hasConceptAliases(db: Database.Database): boolean {
+  return !!db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'concept_aliases'")
+    .get();
+}
+
+// Correlated subqueries annotating a concepts row `c` with its alias links:
+// aliasOf = the canonical this slug is a duplicate of (NULL when it isn't
+// one); aliases = JSON array of duplicates pointing at this slug. Written by
+// add_concept_alias, which maintains a flat depth-1 forest, so a single hop
+// fully resolves (#489). ORDER BY makes the legacy multi-canonical case
+// deterministic; post-#489 writes keep one canonical per duplicate.
+const ALIAS_OF_SUBQUERY =
+  `(SELECT a.canonical_slug FROM concept_aliases a
+     WHERE a.duplicate_slug = c.slug
+     ORDER BY a.created_at DESC, a.canonical_slug ASC LIMIT 1)`;
+const ALIASES_SUBQUERY =
+  `(SELECT json_group_array(a.duplicate_slug)
+      FROM (SELECT duplicate_slug FROM concept_aliases
+             WHERE canonical_slug = c.slug ORDER BY duplicate_slug ASC) a)`;
+
 export function listConcepts(
   vaultRoot: string,
   opts?: { tags?: string[]; search?: string; limit?: number; offset?: number }
@@ -712,9 +768,13 @@ export function listConcepts(
   try {
     const limit = opts?.limit ?? 50;
     const offset = opts?.offset ?? 0;
+    const withAliases = hasConceptAliases(db);
+    const aliasCols = withAliases
+      ? `, ${ALIAS_OF_SUBQUERY} as aliasOf, ${ALIASES_SUBQUERY} as aliases`
+      : "";
     let sql = `
       SELECT c.slug, c.title, c.description, c.tags,
-             COUNT(e.id) as edgeCount
+             COUNT(e.id) as edgeCount${aliasCols}
       FROM concepts c
       LEFT JOIN edges e ON ${conceptEdgeJoinCondition("e", "c")}
     `;
@@ -740,13 +800,21 @@ export function listConcepts(
     params.push(limit, offset);
 
     const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
-    return rows.map((row) => ({
-      slug: row.slug as string,
-      title: row.title as string,
-      description: (row.description as string) ?? "",
-      tags: row.tags ? JSON.parse(row.tags as string) : [],
-      edgeCount: (row.edgeCount as number) ?? 0,
-    }));
+    return rows.map((row) => {
+      const concept: Concept = {
+        slug: row.slug as string,
+        title: row.title as string,
+        description: (row.description as string) ?? "",
+        tags: row.tags ? JSON.parse(row.tags as string) : [],
+        edgeCount: (row.edgeCount as number) ?? 0,
+      };
+      if (typeof row.aliasOf === "string") concept.aliasOf = row.aliasOf;
+      if (typeof row.aliases === "string") {
+        const aliases = JSON.parse(row.aliases) as string[];
+        if (aliases.length > 0) concept.aliases = aliases;
+      }
+      return concept;
+    });
   } finally {
     db.close();
   }
@@ -981,16 +1049,23 @@ export function getContext(
       .prepare("SELECT id, title, date, status FROM docs ORDER BY date DESC, id ASC LIMIT 10")
       .all() as Record<string, unknown>[];
 
-    const hotConcepts = db
+    const aliasCol = hasConceptAliases(db) ? `, ${ALIAS_OF_SUBQUERY} as aliasOf` : "";
+    const hotConcepts = (db
       .prepare(`
-        SELECT c.slug, c.title, COUNT(e.id) as edgeCount
+        SELECT c.slug, c.title, COUNT(e.id) as edgeCount${aliasCol}
         FROM concepts c
         LEFT JOIN edges e ON ${conceptEdgeJoinCondition("e", "c")}
         GROUP BY c.slug
         ORDER BY edgeCount DESC
         LIMIT 10
       `)
-      .all() as Record<string, unknown>[];
+      .all() as Record<string, unknown>[])
+      // Keep aliasOf only where set: a duplicate showing up hot is the signal
+      // agents should consolidate onto the canonical (#489).
+      .map((row) => {
+        if (row.aliasOf == null) delete row.aliasOf;
+        return row;
+      });
 
     const result: Record<string, unknown> = {
       vault: { path: vaultRoot, noteCount, conceptCount, edgeCount },
@@ -1350,21 +1425,108 @@ export function addConceptAlias(
   created_by: string
 ): ConceptAlias {
   validateOwner(created_by);
+  if (duplicate_slug === canonical_slug) {
+    // tools.ts rejects this before we're called; kept here too because this
+    // function is exported API and a self-row would loop any resolver (#490).
+    throw Object.assign(
+      new Error("duplicate_slug and canonical_slug must be different slugs"),
+      { error: "VALIDATION_ERROR" }
+    );
+  }
   const db = openDb(vaultRoot, { readonly: false });
   try {
-    db.prepare(`
-      INSERT OR REPLACE INTO concept_aliases (duplicate_slug, canonical_slug, reason, created_by)
-      VALUES (?, ?, ?, ?)
-    `).run(duplicate_slug, canonical_slug, reason ?? null, created_by);
-    const row = db.prepare("SELECT * FROM concept_aliases WHERE duplicate_slug = ? AND canonical_slug = ?")
-      .get(duplicate_slug, canonical_slug) as Record<string, unknown>;
-    return {
-      duplicate_slug: row.duplicate_slug as string,
-      canonical_slug: row.canonical_slug as string,
-      reason: row.reason as string | undefined,
-      created_by: row.created_by as string,
-      created_at: row.created_at as string,
-    };
+    // Everything below runs in one transaction so the guards check the same
+    // state the write lands on (write-guard rule: validate on the same side
+    // of the lock as the mutation).
+    const result = db.transaction((): ConceptAlias => {
+      // Both slugs must exist in the index (#481). FK enforcement would also
+      // reject, but with a bare "FOREIGN KEY constraint failed" that doesn't
+      // say which slug is missing or what to do about it.
+      const conceptExists = db.prepare("SELECT 1 FROM concepts WHERE slug = ?");
+      const missing = [duplicate_slug, canonical_slug].filter(
+        (s) => !conceptExists.get(s)
+      );
+      if (missing.length > 0) {
+        throw Object.assign(
+          new Error(
+            `concept slug(s) not in the index: ${missing.join(", ")} — ` +
+            `create the concept first (create_concept) or wait for ingest ` +
+            `to index it, otherwise the alias would be pruned on the next ingest`
+          ),
+          { error: "NOT_FOUND" }
+        );
+      }
+
+      // The alias table is a flat forest (depth 1): a canonical is never
+      // itself a duplicate, so readers resolve in a single hop and can't
+      // loop (#495). Aliasing TO a duplicate is therefore redirected to its
+      // root — unless that row is the exact reverse of this request, which
+      // means the caller is deliberately flipping canonical direction.
+      const canonicalsRow = db
+        .prepare("SELECT canonical_slug FROM concept_aliases WHERE duplicate_slug = ?")
+        .get(canonical_slug) as { canonical_slug: string } | undefined;
+      if (canonicalsRow) {
+        if (canonicalsRow.canonical_slug === duplicate_slug) {
+          db.prepare("DELETE FROM concept_aliases WHERE duplicate_slug = ?")
+            .run(canonical_slug);
+        } else {
+          throw Object.assign(
+            new Error(
+              `canonical_slug '${canonical_slug}' is itself marked as a ` +
+              `duplicate of '${canonicalsRow.canonical_slug}' — alias ` +
+              `'${duplicate_slug}' to '${canonicalsRow.canonical_slug}' instead`
+            ),
+            { error: "VALIDATION_ERROR" }
+          );
+        }
+      }
+
+      // One canonical per duplicate: re-aliasing repoints rather than
+      // accumulating a second canonical (which would make resolution
+      // ambiguous). Surface what was replaced so the caller sees the repoint.
+      const prior = db
+        .prepare(
+          "SELECT canonical_slug FROM concept_aliases WHERE duplicate_slug = ? AND canonical_slug <> ?"
+        )
+        .get(duplicate_slug, canonical_slug) as { canonical_slug: string } | undefined;
+      if (prior) {
+        db.prepare("DELETE FROM concept_aliases WHERE duplicate_slug = ?")
+          .run(duplicate_slug);
+      }
+
+      // Flatten: anything that pointed AT the newly-demoted slug now points
+      // at its canonical (a→b + new b→c ⇒ a→c), keeping the forest depth 1.
+      const repointed = (db
+        .prepare("SELECT duplicate_slug FROM concept_aliases WHERE canonical_slug = ?")
+        .all(duplicate_slug) as { duplicate_slug: string }[])
+        .map((r) => r.duplicate_slug);
+      if (repointed.length > 0) {
+        // OR REPLACE: if a legacy row already maps one of these duplicates to
+        // the new canonical, the repoint collapses into it instead of failing
+        // the (duplicate_slug, canonical_slug) primary key.
+        db.prepare(
+          "UPDATE OR REPLACE concept_aliases SET canonical_slug = ? WHERE canonical_slug = ?"
+        ).run(canonical_slug, duplicate_slug);
+      }
+
+      db.prepare(`
+        INSERT OR REPLACE INTO concept_aliases (duplicate_slug, canonical_slug, reason, created_by)
+        VALUES (?, ?, ?, ?)
+      `).run(duplicate_slug, canonical_slug, reason ?? null, created_by);
+      const row = db.prepare("SELECT * FROM concept_aliases WHERE duplicate_slug = ? AND canonical_slug = ?")
+        .get(duplicate_slug, canonical_slug) as Record<string, unknown>;
+      const out: ConceptAlias = {
+        duplicate_slug: row.duplicate_slug as string,
+        canonical_slug: row.canonical_slug as string,
+        reason: row.reason as string | undefined,
+        created_by: row.created_by as string,
+        created_at: row.created_at as string,
+      };
+      if (prior) out.replaced_canonical = prior.canonical_slug;
+      if (repointed.length > 0) out.repointed = repointed;
+      return out;
+    })();
+    return result;
   } finally {
     db.close();
   }

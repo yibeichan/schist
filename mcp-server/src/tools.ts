@@ -3457,6 +3457,17 @@ export async function add_concept_alias(
         message: "duplicate_slug and canonical_slug must be non-empty after normalization",
       } satisfies ToolError;
     }
+    // Compared post-normalization so case/whitespace variants of the same
+    // slug are caught too. A self-alias is semantically void and would loop
+    // any resolver (#490/#495).
+    if (duplicateSlug === canonicalSlug) {
+      return {
+        error: "VALIDATION_ERROR",
+        message:
+          `duplicate_slug and canonical_slug both normalize to '${duplicateSlug}' — ` +
+          `an alias must map one slug to a different canonical slug`,
+      } satisfies ToolError;
+    }
     return sqliteReader.addConceptAlias(vaultRoot, duplicateSlug, canonicalSlug, args.reason, createdBy);
   } catch (e: unknown) {
     return normalizeError(e, "VALIDATION_ERROR");

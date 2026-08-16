@@ -416,7 +416,9 @@ describe("addConceptAlias", () => {
 
       INSERT INTO concepts (slug, name) VALUES
         ('ml', 'ML'),
-        ('machine-learning', 'Machine Learning');
+        ('machine-learning', 'Machine Learning'),
+        ('statistical-learning', 'Statistical Learning'),
+        ('ai', 'AI');
 
       CREATE TABLE IF NOT EXISTS concept_aliases (
         duplicate_slug  TEXT NOT NULL REFERENCES concepts(slug),
@@ -458,13 +460,81 @@ describe("addConceptAlias", () => {
     ).toThrow();
   });
 
-  it("throws when either concept slug does not exist", () => {
+  it("throws NOT_FOUND when either concept slug does not exist", () => {
+    // Pre-#481 this surfaced as a bare FK failure; now it names the missing
+    // slug and what to do about it.
     process.env.SCHIST_AGENT_ID = "sansan";
     expect(() =>
       addConceptAlias(vaultDir, "dl", "machine-learning", "test", "sansan")
-    ).toThrow(/FOREIGN KEY constraint failed/);
+    ).toThrow(/not in the index: dl/);
     expect(() =>
       addConceptAlias(vaultDir, "ml", "deep-learning", "test", "sansan")
-    ).toThrow(/FOREIGN KEY constraint failed/);
+    ).toThrow(/not in the index: deep-learning/);
+    try {
+      addConceptAlias(vaultDir, "dl", "machine-learning", "test", "sansan");
+    } catch (e) {
+      expect((e as { error?: string }).error).toBe("NOT_FOUND");
+    }
+  });
+
+  it("rejects a self-referential alias (#490)", () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    expect(() =>
+      addConceptAlias(vaultDir, "ml", "ml", "test", "sansan")
+    ).toThrow(/must be different/);
+  });
+
+  it("rejects aliasing to a slug that is itself a duplicate (#495 chain guard)", () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    addConceptAlias(vaultDir, "ml", "machine-learning", undefined, "sansan");
+    expect(() =>
+      addConceptAlias(vaultDir, "ai", "ml", undefined, "sansan")
+    ).toThrow(/alias 'ai' to 'machine-learning' instead/);
+  });
+
+  it("re-aliasing repoints to the new canonical instead of accumulating", () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    addConceptAlias(vaultDir, "ml", "machine-learning", undefined, "sansan");
+    const second = addConceptAlias(vaultDir, "ml", "statistical-learning", undefined, "sansan");
+    expect(second.replaced_canonical).toBe("machine-learning");
+
+    const db = new Database(path.join(vaultDir, ".schist", "schist.db"));
+    const rows = db.prepare("SELECT duplicate_slug, canonical_slug FROM concept_aliases").all();
+    db.close();
+    expect(rows).toEqual([
+      { duplicate_slug: "ml", canonical_slug: "statistical-learning" },
+    ]);
+  });
+
+  it("demoting a canonical repoints its existing duplicates (flat forest)", () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    addConceptAlias(vaultDir, "ml", "machine-learning", undefined, "sansan");
+    const result = addConceptAlias(
+      vaultDir, "machine-learning", "statistical-learning", undefined, "sansan");
+    expect(result.repointed).toEqual(["ml"]);
+
+    const db = new Database(path.join(vaultDir, ".schist", "schist.db"));
+    const rows = db
+      .prepare("SELECT duplicate_slug, canonical_slug FROM concept_aliases ORDER BY duplicate_slug")
+      .all();
+    db.close();
+    // Depth stays 1: both ml and machine-learning point straight at the root.
+    expect(rows).toEqual([
+      { duplicate_slug: "machine-learning", canonical_slug: "statistical-learning" },
+      { duplicate_slug: "ml", canonical_slug: "statistical-learning" },
+    ]);
+  });
+
+  it("reversing an alias flips canonical direction without leaving a chain", () => {
+    process.env.SCHIST_AGENT_ID = "sansan";
+    addConceptAlias(vaultDir, "ml", "machine-learning", undefined, "sansan");
+    addConceptAlias(vaultDir, "machine-learning", "ml", undefined, "sansan");
+
+    const db = new Database(path.join(vaultDir, ".schist", "schist.db"));
+    const rows = db.prepare("SELECT duplicate_slug, canonical_slug FROM concept_aliases").all();
+    db.close();
+    expect(rows).toEqual([
+      { duplicate_slug: "machine-learning", canonical_slug: "ml" },
+    ]);
   });
 });
