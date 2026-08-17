@@ -831,3 +831,76 @@ class TestMainPinning:
                   log_path=tmp_path / "r.log")
         assert rc == 1
         assert "require_pinned_identity" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# audit-log source attribution (#518)
+# ---------------------------------------------------------------------------
+
+
+class TestPushSource:
+    def test_ssh_connection_ip(self):
+        from schist.pre_receive import _push_source
+        env = {"SSH_CONNECTION": "203.0.113.9 51000 10.0.0.1 22"}
+        assert _push_source(env) == "203.0.113.9"
+
+    def test_ssh_client_fallback(self):
+        from schist.pre_receive import _push_source
+        assert _push_source({"SSH_CLIENT": "198.51.100.7 51000 22"}) == "198.51.100.7"
+
+    def test_local_when_no_ssh_env(self):
+        from schist.pre_receive import _push_source
+        assert _push_source({}) == "local"
+        assert _push_source({"SSH_CONNECTION": "  "}) == "local"
+
+    def test_rejection_log_carries_src(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SSH_CONNECTION", "203.0.113.9 51000 10.0.0.1 22")
+        log = tmp_path / "rejected.log"
+        v = Violation(identity="mallory", filepath="x.md", scope="(root)",
+                      refname="refs/heads/main")
+        log_rejection([v], log_path=log)
+        assert "src=203.0.113.9" in log.read_text()
+
+    def test_pinning_log_carries_src(self, tmp_path, monkeypatch):
+        from schist.pre_receive import log_pinning_rejection
+        monkeypatch.delenv("SSH_CONNECTION", raising=False)
+        monkeypatch.delenv("SSH_CLIENT", raising=False)
+        log = tmp_path / "rejected.log"
+        log_pinning_rejection("mallory", log_path=log)
+        assert "src=local" in log.read_text()
+
+
+
+class TestLogSanitization:
+    """#524 review: identity on the pinning path is raw client input (logged
+    before NAME_RE validation); filenames come from `git log -z`. A newline in
+    either forges audit-log lines. _sanitize_log_field neutralizes them."""
+
+    def test_sanitize_escapes_control_chars(self):
+        from schist.pre_receive import _sanitize_log_field
+        out = _sanitize_log_field("x\n[fake] PINNING_REJECTED identity=victim")
+        assert "\n" not in out
+        assert "\\x0a" in out
+        assert _sanitize_log_field("normal-id") == "normal-id"
+
+    def test_pinning_log_sanitizes_forged_identity(self, tmp_path):
+        from schist.pre_receive import log_pinning_rejection
+        log = tmp_path / "r.log"
+        log_pinning_rejection(
+            "evil\n[2099-01-01T00:00:00+00:00] PINNING_REJECTED identity=victim src=1.2.3.4",
+            log_path=log)
+        # The forged newline is escaped, so the whole attempt stays on ONE
+        # physical line — no second parseable entry.
+        lines = [ln for ln in log.read_text().splitlines() if ln.strip()]
+        assert len(lines) == 1
+        assert "\\x0a" in lines[0]
+
+    def test_rejection_log_sanitizes_filename(self, tmp_path):
+        log = tmp_path / "r.log"
+        v = Violation(identity="mallory",
+                      filepath="ok.md\n[forged] REJECTED identity=x",
+                      scope="(root)", refname="refs/heads/main")
+        log_rejection([v], log_path=log)
+        lines = [ln for ln in log.read_text().splitlines() if ln.strip()]
+        assert len(lines) == 1
+        assert "\\x0a" in lines[0]

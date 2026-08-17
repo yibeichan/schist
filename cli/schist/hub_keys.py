@@ -156,10 +156,13 @@ def pinned_options(identity: str, repo: str | None = None) -> str:
     """Forced-command options pinning `identity` (and optionally one repo).
 
     The command option's value is parsed by the login shell (`shell -c`), so
-    the repo argument is shell-quoted. Double quotes and backslashes are
-    rejected outright — inside sshd's double-quoted option value they would
-    need a second escaping layer that different sshd versions treat
-    differently, and no sane repo path contains them.
+    the repo argument is ALWAYS single-quoted — unquoted, a path containing
+    `` ` `` or `$` would be expanded by that shell as code (#514). Rejected
+    outright: double quotes and backslashes (they'd need a second escaping
+    layer inside sshd's double-quoted option value that sshd versions treat
+    differently) and control characters (authorized_keys is line-based — an
+    embedded newline would terminate the entry and start a new, attacker-
+    shaped key line).
     """
     if repo is None:
         return f'restrict,command="schist-shell {identity}"'
@@ -169,9 +172,13 @@ def pinned_options(identity: str, repo: str | None = None) -> str:
             f"into an authorized_keys command option. Use --any-repo or a "
             f"saner path."
         )
-    quoted = "'" + repo.replace("'", "'\\''") + "'" if any(
-        c.isspace() or c == "'" for c in repo
-    ) else repo
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in repo):
+        raise HubAdminError(
+            f"repo path {repo!r} contains control characters — cannot be "
+            f"baked into an authorized_keys command option. Use --any-repo "
+            f"or a saner path."
+        )
+    quoted = "'" + repo.replace("'", "'\\''") + "'"
     return f'restrict,command="schist-shell {identity} {quoted}"'
 
 
