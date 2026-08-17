@@ -407,3 +407,53 @@ class TestSecurityToggle:
         capsys.readouterr()
         acl = parse_vault_data(yaml.safe_load(_hub_vault_text(hub)))
         assert acl.security.require_pinned_identity is False
+
+
+class TestParticipantRateLimitsStaleness:
+    """#517/#522: remove/rename must not orphan the participant's rate_limits
+    key — parse_vault_data rejects orphans, so apply_mutation's validation
+    gate blocked BOTH operations entirely on limit-setting hubs (fail-closed:
+    nothing committed, but the admin command was unusable)."""
+
+    def _seed_with_limits(self):
+        d = _seed_data()
+        d["rate_limits"] = {
+            "alpha": {"git_syncs_per_hour": 50, "notes_per_sync": 200},
+            "beta": {"git_syncs_per_hour": 50, "notes_per_sync": 200},
+        }
+        return d
+
+    def test_remove_drops_rate_limits_key(self):
+        from schist.acl import parse_vault_data
+        d = self._seed_with_limits()
+        assert hub_admin.participant_remove(d, "beta") is True
+        assert "beta" not in d["rate_limits"]
+        parse_vault_data(copy.deepcopy(d))  # must validate post-mutation
+
+    def test_rename_rekeys_rate_limits(self):
+        from schist.acl import parse_vault_data
+        d = self._seed_with_limits()
+        assert hub_admin.participant_rename(d, "alpha", "gamma") is True
+        assert "alpha" not in d["rate_limits"]
+        assert d["rate_limits"]["gamma"] == {"git_syncs_per_hour": 50, "notes_per_sync": 200}
+        parse_vault_data(copy.deepcopy(d))
+
+    def test_remove_without_limits_still_works(self):
+        d = _seed_data()
+        assert hub_admin.participant_remove(d, "beta") is True
+
+    @needs_git
+    def test_remove_end_to_end_on_limit_setting_hub(self, tmp_path):
+        # The full apply_mutation path (the one that was blocked in prod shape).
+        hub = _make_hub(tmp_path)
+
+        def add_limits(d):
+            d["rate_limits"] = {"alpha": {"notes_per_sync": 200},
+                                "beta": {"notes_per_sync": 200}}
+            return True
+
+        hub_admin.apply_mutation(hub, add_limits, "limits")
+        changed = hub_admin.apply_mutation(
+            hub, lambda d: hub_admin.participant_remove(d, "beta"), "rm beta")
+        assert changed is True
+        assert "beta" not in _hub_vault_text(hub)

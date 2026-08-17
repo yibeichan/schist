@@ -41,13 +41,17 @@ ALLOWED_VERBS = {"git-receive-pack", "git-upload-pack"}
 # to the hyphenated verb before the whitelist check.
 _TWO_WORD_VERBS = {"receive-pack", "upload-pack"}
 
-# Env vars scrubbed before exec: dynamic-linker and shell-startup injection
-# vectors a client could ship if the hub's AcceptEnv is loose. Kept narrow —
-# PATH/PYTHONPATH have legitimate hub-side uses (venv hooks via
-# ~/.ssh/environment), so those are flagged by `schist doctor`'s AcceptEnv
-# check instead of being stripped here.
-_SCRUB_ENV_PREFIXES = ("LD_", "DYLD_")
-_SCRUB_ENV_EXACT = {"BASH_ENV", "ENV"}
+# Env vars scrubbed before exec: dynamic-linker, shell-startup, and git
+# exec/config redirection vectors a client could ship if the hub's AcceptEnv
+# is loose (#516). Kept narrow — PATH/PYTHONPATH have legitimate hub-side
+# uses (venv hooks via ~/.ssh/environment), so those are flagged by `schist
+# doctor`'s AcceptEnv check instead of being stripped here. GIT_PROTOCOL is
+# deliberately NOT scrubbed (protocol v2 negotiation).
+_SCRUB_ENV_PREFIXES = ("LD_", "DYLD_", "GIT_CONFIG")
+_SCRUB_ENV_EXACT = {
+    "BASH_ENV", "ENV",
+    "GIT_EXEC_PATH", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS",
+}
 
 
 class HubShellError(Exception):

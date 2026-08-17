@@ -831,3 +831,40 @@ class TestMainPinning:
                   log_path=tmp_path / "r.log")
         assert rc == 1
         assert "require_pinned_identity" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# audit-log source attribution (#518)
+# ---------------------------------------------------------------------------
+
+
+class TestPushSource:
+    def test_ssh_connection_ip(self):
+        from schist.pre_receive import _push_source
+        env = {"SSH_CONNECTION": "203.0.113.9 51000 10.0.0.1 22"}
+        assert _push_source(env) == "203.0.113.9"
+
+    def test_ssh_client_fallback(self):
+        from schist.pre_receive import _push_source
+        assert _push_source({"SSH_CLIENT": "198.51.100.7 51000 22"}) == "198.51.100.7"
+
+    def test_local_when_no_ssh_env(self):
+        from schist.pre_receive import _push_source
+        assert _push_source({}) == "local"
+        assert _push_source({"SSH_CONNECTION": "  "}) == "local"
+
+    def test_rejection_log_carries_src(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SSH_CONNECTION", "203.0.113.9 51000 10.0.0.1 22")
+        log = tmp_path / "rejected.log"
+        v = Violation(identity="mallory", filepath="x.md", scope="(root)",
+                      refname="refs/heads/main")
+        log_rejection([v], log_path=log)
+        assert "src=203.0.113.9" in log.read_text()
+
+    def test_pinning_log_carries_src(self, tmp_path, monkeypatch):
+        from schist.pre_receive import log_pinning_rejection
+        monkeypatch.delenv("SSH_CONNECTION", raising=False)
+        monkeypatch.delenv("SSH_CLIENT", raising=False)
+        log = tmp_path / "rejected.log"
+        log_pinning_rejection("mallory", log_path=log)
+        assert "src=local" in log.read_text()

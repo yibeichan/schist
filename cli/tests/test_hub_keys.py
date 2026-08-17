@@ -240,9 +240,22 @@ class TestCmdLayer:
 class TestRepoBinding:
     """Repo confinement baked into the forced command (#502 hardening)."""
 
-    def test_pinned_options_with_repo(self):
+    def test_pinned_options_with_repo_always_quotes(self):
+        # Unquoted, a path containing ` or $ would be EXPANDED by the login
+        # shell running the forced command — always single-quote (#514).
         assert (pinned_options("alpha", "/srv/git/vault.git")
-                == 'restrict,command="schist-shell alpha /srv/git/vault.git"')
+                == 'restrict,command="schist-shell alpha \'/srv/git/vault.git\'"')
+
+    def test_pinned_options_rejects_control_chars(self):
+        # authorized_keys is line-based: an embedded newline would terminate
+        # the entry and start a new attacker-shaped key line (#514).
+        for bad in ("/srv/git/x\ny.git", "/srv/git/x\ty.git", "/srv/git/x\x7fy.git"):
+            with pytest.raises(HubAdminError, match="control characters"):
+                pinned_options("alpha", bad)
+
+    def test_pinned_options_backtick_and_dollar_are_inert_quoted(self):
+        opts = pinned_options("alpha", "/srv/git/`evil`$X.git")
+        assert opts == 'restrict,command="schist-shell alpha \'/srv/git/`evil`$X.git\'"'
 
     def test_pinned_options_repo_with_space_is_shell_quoted(self):
         opts = pinned_options("alpha", "/srv/git/my vault.git")

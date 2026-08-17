@@ -1938,3 +1938,60 @@ class TestHubSshdAcceptEnv:
     def test_warns_on_ld_preload_acceptenv(self, tmp_path, monkeypatch):
         r = self._run(tmp_path, monkeypatch, "AcceptEnv LD_PRELOAD PYTHONPATH\n")
         assert r.status == "WARN"
+
+
+class TestHubKeyPinningWrapperPresence:
+    """#513: pinned keys with no resolvable schist-shell = every pinned push
+    dies at the forced command — doctor must FAIL, not PASS."""
+
+    PIN = ('restrict,command="schist-shell alpha" '
+           'ssh-ed25519 a2V5LW1hdGVyaWFsLWE= alice')
+
+    def _hub(self, tmp_path):
+        import shutil as _shutil
+        if _shutil.which("git") is None:
+            pytest.skip("git not available")
+        from types import SimpleNamespace
+        from schist.sync import init_hub
+        hub = tmp_path / "hub.git"
+        init_hub(SimpleNamespace(name="v", participant=["alpha"]), str(hub))
+        return hub
+
+    def test_fail_when_wrapper_missing(self, tmp_path, monkeypatch):
+        from schist import doctor as doctor_mod
+        hub = self._hub(tmp_path)
+        ak = tmp_path / "ak"
+        ak.write_text(self.PIN + "\n")
+        monkeypatch.setattr(doctor_mod.shutil, "which",
+                            lambda name: None if name == "schist-shell" else "/usr/bin/x")
+        r = doctor_mod.check_hub_key_pinning(str(hub), str(ak))
+        assert r.status == "FAIL"
+        assert "not on PATH" in r.message
+
+    def test_no_wrapper_needed_when_nothing_pinned(self, tmp_path, monkeypatch):
+        from schist import doctor as doctor_mod
+        hub = self._hub(tmp_path)
+        ak = tmp_path / "ak"
+        ak.write_text("ssh-ed25519 a2V5LW1hdGVyaWFsLWE= plain\n")
+        monkeypatch.setattr(doctor_mod.shutil, "which",
+                            lambda name: None if name == "schist-shell" else "/usr/bin/x")
+        r = doctor_mod.check_hub_key_pinning(str(hub), str(ak))
+        assert r.status != "PASS"  # unpinned key, enforcement off -> FAIL path
+        assert "schist-shell forced" in r.message
+
+
+class TestAcceptEnvGlobs:
+    """#523: sshd AcceptEnv tokens are patterns — GIT* forwards GIT_EXEC_PATH
+    just like GIT_* does."""
+
+    @pytest.mark.parametrize("tok", ["GIT*", "GIT_*", "SCHIST*", "*IDENTITY",
+                                     "LD*", "PYTHON*", "PA?H", "G*"])
+    def test_dangerous_globs_flagged(self, tok):
+        from schist.doctor import _acceptenv_offender
+        assert _acceptenv_offender(tok) is True
+
+    @pytest.mark.parametrize("tok", ["GIT_PROTOCOL", "LANG", "LC_*", "TERM*",
+                                     "GIT_PROTO*"])
+    def test_benign_tokens_pass(self, tok):
+        from schist.doctor import _acceptenv_offender
+        assert _acceptenv_offender(tok) is False

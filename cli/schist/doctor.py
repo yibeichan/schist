@@ -733,6 +733,22 @@ def check_hub_key_pinning(hub_path: Optional[str],
     unkeyed = sorted(participants - keyed)
     enforced = acl.security.require_pinned_identity
 
+    # Pinned entries force `schist-shell` on every connection with that key —
+    # if the wrapper doesn't resolve, every pinned spoke's push dies at exec
+    # time (#513). Doctor's PATH is normally a superset of sshd's
+    # non-interactive PATH, so absence here means certainly broken for sshd;
+    # presence is necessary-but-not-sufficient (sshd's PATH can be narrower).
+    if any(e.pinned_identity is not None for e in entries) and shutil.which("schist-shell") is None:
+        return CheckResult(
+            "FAIL", label,
+            f"keys in {ak_path} are pinned to schist-shell, but `schist-shell` "
+            f"is not on PATH — every pinned spoke's push will fail at the "
+            f"forced command",
+            fix="Install the schist CLI for this host and expose the wrapper "
+                "on sshd's non-interactive PATH, e.g. "
+                "`sudo ln -sf <venv>/bin/schist-shell /usr/local/bin/schist-shell`.",
+        )
+
     # An un-pinned key is only a spoofing hole while enforcement is OFF —
     # once require_pinned_identity is on, pre-receive rejects its pushes, and
     # an un-pinned shell-capable key is the normal shape of the admin's own
@@ -810,6 +826,19 @@ SSHD_CONFIG_GLOB = "/etc/ssh/sshd_config.d/*.conf"
 _ACCEPTENV_RE = re.compile(r"^\s*AcceptEnv\s+(.+)$", re.IGNORECASE | re.MULTILINE)
 
 
+# Concrete dangerous variables an AcceptEnv glob is tested against (#523):
+# sshd patterns support * and ?, so `AcceptEnv GIT*` forwards GIT_EXEC_PATH
+# just as surely as `GIT_*` does — prefix checks alone gave globs a free pass.
+_ACCEPTENV_DANGEROUS = (
+    "SCHIST_IDENTITY", "SCHIST_IDENTITY_PINNED",
+    "PATH", "BASH_ENV", "ENV",
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+    "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
+    "GIT_EXEC_PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+    "GIT_SSH_COMMAND", "GIT_ASKPASS",
+)
+
+
 def _acceptenv_offender(token: str) -> bool:
     """True if an AcceptEnv name/glob can undermine identity pinning.
 
@@ -817,10 +846,15 @@ def _acceptenv_offender(token: str) -> bool:
     PYTHON* / BASH_ENV / ENV let a client redirect what the forced command
     (or the pre-receive hook's python3) executes; GIT_* covers config/exec
     redirection — except GIT_PROTOCOL, which git's own transport uses and is
-    harmless.
+    harmless. Glob tokens are matched against _ACCEPTENV_DANGEROUS.
     """
     t = token.upper()
-    if t == "*" or t.startswith("SCHIST"):
+    if "*" in t or "?" in t:
+        if t == "*":
+            return True
+        import fnmatch
+        return any(fnmatch.fnmatchcase(name, t) for name in _ACCEPTENV_DANGEROUS)
+    if t.startswith("SCHIST"):
         return True
     if t in {"PATH", "BASH_ENV", "ENV"}:
         return True

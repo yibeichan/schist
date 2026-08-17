@@ -47,6 +47,20 @@ def resolve_identity() -> str | None:
     return os.environ.get("SCHIST_IDENTITY") or os.environ.get("GL_USER") or None
 
 
+def _push_source(environ: dict[str, str] | None = None) -> str:
+    """Client address for audit-log attribution (#518).
+
+    sshd sets SSH_CONNECTION="<client-ip> <client-port> <server-ip> <port>";
+    SSH_CLIENT is the legacy spelling. A push with neither is filesystem-local.
+    """
+    env = os.environ if environ is None else environ
+    for var in ("SSH_CONNECTION", "SSH_CLIENT"):
+        value = env.get(var, "")
+        if value.strip():
+            return value.split()[0]
+    return "local"
+
+
 def pinning_rejection(
     acl: VaultACL, environ: dict[str, str] | None = None
 ) -> str | None:
@@ -99,7 +113,10 @@ def log_pinning_rejection(identity: str, log_path: Path | None = None) -> None:
         log_path = Path(git_dir) / "hooks" / "rejected-pushes.log"
 
     timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
-    entry = f"[{timestamp}] PINNING_REJECTED identity={identity} reason=identity-not-key-pinned\n"
+    entry = (
+        f"[{timestamp}] PINNING_REJECTED identity={identity} "
+        f"src={_push_source()} reason=identity-not-key-pinned\n"
+    )
 
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -236,7 +253,10 @@ def log_rejection(
     refname = violations[0].refname
     files = ", ".join(v.filepath for v in violations)
 
-    entry = f"[{timestamp}] REJECTED identity={identity} ref={refname} files=[{files}]\n"
+    entry = (
+        f"[{timestamp}] REJECTED identity={identity} src={_push_source()} "
+        f"ref={refname} files=[{files}]\n"
+    )
 
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -259,6 +279,7 @@ def log_rate_limit_rejection(
     timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
     entry = (
         f"[{timestamp}] RATE_LIMIT_REJECTED identity={identity} "
+        f"src={_push_source()} "
         f"reason={result.reason} limit={result.limit} observed={result.observed} "
         f"retry_after={result.retry_after}\n"
     )

@@ -101,11 +101,17 @@ class TestBuildExec:
         from schist.hub_shell import scrub_environ
         env = {"LD_PRELOAD": "/evil.so", "DYLD_INSERT_LIBRARIES": "/e.dylib",
                "BASH_ENV": "/evil.sh", "ENV": "/evil.sh",
+               "GIT_EXEC_PATH": "/evil-git", "GIT_CONFIG_GLOBAL": "/evil.cfg",
+               "GIT_SSH_COMMAND": "evil", "GIT_ASKPASS": "/evil-askpass",
                "PATH": "/usr/bin", "GIT_PROTOCOL": "version=2",
                "SCHIST_IDENTITY": "pi"}
         removed = scrub_environ(env)
-        assert sorted(removed) == ["BASH_ENV", "DYLD_INSERT_LIBRARIES",
-                                   "ENV", "LD_PRELOAD"]
+        assert sorted(removed) == ["BASH_ENV", "DYLD_INSERT_LIBRARIES", "ENV",
+                                   "GIT_ASKPASS", "GIT_CONFIG_GLOBAL",
+                                   "GIT_EXEC_PATH", "GIT_SSH_COMMAND",
+                                   "LD_PRELOAD"]
+        # GIT_PROTOCOL (protocol v2) and PATH (doctor-policed, legit hub-side
+        # uses) deliberately survive — see the #516 comment in hub_shell.py.
         assert set(env) == {"PATH", "GIT_PROTOCOL", "SCHIST_IDENTITY"}
 
 
@@ -128,6 +134,30 @@ class TestMain:
         monkeypatch.delenv("SSH_ORIGINAL_COMMAND", raising=False)
         assert main(["pi"]) == 1
         assert "interactive shell disabled" in capsys.readouterr().err
+
+    def test_two_arg_repo_bound_success_execs(self, monkeypatch, tmp_path):
+        # #515: main()'s 2-arg (repo-confined) path was only covered via
+        # build_exec, never through the console-script entry point.
+        repo = tmp_path / "vault.git"
+        repo.mkdir()
+        monkeypatch.setenv("SSH_ORIGINAL_COMMAND", f"git-receive-pack '{repo}'")
+        recorded = {}
+
+        def fake_execvp(file, argv):
+            recorded["argv"] = argv
+            raise SystemExit(0)
+
+        monkeypatch.setattr("os.execvp", fake_execvp)
+        with pytest.raises(SystemExit):
+            main(["pi", str(repo)])
+        assert recorded["argv"][3].startswith("git-receive-pack ")
+
+    def test_two_arg_repo_mismatch_rejected(self, monkeypatch, tmp_path, capsys):
+        a = tmp_path / "a.git"; a.mkdir()
+        b = tmp_path / "b.git"; b.mkdir()
+        monkeypatch.setenv("SSH_ORIGINAL_COMMAND", f"git-receive-pack '{b}'")
+        assert main(["pi", str(a)]) == 1
+        assert "confined to repository" in capsys.readouterr().err
 
     def test_success_sets_env_and_execs(self, monkeypatch):
         monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "git-receive-pack 'v.git'")

@@ -168,6 +168,13 @@ def participant_rename(data: dict, old: str, new: str) -> bool:
     access = data.setdefault("access", {})
     if old in access:
         access[new] = access.pop(old)
+    # rate_limits is keyed by participant name too, and parse_vault_data
+    # rejects a rate_limits key with no matching participant — leaving the
+    # stale key made every rename fail apply_mutation's validation gate on
+    # hubs that set per-participant limits (#517).
+    rate_limits = data.get("rate_limits")
+    if isinstance(rate_limits, dict) and old in rate_limits:
+        rate_limits[new] = rate_limits.pop(old)
     return True
 
 
@@ -199,6 +206,11 @@ def participant_remove(data: dict, name: str) -> bool:
         raise HubAdminError(f"unknown participant '{name}'")
     data["participants"].pop(idx)
     data.get("access", {}).pop(name, None)
+    # Same staleness as rename (#522): an orphaned rate_limits key fails
+    # validation and blocks the remove entirely on limit-setting hubs.
+    rate_limits = data.get("rate_limits")
+    if isinstance(rate_limits, dict):
+        rate_limits.pop(name, None)
     return True
 
 
