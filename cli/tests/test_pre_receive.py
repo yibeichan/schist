@@ -868,3 +868,39 @@ class TestPushSource:
         log = tmp_path / "rejected.log"
         log_pinning_rejection("mallory", log_path=log)
         assert "src=local" in log.read_text()
+
+
+
+class TestLogSanitization:
+    """#524 review: identity on the pinning path is raw client input (logged
+    before NAME_RE validation); filenames come from `git log -z`. A newline in
+    either forges audit-log lines. _sanitize_log_field neutralizes them."""
+
+    def test_sanitize_escapes_control_chars(self):
+        from schist.pre_receive import _sanitize_log_field
+        out = _sanitize_log_field("x\n[fake] PINNING_REJECTED identity=victim")
+        assert "\n" not in out
+        assert "\\x0a" in out
+        assert _sanitize_log_field("normal-id") == "normal-id"
+
+    def test_pinning_log_sanitizes_forged_identity(self, tmp_path):
+        from schist.pre_receive import log_pinning_rejection
+        log = tmp_path / "r.log"
+        log_pinning_rejection(
+            "evil\n[2099-01-01T00:00:00+00:00] PINNING_REJECTED identity=victim src=1.2.3.4",
+            log_path=log)
+        # The forged newline is escaped, so the whole attempt stays on ONE
+        # physical line — no second parseable entry.
+        lines = [ln for ln in log.read_text().splitlines() if ln.strip()]
+        assert len(lines) == 1
+        assert "\\x0a" in lines[0]
+
+    def test_rejection_log_sanitizes_filename(self, tmp_path):
+        log = tmp_path / "r.log"
+        v = Violation(identity="mallory",
+                      filepath="ok.md\n[forged] REJECTED identity=x",
+                      scope="(root)", refname="refs/heads/main")
+        log_rejection([v], log_path=log)
+        lines = [ln for ln in log.read_text().splitlines() if ln.strip()]
+        assert len(lines) == 1
+        assert "\\x0a" in lines[0]

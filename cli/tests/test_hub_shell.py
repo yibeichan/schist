@@ -99,17 +99,27 @@ class TestBuildExec:
 
     def test_scrub_environ_strips_injection_vectors(self):
         from schist.hub_shell import scrub_environ
+        # GIT_* is a whitelist (#524 review finding 1): every GIT_ var except
+        # GIT_PROTOCOL is scrubbed, incl. the ones the blacklist missed
+        # (GIT_TRACE = arbitrary file-append as hub user; GIT_DIR /
+        # GIT_ALTERNATE_OBJECT_DIRECTORIES = confinement break).
         env = {"LD_PRELOAD": "/evil.so", "DYLD_INSERT_LIBRARIES": "/e.dylib",
                "BASH_ENV": "/evil.sh", "ENV": "/evil.sh",
                "GIT_EXEC_PATH": "/evil-git", "GIT_CONFIG_GLOBAL": "/evil.cfg",
                "GIT_SSH_COMMAND": "evil", "GIT_ASKPASS": "/evil-askpass",
+               "GIT_TRACE": "/home/git/.ssh/authorized_keys",
+               "GIT_DIR": "/other.git",
+               "GIT_ALTERNATE_OBJECT_DIRECTORIES": "/steal",
+               "GIT_NAMESPACE": "x", "GIT_INDEX_FILE": "/y",
                "PATH": "/usr/bin", "GIT_PROTOCOL": "version=2",
                "SCHIST_IDENTITY": "pi"}
         removed = scrub_environ(env)
         assert sorted(removed) == ["BASH_ENV", "DYLD_INSERT_LIBRARIES", "ENV",
-                                   "GIT_ASKPASS", "GIT_CONFIG_GLOBAL",
-                                   "GIT_EXEC_PATH", "GIT_SSH_COMMAND",
-                                   "LD_PRELOAD"]
+                                   "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                                   "GIT_ASKPASS", "GIT_CONFIG_GLOBAL", "GIT_DIR",
+                                   "GIT_EXEC_PATH", "GIT_INDEX_FILE",
+                                   "GIT_NAMESPACE", "GIT_SSH_COMMAND",
+                                   "GIT_TRACE", "LD_PRELOAD"]
         # GIT_PROTOCOL (protocol v2) and PATH (doctor-policed, legit hub-side
         # uses) deliberately survive — see the #516 comment in hub_shell.py.
         assert set(env) == {"PATH", "GIT_PROTOCOL", "SCHIST_IDENTITY"}

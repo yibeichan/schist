@@ -41,17 +41,21 @@ ALLOWED_VERBS = {"git-receive-pack", "git-upload-pack"}
 # to the hyphenated verb before the whitelist check.
 _TWO_WORD_VERBS = {"receive-pack", "upload-pack"}
 
-# Env vars scrubbed before exec: dynamic-linker, shell-startup, and git
-# exec/config redirection vectors a client could ship if the hub's AcceptEnv
-# is loose (#516). Kept narrow — PATH/PYTHONPATH have legitimate hub-side
-# uses (venv hooks via ~/.ssh/environment), so those are flagged by `schist
-# doctor`'s AcceptEnv check instead of being stripped here. GIT_PROTOCOL is
-# deliberately NOT scrubbed (protocol v2 negotiation).
-_SCRUB_ENV_PREFIXES = ("LD_", "DYLD_", "GIT_CONFIG")
-_SCRUB_ENV_EXACT = {
-    "BASH_ENV", "ENV",
-    "GIT_EXEC_PATH", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS",
-}
+# Env scrubbed before exec (#516). GIT_* is a WHITELIST, not a blacklist:
+# git honors a long and version-growing family of GIT_* variables that
+# redirect what/where it reads and writes — GIT_TRACE=<path> appends
+# attacker-chosen lines to any file AS THE HUB USER (authorized_keys, escalation
+# grade), GIT_DIR / GIT_ALTERNATE_OBJECT_DIRECTORIES / GIT_OBJECT_DIRECTORY /
+# GIT_NAMESPACE break repo confinement, GIT_INDEX_FILE / GIT_QUARANTINE_PATH
+# interfere with receive-pack quarantine. Enumerating the dangerous ones is a
+# losing game, so drop EVERY GIT_* except the one the transport legitimately
+# needs (GIT_PROTOCOL, protocol v2). Plus the linker (LD_/DYLD_) and shell
+# startup (BASH_ENV/ENV) injectors. PATH/PYTHONPATH are left intact
+# (legitimate hub-side venv use via ~/.ssh/environment) and policed by
+# `schist doctor`'s AcceptEnv check instead.
+_SCRUB_ENV_PREFIXES = ("LD_", "DYLD_")
+_SCRUB_ENV_EXACT = {"BASH_ENV", "ENV"}
+_GIT_ENV_KEEP = {"GIT_PROTOCOL"}
 
 
 class HubShellError(Exception):
@@ -62,7 +66,9 @@ def scrub_environ(environ) -> list[str]:
     """Drop injection-vector env vars in place; return the removed names."""
     doomed = [
         k for k in environ
-        if k in _SCRUB_ENV_EXACT or k.startswith(_SCRUB_ENV_PREFIXES)
+        if k in _SCRUB_ENV_EXACT
+        or k.startswith(_SCRUB_ENV_PREFIXES)
+        or (k.startswith("GIT_") and k not in _GIT_ENV_KEEP)
     ]
     for k in doomed:
         del environ[k]

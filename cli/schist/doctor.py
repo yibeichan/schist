@@ -734,20 +734,19 @@ def check_hub_key_pinning(hub_path: Optional[str],
     enforced = acl.security.require_pinned_identity
 
     # Pinned entries force `schist-shell` on every connection with that key —
-    # if the wrapper doesn't resolve, every pinned spoke's push dies at exec
-    # time (#513). Doctor's PATH is normally a superset of sshd's
-    # non-interactive PATH, so absence here means certainly broken for sshd;
-    # presence is necessary-but-not-sufficient (sshd's PATH can be narrower).
-    if any(e.pinned_identity is not None for e in entries) and shutil.which("schist-shell") is None:
-        return CheckResult(
-            "FAIL", label,
-            f"keys in {ak_path} are pinned to schist-shell, but `schist-shell` "
-            f"is not on PATH — every pinned spoke's push will fail at the "
-            f"forced command",
-            fix="Install the schist CLI for this host and expose the wrapper "
-                "on sshd's non-interactive PATH, e.g. "
-                "`sudo ln -sf <venv>/bin/schist-shell /usr/local/bin/schist-shell`.",
-        )
+    # if the wrapper doesn't resolve on sshd's forced-command PATH, those
+    # pushes die at exec time (#513). We can only probe THIS process's PATH,
+    # which is neither a superset nor a subset of sshd's: the documented
+    # install exposes the wrapper via ~/.ssh/environment (on sshd's PATH but
+    # maybe not the admin's), and `sudo schist doctor` runs under secure_path.
+    # So absence here is a strong smell, not proof — WARN, don't FAIL, to
+    # avoid crying wolf on a correctly-configured hub. Reported alongside the
+    # other signals rather than short-circuiting, so a real spoofing hole
+    # (unpinned-key FAIL below) still surfaces in the same pass.
+    wrapper_missing = (
+        any(e.pinned_identity is not None for e in entries)
+        and shutil.which("schist-shell") is None
+    )
 
     # An un-pinned key is only a spoofing hole while enforcement is OFF —
     # once require_pinned_identity is on, pre-receive rejects its pushes, and
@@ -767,6 +766,13 @@ def check_hub_key_pinning(hub_path: Optional[str],
         )
 
     problems: list[str] = []
+    if wrapper_missing:
+        problems.append(
+            "`schist-shell` is not on this process's PATH — if it is also "
+            "absent from sshd's forced-command PATH, every pinned push fails "
+            "at exec time (install the CLI on the hub / expose the wrapper "
+            "via ~/.ssh/environment or /usr/local/bin)"
+        )
     if unknown:
         problems.append(f"pinned to unknown participants: {', '.join(unknown)}")
     if not enforced:
@@ -849,20 +855,36 @@ def _acceptenv_offender(token: str) -> bool:
     harmless. Glob tokens are matched against _ACCEPTENV_DANGEROUS.
     """
     t = token.upper()
+
+    def _dangerous_family(name: str) -> bool:
+        # Prefix families whose EVERY member is dangerous, so a glob or exact
+        # name landing in one is flagged without enumerating members.
+        if name.startswith("SCHIST"):
+            return True
+        if name in {"PATH", "BASH_ENV", "ENV"}:
+            return True
+        if name.startswith(("LD_", "DYLD_", "PYTHON")):
+            return True
+        if name.startswith("GIT_") and name != "GIT_PROTOCOL":
+            return True
+        return False
+
     if "*" in t or "?" in t:
         if t == "*":
             return True
+        # A glob can undermine pinning two ways: it matches a concrete
+        # dangerous var (GIT* → GIT_EXEC_PATH), OR its own literal prefix
+        # falls inside a dangerous family (GIT_O* → all GIT_* are dangerous,
+        # even though no representative in the list happens to match). The
+        # non-glob branch below relied entirely on the family check; the glob
+        # branch must too, or `AcceptEnv LD_AU*` / `GIT_T*` slip through.
         import fnmatch
-        return any(fnmatch.fnmatchcase(name, t) for name in _ACCEPTENV_DANGEROUS)
-    if t.startswith("SCHIST"):
-        return True
-    if t in {"PATH", "BASH_ENV", "ENV"}:
-        return True
-    if t.startswith(("LD_", "DYLD_", "PYTHON")):
-        return True
-    if t.startswith("GIT_") and t != "GIT_PROTOCOL":
-        return True
-    return False
+        if any(fnmatch.fnmatchcase(name, t) for name in _ACCEPTENV_DANGEROUS):
+            return True
+        literal_prefix = t.split("*", 1)[0].split("?", 1)[0]
+        return literal_prefix != "" and _dangerous_family(literal_prefix)
+
+    return _dangerous_family(t)
 
 
 def check_hub_sshd_acceptenv(hub_path: Optional[str]) -> CheckResult:

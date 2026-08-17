@@ -1957,16 +1957,34 @@ class TestHubKeyPinningWrapperPresence:
         init_hub(SimpleNamespace(name="v", participant=["alpha"]), str(hub))
         return hub
 
-    def test_fail_when_wrapper_missing(self, tmp_path, monkeypatch):
+    def test_warn_when_wrapper_missing(self, tmp_path, monkeypatch):
+        # WARN not FAIL (#524 review): doctor's PATH is neither superset nor
+        # subset of sshd's forced-command PATH (~/.ssh/environment install,
+        # sudo secure_path), so absence is a strong smell, not proof.
         from schist import doctor as doctor_mod
         hub = self._hub(tmp_path)
         ak = tmp_path / "ak"
+        # Pinned key + enforcement on, so the ONLY signal is wrapper-missing.
+        from schist import hub_admin
+        hub_admin.apply_mutation(
+            hub, lambda d: d.__setitem__("security", {"require_pinned_identity": True}) or True, "on")
         ak.write_text(self.PIN + "\n")
         monkeypatch.setattr(doctor_mod.shutil, "which",
                             lambda name: None if name == "schist-shell" else "/usr/bin/x")
         r = doctor_mod.check_hub_key_pinning(str(hub), str(ak))
-        assert r.status == "FAIL"
-        assert "not on PATH" in r.message
+        assert r.status == "WARN"
+        assert "not on this process's PATH" in r.message
+
+    def test_wrapper_present_and_all_pinned_passes(self, tmp_path, monkeypatch):
+        from schist import doctor as doctor_mod, hub_admin
+        hub = self._hub(tmp_path)
+        ak = tmp_path / "ak"
+        hub_admin.apply_mutation(
+            hub, lambda d: d.__setitem__("security", {"require_pinned_identity": True}) or True, "on")
+        ak.write_text(self.PIN + "\n")
+        monkeypatch.setattr(doctor_mod.shutil, "which", lambda name: "/usr/local/bin/schist-shell")
+        r = doctor_mod.check_hub_key_pinning(str(hub), str(ak))
+        assert r.status == "PASS"
 
     def test_no_wrapper_needed_when_nothing_pinned(self, tmp_path, monkeypatch):
         from schist import doctor as doctor_mod
@@ -1984,14 +2002,22 @@ class TestAcceptEnvGlobs:
     """#523: sshd AcceptEnv tokens are patterns — GIT* forwards GIT_EXEC_PATH
     just like GIT_* does."""
 
-    @pytest.mark.parametrize("tok", ["GIT*", "GIT_*", "SCHIST*", "*IDENTITY",
-                                     "LD*", "PYTHON*", "PA?H", "G*"])
+    @pytest.mark.parametrize("tok", [
+        "GIT*", "GIT_*", "SCHIST*", "*IDENTITY", "LD*", "PYTHON*", "PA?H", "G*",
+        # Prefix-family globs with no matching representative in
+        # _ACCEPTENV_DANGEROUS — these slipped through when the glob branch
+        # only fnmatched the representative list (#524 review finding 3).
+        "LD_AU*", "GIT_T*", "GIT_O*", "GIT_D*", "GIT_N*", "DYLD_*",
+        # A GIT_ glob is flagged conservatively: only the exact GIT_PROTOCOL
+        # is carved out, so a broad git-family glob gets a WARN.
+        "GIT_PROTO*",
+    ])
     def test_dangerous_globs_flagged(self, tok):
         from schist.doctor import _acceptenv_offender
         assert _acceptenv_offender(tok) is True
 
     @pytest.mark.parametrize("tok", ["GIT_PROTOCOL", "LANG", "LC_*", "TERM*",
-                                     "GIT_PROTO*"])
+                                     "COLORTERM", "NO_COLOR"])
     def test_benign_tokens_pass(self, tok):
         from schist.doctor import _acceptenv_offender
         assert _acceptenv_offender(tok) is False

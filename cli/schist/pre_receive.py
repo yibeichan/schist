@@ -47,6 +47,23 @@ def resolve_identity() -> str | None:
     return os.environ.get("SCHIST_IDENTITY") or os.environ.get("GL_USER") or None
 
 
+def _sanitize_log_field(value: str) -> str:
+    """Neutralize control characters before a value enters the audit log.
+
+    The audit log is line-oriented and its entries are grep/parsed, so any
+    field that can carry a newline is a log-forgery vector. `identity` on the
+    pinning-rejection path is the raw client-sent SCHIST_IDENTITY (logged
+    BEFORE the participant-name validation), and filenames come from
+    `git log -z` which preserves embedded newlines (#518 review; #5 pre-
+    existing). Replace CR/LF/other control bytes with a visible marker rather
+    than dropping them, so the forgery attempt is evident in the log.
+    """
+    return "".join(
+        c if (ord(c) >= 0x20 and ord(c) != 0x7f) else "\\x%02x" % ord(c)
+        for c in value
+    )
+
+
 def _push_source(environ: dict[str, str] | None = None) -> str:
     """Client address for audit-log attribution (#518).
 
@@ -114,7 +131,7 @@ def log_pinning_rejection(identity: str, log_path: Path | None = None) -> None:
 
     timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
     entry = (
-        f"[{timestamp}] PINNING_REJECTED identity={identity} "
+        f"[{timestamp}] PINNING_REJECTED identity={_sanitize_log_field(identity)} "
         f"src={_push_source()} reason=identity-not-key-pinned\n"
     )
 
@@ -249,9 +266,9 @@ def log_rejection(
         log_path = Path(git_dir) / "hooks" / "rejected-pushes.log"
 
     timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
-    identity = violations[0].identity
-    refname = violations[0].refname
-    files = ", ".join(v.filepath for v in violations)
+    identity = _sanitize_log_field(violations[0].identity)
+    refname = _sanitize_log_field(violations[0].refname)
+    files = ", ".join(_sanitize_log_field(v.filepath) for v in violations)
 
     entry = (
         f"[{timestamp}] REJECTED identity={identity} src={_push_source()} "
@@ -278,7 +295,7 @@ def log_rate_limit_rejection(
 
     timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
     entry = (
-        f"[{timestamp}] RATE_LIMIT_REJECTED identity={identity} "
+        f"[{timestamp}] RATE_LIMIT_REJECTED identity={_sanitize_log_field(identity)} "
         f"src={_push_source()} "
         f"reason={result.reason} limit={result.limit} observed={result.observed} "
         f"retry_after={result.retry_after}\n"
