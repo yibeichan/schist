@@ -572,6 +572,11 @@ class TestEdgeCases:
 # ---------------------------------------------------------------------------
 
 
+# require_pinned_identity is pinned False rather than left to the parser
+# default: main() runs the pinning gate BEFORE the rate limiter, and
+# log_pinning_rejection also emits src=, so if that default ever flips the
+# src= tests below would keep passing while asserting nothing about the rate
+# limiter's own log line.
 RATE_LIMIT_VAULT_DATA = {
     "name": "rl-test",
     "vault_version": 1,
@@ -587,6 +592,7 @@ RATE_LIMIT_VAULT_DATA = {
     "rate_limits": {
         "admin": {"git_syncs_per_hour": 2, "notes_per_sync": 3},
     },
+    "security": {"require_pinned_identity": False},
 }
 
 
@@ -642,6 +648,50 @@ class TestMainRateLimit:
         content = log_path.read_text()
         assert "RATE_LIMIT_REJECTED" in content
         assert "identity=admin" in content
+
+    def test_rate_limit_log_carries_src(self, rl_acl, tmp_path, monkeypatch):
+        """#526: log_rate_limit_rejection must record the client IP too.
+
+        Four functions write this log; TestPushSource covers two of them, and
+        this path had only identity/reason assertions — so dropping src= from
+        its format string would have gone unnoticed. (The fourth,
+        rate_limit._fail_open, still logs neither identity nor src: #528.)
+        """
+        monkeypatch.setenv("SSH_CONNECTION", "203.0.113.1 51000 10.0.0.1 22")
+        log_path = tmp_path / "rejected-pushes.log"
+        db_path = tmp_path / "rate-limits.sqlite"
+        stdin = ["abc def refs/heads/main"]
+        files = ["notes/a.md"]
+
+        for _ in range(2):  # admin's git_syncs_per_hour is 2
+            assert self._run(rl_acl, "admin", stdin, files,
+                             log_path=log_path, db_path=db_path) == 0
+        assert self._run(rl_acl, "admin", stdin, files,
+                         log_path=log_path, db_path=db_path) == 1
+
+        content = log_path.read_text()
+        assert "RATE_LIMIT_REJECTED" in content
+        assert "src=203.0.113.1" in content
+
+    def test_rate_limit_log_src_local_without_ssh(self, rl_acl, tmp_path,
+                                                  monkeypatch):
+        """A filesystem-local push logs src=local, not an empty field."""
+        monkeypatch.delenv("SSH_CONNECTION", raising=False)
+        monkeypatch.delenv("SSH_CLIENT", raising=False)
+        log_path = tmp_path / "rejected-pushes.log"
+        db_path = tmp_path / "rate-limits.sqlite"
+        stdin = ["abc def refs/heads/main"]
+        files = ["notes/a.md"]
+
+        for _ in range(2):
+            assert self._run(rl_acl, "admin", stdin, files,
+                             log_path=log_path, db_path=db_path) == 0
+        assert self._run(rl_acl, "admin", stdin, files,
+                         log_path=log_path, db_path=db_path) == 1
+
+        content = log_path.read_text()
+        assert "RATE_LIMIT_REJECTED" in content
+        assert "src=local" in content
 
     def test_rate_limit_passes_under_limit(self, rl_acl, tmp_path):
         """ACL passes, rate limit passes, exit 0."""
@@ -790,6 +840,16 @@ class TestPinningRejection:
 
 
 class TestMainPinning:
+    @pytest.fixture(autouse=True)
+    def _isolate_rate_limit_db(self, tmp_path, monkeypatch):
+        """Point rate-limit sqlite at a per-test tmp dir (#525).
+
+        The allow-path tests below reach check_rate_limit without a db_path,
+        so without this the DB lands in the CWD — which is how a binary DB
+        got committed to the repo root. Same fixture as TestMain.
+        """
+        monkeypatch.setenv("GIT_DIR", str(tmp_path))
+
     def test_main_rejects_unpinned_ssh_push(self, pinned_acl, tmp_path, capsys,
                                             monkeypatch):
         monkeypatch.setenv("SSH_CONNECTION", "1.2.3.4 5 6.7.8.9 22")
