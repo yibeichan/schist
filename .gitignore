@@ -33,9 +33,10 @@ Thumbs.db
 # Local-only npm overrides (e.g. HPC python path for better-sqlite3 source build)
 .npmrc
 
-# Pre-receive hook audit log (runtime-generated)
-hooks/rejected-pushes.log
-cli/hooks/rejected-pushes.log
+# Pre-receive hook audit log (runtime-generated). Both spellings were anchored
+# to a directory; the log's default path is $GIT_DIR/hooks/, which follows
+# GIT_DIR anywhere — same trap as rate-limits.sqlite below (#525).
+rejected-pushes.log
 
 # Personal agent tooling (speckit framework + handoff skill — not part of schist)
 .specify/

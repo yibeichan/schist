@@ -572,6 +572,11 @@ class TestEdgeCases:
 # ---------------------------------------------------------------------------
 
 
+# require_pinned_identity is pinned False rather than left to the parser
+# default: main() runs the pinning gate BEFORE the rate limiter, and
+# log_pinning_rejection also emits src=, so if that default ever flips the
+# src= tests below would keep passing while asserting nothing about the rate
+# limiter's own log line.
 RATE_LIMIT_VAULT_DATA = {
     "name": "rl-test",
     "vault_version": 1,
@@ -587,6 +592,7 @@ RATE_LIMIT_VAULT_DATA = {
     "rate_limits": {
         "admin": {"git_syncs_per_hour": 2, "notes_per_sync": 3},
     },
+    "security": {"require_pinned_identity": False},
 }
 
 
@@ -646,9 +652,10 @@ class TestMainRateLimit:
     def test_rate_limit_log_carries_src(self, rl_acl, tmp_path, monkeypatch):
         """#526: log_rate_limit_rejection must record the client IP too.
 
-        The other two audit-log writers are covered by TestPushSource; this
-        path had only identity/reason assertions, so dropping src= from its
-        format string would have gone unnoticed.
+        Four functions write this log; TestPushSource covers two of them, and
+        this path had only identity/reason assertions — so dropping src= from
+        its format string would have gone unnoticed. (The fourth,
+        rate_limit._fail_open, still logs neither identity nor src: #528.)
         """
         monkeypatch.setenv("SSH_CONNECTION", "203.0.113.1 51000 10.0.0.1 22")
         log_path = tmp_path / "rejected-pushes.log"
@@ -682,7 +689,9 @@ class TestMainRateLimit:
         assert self._run(rl_acl, "admin", stdin, files,
                          log_path=log_path, db_path=db_path) == 1
 
-        assert "src=local" in log_path.read_text()
+        content = log_path.read_text()
+        assert "RATE_LIMIT_REJECTED" in content
+        assert "src=local" in content
 
     def test_rate_limit_passes_under_limit(self, rl_acl, tmp_path):
         """ACL passes, rate limit passes, exit 0."""

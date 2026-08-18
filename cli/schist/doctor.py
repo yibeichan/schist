@@ -660,21 +660,19 @@ def check_hub_acl_drift(hub_path: Optional[str]) -> CheckResult:
 
     # Signal (b): a concrete dir some participants have in write but others lack.
     name_set = set(names)
-    holders: dict[str, set] = {}
-    for n in names:
-        for s in acl.access[n].write:
-            if s != "*":
-                holders.setdefault(s, set()).add(n)
+    # Candidate scopes are the concrete dirs someone names explicitly; "*" is a
+    # grant of everything, not a dir anyone can be missing.
+    scopes = {s for n in names for s in acl.access[n].write if s != "*"}
     b_problems: list[str] = []
-    for s, who in sorted(holders.items()):
-        # A participant is only "lacking" if no grant of theirs covers the
-        # scope. Membership in `who` is not enough: `holders` is built from
-        # concrete strings, so a wildcard writer (an admin identity like pi)
-        # is never a holder, and a parent grant (`research`) does not appear
-        # under a child key (`research/x`). Without this, any hub with an
-        # admin identity WARNs on every dir anyone else holds — #512.
-        lacking = {n for n in name_set - who
-                   if not _scope_matches(acl.access[n].write, s)}
+    for s in sorted(scopes):
+        # Both sides of the sentence are EFFECTIVE coverage, not literal
+        # grants. A wildcard writer (an admin identity like pi) or a parent
+        # grant (`research` covering `research/x`) covers the scope without
+        # naming it, so keying off literal strings both invented "lacking"
+        # participants — every hub with an admin identity WARNed on every dir
+        # anyone else held, #512 — and understated who actually holds it.
+        who = {n for n in names if _scope_matches(acl.access[n].write, s)}
+        lacking = name_set - who
         if lacking:
             b_problems.append(f"'{s}' held by {', '.join(sorted(who))} but not {', '.join(sorted(lacking))}")
 

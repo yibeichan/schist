@@ -1566,6 +1566,10 @@ class TestHubAclDrift:
         from schist.doctor import check_hub_acl_drift
         hub = self._make_hub(tmp_path)
 
+        # Direct dict mutation, not participant_add: hub_admin deliberately
+        # refuses to create a '*' writer (it also authorizes editing
+        # vault.yaml over SSH), so a hand-seeded admin identity like the
+        # production hub's pi can only be reproduced this way.
         def make_alpha_wildcard(d):
             d["access"]["alpha"]["write"] = ["*"]
             return True
@@ -1576,7 +1580,33 @@ class TestHubAclDrift:
             hub, lambda d: hub_admin.grant_write(d, "beta", "logs"), "m")
         r = check_hub_acl_drift(str(hub))
         assert r.status == "PASS", r.message
-        assert "alpha" not in r.message
+
+    def test_holder_list_counts_effective_coverage(self, tmp_path):
+        """#512: a wildcard writer appears in 'held by' when the WARN fires.
+
+        Signal (b) previously listed only literal grantees, so a genuine drift
+        line understated who could write the dir — the admin identity was
+        missing from the very sentence an operator acts on.
+        """
+        from schist import hub_admin
+        from schist.doctor import check_hub_acl_drift
+        hub = self._make_hub(tmp_path)
+
+        def make_alpha_wildcard(d):
+            d["access"]["alpha"]["write"] = ["*"]
+            return True
+
+        hub_admin.apply_mutation(hub, make_alpha_wildcard, "m")
+        # 'logs' is infra, so only signal (b) can fire for it. beta holds it
+        # literally, gamma not at all, alpha via the wildcard.
+        hub_admin.apply_mutation(
+            hub, lambda d: hub_admin.participant_add(d, "gamma", write=["notes"]),
+            "m")
+        hub_admin.apply_mutation(
+            hub, lambda d: hub_admin.grant_write(d, "beta", "logs"), "m")
+        r = check_hub_acl_drift(str(hub))
+        assert r.status == "WARN"
+        assert "'logs' held by alpha, beta but not gamma" in r.message
 
     def test_parent_grant_not_reported_as_lacking(self, tmp_path):
         """#512: a parent grant covers a child scope, per _scope_matches."""
@@ -1588,8 +1618,11 @@ class TestHubAclDrift:
         hub_admin.apply_mutation(
             hub, lambda d: hub_admin.grant_write(d, "alpha", "research/mario"), "m")
         r = check_hub_acl_drift(str(hub))
-        # beta's 'research' covers alpha's concrete 'research/mario' child.
-        assert "research/mario' held by" not in r.message
+        # beta's 'research' covers alpha's concrete 'research/mario' child, so
+        # the whole check is clean — asserting on status rather than on the
+        # absence of a message substring, which would pass vacuously if the
+        # message format ever changed.
+        assert r.status == "PASS", r.message
 
     def test_pass_when_consistent_and_covered(self, tmp_path):
         from schist.doctor import check_hub_acl_drift
