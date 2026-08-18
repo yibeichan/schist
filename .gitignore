@@ -45,5 +45,7 @@ cli/hooks/rejected-pushes.log
 .claude/
 
 # Test-run residue: rate_limit.py defaults its DB to $GIT_DIR/rate-limits.sqlite,
-# which lands in cli/ when tests run without GIT_DIR (same trap as cli/hooks/).
-cli/rate-limits.sqlite
+# falling back to the CWD when GIT_DIR is unset — so it lands in cli/ when tests
+# run from there and in the repo root when they run from here (#525; it was
+# committed once already). No leading slash: ignore it at any depth.
+rate-limits.sqlite

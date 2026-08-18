@@ -667,7 +667,14 @@ def check_hub_acl_drift(hub_path: Optional[str]) -> CheckResult:
                 holders.setdefault(s, set()).add(n)
     b_problems: list[str] = []
     for s, who in sorted(holders.items()):
-        lacking = name_set - who
+        # A participant is only "lacking" if no grant of theirs covers the
+        # scope. Membership in `who` is not enough: `holders` is built from
+        # concrete strings, so a wildcard writer (an admin identity like pi)
+        # is never a holder, and a parent grant (`research`) does not appear
+        # under a child key (`research/x`). Without this, any hub with an
+        # admin identity WARNs on every dir anyone else holds — #512.
+        lacking = {n for n in name_set - who
+                   if not _scope_matches(acl.access[n].write, s)}
         if lacking:
             b_problems.append(f"'{s}' held by {', '.join(sorted(who))} but not {', '.join(sorted(lacking))}")
 

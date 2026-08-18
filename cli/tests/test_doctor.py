@@ -1555,6 +1555,42 @@ class TestHubAclDrift:
         assert r.status == "WARN"
         assert "logs" in r.message
 
+    def test_wildcard_writer_not_reported_as_lacking(self, tmp_path):
+        """#512: an admin identity with write:['*'] is never a 'holder'.
+
+        Seen live on the eleven-party hub: pi holds ['*'] but signal (b) built
+        `holders` from concrete strings only, so pi was reported as lacking
+        every dir any other participant held — nine false-positive lines.
+        """
+        from schist import hub_admin
+        from schist.doctor import check_hub_acl_drift
+        hub = self._make_hub(tmp_path)
+
+        def make_alpha_wildcard(d):
+            d["access"]["alpha"]["write"] = ["*"]
+            return True
+
+        hub_admin.apply_mutation(hub, make_alpha_wildcard, "m")
+        # 'logs' is infra (excluded from signal (a)), held by beta only.
+        hub_admin.apply_mutation(
+            hub, lambda d: hub_admin.grant_write(d, "beta", "logs"), "m")
+        r = check_hub_acl_drift(str(hub))
+        assert r.status == "PASS", r.message
+        assert "alpha" not in r.message
+
+    def test_parent_grant_not_reported_as_lacking(self, tmp_path):
+        """#512: a parent grant covers a child scope, per _scope_matches."""
+        from schist import hub_admin
+        from schist.doctor import check_hub_acl_drift
+        hub = self._make_hub(tmp_path)
+        hub_admin.apply_mutation(
+            hub, lambda d: hub_admin.grant_write(d, "beta", "research"), "m")
+        hub_admin.apply_mutation(
+            hub, lambda d: hub_admin.grant_write(d, "alpha", "research/mario"), "m")
+        r = check_hub_acl_drift(str(hub))
+        # beta's 'research' covers alpha's concrete 'research/mario' child.
+        assert "research/mario' held by" not in r.message
+
     def test_pass_when_consistent_and_covered(self, tmp_path):
         from schist.doctor import check_hub_acl_drift
         hub = self._make_hub(tmp_path)

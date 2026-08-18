@@ -643,6 +643,47 @@ class TestMainRateLimit:
         assert "RATE_LIMIT_REJECTED" in content
         assert "identity=admin" in content
 
+    def test_rate_limit_log_carries_src(self, rl_acl, tmp_path, monkeypatch):
+        """#526: log_rate_limit_rejection must record the client IP too.
+
+        The other two audit-log writers are covered by TestPushSource; this
+        path had only identity/reason assertions, so dropping src= from its
+        format string would have gone unnoticed.
+        """
+        monkeypatch.setenv("SSH_CONNECTION", "203.0.113.1 51000 10.0.0.1 22")
+        log_path = tmp_path / "rejected-pushes.log"
+        db_path = tmp_path / "rate-limits.sqlite"
+        stdin = ["abc def refs/heads/main"]
+        files = ["notes/a.md"]
+
+        for _ in range(2):  # admin's git_syncs_per_hour is 2
+            assert self._run(rl_acl, "admin", stdin, files,
+                             log_path=log_path, db_path=db_path) == 0
+        assert self._run(rl_acl, "admin", stdin, files,
+                         log_path=log_path, db_path=db_path) == 1
+
+        content = log_path.read_text()
+        assert "RATE_LIMIT_REJECTED" in content
+        assert "src=203.0.113.1" in content
+
+    def test_rate_limit_log_src_local_without_ssh(self, rl_acl, tmp_path,
+                                                  monkeypatch):
+        """A filesystem-local push logs src=local, not an empty field."""
+        monkeypatch.delenv("SSH_CONNECTION", raising=False)
+        monkeypatch.delenv("SSH_CLIENT", raising=False)
+        log_path = tmp_path / "rejected-pushes.log"
+        db_path = tmp_path / "rate-limits.sqlite"
+        stdin = ["abc def refs/heads/main"]
+        files = ["notes/a.md"]
+
+        for _ in range(2):
+            assert self._run(rl_acl, "admin", stdin, files,
+                             log_path=log_path, db_path=db_path) == 0
+        assert self._run(rl_acl, "admin", stdin, files,
+                         log_path=log_path, db_path=db_path) == 1
+
+        assert "src=local" in log_path.read_text()
+
     def test_rate_limit_passes_under_limit(self, rl_acl, tmp_path):
         """ACL passes, rate limit passes, exit 0."""
         log_path = tmp_path / "rejected-pushes.log"
@@ -790,6 +831,16 @@ class TestPinningRejection:
 
 
 class TestMainPinning:
+    @pytest.fixture(autouse=True)
+    def _isolate_rate_limit_db(self, tmp_path, monkeypatch):
+        """Point rate-limit sqlite at a per-test tmp dir (#525).
+
+        The allow-path tests below reach check_rate_limit without a db_path,
+        so without this the DB lands in the CWD — which is how a binary DB
+        got committed to the repo root. Same fixture as TestMain.
+        """
+        monkeypatch.setenv("GIT_DIR", str(tmp_path))
+
     def test_main_rejects_unpinned_ssh_push(self, pinned_acl, tmp_path, capsys,
                                             monkeypatch):
         monkeypatch.setenv("SSH_CONNECTION", "1.2.3.4 5 6.7.8.9 22")
