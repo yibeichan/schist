@@ -1397,7 +1397,10 @@ export async function sync_retry(
 
     const push = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS);
     if (!push.ok) {
-      await writeSyncError(vaultRoot, `retry push failed: ${outcomeMessage(push)}`);
+      // Same format as the background path (#501): an operator reading the
+      // sentinel shouldn't be able to tell which code path wrote it, and
+      // sync_status's failure_class must parse either one.
+      await writeSyncError(vaultRoot, formatPushFailure(push, "retry push failed"));
       return syncFailureResponse(mode, "push", push);
     }
 

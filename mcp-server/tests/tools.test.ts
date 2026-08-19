@@ -1676,6 +1676,36 @@ esac
     }
   }, 15000);
 
+  test("sync_retry records a classified sentinel too, not a bare message", async () => {
+    // Parity: fixing only the background path would leave sync_status
+    // unable to classify a failure that came from the retry tool instead.
+    const vault = await makeTempSpokeVault();
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(
+      path.join(stubDir, "schist"),
+      `#!/bin/sh
+echo " ! [rejected]  main -> main (non-fast-forward)" >&2
+echo "hint: Updates were rejected because the tip of your current branch is behind" >&2
+exit 1
+`,
+      { mode: 0o755 },
+    );
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      await sync_retry(vault, { owner: "test-agent", mode: "push-only" });
+      const contents = await fs.readFile(
+        path.join(vault, ".schist", "last-sync-error"), "utf-8");
+      expect(contents).toContain("retry push failed [non-fast-forward]");
+      const result = await sync_status(vault) as unknown as Record<string, unknown>;
+      expect((result.last_sync_error as Record<string, unknown>).failure_class)
+        .toBe("non-fast-forward");
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
   test("sync_status surfaces the recorded failure class", async () => {
     const vault = await makeTempSpokeVault();
     await fs.writeFile(
