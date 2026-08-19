@@ -175,10 +175,20 @@ def check_post_commit_hook(vault_path: Optional[str]) -> CheckResult:
     if not vault_path:
         return CheckResult("SKIP", "Post-commit hook", "skipped (no vault)")
     hook = Path(vault_path) / ".git" / "hooks" / "post-commit"
-    if hook.exists():
-        return CheckResult("PASS", "Post-commit hook", "installed")
-    return CheckResult("FAIL", "Post-commit hook", "not installed",
-                       f"Run `schist init {vault_path}` to install hooks.")
+    if not hook.exists():
+        return CheckResult("FAIL", "Post-commit hook", "not installed",
+                           f"Run `schist init {vault_path}` to install hooks.")
+    # Existence is not enough: git silently SKIPS a hook it cannot execute,
+    # so a chmod -x (or a restrictive umask on checkout, or a copy that
+    # dropped the mode bit) disables auto-ingest while doctor reported PASS
+    # — the vault index then drifts from the notes with nothing to show for
+    # it (#460).
+    if not os.access(hook, os.X_OK):
+        return CheckResult(
+            "FAIL", "Post-commit hook", "installed but not executable — git skips it silently",
+            f"Run `chmod +x {hook}` (or `schist init {vault_path}` to reinstall).",
+        )
+    return CheckResult("PASS", "Post-commit hook", "installed")
 
 
 # Match the marker line and tolerate an optional trailing `# comment` so users

@@ -461,6 +461,15 @@ def has_uncommitted_changes(vault_path: str) -> bool:
         )
     except subprocess.TimeoutExpired:
         return True
+    if result.returncode != 0:
+        # A failed `git status` prints nothing to stdout, so the old
+        # `bool(result.stdout.strip())` read a corrupt .git, a held index
+        # lock, or a missing git binary as "no changes" — and sync_push then
+        # skipped the stage/commit branch and exited 0 having pushed nothing
+        # (#467). Answer conservatively, exactly as has_unpushed_commits
+        # below already does: claim there IS work, so the real failure
+        # surfaces from the stage/commit path with git's own message.
+        return True
     return bool(result.stdout.strip())
 
 

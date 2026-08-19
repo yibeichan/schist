@@ -9,7 +9,7 @@ import { writeNote, updateNote, deleteNote } from "./git-writer.js";
 import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython, containsLineBoundary, isRoundTrippableTarget } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
-import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse, ComposeBriefResponse, Note, SearchResult } from "./types.js";
+import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse, PushFailureClass, ComposeBriefResponse, Note, SearchResult } from "./types.js";
 import { loadVaultAcl, canWrite, deriveScope, resolveAclIdentity } from "./vault-acl.js";
 import {
   canonicalizeQueryHash,
@@ -520,7 +520,7 @@ async function readSyncErrorState(vaultRoot: string): Promise<SyncStatusResponse
     const sanitized = sanitizeSentinelContent(rawText);
     if (!sanitized) return null;
     const { timestamp, contents } = parseSyncErrorText(sanitized);
-    return { timestamp, contents, mtimeMs: stat.mtimeMs };
+    return { timestamp, contents, failure_class: parseFailureClass(contents), mtimeMs: stat.mtimeMs };
   } catch (e: unknown) {
     const code = (e as NodeJS.ErrnoException).code;
     return {
@@ -624,7 +624,12 @@ type SyncCommandOutcome = {
 };
 
 function truncateOutput(s: string, cap = 12_000): string {
-  return s.length > cap ? s.slice(0, cap) + "…" : s;
+  if (s.length <= cap) return s;
+  // Keep both ends. A head-only cap discarded git's last line — the one
+  // that says what to do — whenever the hub listed enough violating files
+  // to blow the cap, and tailOutput downstream then "tailed" the middle.
+  const half = Math.floor(cap / 2);
+  return s.slice(0, half) + "\n...[truncated]...\n" + s.slice(-half);
 }
 
 async function runCommand(
@@ -724,6 +729,94 @@ async function hasStaleGitOperation(vaultRoot: string): Promise<boolean> {
   return false;
 }
 
+const TRANSPORT_PATTERNS = [
+  "could not resolve hostname",
+  "connection timed out",
+  "connection refused",
+  "connection closed by remote host",
+  "network is unreachable",
+  "no route to host",
+  "operation timed out",
+  "ssh: connect to host",
+  "kex_exchange_identification",
+  "broken pipe",
+  "unable to access",
+  "early eof",
+  "the remote end hung up",
+];
+
+const STALE_STATE_PATTERNS = [
+  "index.lock",
+  "another git process seems to be running",
+  "rebase in progress",
+  "you have unmerged paths",
+];
+
+/**
+ * Classify a failed push from its captured output.
+ *
+ * Order matters. The hub's rate-limit and ACL rejections BOTH arrive wrapped
+ * in git's generic "pre-receive hook declined" line, so the specific hub
+ * reasons are tested before the generic ACL matcher — otherwise every
+ * rate-limited push would be reported as an ACL violation and marked
+ * non-retriable when it is in fact retriable after a wait.
+ */
+export function classifyPushFailure(outcome: SyncCommandOutcome): PushFailureClass {
+  if (outcome.timedOut) return "timeout";
+  if (outcome.error && outcome.code === undefined && outcome.signal === undefined) {
+    return "spawn-failed";
+  }
+  const text = outcomeMessage(outcome).toLowerCase();
+  if (text.includes("rate limit")) return "rate-limited";
+  // Non-fast-forward before ACL: git's own hint block ("Updates were
+  // rejected because…") is emitted ONLY for a stale ref, while a hub refusal
+  // prints "! [remote rejected] … (pre-receive hook declined)" with no such
+  // hint — so this cannot steal a genuine ACL or rate-limit case, and it
+  // stops a shared word in the surrounding output from doing so.
+  if (
+    text.includes("non-fast-forward") ||
+    text.includes("fetch first") ||
+    text.includes("updates were rejected")
+  ) {
+    return "non-fast-forward";
+  }
+  if (isAclRejection(outcome)) return "acl-rejected";
+  if (TRANSPORT_PATTERNS.some((pattern) => text.includes(pattern))) return "transport";
+  if (STALE_STATE_PATTERNS.some((pattern) => text.includes(pattern))) return "stale-git-state";
+  return "other";
+}
+
+/** Keep the TAIL of command output: git prints the actionable line last. */
+function tailOutput(s: string, cap = 500): string {
+  const trimmed = s.trim();
+  // ASCII only: sanitizeSentinelContent maps anything outside \x20-\x7e to
+  // "?", so a Unicode ellipsis would reach the operator as noise.
+  return trimmed.length > cap ? "..." + trimmed.slice(-cap) : trimmed;
+}
+
+/**
+ * Render a failure for the sentinel: `push failed [<class>]: <detail>`.
+ * The bracketed class is the machine-readable half — `parseFailureClass`
+ * reads it back for sync_status — and the detail is the tail of git's own
+ * output, which is where the actionable line lives.
+ */
+function formatPushFailure(outcome: SyncCommandOutcome, prefix = "push failed"): string {
+  const cls = classifyPushFailure(outcome);
+  const detail = tailOutput(outcomeMessage(outcome));
+  return `${prefix} [${cls}]: ${detail}`;
+}
+
+/** Read the class marker back out of a sentinel written by formatPushFailure. */
+export function parseFailureClass(contents: string): PushFailureClass | null {
+  const match = /^[^[\]]*\[([a-z-]+)\]:/.exec(contents);
+  if (!match) return null;
+  const known: PushFailureClass[] = [
+    "non-fast-forward", "acl-rejected", "rate-limited", "transport",
+    "stale-git-state", "timeout", "spawn-failed", "other",
+  ];
+  return known.includes(match[1] as PushFailureClass) ? (match[1] as PushFailureClass) : null;
+}
+
 function pushFailureMessage(outcome: SyncCommandOutcome): string | null {
   if (outcome.error && outcome.code === undefined && outcome.signal === undefined && !outcome.timedOut) {
     return `push spawn failed: ${outcome.error}`;
@@ -736,6 +829,58 @@ function pushFailureMessage(outcome: SyncCommandOutcome): string | null {
     return `push killed by signal ${outcome.signal}`;
   }
   return null;
+}
+
+/**
+ * One bounded pull-rebase-push for a spoke that is merely behind (#500).
+ *
+ * Returns null when the spoke recovered (caller clears the sentinel), or the
+ * classified failure text to record otherwise. Refuses to act on a dirty tree
+ * or mid-operation repo — rebasing either is how you turn a recoverable
+ * divergence into a conflict a human has to untangle — and aborts the rebase
+ * on conflict so the tree is left exactly as it was found.
+ */
+async function recoverDivergedSpoke(
+  vaultRoot: string,
+  onOutcome: (outcome: SyncCommandOutcome) => void,
+): Promise<string | null> {
+  if (await hasStaleGitOperation(vaultRoot)) {
+    return "push failed [stale-git-state]: diverged from hub, but a git operation " +
+      "is already in progress. Resolve it, then run sync_retry mode=pull-rebase-push";
+  }
+  const status = await runGit(vaultRoot, ["status", "--porcelain"]);
+  if (!status.ok) {
+    // Don't report a probe failure as "dirty" — that names the wrong
+    // condition AND the wrong remedy.
+    return formatPushFailure(status, "diverged from hub, but git status failed");
+  }
+  if ((status.stdout ?? "").trim().length > 0) {
+    return "push failed [non-fast-forward]: working tree dirty, so it was not " +
+      "rebased. Commit or stash, then run sync_retry mode=pull-rebase-push";
+  }
+
+  console.error("[schist] spoke diverged from hub; attempting one pull-rebase-push");
+  const pull = await runSchistSync(vaultRoot, "pull", SYNC_RETRY_TIMEOUT_MS);
+  if (!pull.ok) {
+    // Deliberately NOT onOutcome(pull): the tracked promise's outcome is what
+    // sync_retry reports under phase "push", and a pull error there reads as
+    // a push error. The pull's detail goes into the sentinel instead.
+    if (isRebaseConflict(pull)) {
+      await runGit(vaultRoot, ["rebase", "--abort"], 5_000);
+      return "push failed [non-fast-forward]: rebase conflict during auto-recovery " +
+        "(rebase aborted, tree unchanged). Resolve manually, then run " +
+        "sync_retry mode=pull-rebase-push";
+    }
+    return formatPushFailure(pull, "pull-rebase during auto-recovery failed");
+  }
+
+  const repush = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS);
+  onOutcome(repush);
+  if (repush.ok) {
+    console.error("[schist] spoke recovered: pull-rebase-push succeeded");
+    return null;
+  }
+  return formatPushFailure(repush, "push after auto-recovery rebase failed");
 }
 
 /** Fire-and-forget spoke push after a write. No-op for non-spoke vaults. */
@@ -752,13 +897,12 @@ export function triggerSpokePush(vaultRoot: string): void {
 
     const pushPromise = (async () => {
       const sentinelBeforePush = await readSyncErrorState(vaultRoot);
-      let outcome = await runCommand(
-        schistCliBin("schist"),
-        ["--vault", vaultRoot, "sync", "push"],
-        { cwd: vaultRoot, timeoutMs: SYNC_RETRY_TIMEOUT_MS, env: process.env, capture: false },
-      );
+      // capture: true (#501). Discarding stderr here made every failure
+      // class read as "push exited with code 1" in the sentinel, which is
+      // both useless to an operator and unusable as a recovery signal.
+      let outcome = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS);
 
-      let failure = pushFailureMessage(outcome);
+      let failure = pushFailureMessage(outcome) === null ? null : formatPushFailure(outcome);
       if (failure !== null && await hasStaleGitOperation(vaultRoot)) {
         console.error("[schist] spoke push failed with stale git state; retrying with sync push --force");
         const retry = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS, true);
@@ -767,8 +911,18 @@ export function triggerSpokePush(vaultRoot: string): void {
           failure = null;
         } else {
           outcome = retry;
-          failure = `push failed after stale-state cleanup retry: ${outcomeMessage(retry)}`;
+          failure = formatPushFailure(retry, "push failed after stale-state cleanup retry");
         }
+      }
+
+      // #500: a diverged spoke can never recover on its own — every
+      // subsequent push fails the same way until a human runs
+      // `sync_retry mode=pull-rebase-push`. That is provably the right move
+      // for exactly one class, so make it automatic for that class only:
+      // one bounded pull-rebase + one push, never a force-push, and only
+      // from a clean tree with no git operation already in progress.
+      if (failure !== null && classifyPushFailure(outcome) === "non-fast-forward") {
+        failure = await recoverDivergedSpoke(vaultRoot, (recovered) => { outcome = recovered; });
       }
 
       if (failure === null) {
@@ -985,14 +1139,29 @@ async function recentAddedPaths(
   return { ok: true, rows };
 }
 
+/**
+ * Does this failure come from the hub REFUSING the write (as opposed to
+ * refusing the ref update)?
+ *
+ * Two traps, both hit in production (#501):
+ *   - "push rejected by hub" is NOT an ACL signal. `sync.py` prints that
+ *     wrapper for any push output containing "rejected", and git's
+ *     non-fast-forward output always contains "! [rejected]" — so keying on
+ *     it labelled every diverged spoke an ACL violation, marked it
+ *     non-retriable in sync_retry, and made #500's auto-recovery unreachable.
+ *   - bare "acl" matches any hostname or path containing the letters
+ *     (oracle, tentacle, pinnacle...), and git echoes the remote URL on
+ *     essentially every push failure. Word-bounded.
+ */
 function isAclRejection(outcome: SyncCommandOutcome): boolean {
   const text = outcomeMessage(outcome).toLowerCase();
   return (
-    text.includes("acl") ||
+    /\bacl\b/.test(text) ||
+    text.includes("out-of-scope writes") ||
     text.includes("pre-receive hook declined") ||
-    text.includes("push rejected by hub") ||
+    text.includes("require_pinned_identity") ||
     text.includes("cannot determine push identity") ||
-    text.includes("identity") && text.includes("rejected")
+    (text.includes("identity") && text.includes("rejected"))
   );
 }
 
@@ -1192,7 +1361,13 @@ export async function sync_status(vaultRoot: string): Promise<SyncStatusResponse
       hub_head: hubHead,
       ahead,
       behind,
-      last_sync_error: sentinel ? { timestamp: sentinel.timestamp, contents: sentinel.contents } : null,
+      last_sync_error: sentinel
+        ? {
+            timestamp: sentinel.timestamp,
+            contents: sentinel.contents,
+            failure_class: sentinel.failure_class ?? null,
+          }
+        : null,
       clean_working_tree: clean.ok ? (clean.stdout ?? "").trim().length === 0 : false,
       blocked_by_ignored: blockingIgnored.length > 0,
       blocking_ignored_paths: blockingIgnored.slice(0, 10),
@@ -1256,7 +1431,10 @@ export async function sync_retry(
 
     const push = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS);
     if (!push.ok) {
-      await writeSyncError(vaultRoot, `retry push failed: ${outcomeMessage(push)}`);
+      // Same format as the background path (#501): an operator reading the
+      // sentinel shouldn't be able to tell which code path wrote it, and
+      // sync_status's failure_class must parse either one.
+      await writeSyncError(vaultRoot, formatPushFailure(push, "retry push failed"));
       return syncFailureResponse(mode, "push", push);
     }
 

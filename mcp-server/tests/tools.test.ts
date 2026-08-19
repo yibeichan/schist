@@ -7,7 +7,7 @@ import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { load as yamlLoadSync } from "js-yaml";
 import { jest } from "@jest/globals";
-import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES } from "../src/tools.js";
+import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES } from "../src/tools.js";
 import Database from "better-sqlite3";
 import { INDEX_SCHEMA_VERSION } from "../src/sqlite-reader.js";
 import { parseConnections, parseNote } from "../src/markdown-parser.js";
@@ -1521,6 +1521,354 @@ describe("maybeSpokePull", () => {
   }, 10000);
 });
 
+describe("push failure classification (#501)", () => {
+  const failed = (stderr: string) => ({ ok: false, code: 1, stdout: "", stderr });
+
+  test("a diverged spoke is non-fast-forward, not a generic failure", () => {
+    expect(classifyPushFailure(failed(
+      " ! [rejected]        main -> main (non-fast-forward)\n" +
+      "error: failed to push some refs to 'ssh://hub/vault.git'\n" +
+      "hint: Updates were rejected because the tip of your current branch is behind\n",
+    ))).toBe("non-fast-forward");
+  });
+
+  test("hub ACL rejection is acl-rejected", () => {
+    expect(classifyPushFailure(failed(
+      "remote: REJECTED: push contains out-of-scope writes\n" +
+      "remote: Identity: cluster-mario\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+    ))).toBe("acl-rejected");
+  });
+
+  test("a rate-limit rejection is NOT reported as an ACL violation", () => {
+    // Both arrive wrapped in "pre-receive hook declined"; only the specific
+    // reason distinguishes a permanent violation from one that clears itself
+    // after an hour. Classifying this as acl-rejected would tell the operator
+    // (and syncFailureResponse's retriable flag) exactly the wrong thing.
+    expect(classifyPushFailure(failed(
+      "remote: REJECTED: rate limit exceeded (git_syncs_per_hour)\n" +
+      "remote: Retry after 1800s\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+    ))).toBe("rate-limited");
+  });
+
+  test("a sleeping VPN is transport, not a hard failure", () => {
+    expect(classifyPushFailure(failed(
+      "ssh: connect to host hub.example.ts.net port 22: Operation timed out\n" +
+      "fatal: Could not read from remote repository.\n",
+    ))).toBe("transport");
+  });
+
+  test("timeout and spawn failure keep their own classes", () => {
+    expect(classifyPushFailure({ ok: false, timedOut: true, error: "timed out after 30000ms" }))
+      .toBe("timeout");
+    expect(classifyPushFailure({ ok: false, error: "spawn schist ENOENT" }))
+      .toBe("spawn-failed");
+  });
+
+  test("an unrecognized failure falls through to other, never a guess", () => {
+    expect(classifyPushFailure(failed("error: something nobody has seen before\n")))
+      .toBe("other");
+  });
+
+  test("REAL `schist sync push` output for a diverged spoke — not raw git", () => {
+    // The literal transcript the CLI produces: sync.py wraps ANY push output
+    // containing "rejected" in "Push rejected by hub:", and git's non-ff
+    // output always contains "! [rejected]". Keying ACL detection off that
+    // wrapper classified every diverged spoke as acl-rejected, which made
+    // #500 auto-recovery unreachable in production while stubs that emitted
+    // bare git stderr passed. Pin the real string.
+    expect(classifyPushFailure(failed(
+      "Push rejected by hub:\n" +
+      "To /tmp/hub.git\n" +
+      " ! [rejected]        main -> main (fetch first)\n" +
+      "error: failed to push some refs to '/tmp/hub.git'\n" +
+      "hint: Updates were rejected because the remote contains work that you do not\n" +
+      "hint: have locally.\n",
+    ))).toBe("non-fast-forward");
+  });
+
+  test("a hostname containing the letters a-c-l is not an ACL rejection", () => {
+    // isAclRejection matched a bare "acl" substring, and git echoes the
+    // remote URL on almost every failure — so one `git remote set-url` to a
+    // host like oracle.example.com turned every transport blip into a
+    // non-retriable "ACL violation".
+    expect(classifyPushFailure(failed(
+      "ssh: connect to host oracle.example.com port 22: Connection refused\n" +
+      "fatal: Could not read from remote repository.\n",
+    ))).toBe("transport");
+  });
+
+  test("a real hub ACL rejection still classifies as acl-rejected", () => {
+    expect(classifyPushFailure(failed(
+      "Push rejected by hub:\n" +
+      "remote: REJECTED: push contains out-of-scope writes\n" +
+      "remote: Identity: cluster-mario\n" +
+      "remote:   - security/bad.md (scope: security)\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+    ))).toBe("acl-rejected");
+  });
+
+  test("sentinel text stays ASCII so sanitizeSentinelContent leaves it intact", () => {
+    // Every byte outside \x20-\x7e is replaced with "?" before an operator
+    // or agent ever reads it, so an em dash in a recovery message arrives as
+    // noise exactly when someone is trying to follow instructions.
+    const messages = [
+      "push failed [non-fast-forward]: working tree dirty, so it was not rebased. " +
+        "Commit or stash, then run sync_retry mode=pull-rebase-push",
+      "push failed [stale-git-state]: diverged from hub, but a git operation is " +
+        "already in progress. Resolve it, then run sync_retry mode=pull-rebase-push",
+    ];
+    for (const m of messages) {
+      expect(/^[\x20-\x7e\t\n]*$/.test(m)).toBe(true);
+    }
+  });
+
+  test("parseFailureClass round-trips the sentinel marker and rejects junk", () => {
+    expect(parseFailureClass("push failed [non-fast-forward]: ! [rejected] main")).toBe("non-fast-forward");
+    expect(parseFailureClass("retry push failed [acl-rejected]: declined")).toBe("acl-rejected");
+    expect(parseFailureClass("push exited with code 1")).toBeNull();
+    expect(parseFailureClass("push failed [not-a-real-class]: x")).toBeNull();
+    // git's own "[rejected]" must never be read as a class: the marker is
+    // only the leading `<prefix> [class]:` group.
+    expect(parseFailureClass("some other writer: ! [rejected] main -> main")).toBeNull();
+  });
+});
+
+describe("diverged spoke auto-recovery (#500)", () => {
+  beforeEach(() => {
+    resetSpokePushTrackerForTesting();
+  });
+
+  /**
+   * Stub `schist` on PATH: the first push reports a non-fast-forward
+   * rejection, a pull succeeds, and the push after the pull succeeds — the
+   * exact shape of a spoke that is merely behind the hub.
+   */
+  async function stubDivergedSpoke(vault: string, logPath: string): Promise<string> {
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(
+      path.join(stubDir, "schist"),
+      `#!/bin/sh
+echo "$@" >> "${logPath}"
+case "$*" in
+  *"sync pull"*) exit 0 ;;
+  *"sync push"*)
+    if grep -q "sync pull" "${logPath}"; then exit 0; fi
+    # Faithful to the real CLI: sync.py prints this wrapper for ANY push
+    # output containing "rejected", which git's non-ff output always does.
+    echo "Push rejected by hub:" >&2
+    echo " ! [rejected]  main -> main (non-fast-forward)" >&2
+    echo "hint: Updates were rejected because the tip of your current branch is behind" >&2
+    exit 1 ;;
+  *) exit 0 ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    return stubDir;
+  }
+
+  async function waitForLog(logPath: string, minLines: number): Promise<string[]> {
+    for (let i = 0; i < 80; i++) {
+      try {
+        const lines = (await fs.readFile(logPath, "utf-8")).trim().split("\n").filter(Boolean);
+        if (lines.length >= minLines) return lines;
+      } catch { /* not written yet */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return [];
+  }
+
+  test("a clean spoke that is merely behind recovers itself: push → pull → push", async () => {
+    const vault = await makeTempSpokeVault();
+    const logPath = path.join(vault, ".schist", "push-log");
+    const stubDir = await stubDivergedSpoke(vault, logPath);
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      triggerSpokePush(vault);
+      const lines = await waitForLog(logPath, 3);
+      expect(lines.length).toBeGreaterThanOrEqual(3);
+      expect(lines[0]).toContain("sync push");
+      expect(lines[1]).toContain("sync pull");
+      expect(lines[2]).toContain("sync push");
+      // Never a force-push: forcing over a diverged hub destroys other
+      // spokes' commits, which is why sync_retry doesn't do it either.
+      expect(lines.some((l) => l.includes("--force"))).toBe(false);
+      // Recovered => no sentinel left behind.
+      await new Promise((r) => setTimeout(r, 200));
+      await expect(
+        fs.access(path.join(vault, ".schist", "last-sync-error")),
+      ).rejects.toThrow();
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test("a dirty tree is never rebased — it records what the operator must run", async () => {
+    const vault = await makeTempSpokeVault();
+    await fs.writeFile(path.join(vault, "dirty.md"), "uncommitted\n");
+    const logPath = path.join(vault, ".schist", "push-log");
+    const stubDir = await stubDivergedSpoke(vault, logPath);
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      triggerSpokePush(vault);
+      const sentinelPath = path.join(vault, ".schist", "last-sync-error");
+      let contents = "";
+      for (let i = 0; i < 80; i++) {
+        try {
+          contents = await fs.readFile(sentinelPath, "utf-8");
+          if (contents.includes("non-fast-forward")) break;
+        } catch { /* not written yet */ }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(contents).toContain("[non-fast-forward]");
+      expect(contents).toContain("working tree dirty");
+      expect(contents).toContain("sync_retry mode=pull-rebase-push");
+      const lines = (await fs.readFile(logPath, "utf-8")).trim().split("\n").filter(Boolean);
+      expect(lines.some((l) => l.includes("sync pull"))).toBe(false);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test("sync_retry records a classified sentinel too, not a bare message", async () => {
+    // Parity: fixing only the background path would leave sync_status
+    // unable to classify a failure that came from the retry tool instead.
+    const vault = await makeTempSpokeVault();
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(
+      path.join(stubDir, "schist"),
+      `#!/bin/sh
+echo "Push rejected by hub:" >&2
+echo " ! [rejected]  main -> main (non-fast-forward)" >&2
+echo "hint: Updates were rejected because the tip of your current branch is behind" >&2
+exit 1
+`,
+      { mode: 0o755 },
+    );
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      await sync_retry(vault, { owner: "test-agent", mode: "push-only" });
+      const contents = await fs.readFile(
+        path.join(vault, ".schist", "last-sync-error"), "utf-8");
+      expect(contents).toContain("retry push failed [non-fast-forward]");
+      const result = await sync_status(vault) as unknown as Record<string, unknown>;
+      expect((result.last_sync_error as Record<string, unknown>).failure_class)
+        .toBe("non-fast-forward");
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test("sync_status surfaces the recorded failure class", async () => {
+    const vault = await makeTempSpokeVault();
+    await fs.writeFile(
+      path.join(vault, ".schist", "last-sync-error"),
+      "2026-08-18T12:00:00.000Z push failed [acl-rejected]: pre-receive hook declined\n",
+    );
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
+    const err = result.last_sync_error as Record<string, unknown>;
+    expect(err.failure_class).toBe("acl-rejected");
+  }, 10000);
+});
+
+describe("diverged spoke auto-recovery against the REAL schist CLI (#500)", () => {
+  beforeEach(() => {
+    resetSpokePushTrackerForTesting();
+  });
+
+  /**
+   * The stub-based tests above can only ever check this code against our
+   * MODEL of `schist sync push`. That model was wrong once already: the
+   * stubs omitted the "Push rejected by hub:" wrapper the CLI always adds,
+   * which is exactly what made every diverged spoke classify as
+   * acl-rejected and left auto-recovery unreachable in production. This
+   * test spawns the real binary against a real hub, so no model sits
+   * between the assertion and the behavior.
+   */
+  test("a real spoke, really behind a real hub, really recovers", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "schist-e2e-"));
+    createdDirs.add(root);
+    const hub = path.join(root, "hub.git");
+    await execFile("git", ["init", "--bare", "--initial-branch=main", hub]);
+
+    const makeClone = async (name: string): Promise<string> => {
+      const dir = path.join(root, name);
+      await execFile("git", ["clone", hub, dir]);
+      await execFile("git", ["config", "user.email", "test@test.com"], { cwd: dir });
+      await execFile("git", ["config", "user.name", "Test"], { cwd: dir });
+      return dir;
+    };
+
+    // Spoke under test: a real schist vault wired to the real hub.
+    const spoke = await makeClone("spoke");
+    await fs.writeFile(
+      path.join(spoke, "schist.yaml"),
+      "name: E2E Vault\nwrite_branch: drafts\ndirectories:\n  - notes\n",
+    );
+    await fs.writeFile(path.join(spoke, ".gitignore"), ".schist/\n");
+    await fs.mkdir(path.join(spoke, "notes"), { recursive: true });
+    await fs.writeFile(path.join(spoke, "notes", "seed.md"), "# seed\n");
+    await execFile("git", ["add", "."], { cwd: spoke });
+    await execFile("git", ["commit", "-m", "seed"], { cwd: spoke });
+    await execFile("git", ["push", "-u", "origin", "main"], { cwd: spoke });
+    await fs.mkdir(path.join(spoke, ".schist"), { recursive: true });
+    await fs.writeFile(
+      path.join(spoke, ".schist", "spoke.yaml"),
+      `hub: ${hub}\nidentity: e2e-spoke\nscope: global\n`,
+    );
+
+    // A second clone moves the hub forward: the spoke is now behind.
+    const other = await makeClone("other");
+    await fs.writeFile(path.join(other, "notes", "from-other.md"), "# other\n");
+    await execFile("git", ["add", "."], { cwd: other });
+    await execFile("git", ["commit", "-m", "beta-from-other"], { cwd: other });
+    await execFile("git", ["push", "origin", "main"], { cwd: other });
+
+    // And the spoke has its own unpushed work: ahead 1, behind 1 = diverged.
+    await fs.writeFile(path.join(spoke, "notes", "from-spoke.md"), "# spoke\n");
+    await execFile("git", ["add", "."], { cwd: spoke });
+    await execFile("git", ["commit", "-m", "alpha-from-spoke"], { cwd: spoke });
+
+    const before = await execFile("git", ["rev-list", "--count", "origin/main..HEAD"], { cwd: spoke });
+    expect(before.stdout.trim()).toBe("1");
+
+    triggerSpokePush(spoke);
+
+    // Wait for the hub to carry BOTH commits — the recovery's own success
+    // signal, not an intermediate log line.
+    let hubLog = "";
+    for (let i = 0; i < 100; i++) {
+      const log = await execFile("git", ["log", "--oneline", "main"], { cwd: hub });
+      hubLog = log.stdout;
+      if (hubLog.includes("alpha-from-spoke") && hubLog.includes("beta-from-other")) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    // Distinct, non-overlapping subjects on purpose: an earlier version used
+    // "spoke commit" and "other spoke commit", and the second contains the
+    // first as a substring — so one hub commit satisfied both assertions and
+    // the test passed even with the classifier bug reintroduced.
+    expect(hubLog).toContain("alpha-from-spoke");
+    expect(hubLog).toContain("beta-from-other");
+
+    // Recovered => sentinel cleared, and no rebase left half-done.
+    await expect(
+      fs.access(path.join(spoke, ".schist", "last-sync-error")),
+    ).rejects.toThrow();
+    await expect(
+      fs.access(path.join(spoke, ".git", "rebase-merge")),
+    ).rejects.toThrow();
+  }, 60000);
+});
+
 describe("sync_status + sync_retry (#135)", () => {
   beforeEach(() => {
     resetSpokePushTrackerForTesting();
@@ -1545,6 +1893,8 @@ describe("sync_status + sync_retry (#135)", () => {
     expect(result.last_sync_error).toEqual({
       timestamp: "2026-06-02T12:00:00.000Z",
       contents: "push exited with code 1",
+      // Pre-#501 sentinels carry no [class] marker — null, not a guess.
+      failure_class: null,
     });
   }, 10000);
 

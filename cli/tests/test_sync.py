@@ -499,6 +499,34 @@ class TestSyncPush:
     @patch("schist.sync.git_ops.stage_scope_files", return_value=(True, ""))
     @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=True)
     @patch("subprocess.run")
+    def test_diff_cached_failure_is_not_nothing_to_push(
+            self, mock_run, mock_changes, mock_stage, mock_commit,
+            mock_unpushed, mock_push, tmp_path, capsys):
+        """#467: a non-zero `git diff --cached` prints nothing to stdout, so
+        the staged list came out empty and the commit branch was skipped — a
+        hard git failure reported as success with exit 0."""
+        from schist.sync import sync_push
+
+        mock_run.return_value = MagicMock(
+            stdout="", stderr="fatal: not a git repository\n", returncode=128)
+
+        vault = _make_spoke(tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            sync_push(MagicMock(), vault, "db.sqlite")
+
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "git diff --cached failed" in err
+        assert "not a git repository" in err
+        mock_commit.assert_not_called()
+        mock_push.assert_not_called()
+
+    @patch("schist.sync.git_ops.push", return_value=(True, ""))
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+    @patch("schist.sync.git_ops.commit", return_value=(True, ""))
+    @patch("schist.sync.git_ops.stage_scope_files", return_value=(True, ""))
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=True)
+    @patch("subprocess.run")
     def test_auto_commits_and_pushes(self, mock_run, mock_changes, mock_stage, mock_commit,
                                      mock_unpushed, mock_push, tmp_path, capsys):
         from schist.sync import sync_push
