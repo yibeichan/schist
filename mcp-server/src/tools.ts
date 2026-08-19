@@ -624,7 +624,12 @@ type SyncCommandOutcome = {
 };
 
 function truncateOutput(s: string, cap = 12_000): string {
-  return s.length > cap ? s.slice(0, cap) + "…" : s;
+  if (s.length <= cap) return s;
+  // Keep both ends. A head-only cap discarded git's last line — the one
+  // that says what to do — whenever the hub listed enough violating files
+  // to blow the cap, and tailOutput downstream then "tailed" the middle.
+  const half = Math.floor(cap / 2);
+  return s.slice(0, half) + "\n...[truncated]...\n" + s.slice(-half);
 }
 
 async function runCommand(
@@ -763,7 +768,11 @@ export function classifyPushFailure(outcome: SyncCommandOutcome): PushFailureCla
   }
   const text = outcomeMessage(outcome).toLowerCase();
   if (text.includes("rate limit")) return "rate-limited";
-  if (isAclRejection(outcome)) return "acl-rejected";
+  // Non-fast-forward before ACL: git's own hint block ("Updates were
+  // rejected because…") is emitted ONLY for a stale ref, while a hub refusal
+  // prints "! [remote rejected] … (pre-receive hook declined)" with no such
+  // hint — so this cannot steal a genuine ACL or rate-limit case, and it
+  // stops a shared word in the surrounding output from doing so.
   if (
     text.includes("non-fast-forward") ||
     text.includes("fetch first") ||
@@ -771,6 +780,7 @@ export function classifyPushFailure(outcome: SyncCommandOutcome): PushFailureCla
   ) {
     return "non-fast-forward";
   }
+  if (isAclRejection(outcome)) return "acl-rejected";
   if (TRANSPORT_PATTERNS.some((pattern) => text.includes(pattern))) return "transport";
   if (STALE_STATE_PATTERNS.some((pattern) => text.includes(pattern))) return "stale-git-state";
   return "other";
@@ -779,7 +789,9 @@ export function classifyPushFailure(outcome: SyncCommandOutcome): PushFailureCla
 /** Keep the TAIL of command output: git prints the actionable line last. */
 function tailOutput(s: string, cap = 500): string {
   const trimmed = s.trim();
-  return trimmed.length > cap ? "…" + trimmed.slice(-cap) : trimmed;
+  // ASCII only: sanitizeSentinelContent maps anything outside \x20-\x7e to
+  // "?", so a Unicode ellipsis would reach the operator as noise.
+  return trimmed.length > cap ? "..." + trimmed.slice(-cap) : trimmed;
 }
 
 /**
@@ -796,7 +808,7 @@ function formatPushFailure(outcome: SyncCommandOutcome, prefix = "push failed"):
 
 /** Read the class marker back out of a sentinel written by formatPushFailure. */
 export function parseFailureClass(contents: string): PushFailureClass | null {
-  const match = /\[([a-z-]+)\]/.exec(contents);
+  const match = /^[^[\]]*\[([a-z-]+)\]:/.exec(contents);
   if (!match) return null;
   const known: PushFailureClass[] = [
     "non-fast-forward", "acl-rejected", "rate-limited", "transport",
@@ -833,23 +845,30 @@ async function recoverDivergedSpoke(
   onOutcome: (outcome: SyncCommandOutcome) => void,
 ): Promise<string | null> {
   if (await hasStaleGitOperation(vaultRoot)) {
-    return "push failed [non-fast-forward]: git operation already in progress — " +
-      "resolve it, then run sync_retry mode=pull-rebase-push";
+    return "push failed [stale-git-state]: diverged from hub, but a git operation " +
+      "is already in progress. Resolve it, then run sync_retry mode=pull-rebase-push";
   }
   const status = await runGit(vaultRoot, ["status", "--porcelain"]);
-  if (!status.ok || (status.stdout ?? "").trim().length > 0) {
-    return "push failed [non-fast-forward]: working tree dirty — " +
-      "run sync_retry mode=pull-rebase-push";
+  if (!status.ok) {
+    // Don't report a probe failure as "dirty" — that names the wrong
+    // condition AND the wrong remedy.
+    return formatPushFailure(status, "diverged from hub, but git status failed");
+  }
+  if ((status.stdout ?? "").trim().length > 0) {
+    return "push failed [non-fast-forward]: working tree dirty, so it was not " +
+      "rebased. Commit or stash, then run sync_retry mode=pull-rebase-push";
   }
 
   console.error("[schist] spoke diverged from hub; attempting one pull-rebase-push");
   const pull = await runSchistSync(vaultRoot, "pull", SYNC_RETRY_TIMEOUT_MS);
   if (!pull.ok) {
-    onOutcome(pull);
+    // Deliberately NOT onOutcome(pull): the tracked promise's outcome is what
+    // sync_retry reports under phase "push", and a pull error there reads as
+    // a push error. The pull's detail goes into the sentinel instead.
     if (isRebaseConflict(pull)) {
       await runGit(vaultRoot, ["rebase", "--abort"], 5_000);
       return "push failed [non-fast-forward]: rebase conflict during auto-recovery " +
-        "(rebase aborted, tree unchanged) — resolve manually, then run " +
+        "(rebase aborted, tree unchanged). Resolve manually, then run " +
         "sync_retry mode=pull-rebase-push";
     }
     return formatPushFailure(pull, "pull-rebase during auto-recovery failed");
@@ -1120,14 +1139,29 @@ async function recentAddedPaths(
   return { ok: true, rows };
 }
 
+/**
+ * Does this failure come from the hub REFUSING the write (as opposed to
+ * refusing the ref update)?
+ *
+ * Two traps, both hit in production (#501):
+ *   - "push rejected by hub" is NOT an ACL signal. `sync.py` prints that
+ *     wrapper for any push output containing "rejected", and git's
+ *     non-fast-forward output always contains "! [rejected]" — so keying on
+ *     it labelled every diverged spoke an ACL violation, marked it
+ *     non-retriable in sync_retry, and made #500's auto-recovery unreachable.
+ *   - bare "acl" matches any hostname or path containing the letters
+ *     (oracle, tentacle, pinnacle...), and git echoes the remote URL on
+ *     essentially every push failure. Word-bounded.
+ */
 function isAclRejection(outcome: SyncCommandOutcome): boolean {
   const text = outcomeMessage(outcome).toLowerCase();
   return (
-    text.includes("acl") ||
+    /\bacl\b/.test(text) ||
+    text.includes("out-of-scope writes") ||
     text.includes("pre-receive hook declined") ||
-    text.includes("push rejected by hub") ||
+    text.includes("require_pinned_identity") ||
     text.includes("cannot determine push identity") ||
-    text.includes("identity") && text.includes("rejected")
+    (text.includes("identity") && text.includes("rejected"))
   );
 }
 

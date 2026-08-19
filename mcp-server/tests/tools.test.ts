@@ -1571,10 +1571,67 @@ describe("push failure classification (#501)", () => {
       .toBe("other");
   });
 
+  test("REAL `schist sync push` output for a diverged spoke — not raw git", () => {
+    // The literal transcript the CLI produces: sync.py wraps ANY push output
+    // containing "rejected" in "Push rejected by hub:", and git's non-ff
+    // output always contains "! [rejected]". Keying ACL detection off that
+    // wrapper classified every diverged spoke as acl-rejected, which made
+    // #500 auto-recovery unreachable in production while stubs that emitted
+    // bare git stderr passed. Pin the real string.
+    expect(classifyPushFailure(failed(
+      "Push rejected by hub:\n" +
+      "To /tmp/hub.git\n" +
+      " ! [rejected]        main -> main (fetch first)\n" +
+      "error: failed to push some refs to '/tmp/hub.git'\n" +
+      "hint: Updates were rejected because the remote contains work that you do not\n" +
+      "hint: have locally.\n",
+    ))).toBe("non-fast-forward");
+  });
+
+  test("a hostname containing the letters a-c-l is not an ACL rejection", () => {
+    // isAclRejection matched a bare "acl" substring, and git echoes the
+    // remote URL on almost every failure — so one `git remote set-url` to a
+    // host like oracle.example.com turned every transport blip into a
+    // non-retriable "ACL violation".
+    expect(classifyPushFailure(failed(
+      "ssh: connect to host oracle.example.com port 22: Connection refused\n" +
+      "fatal: Could not read from remote repository.\n",
+    ))).toBe("transport");
+  });
+
+  test("a real hub ACL rejection still classifies as acl-rejected", () => {
+    expect(classifyPushFailure(failed(
+      "Push rejected by hub:\n" +
+      "remote: REJECTED: push contains out-of-scope writes\n" +
+      "remote: Identity: cluster-mario\n" +
+      "remote:   - security/bad.md (scope: security)\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+    ))).toBe("acl-rejected");
+  });
+
+  test("sentinel text stays ASCII so sanitizeSentinelContent leaves it intact", () => {
+    // Every byte outside \x20-\x7e is replaced with "?" before an operator
+    // or agent ever reads it, so an em dash in a recovery message arrives as
+    // noise exactly when someone is trying to follow instructions.
+    const messages = [
+      "push failed [non-fast-forward]: working tree dirty, so it was not rebased. " +
+        "Commit or stash, then run sync_retry mode=pull-rebase-push",
+      "push failed [stale-git-state]: diverged from hub, but a git operation is " +
+        "already in progress. Resolve it, then run sync_retry mode=pull-rebase-push",
+    ];
+    for (const m of messages) {
+      expect(/^[\x20-\x7e\t\n]*$/.test(m)).toBe(true);
+    }
+  });
+
   test("parseFailureClass round-trips the sentinel marker and rejects junk", () => {
     expect(parseFailureClass("push failed [non-fast-forward]: ! [rejected] main")).toBe("non-fast-forward");
+    expect(parseFailureClass("retry push failed [acl-rejected]: declined")).toBe("acl-rejected");
     expect(parseFailureClass("push exited with code 1")).toBeNull();
     expect(parseFailureClass("push failed [not-a-real-class]: x")).toBeNull();
+    // git's own "[rejected]" must never be read as a class: the marker is
+    // only the leading `<prefix> [class]:` group.
+    expect(parseFailureClass("some other writer: ! [rejected] main -> main")).toBeNull();
   });
 });
 
@@ -1598,6 +1655,9 @@ case "$*" in
   *"sync pull"*) exit 0 ;;
   *"sync push"*)
     if grep -q "sync pull" "${logPath}"; then exit 0; fi
+    # Faithful to the real CLI: sync.py prints this wrapper for ANY push
+    # output containing "rejected", which git's non-ff output always does.
+    echo "Push rejected by hub:" >&2
     echo " ! [rejected]  main -> main (non-fast-forward)" >&2
     echo "hint: Updates were rejected because the tip of your current branch is behind" >&2
     exit 1 ;;
@@ -1684,6 +1744,7 @@ esac
     await fs.writeFile(
       path.join(stubDir, "schist"),
       `#!/bin/sh
+echo "Push rejected by hub:" >&2
 echo " ! [rejected]  main -> main (non-fast-forward)" >&2
 echo "hint: Updates were rejected because the tip of your current branch is behind" >&2
 exit 1
