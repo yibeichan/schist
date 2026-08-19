@@ -1779,6 +1779,96 @@ exit 1
   }, 10000);
 });
 
+describe("diverged spoke auto-recovery against the REAL schist CLI (#500)", () => {
+  beforeEach(() => {
+    resetSpokePushTrackerForTesting();
+  });
+
+  /**
+   * The stub-based tests above can only ever check this code against our
+   * MODEL of `schist sync push`. That model was wrong once already: the
+   * stubs omitted the "Push rejected by hub:" wrapper the CLI always adds,
+   * which is exactly what made every diverged spoke classify as
+   * acl-rejected and left auto-recovery unreachable in production. This
+   * test spawns the real binary against a real hub, so no model sits
+   * between the assertion and the behavior.
+   */
+  test("a real spoke, really behind a real hub, really recovers", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "schist-e2e-"));
+    createdDirs.add(root);
+    const hub = path.join(root, "hub.git");
+    await execFile("git", ["init", "--bare", "--initial-branch=main", hub]);
+
+    const makeClone = async (name: string): Promise<string> => {
+      const dir = path.join(root, name);
+      await execFile("git", ["clone", hub, dir]);
+      await execFile("git", ["config", "user.email", "test@test.com"], { cwd: dir });
+      await execFile("git", ["config", "user.name", "Test"], { cwd: dir });
+      return dir;
+    };
+
+    // Spoke under test: a real schist vault wired to the real hub.
+    const spoke = await makeClone("spoke");
+    await fs.writeFile(
+      path.join(spoke, "schist.yaml"),
+      "name: E2E Vault\nwrite_branch: drafts\ndirectories:\n  - notes\n",
+    );
+    await fs.writeFile(path.join(spoke, ".gitignore"), ".schist/\n");
+    await fs.mkdir(path.join(spoke, "notes"), { recursive: true });
+    await fs.writeFile(path.join(spoke, "notes", "seed.md"), "# seed\n");
+    await execFile("git", ["add", "."], { cwd: spoke });
+    await execFile("git", ["commit", "-m", "seed"], { cwd: spoke });
+    await execFile("git", ["push", "-u", "origin", "main"], { cwd: spoke });
+    await fs.mkdir(path.join(spoke, ".schist"), { recursive: true });
+    await fs.writeFile(
+      path.join(spoke, ".schist", "spoke.yaml"),
+      `hub: ${hub}\nidentity: e2e-spoke\nscope: global\n`,
+    );
+
+    // A second clone moves the hub forward: the spoke is now behind.
+    const other = await makeClone("other");
+    await fs.writeFile(path.join(other, "notes", "from-other.md"), "# other\n");
+    await execFile("git", ["add", "."], { cwd: other });
+    await execFile("git", ["commit", "-m", "beta-from-other"], { cwd: other });
+    await execFile("git", ["push", "origin", "main"], { cwd: other });
+
+    // And the spoke has its own unpushed work: ahead 1, behind 1 = diverged.
+    await fs.writeFile(path.join(spoke, "notes", "from-spoke.md"), "# spoke\n");
+    await execFile("git", ["add", "."], { cwd: spoke });
+    await execFile("git", ["commit", "-m", "alpha-from-spoke"], { cwd: spoke });
+
+    const before = await execFile("git", ["rev-list", "--count", "origin/main..HEAD"], { cwd: spoke });
+    expect(before.stdout.trim()).toBe("1");
+
+    triggerSpokePush(spoke);
+
+    // Wait for the hub to carry BOTH commits — the recovery's own success
+    // signal, not an intermediate log line.
+    let hubLog = "";
+    for (let i = 0; i < 100; i++) {
+      const log = await execFile("git", ["log", "--oneline", "main"], { cwd: hub });
+      hubLog = log.stdout;
+      if (hubLog.includes("alpha-from-spoke") && hubLog.includes("beta-from-other")) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    // Distinct, non-overlapping subjects on purpose: an earlier version used
+    // "spoke commit" and "other spoke commit", and the second contains the
+    // first as a substring — so one hub commit satisfied both assertions and
+    // the test passed even with the classifier bug reintroduced.
+    expect(hubLog).toContain("alpha-from-spoke");
+    expect(hubLog).toContain("beta-from-other");
+
+    // Recovered => sentinel cleared, and no rebase left half-done.
+    await expect(
+      fs.access(path.join(spoke, ".schist", "last-sync-error")),
+    ).rejects.toThrow();
+    await expect(
+      fs.access(path.join(spoke, ".git", "rebase-merge")),
+    ).rejects.toThrow();
+  }, 60000);
+});
+
 describe("sync_status + sync_retry (#135)", () => {
   beforeEach(() => {
     resetSpokePushTrackerForTesting();
