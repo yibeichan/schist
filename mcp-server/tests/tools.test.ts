@@ -7,7 +7,7 @@ import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { load as yamlLoadSync } from "js-yaml";
 import { jest } from "@jest/globals";
-import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES } from "../src/tools.js";
+import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES } from "../src/tools.js";
 import Database from "better-sqlite3";
 import { INDEX_SCHEMA_VERSION } from "../src/sqlite-reader.js";
 import { parseConnections, parseNote } from "../src/markdown-parser.js";
@@ -1521,6 +1521,173 @@ describe("maybeSpokePull", () => {
   }, 10000);
 });
 
+describe("push failure classification (#501)", () => {
+  const failed = (stderr: string) => ({ ok: false, code: 1, stdout: "", stderr });
+
+  test("a diverged spoke is non-fast-forward, not a generic failure", () => {
+    expect(classifyPushFailure(failed(
+      " ! [rejected]        main -> main (non-fast-forward)\n" +
+      "error: failed to push some refs to 'ssh://hub/vault.git'\n" +
+      "hint: Updates were rejected because the tip of your current branch is behind\n",
+    ))).toBe("non-fast-forward");
+  });
+
+  test("hub ACL rejection is acl-rejected", () => {
+    expect(classifyPushFailure(failed(
+      "remote: REJECTED: push contains out-of-scope writes\n" +
+      "remote: Identity: cluster-mario\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+    ))).toBe("acl-rejected");
+  });
+
+  test("a rate-limit rejection is NOT reported as an ACL violation", () => {
+    // Both arrive wrapped in "pre-receive hook declined"; only the specific
+    // reason distinguishes a permanent violation from one that clears itself
+    // after an hour. Classifying this as acl-rejected would tell the operator
+    // (and syncFailureResponse's retriable flag) exactly the wrong thing.
+    expect(classifyPushFailure(failed(
+      "remote: REJECTED: rate limit exceeded (git_syncs_per_hour)\n" +
+      "remote: Retry after 1800s\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+    ))).toBe("rate-limited");
+  });
+
+  test("a sleeping VPN is transport, not a hard failure", () => {
+    expect(classifyPushFailure(failed(
+      "ssh: connect to host hub.example.ts.net port 22: Operation timed out\n" +
+      "fatal: Could not read from remote repository.\n",
+    ))).toBe("transport");
+  });
+
+  test("timeout and spawn failure keep their own classes", () => {
+    expect(classifyPushFailure({ ok: false, timedOut: true, error: "timed out after 30000ms" }))
+      .toBe("timeout");
+    expect(classifyPushFailure({ ok: false, error: "spawn schist ENOENT" }))
+      .toBe("spawn-failed");
+  });
+
+  test("an unrecognized failure falls through to other, never a guess", () => {
+    expect(classifyPushFailure(failed("error: something nobody has seen before\n")))
+      .toBe("other");
+  });
+
+  test("parseFailureClass round-trips the sentinel marker and rejects junk", () => {
+    expect(parseFailureClass("push failed [non-fast-forward]: ! [rejected] main")).toBe("non-fast-forward");
+    expect(parseFailureClass("push exited with code 1")).toBeNull();
+    expect(parseFailureClass("push failed [not-a-real-class]: x")).toBeNull();
+  });
+});
+
+describe("diverged spoke auto-recovery (#500)", () => {
+  beforeEach(() => {
+    resetSpokePushTrackerForTesting();
+  });
+
+  /**
+   * Stub `schist` on PATH: the first push reports a non-fast-forward
+   * rejection, a pull succeeds, and the push after the pull succeeds — the
+   * exact shape of a spoke that is merely behind the hub.
+   */
+  async function stubDivergedSpoke(vault: string, logPath: string): Promise<string> {
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(
+      path.join(stubDir, "schist"),
+      `#!/bin/sh
+echo "$@" >> "${logPath}"
+case "$*" in
+  *"sync pull"*) exit 0 ;;
+  *"sync push"*)
+    if grep -q "sync pull" "${logPath}"; then exit 0; fi
+    echo " ! [rejected]  main -> main (non-fast-forward)" >&2
+    echo "hint: Updates were rejected because the tip of your current branch is behind" >&2
+    exit 1 ;;
+  *) exit 0 ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    return stubDir;
+  }
+
+  async function waitForLog(logPath: string, minLines: number): Promise<string[]> {
+    for (let i = 0; i < 80; i++) {
+      try {
+        const lines = (await fs.readFile(logPath, "utf-8")).trim().split("\n").filter(Boolean);
+        if (lines.length >= minLines) return lines;
+      } catch { /* not written yet */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return [];
+  }
+
+  test("a clean spoke that is merely behind recovers itself: push → pull → push", async () => {
+    const vault = await makeTempSpokeVault();
+    const logPath = path.join(vault, ".schist", "push-log");
+    const stubDir = await stubDivergedSpoke(vault, logPath);
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      triggerSpokePush(vault);
+      const lines = await waitForLog(logPath, 3);
+      expect(lines.length).toBeGreaterThanOrEqual(3);
+      expect(lines[0]).toContain("sync push");
+      expect(lines[1]).toContain("sync pull");
+      expect(lines[2]).toContain("sync push");
+      // Never a force-push: forcing over a diverged hub destroys other
+      // spokes' commits, which is why sync_retry doesn't do it either.
+      expect(lines.some((l) => l.includes("--force"))).toBe(false);
+      // Recovered => no sentinel left behind.
+      await new Promise((r) => setTimeout(r, 200));
+      await expect(
+        fs.access(path.join(vault, ".schist", "last-sync-error")),
+      ).rejects.toThrow();
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test("a dirty tree is never rebased — it records what the operator must run", async () => {
+    const vault = await makeTempSpokeVault();
+    await fs.writeFile(path.join(vault, "dirty.md"), "uncommitted\n");
+    const logPath = path.join(vault, ".schist", "push-log");
+    const stubDir = await stubDivergedSpoke(vault, logPath);
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      triggerSpokePush(vault);
+      const sentinelPath = path.join(vault, ".schist", "last-sync-error");
+      let contents = "";
+      for (let i = 0; i < 80; i++) {
+        try {
+          contents = await fs.readFile(sentinelPath, "utf-8");
+          if (contents.includes("non-fast-forward")) break;
+        } catch { /* not written yet */ }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(contents).toContain("[non-fast-forward]");
+      expect(contents).toContain("working tree dirty");
+      expect(contents).toContain("sync_retry mode=pull-rebase-push");
+      const lines = (await fs.readFile(logPath, "utf-8")).trim().split("\n").filter(Boolean);
+      expect(lines.some((l) => l.includes("sync pull"))).toBe(false);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test("sync_status surfaces the recorded failure class", async () => {
+    const vault = await makeTempSpokeVault();
+    await fs.writeFile(
+      path.join(vault, ".schist", "last-sync-error"),
+      "2026-08-18T12:00:00.000Z push failed [acl-rejected]: pre-receive hook declined\n",
+    );
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
+    const err = result.last_sync_error as Record<string, unknown>;
+    expect(err.failure_class).toBe("acl-rejected");
+  }, 10000);
+});
+
 describe("sync_status + sync_retry (#135)", () => {
   beforeEach(() => {
     resetSpokePushTrackerForTesting();
@@ -1545,6 +1712,8 @@ describe("sync_status + sync_retry (#135)", () => {
     expect(result.last_sync_error).toEqual({
       timestamp: "2026-06-02T12:00:00.000Z",
       contents: "push exited with code 1",
+      // Pre-#501 sentinels carry no [class] marker — null, not a guess.
+      failure_class: null,
     });
   }, 10000);
 

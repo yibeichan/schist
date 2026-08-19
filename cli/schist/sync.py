@@ -690,6 +690,15 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
                 # the next push attempt picks them up.
                 print("Error: git diff --cached timed out after 30s (NFS stall?)", file=sys.stderr)
                 sys.exit(1)
+            if result.returncode != 0:
+                # Same swallow as has_uncommitted_changes had (#467): on a
+                # non-zero exit stdout is empty, so `staged` came out [] and
+                # the commit branch was skipped — a hard git failure reported
+                # as "Nothing to push" with exit 0. Fail loudly instead; the
+                # files stay staged for the next attempt.
+                err = (result.stderr or "").strip() or f"exit {result.returncode}"
+                print(f"Error: git diff --cached failed: {err}", file=sys.stderr)
+                sys.exit(1)
             staged = [f for f in result.stdout.strip().split("\n") if f]
             n = len(staged)
 

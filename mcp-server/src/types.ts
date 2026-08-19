@@ -89,6 +89,23 @@ export interface GetContextResponse {
   verboseNote?: string;
 }
 
+/**
+ * Why a background push failed, in terms an operator — or the auto-recovery
+ * path — can act on (#501). Recorded in the `.schist/last-sync-error`
+ * sentinel as a `[class]` marker and surfaced here so a caller can tell a
+ * diverged spoke (seconds to fix) from an out-of-scope write (never fixable
+ * by retry) from a sleeping VPN (fixes itself).
+ */
+export type PushFailureClass =
+  | "non-fast-forward"
+  | "acl-rejected"
+  | "rate-limited"
+  | "transport"
+  | "stale-git-state"
+  | "timeout"
+  | "spawn-failed"
+  | "other";
+
 export interface SyncStatusResponse {
   is_spoke: boolean;
   spoke_head: string;
@@ -98,6 +115,9 @@ export interface SyncStatusResponse {
   last_sync_error: {
     timestamp?: string;
     contents: string;
+    /** Parsed from the sentinel's `[class]` marker; null for sentinels
+     *  written before #501, or written by a path that doesn't classify. */
+    failure_class?: PushFailureClass | null;
   } | null;
   clean_working_tree: boolean;
   /** #388: true when `schist sync push` would hard-fail on .gitignore-excluded

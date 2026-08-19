@@ -264,6 +264,28 @@ def test_has_uncommitted_changes_true_on_timeout():
         assert git_ops.has_uncommitted_changes("/tmp/vault") is True
 
 
+def test_has_uncommitted_changes_true_on_nonzero_returncode():
+    """#467: a failed `git status` prints nothing, so the old
+    bool(stdout.strip()) read a corrupt repo as 'no changes' and sync_push
+    silently pushed nothing. Answer conservatively, like has_unpushed_commits.
+    """
+    failed = subprocess.CompletedProcess(
+        ["git", "status", "--porcelain"], 128,
+        stdout="", stderr="fatal: not a git repository\n",
+    )
+    with patch("schist.git_ops.subprocess.run", return_value=failed):
+        assert git_ops.has_uncommitted_changes("/tmp/vault") is True
+
+
+def test_has_uncommitted_changes_false_on_clean_repo():
+    """The conservative path must not swallow the genuine 'clean' answer."""
+    clean = subprocess.CompletedProcess(
+        ["git", "status", "--porcelain"], 0, stdout="", stderr="",
+    )
+    with patch("schist.git_ops.subprocess.run", return_value=clean):
+        assert git_ops.has_uncommitted_changes("/tmp/vault") is False
+
+
 def test_has_unpushed_commits_true_on_rev_list_timeout():
     def _branch_ok_revlist_stalls(*args, **kwargs):
         argv = args[0]

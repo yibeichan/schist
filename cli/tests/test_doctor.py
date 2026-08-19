@@ -214,9 +214,30 @@ class TestCheckPostCommitHook:
     def test_installed(self, tmp_path):
         hooks = tmp_path / ".git" / "hooks"
         hooks.mkdir(parents=True)
-        (hooks / "post-commit").write_text("#!/bin/sh\n")
+        hook = hooks / "post-commit"
+        hook.write_text("#!/bin/sh\n")
+        # chmod added with #460: git only runs an executable hook, so a
+        # non-executable one is not an "installed" hook in any useful sense.
+        hook.chmod(0o755)
         r = check_post_commit_hook(str(tmp_path))
         assert r.status == "PASS"
+
+    def test_installed_but_not_executable(self, tmp_path):
+        """#460: git SKIPS a non-executable hook silently, so auto-ingest is
+        dead while doctor reports PASS and the index drifts from the notes."""
+        import os
+        hooks = tmp_path / ".git" / "hooks"
+        hooks.mkdir(parents=True)
+        hook = hooks / "post-commit"
+        hook.write_text("#!/bin/sh\n")
+        hook.chmod(0o644)
+        if os.access(hook, os.X_OK):  # pragma: no cover - root ignores mode bits
+            import pytest as _pytest
+            _pytest.skip("running as root: mode bits don't gate os.access")
+        r = check_post_commit_hook(str(tmp_path))
+        assert r.status == "FAIL"
+        assert "not executable" in r.message
+        assert "chmod +x" in (r.fix or "")
 
     def test_missing(self, tmp_path):
         (tmp_path / ".git").mkdir()
@@ -1365,7 +1386,10 @@ class TestRunDoctor:
         # Set up a minimal valid vault
         (tmp_path / ".git").mkdir()
         (tmp_path / ".git" / "hooks").mkdir()
-        (tmp_path / ".git" / "hooks" / "post-commit").write_text("#!/bin/sh\n")
+        _hook = tmp_path / ".git" / "hooks" / "post-commit"
+        _hook.write_text("#!/bin/sh\n")
+        _hook.chmod(0o755)  # #460: sync.py installs hooks 0o755; git skips
+                            # a non-executable one, so doctor now FAILs on it.
         (tmp_path / "schist.yaml").write_text(yaml.dump({"name": "test"}))
 
         db = tmp_path / ".schist" / "schist.db"
