@@ -233,6 +233,63 @@ of whatever process ran `git push`. On HPC this usually means the SLURM job
 wrapper didn't inherit your `.bashrc` exports — add an explicit
 `export SCHIST_IDENTITY=hpc-cluster` to the job script.
 
+### "REJECTED: rate limit exceeded"
+
+Two different limits produce this line, and only one of them clears by
+waiting — check which name is in the parentheses:
+
+- **`git_syncs_per_hour`** is a sliding window. The hook prints a
+  `Retry after: N seconds` line with the next available slot. Waiting works;
+  `sync_retry` reports `retriable: true`.
+- **`notes_per_sync`** is a cap on the whole **push range**, enforced
+  statelessly with no retry window and no `Retry after:` line. The identical
+  push is rejected identically forever — waiting never helps. `sync_retry`
+  reports `retriable: false, reason: "Rate limit (no retry window)"`.
+
+  Adding more commits does **not** help: the hook counts files across
+  `oldrev..newrev` and dedupes, so every commit you add is still inside the
+  range being pushed. What matters is the *range*, so the remedy depends on
+  how the backlog was built:
+
+  - **Many commits** (the usual MCP case — each `create_note` commits on its
+    own): push the range in pieces. Each push is its own range and is counted
+    separately.
+
+    ```bash
+    git log --oneline origin/main..main     # pick a sha under the cap
+    git push origin <intermediate-sha>:main
+    git push origin main
+    ```
+
+  - **One commit** (the CLI path — `schist sync push` stages everything
+    pending and makes a single `sync(<identity>): N files` commit): there is
+    no intermediate sha, so there is nothing to split. Either raise the limit,
+    or rewind and re-commit in batches before pushing:
+
+    ```bash
+    git reset --soft origin/main   # keep the files, drop the one big commit
+    # then re-add and commit in groups under the cap, pushing after each
+    ```
+
+  Raising the limit instead is a hub-side edit to `rate_limits.notes_per_sync`
+  for that identity in the hub's `vault.yaml` — root `vault.yaml` writes are
+  rejected from a spoke, so make it on the hub and let spokes fast-forward.
+
+  Two things to know before you start splitting:
+
+  - **The two limits trade against each other.** `git_syncs_per_hour` defaults
+    to 10, so splitting a large backlog into N pushes spends N of those slots
+    and can turn a `notes_per_sync` rejection into a `git_syncs_per_hour` one.
+    If the backlog is large enough to need many pieces, raise the limit
+    instead.
+  - **A manual `git push` does not clear the sentinel.** `.schist/last-sync-error`
+    is only cleared by `sync_retry` or a successful background push, so after
+    pushing by hand your pushes are fine but MCP writes are still blocked. Run
+    `sync_retry mode=push-only` afterwards to clear it.
+
+Both are reported as `failure_class: "rate-limited"` — the class says what
+happened, `retriable` says whether repeating the same command could work.
+
 ### "Pull timed out — falling through"
 
 The 5-second cap on `maybeSpokePull` is intentional. If you see this
