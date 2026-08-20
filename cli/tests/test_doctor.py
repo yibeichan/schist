@@ -23,6 +23,7 @@ from schist.doctor import (
     check_node,
     check_post_commit_hook,
     check_pre_commit_hook,
+    _effective_hooks_dir,
     check_hub_pre_receive_hook,
     check_python,
     check_root_gitignore,
@@ -325,6 +326,45 @@ class TestHookChecksRespectHooksPath:
         r = check_pre_commit_hook(str(repo))
         assert r.status == "PASS"
         assert "core.hooksPath" in r.message
+
+    def test_empty_hooks_path_is_not_the_same_as_unset(self, tmp_path):
+        """Verified against real git: `core.hooksPath = ""` runs NO hook from
+        .git/hooks. Treating set-but-empty as unset made doctor report
+        `PASS | installed` on the default pre-commit while git ran nothing —
+        a false all-clear on a disabled secret scanner, which is the exact
+        defect class this check exists to catch."""
+        repo = self._repo(tmp_path, "")
+        default = repo / ".git" / "hooks"
+        default.mkdir(parents=True, exist_ok=True)
+        for name in ("pre-commit", "post-commit"):
+            (default / name).write_text("#!/bin/sh\n")
+            (default / name).chmod(0o755)
+
+        for check in (check_pre_commit_hook, check_post_commit_hook):
+            r = check(str(repo))
+            assert r.status == "FAIL", f"{check.__name__} must not pass on a disabled hook"
+            assert "empty value" in r.message
+            assert "--unset core.hooksPath" in (r.fix or "")
+        assert check_hooks_freshness(str(repo)).status == "FAIL"
+
+    def test_tilde_is_expanded_by_git_not_by_us(self, tmp_path):
+        """`--type=path` makes git do the expansion, so we never have to match
+        Path.expanduser() against git's behaviour by hand."""
+        hooks = Path.home() / ".schist-doctor-tilde-test"
+        repo = self._repo(tmp_path, "~/.schist-doctor-tilde-test")
+        hooks_dir, configured = _effective_hooks_dir(str(repo))
+        assert hooks_dir == hooks, hooks_dir
+        assert "~" not in str(hooks_dir)
+        assert configured == str(hooks)
+
+    def test_last_value_wins_on_a_multivalued_key(self, tmp_path):
+        """git honours the last value for a single-valued key, and so must we."""
+        import subprocess as sp
+        repo = self._repo(tmp_path, "first")
+        sp.run(["git", "-C", str(repo), "config", "--add",
+                "core.hooksPath", "second"], check=True)
+        hooks_dir, _ = _effective_hooks_dir(str(repo))
+        assert hooks_dir == repo / "second", hooks_dir
 
     def test_absolute_hooks_path(self, tmp_path):
         hooks = tmp_path / "elsewhere"

@@ -172,21 +172,35 @@ def check_sqlite(vault_path: Optional[str], db_path: Optional[str]) -> CheckResu
 
 
 def _configured_hooks_path(git_dir_arg: list[str], cwd: Optional[str]) -> Optional[str]:
-    """Read `core.hooksPath`, or None when unset/unreadable."""
+    """Read `core.hooksPath`.
+
+    Tri-state, and the distinction matters: None means UNSET (git uses
+    .git/hooks), `""` means SET TO EMPTY, which is not the same thing —
+    verified against real git, an empty value runs no hook from .git/hooks at
+    all. Collapsing the two made this module report PASS on the default
+    pre-commit while git ran nothing, i.e. a false all-clear on a disabled
+    secret scanner.
+
+    `--type=path` makes git expand `~` itself rather than us guessing whether
+    Path.expanduser() matches; relative values are returned unchanged.
+    Multiple values are fine: `--get` returns the last, which is also the one
+    git honours for a single-valued key.
+    """
     try:
         r = subprocess.run(
-            ["git", *git_dir_arg, "config", "--get", "core.hooksPath"],
+            ["git", *git_dir_arg, "config", "--get", "--type=path", "core.hooksPath"],
             capture_output=True, text=True, timeout=5, cwd=cwd,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return None
-    # `git config --get` exits 1 when the key is unset.
+    # `git config --get` exits 1 when the key is unset; other non-zero codes
+    # mean something else went wrong, and neither is a configured path.
     if r.returncode != 0:
         return None
-    return r.stdout.strip() or None
+    return r.stdout.strip()
 
 
-def _effective_hooks_dir(vault_path: str) -> tuple[Path, Optional[str]]:
+def _effective_hooks_dir(vault_path: str) -> tuple[Optional[Path], Optional[str]]:
     """Where git will ACTUALLY look for this vault's hooks, and the
     `core.hooksPath` value if one redirected it.
 
@@ -201,17 +215,28 @@ def _effective_hooks_dir(vault_path: str) -> tuple[Path, Optional[str]]:
     the worktree top-level as cwd.
     """
     configured = _configured_hooks_path(["-C", vault_path], None)
-    if configured:
-        p = Path(configured).expanduser()
-        return (p if p.is_absolute() else Path(vault_path) / p), configured
-    return Path(vault_path) / ".git" / "hooks", None
+    if configured is None:
+        return Path(vault_path) / ".git" / "hooks", None
+    if configured == "":
+        # Set-but-empty: git runs nothing from .git/hooks. There is no
+        # directory to report on, so callers must not fall back to the default
+        # and call it PASS.
+        return None, ""
+    p = Path(configured)
+    return (p if p.is_absolute() else Path(vault_path) / p), configured
 
 
-def _hook_fix(vault_path: str, hooks_dir: Path, name: str,
+def _hook_fix(vault_path: str, hooks_dir: Optional[Path], name: str,
               configured: Optional[str]) -> str:
     """The remedy, which differs by cause. `hooks reinstall` writes to
     .git/hooks, so recommending it under a core.hooksPath redirect would send
     the user to install a hook in the one place git is not looking."""
+    if hooks_dir is None:
+        return (
+            f"core.hooksPath is set to an empty string. Unset it "
+            f"(`git -C {vault_path} config --unset core.hooksPath`) so git uses "
+            f".git/hooks again, then `schist --vault {vault_path} hooks reinstall`."
+        )
     hook = hooks_dir / name
     if configured:
         return (
@@ -226,7 +251,7 @@ def _hook_fix(vault_path: str, hooks_dir: Path, name: str,
     )
 
 
-def _hook_state(hooks_dir: Path, name: str, configured: Optional[str]) -> tuple[str, str]:
+def _hook_state(hooks_dir: Optional[Path], name: str, configured: Optional[str]) -> tuple[str, str]:
     """Return (status, message-suffix) for one hook file.
 
     Existence is not enough: git silently SKIPS a hook it cannot execute, so a
@@ -234,6 +259,11 @@ def _hook_state(hooks_dir: Path, name: str, configured: Optional[str]) -> tuple[
     dropped the mode bit, a container COPY, an editor rewriting in place — is
     indistinguishable from a working hook to anything that only stats the path.
     """
+    if hooks_dir is None:
+        return "FAIL", (
+            "core.hooksPath is set to an empty value — git runs no hook from "
+            ".git/hooks, so this hook never fires"
+        )
     where = f" (via core.hooksPath '{configured}')" if configured else ""
     hook = hooks_dir / name
     if not hook.exists():
@@ -332,6 +362,13 @@ def check_hooks_freshness(vault_path: Optional[str]) -> CheckResult:
     # The directory git actually uses, not the default (#532) — otherwise this
     # reports the version of a hook that never runs.
     hooks_dir, _configured = _effective_hooks_dir(vault_path)
+    if hooks_dir is None:
+        return CheckResult(
+            "FAIL", "Hooks freshness",
+            "core.hooksPath is set to an empty value — no hooks run",
+            fix=f"`git -C {vault_path} config --unset core.hooksPath`, then "
+                f"`schist --vault {vault_path} hooks reinstall`.",
+        )
     stale = []
     pinned = []
     unreadable = []
@@ -1022,8 +1059,15 @@ def check_hub_pre_receive_hook(hub_path: Optional[str]) -> CheckResult:
     # Bare repos keep hooks at <repo>/hooks; a non-bare hub would use
     # <repo>/.git/hooks. Honour core.hooksPath either way.
     configured = _configured_hooks_path(["--git-dir", str(hub)], None)
+    if configured == "":
+        return CheckResult(
+            "FAIL", label,
+            "core.hooksPath is set to an empty value — pre-receive never runs, "
+            "so every push is accepted with NO ACL check",
+            f"`git --git-dir {hub} config --unset core.hooksPath`.",
+        )
     if configured:
-        p = Path(configured).expanduser()
+        p = Path(configured)
         hooks_dir = p if p.is_absolute() else hub / p
     elif (hub / "hooks").is_dir():
         hooks_dir = hub / "hooks"
