@@ -1149,14 +1149,22 @@ async function recentAddedPaths(
  *     non-fast-forward output always contains "! [rejected]" — so keying on
  *     it labelled every diverged spoke an ACL violation, marked it
  *     non-retriable in sync_retry, and made #500's auto-recovery unreachable.
- *   - bare "acl" matches any hostname or path containing the letters
- *     (oracle, tentacle, pinnacle...), and git echoes the remote URL on
- *     essentially every push failure. Word-bounded.
+ *   - the word "acl" is NOT a hub signal at all, in any form. No rejection
+ *     path in `pre_receive.py` (nor sync.py's wrapper) prints it: the hub
+ *     says "out-of-scope writes", "cannot determine push identity",
+ *     "unknown identity", or the pinning message, and git wraps EVERY
+ *     pre-receive refusal in "(pre-receive hook declined)" — which is what
+ *     actually catches them all, including `failed to load vault.yaml`.
+ *     Meanwhile git echoes the remote URL on essentially every failure, so
+ *     matching the word only ever misfires. It went bare substring
+ *     ("oracle" matched) -> `\bacl\b` (still matched a host named
+ *     `acl.internal`, #535) -> gone. A transport blip against such a host
+ *     was marked non-retriable, so #500's recovery never fired and the
+ *     operator was told to check ACLs while the real fix was to wait.
  */
 function isAclRejection(outcome: SyncCommandOutcome): boolean {
   const text = outcomeMessage(outcome).toLowerCase();
   return (
-    /\bacl\b/.test(text) ||
     text.includes("out-of-scope writes") ||
     text.includes("pre-receive hook declined") ||
     text.includes("require_pinned_identity") ||
@@ -1175,12 +1183,21 @@ function syncFailureResponse(
   phase: SyncRetryResponse["phase"],
   outcome: SyncCommandOutcome,
 ): SyncRetryResponse {
-  const acl = isAclRejection(outcome);
+  // Derive from classifyPushFailure, NOT from isAclRejection directly (#534).
+  // classifyPushFailure tests the specific hub reasons BEFORE the generic ACL
+  // matcher precisely because a rate-limit rejection also arrives wrapped in
+  // "pre-receive hook declined"; calling isAclRejection here bypassed that
+  // ordering, so a rate-limited retry was reported `retriable: false,
+  // reason: "ACL violation"` — non-retriable and mis-attributed, when it in
+  // fact clears itself after the window. One classifier, one answer.
+  const failureClass = classifyPushFailure(outcome);
+  const acl = failureClass === "acl-rejected";
   return {
     ok: false,
     mode,
     phase,
     retriable: !acl,
+    failure_class: failureClass,
     reason: acl ? "ACL violation" : (outcome.timedOut ? "Timeout" : "Command failed"),
     message: outcomeMessage(outcome),
     code: outcome.code ?? undefined,

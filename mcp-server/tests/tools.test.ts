@@ -1599,6 +1599,38 @@ describe("push failure classification (#501)", () => {
     ))).toBe("transport");
   });
 
+  test("a hostname that IS the word acl is not an ACL rejection either", () => {
+    // #535: the fix above was `\bacl\b`, which the test on its left no longer
+    // discriminates against — "oracle" has a word char before "acl", so the
+    // oracle case passes with OR without the word-bounded version. A host
+    // named `acl.internal` has non-word chars on both sides and still
+    // matched, so every transport failure against that remote was classified
+    // non-retriable. The word is now gone from the matcher entirely: no hub
+    // rejection path prints it.
+    expect(classifyPushFailure(failed(
+      "ssh: connect to host acl.internal port 22: Connection refused\n" +
+      "fatal: Could not read from remote repository.\n",
+    ))).toBe("transport");
+    expect(classifyPushFailure(failed(
+      "fatal: unable to access 'https://acl.company.com/vault.git/': " +
+      "Could not resolve host: acl.company.com\n",
+    ))).toBe("transport");
+  });
+
+  test("the hub's other refusals still classify via the declined wrapper", () => {
+    // What justifies dropping the acl word: git wraps EVERY pre-receive
+    // refusal in "(pre-receive hook declined)", including the paths whose
+    // own text carries no hub-specific phrase at all.
+    expect(classifyPushFailure(failed(
+      "remote: REJECTED: failed to load vault.yaml: mapping values are not allowed\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+    ))).toBe("acl-rejected");
+    expect(classifyPushFailure(failed(
+      "remote: REJECTED: unknown identity 'ghost' — not listed in vault.yaml participants\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+    ))).toBe("acl-rejected");
+  });
+
   test("a real hub ACL rejection still classifies as acl-rejected", () => {
     expect(classifyPushFailure(failed(
       "Push rejected by hub:\n" +
@@ -1761,6 +1793,71 @@ exit 1
       const result = await sync_status(vault) as unknown as Record<string, unknown>;
       expect((result.last_sync_error as Record<string, unknown>).failure_class)
         .toBe("non-fast-forward");
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test("sync_retry RETURNS the failure class, not just the sentinel", async () => {
+    // #534: the class was written to the sentinel and readable via a second
+    // sync_status call, but the retry tool's own response was blind to it —
+    // so an agent holding `retriable: true, reason: "Command failed"` had no
+    // programmatic signal that the right next move is mode=pull-rebase-push,
+    // and would retry push-only forever. Assert the RESPONSE, which the
+    // sentinel test above cannot.
+    const vault = await makeTempSpokeVault();
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(
+      path.join(stubDir, "schist"),
+      `#!/bin/sh
+echo "Push rejected by hub:" >&2
+echo " ! [rejected]  main -> main (non-fast-forward)" >&2
+echo "hint: Updates were rejected because the tip of your current branch is behind" >&2
+exit 1
+`,
+      { mode: 0o755 },
+    );
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const result = await sync_retry(vault, { owner: "test-agent", mode: "push-only" }) as unknown as Record<string, unknown>;
+      expect(result.failure_class).toBe("non-fast-forward");
+      expect(result.retriable).toBe(true);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test("a rate-limited retry is retriable, not an ACL violation", async () => {
+    // syncFailureResponse called isAclRejection DIRECTLY, bypassing
+    // classifyPushFailure's ordering — and the hub's rate-limit refusal
+    // arrives wrapped in the same "pre-receive hook declined" line an ACL
+    // refusal does. So a push that clears itself after the window was
+    // reported `retriable: false, reason: "ACL violation"`: the exact
+    // mis-attribution that ordering exists to prevent, reached through the
+    // other door. Both fields must move.
+    const vault = await makeTempSpokeVault();
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(
+      path.join(stubDir, "schist"),
+      `#!/bin/sh
+echo "Push rejected by hub:" >&2
+echo "remote: REJECTED: rate limit exceeded (git_syncs_per_hour)" >&2
+echo "remote: Retry after 1800s" >&2
+echo " ! [remote rejected] main -> main (pre-receive hook declined)" >&2
+exit 1
+`,
+      { mode: 0o755 },
+    );
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const result = await sync_retry(vault, { owner: "test-agent", mode: "push-only" }) as unknown as Record<string, unknown>;
+      expect(result.failure_class).toBe("rate-limited");
+      expect(result.retriable).toBe(true);
+      expect(result.reason).not.toBe("ACL violation");
     } finally {
       process.env.PATH = origPath;
       await fs.rm(stubDir, { recursive: true, force: true });
@@ -2048,9 +2145,20 @@ describe("sync_status + sync_retry (#135)", () => {
     const vault = await makeTempSpokeVault();
     const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
     const stub = path.join(stubDir, "schist");
+    // The stub used to emit `Push rejected by hub: ACL violation` — a string
+    // NOTHING in the pipeline produces. "ACL violation" is this module's own
+    // `reason` field, fed back in as though git had printed it, so the test
+    // asserted against its own output and passed only because the matcher
+    // still keyed on the word "acl" (#535). Emit what `pre_receive.py` and
+    // git actually print.
     await fs.writeFile(
       stub,
-      "#!/bin/sh\necho 'Push rejected by hub: ACL violation' >&2\nexit 1\n",
+      "#!/bin/sh\n" +
+      "echo 'Push rejected by hub:' >&2\n" +
+      "echo 'remote: REJECTED: push contains out-of-scope writes' >&2\n" +
+      "echo 'remote:   - security/bad.md (scope: security)' >&2\n" +
+      "echo ' ! [remote rejected] main -> main (pre-receive hook declined)' >&2\n" +
+      "exit 1\n",
       { mode: 0o755 },
     );
 
@@ -2061,6 +2169,7 @@ describe("sync_status + sync_retry (#135)", () => {
       expect(result.ok).toBe(false);
       expect(result.retriable).toBe(false);
       expect(result.reason).toBe("ACL violation");
+      expect(result.failure_class).toBe("acl-rejected");
       expect(result.phase).toBe("push");
     } finally {
       process.env.PATH = origPath;

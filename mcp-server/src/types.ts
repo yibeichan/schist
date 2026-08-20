@@ -140,6 +140,10 @@ export interface SyncRetryResponse {
   mode: "push-only" | "pull-rebase-push";
   phase: "await-in-flight" | "pull-rebase" | "push";
   retriable: boolean;
+  /** The same classification `sync_status` reads back off the sentinel (#534),
+   *  returned inline so a caller can pick the next retry MODE without a second
+   *  round-trip and without parsing `message`. Absent on success. */
+  failure_class?: PushFailureClass;
   reason?: string;
   message: string;
   code?: number;
