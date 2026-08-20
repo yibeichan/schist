@@ -206,6 +206,16 @@ def test_non_executable_pre_receive_is_a_total_acl_bypass(tmp_path):
     assert r.returncode != 0, "hook must refuse an out-of-scope write"
     assert "out-of-scope writes" in r.stderr
     before = _run(["git", "--git-dir", str(hub), "rev-parse", "main"], check=False)
+    # `before` must be a real sha (init_hub's seed push), not an error string —
+    # otherwise the "ref moved" assertion below could pass for the wrong reason.
+    assert len(before.stdout.strip()) == 40, before.stdout
+
+    # 1b. Against the REAL init_hub-installed hook, the check must PASS —
+    # otherwise step 3 below would pass under a check that FAILs
+    # unconditionally, and prove nothing. The unit fixtures hand-build a hub;
+    # this is the only place the actual installed hook is exercised.
+    healthy = check_hub_pre_receive_hook(str(hub))
+    assert healthy.status == "PASS", healthy.message
 
     # 2. Drop the exec bit. Git skips the hook and ACCEPTS the same push.
     hook.chmod(0o644)

@@ -16,6 +16,7 @@ from schist.doctor import (
     check_git,
     check_hooks_freshness,
     check_hooks_path,
+    check_hooks_path,
     check_ingest_available,
     check_mcp_config,
     check_mcp_schema_alignment,
@@ -209,14 +210,30 @@ class TestCheckSqlite:
         assert r.status == "FAIL"
 
 
+def _real_repo(path: Path) -> Path:
+    """A REAL git repo. The hook checks ask git where it looks for hooks, and
+    git refuses a directory that only *looks* like a repo — several fixtures
+    here used to `mkdir .git/hooks` and were silently tolerated by the old
+    hand-rolled path resolution."""
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    return path
+
+
+def _real_bare_hub(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "--bare", str(path)], check=True)
+    return path
+
+
 class TestCheckPostCommitHook:
     def test_no_path(self):
         r = check_post_commit_hook(None)
         assert r.status == "SKIP"
 
     def test_installed(self, tmp_path):
-        hooks = tmp_path / ".git" / "hooks"
-        hooks.mkdir(parents=True)
+        hooks = _real_repo(tmp_path) / ".git" / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
         hook = hooks / "post-commit"
         hook.write_text("#!/bin/sh\n")
         # chmod added with #460: git only runs an executable hook, so a
@@ -229,8 +246,8 @@ class TestCheckPostCommitHook:
         """#460: git SKIPS a non-executable hook silently, so auto-ingest is
         dead while doctor reports PASS and the index drifts from the notes."""
         import os
-        hooks = tmp_path / ".git" / "hooks"
-        hooks.mkdir(parents=True)
+        hooks = _real_repo(tmp_path) / ".git" / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
         hook = hooks / "post-commit"
         hook.write_text("#!/bin/sh\n")
         hook.chmod(0o644)
@@ -243,7 +260,7 @@ class TestCheckPostCommitHook:
         assert "chmod +x" in (r.fix or "")
 
     def test_missing(self, tmp_path):
-        (tmp_path / ".git").mkdir()
+        _real_repo(tmp_path)
         r = check_post_commit_hook(str(tmp_path))
         assert r.status == "FAIL"
 
@@ -259,8 +276,8 @@ class TestCheckPreCommitHook:
         assert r.status == "SKIP"
 
     def test_installed(self, tmp_path):
-        hooks = tmp_path / ".git" / "hooks"
-        hooks.mkdir(parents=True)
+        hooks = _real_repo(tmp_path) / ".git" / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
         hook = hooks / "pre-commit"
         hook.write_text("#!/bin/sh\n")
         hook.chmod(0o755)
@@ -270,8 +287,8 @@ class TestCheckPreCommitHook:
         """The severe half of #460: git skips it silently, so `git commit`
         stops scanning for secrets and says nothing."""
         import os
-        hooks = tmp_path / ".git" / "hooks"
-        hooks.mkdir(parents=True)
+        hooks = _real_repo(tmp_path) / ".git" / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
         hook = hooks / "pre-commit"
         hook.write_text("#!/bin/sh\n")
         hook.chmod(0o644)
@@ -285,8 +302,12 @@ class TestCheckPreCommitHook:
         assert "chmod +x" in (r.fix or "")
 
     def test_missing(self, tmp_path):
-        (tmp_path / ".git").mkdir()
-        assert check_pre_commit_hook(str(tmp_path)).status == "FAIL"
+        _real_repo(tmp_path)
+        r = check_pre_commit_hook(str(tmp_path))
+        assert r.status == "FAIL"
+        # Not vacuous: it must fail for ABSENCE, not because the fixture is
+        # not a repo (which is its own, differently-worded failure).
+        assert "not installed" in r.message
 
 
 class TestHookChecksRespectHooksPath:
@@ -347,12 +368,33 @@ class TestHookChecksRespectHooksPath:
             assert "--unset core.hooksPath" in (r.fix or "")
         assert check_hooks_freshness(str(repo)).status == "FAIL"
 
+    def test_hooks_path_check_agrees_with_the_hook_checks(self, tmp_path):
+        """One doctor run must not contradict itself. check_hooks_path did its
+        own `--get` + truthiness test, so with an empty core.hooksPath three
+        checks FAILed "no hooks run" while it reported "PASS | uses default
+        .git/hooks/" — the same empty-vs-unset defect, surviving in the
+        sibling check three functions away from the ones that fixed it."""
+        repo = self._repo(tmp_path, "")
+        assert check_hooks_path(str(repo)).status == "FAIL"
+        assert check_pre_commit_hook(str(repo)).status == "FAIL"
+
+    def test_a_directory_named_like_a_hook_is_not_a_hook(self, tmp_path):
+        """os.access(X_OK) is true for a directory, so without an is_file()
+        guard a directory named `pre-commit` reported PASS | installed."""
+        repo = _real_repo(tmp_path)
+        d = repo / ".git" / "hooks"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "pre-commit").mkdir()
+        r = check_pre_commit_hook(str(repo))
+        assert r.status == "FAIL"
+        assert "not a file" in r.message
+
     def test_tilde_is_expanded_by_git_not_by_us(self, tmp_path):
         """`--type=path` makes git do the expansion, so we never have to match
         Path.expanduser() against git's behaviour by hand."""
         hooks = Path.home() / ".schist-doctor-tilde-test"
         repo = self._repo(tmp_path, "~/.schist-doctor-tilde-test")
-        hooks_dir, configured = _effective_hooks_dir(str(repo))
+        hooks_dir, configured, error = _effective_hooks_dir(str(repo))
         assert hooks_dir == hooks, hooks_dir
         assert "~" not in str(hooks_dir)
         assert configured == str(hooks)
@@ -363,7 +405,7 @@ class TestHookChecksRespectHooksPath:
         repo = self._repo(tmp_path, "first")
         sp.run(["git", "-C", str(repo), "config", "--add",
                 "core.hooksPath", "second"], check=True)
-        hooks_dir, _ = _effective_hooks_dir(str(repo))
+        hooks_dir, _, _err = _effective_hooks_dir(str(repo))
         assert hooks_dir == repo / "second", hooks_dir
 
     def test_absolute_hooks_path(self, tmp_path):
@@ -408,19 +450,77 @@ class TestCheckHubPreReceiveHook:
         assert check_hub_pre_receive_hook(str(tmp_path)).status == "SKIP"
 
     def test_executable_passes(self, tmp_path):
-        hub = tmp_path / "hub.git"
-        (hub / "objects").mkdir(parents=True)
-        (hub / "hooks").mkdir()
+        hub = _real_bare_hub(tmp_path / "hub.git")
         h = hub / "hooks" / "pre-receive"
-        h.write_text("#!/bin/sh\n")
+        h.write_text("#!/bin/sh\nexec python3 -m schist.pre_receive\n")
         h.chmod(0o755)
         assert check_hub_pre_receive_hook(str(hub)).status == "PASS"
 
+    def test_executable_but_EMPTY_is_the_worst_case(self, tmp_path):
+        """The exec bit is necessary, not sufficient. The threat list for this
+        check — archive restore, scp, container COPY, manual redeploy — causes
+        truncation at least as often as mode loss, and truncation is the worse
+        half: garbage content fails CLOSED (the shell errors, git reports
+        "pre-receive hook declined"), while an empty script exits 0 and the
+        push is accepted. Verified on real git: a 0-byte mode-755 pre-receive
+        moves the ref."""
+        hub = _real_bare_hub(tmp_path / "hub.git")
+        h = hub / "hooks" / "pre-receive"
+        h.write_text("")
+        h.chmod(0o755)
+        r = check_hub_pre_receive_hook(str(hub))
+        assert r.status == "FAIL"
+        assert "EMPTY" in r.message
+
+    def test_executable_but_not_schist_warns(self, tmp_path):
+        """Someone else's pre-receive is not schist's ACL. Not a FAIL — a hub
+        admin may legitimately chain hooks — but it must not read as PASS."""
+        hub = _real_bare_hub(tmp_path / "hub.git")
+        h = hub / "hooks" / "pre-receive"
+        h.write_text("#!/bin/sh\n# some other team's hook\nexit 0\n")
+        h.chmod(0o755)
+        r = check_hub_pre_receive_hook(str(hub))
+        assert r.status == "WARN"
+        assert "pre_receive" in r.message
+
+    def test_hub_honours_core_hookspath(self, tmp_path):
+        """The hub resolves through the same `rev-parse --git-path hooks` call
+        as the spoke, so a redirected hub is found rather than reported
+        missing."""
+        import subprocess as sp
+        hub = _real_bare_hub(tmp_path / "hub.git")
+        elsewhere = tmp_path / "hub-hooks"
+        elsewhere.mkdir()
+        sp.run(["git", "--git-dir", str(hub), "config",
+                "core.hooksPath", str(elsewhere)], check=True)
+        h = elsewhere / "pre-receive"
+        h.write_text("#!/bin/sh\nexec python3 -m schist.pre_receive\n")
+        h.chmod(0o755)
+        r = check_hub_pre_receive_hook(str(hub))
+        assert r.status == "PASS", r.message
+        assert str(elsewhere) in r.message
+
+    def test_unreadable_repo_is_not_reported_as_healthy(self, tmp_path):
+        """`git config --get` exits 1 for "unset" and 128 for "I cannot read
+        this repo" — a non-repo, an unreadable config, safe.directory
+        ownership. Collapsing those into "unset" made the check fall back to
+        the default path, find a hook and report PASS. For a check whose job
+        is to say whether the ACL is live, "I don't know" must not be PASS."""
+        hub = _real_bare_hub(tmp_path / "hub.git")
+        h = hub / "hooks" / "pre-receive"
+        h.write_text("#!/bin/sh\nexec python3 -m schist.pre_receive\n")
+        h.chmod(0o755)
+        (hub / "config").chmod(0o000)
+        try:
+            r = check_hub_pre_receive_hook(str(hub))
+        finally:
+            (hub / "config").chmod(0o644)
+        assert r.status == "FAIL"
+        assert "cannot determine" in r.message
+
     def test_not_executable_is_a_total_bypass(self, tmp_path):
         import os
-        hub = tmp_path / "hub.git"
-        (hub / "objects").mkdir(parents=True)
-        (hub / "hooks").mkdir()
+        hub = _real_bare_hub(tmp_path / "hub.git")
         h = hub / "hooks" / "pre-receive"
         h.write_text("#!/bin/sh\nexit 1\n")
         h.chmod(0o644)
@@ -433,9 +533,7 @@ class TestCheckHubPreReceiveHook:
         assert "NO ACL" in r.message
 
     def test_missing_is_also_a_bypass(self, tmp_path):
-        hub = tmp_path / "hub.git"
-        (hub / "objects").mkdir(parents=True)
-        (hub / "hooks").mkdir()
+        hub = _real_bare_hub(tmp_path / "hub.git")
         r = check_hub_pre_receive_hook(str(hub))
         assert r.status == "FAIL"
         assert "NO ACL" in r.message
@@ -459,7 +557,7 @@ class TestCheckHooksFreshness:
         assert r.status == "SKIP"
 
     def test_current_versions_pass(self, tmp_path):
-        (tmp_path / ".git").mkdir()
+        _real_repo(tmp_path)
         self._install_hook(tmp_path, "pre-commit", PRE_COMMIT_HOOK)
         self._install_hook(tmp_path, "post-commit", POST_COMMIT_HOOK)
         r = check_hooks_freshness(str(tmp_path))
@@ -469,7 +567,7 @@ class TestCheckHooksFreshness:
     def test_legacy_unversioned_hook_warns(self, tmp_path):
         """A spoke init'd before HOOK_VERSION was introduced has no marker —
         must surface as stale so the user knows to reinstall."""
-        (tmp_path / ".git").mkdir()
+        _real_repo(tmp_path)
         self._install_hook(tmp_path, "pre-commit",
                            "#!/bin/sh\n# legacy hook with no version marker\nexit 0\n")
         self._install_hook(tmp_path, "post-commit", POST_COMMIT_HOOK)
@@ -480,7 +578,7 @@ class TestCheckHooksFreshness:
         assert "hooks reinstall" in r.fix
 
     def test_old_versioned_hook_warns(self, tmp_path):
-        (tmp_path / ".git").mkdir()
+        _real_repo(tmp_path)
         self._install_hook(tmp_path, "pre-commit",
                            "#!/bin/sh\n# schist-hook-version: 1\nexit 0\n")
         self._install_hook(tmp_path, "post-commit", POST_COMMIT_HOOK)
@@ -491,7 +589,7 @@ class TestCheckHooksFreshness:
 
     def test_pinned_marker_silences_warning(self, tmp_path):
         """User who customized their hook can opt out with `pinned`."""
-        (tmp_path / ".git").mkdir()
+        _real_repo(tmp_path)
         self._install_hook(tmp_path, "pre-commit",
                            "#!/bin/sh\n# schist-hook-version: pinned\n# my custom patterns\nexit 0\n")
         self._install_hook(tmp_path, "post-commit", POST_COMMIT_HOOK)
@@ -1580,8 +1678,8 @@ class TestRunDoctor:
 
     def test_full_vault(self, tmp_path, capsys):
         # Set up a minimal valid vault
-        (tmp_path / ".git").mkdir()
-        (tmp_path / ".git" / "hooks").mkdir()
+        _real_repo(tmp_path)
+        (tmp_path / ".git" / "hooks").mkdir(exist_ok=True)
         _hook = tmp_path / ".git" / "hooks" / "post-commit"
         _hook.write_text("#!/bin/sh\n")
         _hook.chmod(0o755)  # #460: sync.py installs hooks 0o755; git skips
