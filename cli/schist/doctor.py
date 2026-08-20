@@ -171,24 +171,113 @@ def check_sqlite(vault_path: Optional[str], db_path: Optional[str]) -> CheckResu
                            f"Run `schist-ingest --vault {vault_path} --db {db}` to rebuild.")
 
 
-def check_post_commit_hook(vault_path: Optional[str]) -> CheckResult:
-    if not vault_path:
-        return CheckResult("SKIP", "Post-commit hook", "skipped (no vault)")
-    hook = Path(vault_path) / ".git" / "hooks" / "post-commit"
-    if not hook.exists():
-        return CheckResult("FAIL", "Post-commit hook", "not installed",
-                           f"Run `schist init {vault_path}` to install hooks.")
-    # Existence is not enough: git silently SKIPS a hook it cannot execute,
-    # so a chmod -x (or a restrictive umask on checkout, or a copy that
-    # dropped the mode bit) disables auto-ingest while doctor reported PASS
-    # — the vault index then drifts from the notes with nothing to show for
-    # it (#460).
-    if not os.access(hook, os.X_OK):
-        return CheckResult(
-            "FAIL", "Post-commit hook", "installed but not executable — git skips it silently",
-            f"Run `chmod +x {hook}` (or `schist init {vault_path}` to reinstall).",
+def _configured_hooks_path(git_dir_arg: list[str], cwd: Optional[str]) -> Optional[str]:
+    """Read `core.hooksPath`, or None when unset/unreadable."""
+    try:
+        r = subprocess.run(
+            ["git", *git_dir_arg, "config", "--get", "core.hooksPath"],
+            capture_output=True, text=True, timeout=5, cwd=cwd,
         )
-    return CheckResult("PASS", "Post-commit hook", "installed")
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    # `git config --get` exits 1 when the key is unset.
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip() or None
+
+
+def _effective_hooks_dir(vault_path: str) -> tuple[Path, Optional[str]]:
+    """Where git will ACTUALLY look for this vault's hooks, and the
+    `core.hooksPath` value if one redirected it.
+
+    Every hook check used to inspect `.git/hooks/` unconditionally (#532).
+    When `core.hooksPath` is set, git runs hooks from somewhere else entirely,
+    so those checks reported on files git will never execute — a PASS that is
+    worse than silence, because it is a false assurance about the secret
+    scanner and the auto-ingester. `check_hooks_path` warns about the redirect
+    separately, but a WARN next to a PASS reads as "fine, just unusual".
+
+    Relative values are resolved against the vault root: git runs hooks with
+    the worktree top-level as cwd.
+    """
+    configured = _configured_hooks_path(["-C", vault_path], None)
+    if configured:
+        p = Path(configured).expanduser()
+        return (p if p.is_absolute() else Path(vault_path) / p), configured
+    return Path(vault_path) / ".git" / "hooks", None
+
+
+def _hook_fix(vault_path: str, hooks_dir: Path, name: str,
+              configured: Optional[str]) -> str:
+    """The remedy, which differs by cause. `hooks reinstall` writes to
+    .git/hooks, so recommending it under a core.hooksPath redirect would send
+    the user to install a hook in the one place git is not looking."""
+    hook = hooks_dir / name
+    if configured:
+        return (
+            f"git runs hooks from {hooks_dir} (core.hooksPath = '{configured}'). "
+            f"Either symlink schist's {name} into that directory, or unset the "
+            f"redirect (`git -C {vault_path} config --unset core.hooksPath`) and "
+            f"run `schist --vault {vault_path} hooks reinstall`."
+        )
+    return (
+        f"Run `chmod +x {hook}` if it exists, or "
+        f"`schist --vault {vault_path} hooks reinstall` to (re)install."
+    )
+
+
+def _hook_state(hooks_dir: Path, name: str, configured: Optional[str]) -> tuple[str, str]:
+    """Return (status, message-suffix) for one hook file.
+
+    Existence is not enough: git silently SKIPS a hook it cannot execute, so a
+    chmod -x — or a restrictive umask on checkout, an archive restore that
+    dropped the mode bit, a container COPY, an editor rewriting in place — is
+    indistinguishable from a working hook to anything that only stats the path.
+    """
+    where = f" (via core.hooksPath '{configured}')" if configured else ""
+    hook = hooks_dir / name
+    if not hook.exists():
+        return "FAIL", f"not installed at {hook}{where}"
+    if not os.access(hook, os.X_OK):
+        return "FAIL", f"installed but not executable — git skips it silently: {hook}{where}"
+    return "PASS", f"installed{where}"
+
+
+def check_post_commit_hook(vault_path: Optional[str]) -> CheckResult:
+    """A skipped post-commit hook means auto-ingest stops and the index drifts
+    from the notes with nothing to show for it (#460)."""
+    label = "Post-commit hook"
+    if not vault_path:
+        return CheckResult("SKIP", label, "skipped (no vault)")
+    hooks_dir, configured = _effective_hooks_dir(vault_path)
+    status, msg = _hook_state(hooks_dir, "post-commit", configured)
+    if status == "PASS":
+        return CheckResult("PASS", label, msg)
+    return CheckResult("FAIL", label, msg,
+                       _hook_fix(vault_path, hooks_dir, "post-commit", configured))
+
+
+def check_pre_commit_hook(vault_path: Optional[str]) -> CheckResult:
+    """The pre-commit hook is the staged-secret scanner, and git skips a hook
+    it cannot execute WITHOUT a word of complaint.
+
+    #460/#530 added this check for post-commit, where the cost is a stale
+    index. Here the cost is that `git commit` stops scanning for secrets and
+    says nothing, so credentials land in a git-backed vault that syncs to a
+    hub — the more severe half of the same defect, and it had no check at all
+    (#536). `check_hooks_freshness` reads this file's version marker, which
+    needs only read permission, so it reported PASS on a hook git would never
+    run.
+    """
+    label = "Pre-commit hook"
+    if not vault_path:
+        return CheckResult("SKIP", label, "skipped (no vault)")
+    hooks_dir, configured = _effective_hooks_dir(vault_path)
+    status, msg = _hook_state(hooks_dir, "pre-commit", configured)
+    if status == "PASS":
+        return CheckResult("PASS", label, msg)
+    return CheckResult("FAIL", label, f"{msg} — staged secrets are NOT being scanned",
+                       _hook_fix(vault_path, hooks_dir, "pre-commit", configured))
 
 
 # Match the marker line and tolerate an optional trailing `# comment` so users
@@ -240,7 +329,9 @@ def check_hooks_freshness(vault_path: Optional[str]) -> CheckResult:
     from . import sync as sync_mod
 
     current = str(sync_mod.HOOK_VERSION)
-    hooks_dir = Path(vault_path) / ".git" / "hooks"
+    # The directory git actually uses, not the default (#532) — otherwise this
+    # reports the version of a hook that never runs.
+    hooks_dir, _configured = _effective_hooks_dir(vault_path)
     stale = []
     pinned = []
     unreadable = []
@@ -900,6 +991,54 @@ def _acceptenv_offender(token: str) -> bool:
         return literal_prefix != "" and _dangerous_family(literal_prefix)
 
     return _dangerous_family(t)
+
+
+def check_hub_pre_receive_hook(hub_path: Optional[str]) -> CheckResult:
+    """The hub's pre-receive hook IS the write ACL. If git skips it, there
+    isn't one.
+
+    Git ignores a hook that is not executable and **continues** — for a spoke's
+    post-commit that costs a stale index (#460), but here it means the push is
+    ACCEPTED with no identity check, no scope check and no rate limit. The
+    entire vault.yaml ACL stops existing and the only signal is an advice line
+    the pusher can turn off (`advice.ignoredHook`). Reproduced on real git: an
+    out-of-scope push that was rejected with the bit set moves the ref without
+    it. Everything #502/#511/#519/#524 built rests on this hook running.
+
+    The exec bit is not carried by every path that puts a file in place — an
+    archive restore that drops modes, an scp from a filesystem without the bit,
+    a container COPY, an editor writing in place, a manual redeploy. Nothing on
+    the hub notices, and nothing on a spoke notices either: pushes just start
+    succeeding.
+    """
+    label = "Hub pre-receive hook"
+    if not hub_path:
+        return CheckResult("SKIP", label, "no --hub-path supplied")
+
+    hub = Path(hub_path)
+    if not (hub / "objects").is_dir():
+        return CheckResult("SKIP", label, f"not a git repository: {hub_path}")
+
+    # Bare repos keep hooks at <repo>/hooks; a non-bare hub would use
+    # <repo>/.git/hooks. Honour core.hooksPath either way.
+    configured = _configured_hooks_path(["--git-dir", str(hub)], None)
+    if configured:
+        p = Path(configured).expanduser()
+        hooks_dir = p if p.is_absolute() else hub / p
+    elif (hub / "hooks").is_dir():
+        hooks_dir = hub / "hooks"
+    else:
+        hooks_dir = hub / ".git" / "hooks"
+
+    status, msg = _hook_state(hooks_dir, "pre-receive", configured)
+    if status == "PASS":
+        return CheckResult("PASS", label, msg)
+    return CheckResult(
+        "FAIL", label,
+        f"{msg} — every push is accepted with NO ACL, identity or rate-limit check",
+        f"Run `chmod +x {hooks_dir / 'pre-receive'}` if it exists, or reinstall the "
+        f"hub hook so `schist.pre_receive` runs on every push.",
+    )
 
 
 def check_hub_sshd_acceptenv(hub_path: Optional[str]) -> CheckResult:
@@ -1698,6 +1837,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_schist_yaml(vault_path),
         check_sqlite(vault_path, db_path),
         check_post_commit_hook(vault_path),
+        check_pre_commit_hook(vault_path),
         check_hooks_freshness(vault_path),
         check_hooks_path(vault_path),
         check_root_gitignore(vault_path),
@@ -1713,6 +1853,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
     ]
     if hub_path:
         checks.append(check_hub_acl_drift(hub_path))
+        checks.append(check_hub_pre_receive_hook(hub_path))
         checks.append(check_hub_key_pinning(hub_path, authorized_keys))
         checks.append(check_hub_sshd_acceptenv(hub_path))
 

@@ -168,3 +168,58 @@ def test_pinned_identity_enforcement(tmp_path):
     (work / "research" / "note.md").write_text("more\n")
     _run(["git", "commit", "-am", "more"], cwd=work)
     _run(["git", "push", "origin", "main"], cwd=work, env=base_env)
+
+
+def test_non_executable_pre_receive_is_a_total_acl_bypass(tmp_path):
+    """#538: git IGNORES a hook it cannot execute and continues, so dropping
+    the exec bit on the hub's pre-receive accepts every push with no ACL,
+    identity or rate-limit check at all.
+
+    This asserts GIT's behaviour, not our model of it (schist memory #215):
+    the same out-of-scope push is rejected with the bit set and lands without
+    it. Everything #502/#511/#519/#524 built assumes this hook runs.
+    """
+    from schist.doctor import check_hub_pre_receive_hook
+    from schist.sync import init_hub
+
+    hub = tmp_path / "hub.git"
+    init_hub(SimpleNamespace(name="e2e-execbit", participant=["alpha"]), str(hub))
+    hook = hub / "hooks" / "pre-receive"
+    assert hook.exists(), "init_hub should install the pre-receive hook"
+
+    work = tmp_path / "work"
+    _run(["git", "clone", str(hub), str(work)])
+    _run(["git", "config", "user.email", "t@t"], cwd=work)
+    _run(["git", "config", "user.name", "t"], cwd=work)
+
+    env = os.environ.copy()
+    env["SCHIST_IDENTITY"] = "alpha"
+
+    # An out-of-scope write: alpha is granted 'research', not 'security'.
+    (work / "security").mkdir()
+    (work / "security" / "bad.md").write_text("out of scope\n")
+    _run(["git", "add", "."], cwd=work)
+    _run(["git", "commit", "-m", "out of scope"], cwd=work)
+
+    # 1. Control: with the exec bit, the hook runs and refuses.
+    r = _run(["git", "push", "origin", "main"], cwd=work, env=env, check=False)
+    assert r.returncode != 0, "hook must refuse an out-of-scope write"
+    assert "out-of-scope writes" in r.stderr
+    before = _run(["git", "--git-dir", str(hub), "rev-parse", "main"], check=False)
+
+    # 2. Drop the exec bit. Git skips the hook and ACCEPTS the same push.
+    hook.chmod(0o644)
+    if os.access(hook, os.X_OK):  # pragma: no cover - root ignores mode bits
+        pytest.skip("running as root: mode bits don't gate os.access")
+    r = _run(["git", "push", "origin", "main"], cwd=work, env=env, check=False)
+    assert r.returncode == 0, (
+        "git is expected to SKIP a non-executable hook and accept the push — "
+        "if this now fails, git changed and #538's premise needs revisiting"
+    )
+    after = _run(["git", "--git-dir", str(hub), "rev-parse", "main"], check=False)
+    assert after.stdout != before.stdout, "the ref moved: the ACL was bypassed"
+
+    # 3. doctor is the only thing that can catch it, so it must.
+    res = check_hub_pre_receive_hook(str(hub))
+    assert res.status == "FAIL"
+    assert "not executable" in res.message

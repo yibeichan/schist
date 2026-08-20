@@ -22,6 +22,8 @@ from schist.doctor import (
     check_mcp_vocab_alignment,
     check_node,
     check_post_commit_hook,
+    check_pre_commit_hook,
+    check_hub_pre_receive_hook,
     check_python,
     check_root_gitignore,
     check_schist_yaml,
@@ -243,6 +245,160 @@ class TestCheckPostCommitHook:
         (tmp_path / ".git").mkdir()
         r = check_post_commit_hook(str(tmp_path))
         assert r.status == "FAIL"
+
+
+class TestCheckPreCommitHook:
+    """#536 — the pre-commit hook is the staged-secret scanner, and doctor had
+    no check for it at all. `check_hooks_freshness` reads its version marker,
+    which needs only READ permission, so a hook git would never run reported
+    PASS."""
+
+    def test_no_path(self):
+        r = check_pre_commit_hook(None)
+        assert r.status == "SKIP"
+
+    def test_installed(self, tmp_path):
+        hooks = tmp_path / ".git" / "hooks"
+        hooks.mkdir(parents=True)
+        hook = hooks / "pre-commit"
+        hook.write_text("#!/bin/sh\n")
+        hook.chmod(0o755)
+        assert check_pre_commit_hook(str(tmp_path)).status == "PASS"
+
+    def test_installed_but_not_executable(self, tmp_path):
+        """The severe half of #460: git skips it silently, so `git commit`
+        stops scanning for secrets and says nothing."""
+        import os
+        hooks = tmp_path / ".git" / "hooks"
+        hooks.mkdir(parents=True)
+        hook = hooks / "pre-commit"
+        hook.write_text("#!/bin/sh\n")
+        hook.chmod(0o644)
+        if os.access(hook, os.X_OK):  # pragma: no cover - root ignores mode bits
+            import pytest as _pytest
+            _pytest.skip("running as root: mode bits don't gate os.access")
+        r = check_pre_commit_hook(str(tmp_path))
+        assert r.status == "FAIL"
+        assert "not executable" in r.message
+        assert "NOT being scanned" in r.message
+        assert "chmod +x" in (r.fix or "")
+
+    def test_missing(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        assert check_pre_commit_hook(str(tmp_path)).status == "FAIL"
+
+
+class TestHookChecksRespectHooksPath:
+    """#532 — every hook check inspected .git/hooks unconditionally. With
+    core.hooksPath set, git runs hooks from somewhere else, so those checks
+    reported on files git will never execute: a PASS that is a false assurance
+    about the secret scanner, sitting next to a WARN that reads as 'unusual but
+    fine'."""
+
+    def _repo(self, tmp_path, hooks_path_value):
+        import subprocess
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "config",
+                        "core.hooksPath", hooks_path_value], check=True)
+        return tmp_path
+
+    def test_relative_hooks_path_is_where_the_hook_is_found(self, tmp_path):
+        repo = self._repo(tmp_path, "team-hooks")
+        # The DEFAULT location has a good hook; git will not run it.
+        default = repo / ".git" / "hooks"
+        default.mkdir(parents=True, exist_ok=True)
+        (default / "pre-commit").write_text("#!/bin/sh\n")
+        (default / "pre-commit").chmod(0o755)
+        r = check_pre_commit_hook(str(repo))
+        assert r.status == "FAIL", "must not pass on a hook git never runs"
+        assert "team-hooks" in r.message
+        # `hooks reinstall` writes to .git/hooks, so recommending it here would
+        # send the user to install a hook where git is not looking.
+        assert "symlink" in (r.fix or "")
+        assert "hooks reinstall" in (r.fix or "")
+
+        # Put it where git actually looks.
+        real = repo / "team-hooks"
+        real.mkdir()
+        (real / "pre-commit").write_text("#!/bin/sh\n")
+        (real / "pre-commit").chmod(0o755)
+        r = check_pre_commit_hook(str(repo))
+        assert r.status == "PASS"
+        assert "core.hooksPath" in r.message
+
+    def test_absolute_hooks_path(self, tmp_path):
+        hooks = tmp_path / "elsewhere"
+        hooks.mkdir()
+        (hooks / "post-commit").write_text("#!/bin/sh\n")
+        (hooks / "post-commit").chmod(0o755)
+        repo = self._repo(tmp_path / "repo", str(hooks))
+        r = check_post_commit_hook(str(repo))
+        assert r.status == "PASS"
+        assert str(hooks) in r.message
+
+    def test_freshness_reads_the_redirected_dir(self, tmp_path):
+        """Otherwise it reports the version of a hook that never runs."""
+        from schist import sync as sync_mod
+        repo = self._repo(tmp_path, "team-hooks")
+        real = repo / "team-hooks"
+        real.mkdir()
+        for name in ("pre-commit", "post-commit"):
+            (real / name).write_text(
+                f"#!/bin/sh\n# schist-hook-version: {sync_mod.HOOK_VERSION}\n")
+            (real / name).chmod(0o755)
+        # A stale hook sits at the default path and must be ignored.
+        default = repo / ".git" / "hooks"
+        default.mkdir(parents=True, exist_ok=True)
+        for name in ("pre-commit", "post-commit"):
+            (default / name).write_text("#!/bin/sh\n")
+        assert check_hooks_freshness(str(repo)).status == "PASS"
+
+
+class TestCheckHubPreReceiveHook:
+    """#538 — the hub's pre-receive hook IS the write ACL. Git ignores a hook
+    it cannot execute and CONTINUES, so a dropped exec bit means every push is
+    accepted with no identity, scope or rate-limit check. Everything
+    #502/#511/#519/#524 built rests on this hook running, and nothing checked
+    it."""
+
+    def test_no_hub_path(self):
+        assert check_hub_pre_receive_hook(None).status == "SKIP"
+
+    def test_not_a_repo(self, tmp_path):
+        assert check_hub_pre_receive_hook(str(tmp_path)).status == "SKIP"
+
+    def test_executable_passes(self, tmp_path):
+        hub = tmp_path / "hub.git"
+        (hub / "objects").mkdir(parents=True)
+        (hub / "hooks").mkdir()
+        h = hub / "hooks" / "pre-receive"
+        h.write_text("#!/bin/sh\n")
+        h.chmod(0o755)
+        assert check_hub_pre_receive_hook(str(hub)).status == "PASS"
+
+    def test_not_executable_is_a_total_bypass(self, tmp_path):
+        import os
+        hub = tmp_path / "hub.git"
+        (hub / "objects").mkdir(parents=True)
+        (hub / "hooks").mkdir()
+        h = hub / "hooks" / "pre-receive"
+        h.write_text("#!/bin/sh\nexit 1\n")
+        h.chmod(0o644)
+        if os.access(h, os.X_OK):  # pragma: no cover - root ignores mode bits
+            import pytest as _pytest
+            _pytest.skip("running as root: mode bits don't gate os.access")
+        r = check_hub_pre_receive_hook(str(hub))
+        assert r.status == "FAIL"
+        assert "not executable" in r.message
+        assert "NO ACL" in r.message
+
+    def test_missing_is_also_a_bypass(self, tmp_path):
+        hub = tmp_path / "hub.git"
+        (hub / "objects").mkdir(parents=True)
+        (hub / "hooks").mkdir()
+        r = check_hub_pre_receive_hook(str(hub))
+        assert r.status == "FAIL"
+        assert "NO ACL" in r.message
 
 
 class TestCheckHooksFreshness:
