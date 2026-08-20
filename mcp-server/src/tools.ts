@@ -745,6 +745,19 @@ const TRANSPORT_PATTERNS = [
   "the remote end hung up",
 ];
 
+// The hub telling us IT is having trouble, not that our push is wrong. Keep in
+// sync with the `ERROR:`-prefixed paths in cli/schist/pre_receive.py.
+const HUB_TRANSIENT_PATTERNS = [
+  "the hub may be under load",
+  "failed to diff",
+];
+
+// The hub's rate-limit refusal, anchored on the literal line rate_limit.py's
+// _format_rejection builds: "REJECTED: rate limit exceeded (<limit>: n/m)".
+// Requiring the limit's NAME is what keeps arbitrary text — vault note paths,
+// commit subjects, the fail-open warning — from claiming to be a rate limit.
+const RATE_LIMIT_REJECTION_RE = /rejected: rate limit exceeded \((notes_per_sync|git_syncs_per_hour)\b/;
+
 const STALE_STATE_PATTERNS = [
   "index.lock",
   "another git process seems to be running",
@@ -767,7 +780,26 @@ export function classifyPushFailure(outcome: SyncCommandOutcome): PushFailureCla
     return "spawn-failed";
   }
   const text = outcomeMessage(outcome).toLowerCase();
-  if (text.includes("rate limit")) return "rate-limited";
+  // A hub-side transient is NOT a refusal about our content. pre_receive.py
+  // distinguishes its own two prefixes deliberately — `REJECTED:` means "your
+  // push", `ERROR:` means "the hub"; the diff-timeout path even says "the hub
+  // may be under load; please retry the push" (pre_receive.py:457-464). Both
+  // return 1, so git wraps both in "(pre-receive hook declined)" — which
+  // means the generic wrapper alone would call the hub asking us to retry an
+  // ACL violation and mark it non-retriable. Tested before isAclRejection.
+  if (HUB_TRANSIENT_PATTERNS.some((pattern) => text.includes(pattern))) return "transport";
+  // Anchored on the hub's own rejection line (rate_limit.py:211), NOT a bare
+  // "rate limit" substring. This text is matched against combined stdout and
+  // stderr, and two purely LOCAL failures echo vault paths into it verbatim —
+  // the ignore guard's blocking list (sync.py:672) and the pre-commit secret
+  // scanner's matches (sync.py:709). A note named "rate limit notes.md" then
+  // classified as rate-limited, which since retriable derives from the class
+  // also decides retriability and prints hub rate-limit remedies for what is
+  // really a .gitignore problem. Anyone with vault write could steer it.
+  // The bare substring also swallowed the hub's fail-OPEN warning
+  // ("WARNING: RATE_LIMIT_BYPASSED — rate limit DB unavailable", allowing the
+  // push), so an unrelated later failure read as rate-limited.
+  if (RATE_LIMIT_REJECTION_RE.test(text)) return "rate-limited";
   // Non-fast-forward before ACL: git's own hint block ("Updates were
   // rejected because…") is emitted ONLY for a stale ref, while a hub refusal
   // prints "! [remote rejected] … (pre-receive hook declined)" with no such
@@ -1165,6 +1197,15 @@ async function recentAddedPaths(
 function isAclRejection(outcome: SyncCommandOutcome): boolean {
   const text = outcomeMessage(outcome).toLowerCase();
   return (
+    // #511's forced command refuses BEFORE receive-pack starts — wrong repo,
+    // wrong verb, interactive shell, unparseable authorized_keys entry — so
+    // there is no pre-receive, no hook, and no "declined" wrapper to catch it.
+    // The spoke sees the message plus "fatal: Could not read from remote
+    // repository.", which is in no transport pattern either, so without this
+    // the clearest possible refusal fell through to "other"/retriable and an
+    // agent confined to another repo would retry forever. Every one of these
+    // messages carries the prefix (cli/schist/hub_shell.py:111-182).
+    text.includes("schist-shell:") ||
     text.includes("out-of-scope writes") ||
     text.includes("pre-receive hook declined") ||
     text.includes("require_pinned_identity") ||
@@ -1209,7 +1250,17 @@ function syncFailureResponse(
     mode,
     phase,
     retriable: !acl && !rateLimitedWithoutWindow,
-    failure_class: failureClass,
+    // Only on the push phase. types.ts invites the agent to pick its next
+    // MODE from this field, and a PULL outcome run through a push classifier
+    // can hand it a class that means something else entirely: `sync pull`'s
+    // conflict guidance prints "--identity <name>" (sync.py:606), and rebase
+    // echoes commit subjects, which on this server embed note titles
+    // verbatim — so a note titled with the word "rejected" satisfies
+    // isAclRejection's identity+rejected clause and a pull comes back
+    // "acl-rejected". A `non-fast-forward` on a pull would route the agent
+    // straight back to pull-rebase-push, forever. `reason` and `retriable`
+    // still describe every phase.
+    failure_class: phase === "push" ? failureClass : undefined,
     reason: acl
       ? "ACL violation"
       : rateLimitedWithoutWindow

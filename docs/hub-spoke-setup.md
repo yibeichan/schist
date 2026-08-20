@@ -241,13 +241,21 @@ waiting — check which name is in the parentheses:
 - **`git_syncs_per_hour`** is a sliding window. The hook prints a
   `Retry after: N seconds` line with the next available slot. Waiting works;
   `sync_retry` reports `retriable: true`.
-- **`notes_per_sync`** is a per-push cap, enforced statelessly with no retry
-  window and no `Retry after:` line. The identical push is rejected
-  identically forever — waiting never helps. `sync_retry` reports
-  `retriable: false, reason: "Rate limit (no retry window)"`. The fix is to
-  make the push smaller (commit and push in batches under the cap), or to
-  raise `rate_limits.notes_per_sync` for that identity in the hub's
-  `vault.yaml`.
+- **`notes_per_sync`** is a cap on the whole **push range**, enforced
+  statelessly with no retry window and no `Retry after:` line. The identical
+  push is rejected identically forever — waiting never helps. `sync_retry`
+  reports `retriable: false, reason: "Rate limit (no retry window)"`.
+
+  Splitting into more commits does **not** help: the hook counts files across
+  `oldrev..newrev` and dedupes, so every commit you add is still in the range.
+  Either raise `rate_limits.notes_per_sync` for that identity in the hub's
+  `vault.yaml`, or push the backlog a piece at a time by ref:
+
+  ```bash
+  # each push is its own range, so each is counted separately
+  git push origin <intermediate-sha>:main
+  git push origin main
+  ```
 
 Both are reported as `failure_class: "rate-limited"` — the class says what
 happened, `retriable` says whether repeating the same command could work.
