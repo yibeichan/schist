@@ -233,6 +233,25 @@ of whatever process ran `git push`. On HPC this usually means the SLURM job
 wrapper didn't inherit your `.bashrc` exports — add an explicit
 `export SCHIST_IDENTITY=hpc-cluster` to the job script.
 
+### "REJECTED: rate limit exceeded"
+
+Two different limits produce this line, and only one of them clears by
+waiting — check which name is in the parentheses:
+
+- **`git_syncs_per_hour`** is a sliding window. The hook prints a
+  `Retry after: N seconds` line with the next available slot. Waiting works;
+  `sync_retry` reports `retriable: true`.
+- **`notes_per_sync`** is a per-push cap, enforced statelessly with no retry
+  window and no `Retry after:` line. The identical push is rejected
+  identically forever — waiting never helps. `sync_retry` reports
+  `retriable: false, reason: "Rate limit (no retry window)"`. The fix is to
+  make the push smaller (commit and push in batches under the cap), or to
+  raise `rate_limits.notes_per_sync` for that identity in the hub's
+  `vault.yaml`.
+
+Both are reported as `failure_class: "rate-limited"` — the class says what
+happened, `retriable` says whether repeating the same command could work.
+
 ### "Pull timed out — falling through"
 
 The 5-second cap on `maybeSpokePull` is intentional. If you see this

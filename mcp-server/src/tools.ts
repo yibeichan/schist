@@ -1192,13 +1192,29 @@ function syncFailureResponse(
   // fact clears itself after the window. One classifier, one answer.
   const failureClass = classifyPushFailure(outcome);
   const acl = failureClass === "acl-rejected";
+  // A rate limit is only retriable if WAITING can clear it, and the hub
+  // enforces two that differ on exactly that. `git_syncs_per_hour` is a
+  // sliding window: rate_limit.py computes a positive retry_after and
+  // _format_rejection prints "Retry after: N seconds". `notes_per_sync` is
+  // stateless with retry_after=0 and prints no such line — the identical push
+  // is rejected identically forever, and the fix is to split it, not to wait.
+  // Both classify as "rate-limited", so require the POSITIVE evidence of a
+  // window rather than matching the limit's name: an unrecognized future
+  // stateless limit then reads non-retriable, which stops an agent rather
+  // than looping it (fail closed on the claim we can't support).
+  const rateLimitedWithoutWindow =
+    failureClass === "rate-limited" && !/retry after/i.test(outcomeMessage(outcome));
   return {
     ok: false,
     mode,
     phase,
-    retriable: !acl,
+    retriable: !acl && !rateLimitedWithoutWindow,
     failure_class: failureClass,
-    reason: acl ? "ACL violation" : (outcome.timedOut ? "Timeout" : "Command failed"),
+    reason: acl
+      ? "ACL violation"
+      : rateLimitedWithoutWindow
+        ? "Rate limit (no retry window)"
+        : (outcome.timedOut ? "Timeout" : "Command failed"),
     message: outcomeMessage(outcome),
     code: outcome.code ?? undefined,
     signal: outcome.signal ?? undefined,

@@ -1830,7 +1830,7 @@ exit 1
     }
   }, 15000);
 
-  test("a rate-limited retry is retriable, not an ACL violation", async () => {
+  test("a WINDOWED rate limit is retriable, not an ACL violation", async () => {
     // syncFailureResponse called isAclRejection DIRECTLY, bypassing
     // classifyPushFailure's ordering — and the hub's rate-limit refusal
     // arrives wrapped in the same "pre-receive hook declined" line an ACL
@@ -1844,8 +1844,9 @@ exit 1
       path.join(stubDir, "schist"),
       `#!/bin/sh
 echo "Push rejected by hub:" >&2
-echo "remote: REJECTED: rate limit exceeded (git_syncs_per_hour)" >&2
-echo "remote: Retry after 1800s" >&2
+echo "remote: REJECTED: rate limit exceeded (git_syncs_per_hour: 60/60)" >&2
+echo "remote: Identity: dragonfly" >&2
+echo "remote: Retry after: 1800 seconds (next slot available at 2026-08-20T20:00:00+00:00)" >&2
 echo " ! [remote rejected] main -> main (pre-receive hook declined)" >&2
 exit 1
 `,
@@ -1858,6 +1859,41 @@ exit 1
       expect(result.failure_class).toBe("rate-limited");
       expect(result.retriable).toBe(true);
       expect(result.reason).not.toBe("ACL violation");
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test("a rate limit with NO retry window is not retriable", async () => {
+    // The other hub rate limit. `notes_per_sync` is enforced statelessly with
+    // retry_after=0 (rate_limit.py:247-259), so _format_rejection emits no
+    // "Retry after:" line and the identical push is rejected identically
+    // forever — the fix is to split it, not to wait. Routing retriable
+    // through the class alone would have said `true` here and sent an agent
+    // into a loop, which is worse than the ACL mislabel it replaced.
+    const vault = await makeTempSpokeVault();
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(
+      path.join(stubDir, "schist"),
+      `#!/bin/sh
+echo "Push rejected by hub:" >&2
+echo "remote: REJECTED: rate limit exceeded (notes_per_sync: 25/20)" >&2
+echo "remote: Identity: dragonfly" >&2
+echo " ! [remote rejected] main -> main (pre-receive hook declined)" >&2
+exit 1
+`,
+      { mode: 0o755 },
+    );
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const result = await sync_retry(vault, { owner: "test-agent", mode: "push-only" }) as unknown as Record<string, unknown>;
+      // Still classified rate-limited — the class describes WHAT happened;
+      // retriable describes whether repeating the command could work.
+      expect(result.failure_class).toBe("rate-limited");
+      expect(result.retriable).toBe(false);
+      expect(result.reason).toBe("Rate limit (no retry window)");
     } finally {
       process.env.PATH = origPath;
       await fs.rm(stubDir, { recursive: true, force: true });
