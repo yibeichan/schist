@@ -745,12 +745,17 @@ const TRANSPORT_PATTERNS = [
   "the remote end hung up",
 ];
 
-// The hub telling us IT is having trouble, not that our push is wrong. Keep in
-// sync with the `ERROR:`-prefixed paths in cli/schist/pre_receive.py.
-const HUB_TRANSIENT_PATTERNS = [
-  "the hub may be under load",
-  "failed to diff",
-];
+// The hub telling us IT is having trouble, not that our push is wrong: the
+// `ERROR:`-prefixed paths in cli/schist/pre_receive.py:458-464, as opposed to
+// its `REJECTED:` ones. Anchored on that prefix, and NOT on the bare phrases.
+// "failed to diff" is two common words, and this pattern is the first text
+// test in classifyPushFailure, matched against combined output that embeds
+// vault note paths verbatim (the ignore guard lists up to 10) and commit
+// subjects — so unanchored it would let a note named "failed to diff.md" turn
+// any push failure into "transport", which is the class #531's gate treats as
+// self-clearing. A steerable substring that OPENS a gate is worse than one
+// that closes it.
+const HUB_TRANSIENT_RE = /error: (timed out diffing|failed to diff)\b/;
 
 // The hub's rate-limit refusal, anchored on the literal line rate_limit.py's
 // _format_rejection builds: "REJECTED: rate limit exceeded (<limit>: n/m)".
@@ -787,7 +792,7 @@ export function classifyPushFailure(outcome: SyncCommandOutcome): PushFailureCla
   // return 1, so git wraps both in "(pre-receive hook declined)" — which
   // means the generic wrapper alone would call the hub asking us to retry an
   // ACL violation and mark it non-retriable. Tested before isAclRejection.
-  if (HUB_TRANSIENT_PATTERNS.some((pattern) => text.includes(pattern))) return "transport";
+  if (HUB_TRANSIENT_RE.test(text)) return "transport";
   // Anchored on the hub's own rejection line (rate_limit.py:211), NOT a bare
   // "rate limit" substring. This text is matched against combined stdout and
   // stderr, and two purely LOCAL failures echo vault paths into it verbatim —

@@ -246,16 +246,34 @@ waiting — check which name is in the parentheses:
   push is rejected identically forever — waiting never helps. `sync_retry`
   reports `retriable: false, reason: "Rate limit (no retry window)"`.
 
-  Splitting into more commits does **not** help: the hook counts files across
-  `oldrev..newrev` and dedupes, so every commit you add is still in the range.
-  Either raise `rate_limits.notes_per_sync` for that identity in the hub's
-  `vault.yaml`, or push the backlog a piece at a time by ref:
+  Adding more commits does **not** help: the hook counts files across
+  `oldrev..newrev` and dedupes, so every commit you add is still inside the
+  range being pushed. What matters is the *range*, so the remedy depends on
+  how the backlog was built:
 
-  ```bash
-  # each push is its own range, so each is counted separately
-  git push origin <intermediate-sha>:main
-  git push origin main
-  ```
+  - **Many commits** (the usual MCP case — each `create_note` commits on its
+    own): push the range in pieces. Each push is its own range and is counted
+    separately.
+
+    ```bash
+    git log --oneline origin/main..main     # pick a sha under the cap
+    git push origin <intermediate-sha>:main
+    git push origin main
+    ```
+
+  - **One commit** (the CLI path — `schist sync push` stages everything
+    pending and makes a single `sync(<identity>): N files` commit): there is
+    no intermediate sha, so there is nothing to split. Either raise the limit,
+    or rewind and re-commit in batches before pushing:
+
+    ```bash
+    git reset --soft origin/main   # keep the files, drop the one big commit
+    # then re-add and commit in groups under the cap, pushing after each
+    ```
+
+  Raising the limit instead is a hub-side edit to `rate_limits.notes_per_sync`
+  for that identity in the hub's `vault.yaml` — root `vault.yaml` writes are
+  rejected from a spoke, so make it on the hub and let spokes fast-forward.
 
 Both are reported as `failure_class: "rate-limited"` — the class says what
 happened, `retriable` says whether repeating the same command could work.

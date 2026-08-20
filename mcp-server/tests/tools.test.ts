@@ -1672,6 +1672,26 @@ describe("push failure classification (#501)", () => {
     ))).toBe("acl-rejected");
   });
 
+  test("a note path cannot fake a hub-transient and open the gate", () => {
+    // The hub-transient test is the FIRST text test in classifyPushFailure,
+    // and "failed to diff" is two common words. Unanchored, a note named
+    // "failed to diff.md" — echoed verbatim by the ignore guard's blocking
+    // list (sync.py:672) or a commit subject — would turn ANY push failure
+    // into "transport", the class #531's gate treats as self-clearing. A
+    // steerable substring that OPENS a gate is worse than one that closes
+    // one, so this is anchored on the hub's own "ERROR:" prefix.
+    expect(classifyPushFailure(failed(
+      "Error: failed to stage scope 'research': research/mario/failed to diff.md\n",
+    ))).not.toBe("transport");
+    // A real out-of-scope refusal must not be stolen by a note title either.
+    expect(classifyPushFailure(failed(
+      "Push rejected by hub:\n" +
+      "remote: REJECTED: push contains out-of-scope writes\n" +
+      "remote:   - security/why the hub may be under load.md (scope: security)\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+    ))).toBe("acl-rejected");
+  });
+
   test("a vault note path cannot claim to be a rate limit", () => {
     // classifyPushFailure matches combined stdout+stderr, and two purely
     // LOCAL failures echo vault paths into it verbatim: the ignore guard's
