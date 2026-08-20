@@ -275,6 +275,18 @@ waiting — check which name is in the parentheses:
   for that identity in the hub's `vault.yaml` — root `vault.yaml` writes are
   rejected from a spoke, so make it on the hub and let spokes fast-forward.
 
+  Two things to know before you start splitting:
+
+  - **The two limits trade against each other.** `git_syncs_per_hour` defaults
+    to 10, so splitting a large backlog into N pushes spends N of those slots
+    and can turn a `notes_per_sync` rejection into a `git_syncs_per_hour` one.
+    If the backlog is large enough to need many pieces, raise the limit
+    instead.
+  - **A manual `git push` does not clear the sentinel.** `.schist/last-sync-error`
+    is only cleared by `sync_retry` or a successful background push, so after
+    pushing by hand your pushes are fine but MCP writes are still blocked. Run
+    `sync_retry mode=push-only` afterwards to clear it.
+
 Both are reported as `failure_class: "rate-limited"` — the class says what
 happened, `retriable` says whether repeating the same command could work.
 

@@ -752,16 +752,54 @@ const TRANSPORT_PATTERNS = [
 // test in classifyPushFailure, matched against combined output that embeds
 // vault note paths verbatim (the ignore guard lists up to 10) and commit
 // subjects — so unanchored it would let a note named "failed to diff.md" turn
-// any push failure into "transport", which is the class #531's gate treats as
-// self-clearing. A steerable substring that OPENS a gate is worse than one
-// that closes it.
-const HUB_TRANSIENT_RE = /error: (timed out diffing|failed to diff)\b/;
+// any push failure into "transport". Today's gate is class-blind (it blocks on
+// any sentinel), but #531 proposes treating transport as self-clearing, so a
+// steerable substring here would open a gate rather than close one — worse.
+// Stated as a forward constraint, not as current behavior.
+const HUB_TRANSIENT_RE = /^remote:\s*error: timed out diffing\b/m;
+
+// The hub REFUSING our content. pre_receive.py prefixes every such line
+// "REJECTED:" — out-of-scope writes, unknown identity, cannot determine
+// identity, the pinning message, and `failed to load vault.yaml`, whose own
+// text carries no hub-specific phrase. One anchored prefix replaces the
+// per-message list AND the old `identity` + `rejected` conjunction, which was
+// two loose substrings over the whole combined output: the worst shape in this
+// file and the one memory #237 is about.
+const HUB_REFUSAL_RE = /^remote:\s*rejected:/m;
+
+// #511's forced command refuses BEFORE receive-pack starts — wrong repo, wrong
+// verb, interactive shell, unparseable authorized_keys entry — so there is no
+// pre-receive, no hook, and no "declined" wrapper to catch it. The spoke sees
+// only this line plus "fatal: Could not read from remote repository.", which
+// matches no transport pattern, so the clearest possible refusal fell through
+// to "other"/retriable and an agent confined to another repo retried forever.
+// schist-shell writes before exec, so the line is unprefixed at line start —
+// anchored, because a vault path is arbitrary and colons are legal in
+// filenames, so an unanchored form let a junk-file warning naming
+// "research/schist-shell: x.md~" turn an unreachable hub into a permanent
+// refusal. That is #535 again, sourced from the vault instead of the hostname.
+// `failed to exec git shell` is deliberately excluded: an execvp OSError is a
+// hub-side operational fault (missing binary, EAGAIN under fork pressure), not
+// an authorization decision (hub_shell.py:182).
+const SHELL_REFUSAL_RE =
+  /^schist-shell: (?!failed to exec )/m;
 
 // The hub's rate-limit refusal, anchored on the literal line rate_limit.py's
 // _format_rejection builds: "REJECTED: rate limit exceeded (<limit>: n/m)".
 // Requiring the limit's NAME is what keeps arbitrary text — vault note paths,
 // commit subjects, the fail-open warning — from claiming to be a rate limit.
 const RATE_LIMIT_REJECTION_RE = /rejected: rate limit exceeded \((notes_per_sync|git_syncs_per_hour)\b/;
+
+// The retry window, anchored on _format_rejection's own line
+// (rate_limit.py:216-221). Unanchored, this was the same steerable-substring
+// defect one axis over: the class was anchored but RETRIABILITY was decided by
+// a bare "retry after", and the junk-skip warning relays arbitrary vault paths
+// into the SAME stderr as a real hub rejection and then keeps syncing
+// (sync.py:674-677, unlike the blocking path which exits). A note under
+// "notes/retry after review/" therefore made a stateless notes_per_sync
+// rejection look windowed and put an agent back in the retry loop this was
+// added to prevent.
+const RETRY_WINDOW_RE = /^remote:\s*retry after: \d+ seconds\b/mi;
 
 const STALE_STATE_PATTERNS = [
   "index.lock",
@@ -1202,20 +1240,9 @@ async function recentAddedPaths(
 function isAclRejection(outcome: SyncCommandOutcome): boolean {
   const text = outcomeMessage(outcome).toLowerCase();
   return (
-    // #511's forced command refuses BEFORE receive-pack starts — wrong repo,
-    // wrong verb, interactive shell, unparseable authorized_keys entry — so
-    // there is no pre-receive, no hook, and no "declined" wrapper to catch it.
-    // The spoke sees the message plus "fatal: Could not read from remote
-    // repository.", which is in no transport pattern either, so without this
-    // the clearest possible refusal fell through to "other"/retriable and an
-    // agent confined to another repo would retry forever. Every one of these
-    // messages carries the prefix (cli/schist/hub_shell.py:111-182).
-    text.includes("schist-shell:") ||
-    text.includes("out-of-scope writes") ||
-    text.includes("pre-receive hook declined") ||
-    text.includes("require_pinned_identity") ||
-    text.includes("cannot determine push identity") ||
-    (text.includes("identity") && text.includes("rejected"))
+    HUB_REFUSAL_RE.test(text) ||
+    SHELL_REFUSAL_RE.test(text) ||
+    text.includes("pre-receive hook declined")
   );
 }
 
@@ -1249,23 +1276,26 @@ function syncFailureResponse(
   // stateless limit then reads non-retriable, which stops an agent rather
   // than looping it (fail closed on the claim we can't support).
   const rateLimitedWithoutWindow =
-    failureClass === "rate-limited" && !/retry after/i.test(outcomeMessage(outcome));
+    failureClass === "rate-limited" && !RETRY_WINDOW_RE.test(outcomeMessage(outcome));
   return {
     ok: false,
     mode,
     phase,
     retriable: !acl && !rateLimitedWithoutWindow,
-    // Only on the push phase. types.ts invites the agent to pick its next
-    // MODE from this field, and a PULL outcome run through a push classifier
-    // can hand it a class that means something else entirely: `sync pull`'s
-    // conflict guidance prints "--identity <name>" (sync.py:606), and rebase
-    // echoes commit subjects, which on this server embed note titles
-    // verbatim — so a note titled with the word "rejected" satisfies
-    // isAclRejection's identity+rejected clause and a pull comes back
-    // "acl-rejected". A `non-fast-forward` on a pull would route the agent
-    // straight back to pull-rebase-push, forever. `reason` and `retriable`
-    // still describe every phase.
-    failure_class: phase === "push" ? failureClass : undefined,
+    // Push phase only, and for ONE narrow reason: types.ts invites the agent
+    // to pick its next MODE from this field, and a push class does not name a
+    // pull's next move — a pull reported `non-fast-forward` would route
+    // straight back to pull-rebase-push, forever.
+    //
+    // This is NOT what keeps a pull from being mislabelled. `retriable` and
+    // `reason` are still computed from the same classifier on every phase, so
+    // suppressing the field would only have hidden the evidence for an equally
+    // wrong verdict. What fixes that is anchoring the matchers on hub-owned
+    // tokens at line start (HUB_REFUSAL_RE, SHELL_REFUSAL_RE), so interleaved
+    // note paths and commit subjects cannot reach them at all — on either
+    // phase. The old loose `identity` + `rejected` conjunction is what made a
+    // pull come back "acl-rejected"; it is gone rather than suppressed.
+    ...(phase === "push" ? { failure_class: failureClass } : {}),
     reason: acl
       ? "ACL violation"
       : rateLimitedWithoutWindow

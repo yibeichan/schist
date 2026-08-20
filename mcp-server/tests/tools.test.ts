@@ -1661,10 +1661,15 @@ describe("push failure classification (#501)", () => {
       "please retry the push.\n" +
       " ! [remote rejected] main -> main (pre-receive hook declined)\n",
     ))).toBe("transport");
+    // But only the TIMEOUT path. "failed to diff" comes from a
+    // CalledProcessError on `git log <old>..<new>` (pre_receive.py:464) — a
+    // missing or unreachable rev, or a corrupt object. No retry clears that,
+    // and note that the hub does NOT ask for one there, unlike the timeout
+    // path directly above it. It must stay non-retriable.
     expect(classifyPushFailure(failed(
       "remote: ERROR: failed to diff abc123..def456: Command returned non-zero exit status 128\n" +
       " ! [remote rejected] main -> main (pre-receive hook declined)\n",
-    ))).toBe("transport");
+    ))).not.toBe("transport");
     // ...but a hub-side problem the hub blames on YOUR file is still yours.
     expect(classifyPushFailure(failed(
       "remote: REJECTED: failed to load vault.yaml: mapping values are not allowed\n" +
@@ -1677,9 +1682,10 @@ describe("push failure classification (#501)", () => {
     // and "failed to diff" is two common words. Unanchored, a note named
     // "failed to diff.md" — echoed verbatim by the ignore guard's blocking
     // list (sync.py:672) or a commit subject — would turn ANY push failure
-    // into "transport", the class #531's gate treats as self-clearing. A
-    // steerable substring that OPENS a gate is worse than one that closes
-    // one, so this is anchored on the hub's own "ERROR:" prefix.
+    // into "transport" — the class #531 PROPOSES to treat as self-clearing
+    // (today's gate is class-blind). A steerable substring that would open a
+    // gate is worse than one that closes it, so this is anchored on the hub's
+    // own line-start "remote: ERROR:" prefix.
     expect(classifyPushFailure(failed(
       "Error: failed to stage scope 'research': research/mario/failed to diff.md\n",
     ))).not.toBe("transport");
@@ -1688,6 +1694,101 @@ describe("push failure classification (#501)", () => {
       "Push rejected by hub:\n" +
       "remote: REJECTED: push contains out-of-scope writes\n" +
       "remote:   - security/why the hub may be under load.md (scope: security)\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+    ))).toBe("acl-rejected");
+  });
+
+  /**
+   * The one real-world stdout+stderr interleaving this classifier actually
+   * sees, and the shape none of the tests above covered: the junk-skip
+   * warning relays up to 10 ARBITRARY vault paths and then KEEPS SYNCING
+   * (git_ops.py:540-548 -> sync.py:674-677), unlike the ignore-guard blocking
+   * list which exits. So a vault writer's chosen filename appears in the same
+   * captured output as whatever the hub says next. `*~` is in
+   * IGNORE_GUARD_JUNK_BASENAMES, so any editor backup qualifies and the
+   * directory component is free text. Every matcher this file keys on has to
+   * survive that.
+   */
+  describe("a vault writer cannot steer the class through the junk-skip warning", () => {
+    const junk = (paths: string) =>
+      "Warning: skipped .gitignore-excluded junk file(s) under scope 'research' " +
+      `(OS/editor litter, never syncs to the hub): ${paths}. ` +
+      "Delete the file(s) to silence this warning.\n";
+
+    test("a path naming schist-shell cannot make an unreachable hub permanent", () => {
+      // #535's exact harm — permanent refusal for a hub that is merely down,
+      // so #500 recovery never fires — sourced from the vault rather than the
+      // hostname. Colons are legal in POSIX filenames and the warning relays
+      // them unfiltered.
+      const outcome = {
+        ok: false, code: 1,
+        stdout: junk("research/schist-shell: draft.md~"),
+        stderr:
+          "ssh: connect to host hub.example.ts.net port 22: Connection refused\n" +
+          "fatal: Could not read from remote repository.\n",
+      };
+      expect(classifyPushFailure(outcome)).toBe("transport");
+    });
+
+    test("a path naming a hub refusal cannot fake one", () => {
+      const outcome = {
+        ok: false, code: 1,
+        stdout: junk("research/REJECTED: out-of-scope writes.md~"),
+        stderr: "ssh: connect to host hub.example.ts.net port 22: Connection refused\n",
+      };
+      expect(classifyPushFailure(outcome)).toBe("transport");
+    });
+
+    test("a path cannot fake a retry window onto a stateless rate limit", () => {
+      // The class is anchored, so this reaches retriable via the WINDOW probe
+      // instead — the same defect one axis over. notes_per_sync is stateless;
+      // saying "retry" here is the infinite loop the window probe exists to
+      // prevent.
+      const outcome = {
+        ok: false, code: 1,
+        stdout: junk("notes/retry after review/draft.md~"),
+        stderr:
+          "Push rejected by hub:\n" +
+          "remote: REJECTED: rate limit exceeded (notes_per_sync: 25/20)\n" +
+          "remote: Identity: dragonfly\n" +
+          " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+      };
+      expect(classifyPushFailure(outcome)).toBe("rate-limited");
+    });
+
+    test("a real windowed rate limit is still recognized alongside junk", () => {
+      const outcome = {
+        ok: false, code: 1,
+        stdout: junk("notes/whatever.md~"),
+        stderr:
+          "remote: REJECTED: rate limit exceeded (git_syncs_per_hour: 10/10)\n" +
+          "remote: Retry after: 1800 seconds (next slot available at 2026-08-20T20:00:00+00:00)\n" +
+          " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+      };
+      expect(classifyPushFailure(outcome)).toBe("rate-limited");
+    });
+  });
+
+  test("a hub-side exec fault is not an authorization decision", () => {
+    // hub_shell.py:182 — an execvp OSError (missing binary, EAGAIN under fork
+    // pressure). It carries the schist-shell prefix like every refusal does,
+    // but it is the hub failing, not the hub refusing, so it must not be
+    // reported as a permanent ACL violation.
+    expect(classifyPushFailure(failed(
+      "schist-shell: failed to exec git shell: [Errno 11] Resource temporarily unavailable\n" +
+      "fatal: Could not read from remote repository.\n",
+    ))).not.toBe("acl-rejected");
+  });
+
+  test("a residual unanchored ERROR cannot steal a real refusal", () => {
+    // The anchor is ^remote: error:, not a bare "error:" — git prefixes every
+    // pre-receive line with "remote: ", so the full anchor is free, and
+    // without it a note path carrying "error: failed to diff" flipped a
+    // genuine out-of-scope refusal to transport.
+    expect(classifyPushFailure(failed(
+      "Push rejected by hub:\n" +
+      "remote: REJECTED: push contains out-of-scope writes\n" +
+      "remote:   - security/error: timed out diffing notes.md (scope: security)\n" +
       " ! [remote rejected] main -> main (pre-receive hook declined)\n",
     ))).toBe("acl-rejected");
   });
@@ -1980,6 +2081,40 @@ exit 1
       const result = await sync_retry(vault, { owner: "test-agent", mode: "push-only" }) as unknown as Record<string, unknown>;
       // Still classified rate-limited — the class describes WHAT happened;
       // retriable describes whether repeating the command could work.
+      expect(result.failure_class).toBe("rate-limited");
+      expect(result.retriable).toBe(false);
+      expect(result.reason).toBe("Rate limit (no retry window)");
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test("a junk-file path cannot buy back retriability on a stateless limit", async () => {
+    // The window probe decides retriable, and the junk-skip warning puts
+    // ARBITRARY vault paths in the same output as the hub's rejection and then
+    // keeps syncing (sync.py:674-677). Unanchored, a note under
+    // "notes/retry after review/" made a stateless notes_per_sync rejection
+    // look windowed — putting an agent straight back into the infinite retry
+    // loop the probe was added to prevent, and losing the operator's hint.
+    const vault = await makeTempSpokeVault();
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(
+      path.join(stubDir, "schist"),
+      `#!/bin/sh
+echo "Warning: skipped .gitignore-excluded junk file(s) under scope 'research' (OS/editor litter, never syncs to the hub): notes/retry after review/draft.md~. Delete the file(s) to silence this warning."
+echo "Push rejected by hub:" >&2
+echo "remote: REJECTED: rate limit exceeded (notes_per_sync: 25/20)" >&2
+echo "remote: Identity: dragonfly" >&2
+echo " ! [remote rejected] main -> main (pre-receive hook declined)" >&2
+exit 1
+`,
+      { mode: 0o755 },
+    );
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const result = await sync_retry(vault, { owner: "test-agent", mode: "push-only" }) as unknown as Record<string, unknown>;
       expect(result.failure_class).toBe("rate-limited");
       expect(result.retriable).toBe(false);
       expect(result.reason).toBe("Rate limit (no retry window)");
