@@ -2231,8 +2231,48 @@ describe("sync_status + sync_retry (#135)", () => {
       expect(result.ok).toBe(false);
       expect(result.retriable).toBe(false);
       expect(result.reason).toBe("Rebase conflict");
+      // syncFailureResponse now classifies this path too, and the classifier
+      // is a PUSH classifier with no rebase-conflict class — so a conflict
+      // lands on "other". Pinned deliberately: it is the honest answer, and
+      // `reason` plus `retriable: false` carry the real signal, so the
+      // generic class cannot mislead an agent into retrying. If a
+      // rebase-conflict class is ever added, this assertion is the reminder
+      // that parseFailureClass and the sentinel grammar move with it.
+      expect(result.failure_class).toBe("other");
       const log = await fs.readFile(logPath, "utf-8");
       expect(log.trim()).toBe(`--vault ${vault} sync pull`);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  test("a pull-phase failure gets a real class, not a push-shaped guess", async () => {
+    // syncFailureResponse is shared by the push, in-flight and pull-rebase
+    // paths, so failure_class is now computed for a PULL outcome by a
+    // function named for push failures. The hub-refusal branches can't fire
+    // on a pull, but the transport/timeout/stale-state ones are exactly as
+    // meaningful — pin that a pull that can't reach the hub says so, rather
+    // than falling through to "other".
+    const vault = await makeTempSpokeVault();
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(
+      path.join(stubDir, "schist"),
+      `#!/bin/sh
+echo "ssh: connect to host hub.example.ts.net port 22: Operation timed out" >&2
+echo "fatal: Could not read from remote repository." >&2
+exit 1
+`,
+      { mode: 0o755 },
+    );
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as unknown as Record<string, unknown>;
+      expect(result.ok).toBe(false);
+      expect(result.phase).toBe("pull-rebase");
+      expect(result.failure_class).toBe("transport");
+      expect(result.retriable).toBe(true);
     } finally {
       process.env.PATH = origPath;
       await fs.rm(stubDir, { recursive: true, force: true });
