@@ -251,18 +251,33 @@ Or trigger a dummy commit:
 cd ~/my-vault && git commit --allow-empty -m "trigger ingest"
 ```
 
-### 5. `Post-commit hook not installed`
+### 5. `Post-commit hook not installed` / `not executable`
+
+Reinstall the hooks in place — re-running `schist init` on an existing vault is
+not supported, but there is a dedicated command:
 
 ```bash
-schist init ~/my-vault --name my-vault --identity local
+schist --vault ~/my-vault hooks reinstall
 ```
 
-Re-running `schist init` on an existing vault is not supported. Check the hook exists:
+`doctor` reports two distinct failures here, and they need different fixes:
+
+- **`not installed`** — the file is absent. Reinstall as above.
+- **`installed but not executable — git skips it silently`** — the file is
+  there but git will not run it, so nothing happens and nothing complains.
+  `chmod +x` the path named in the message. This matters most for
+  `pre-commit`, which is the staged-secret scanner: without the execute bit
+  `git commit` stops scanning and says nothing.
+
+`doctor` names the exact path it checked, and that is not always
+`.git/hooks/` — if `core.hooksPath` is set, git looks in the configured
+directory instead and schist's hooks there are the ones that count. Either
+symlink them in, or unset the redirect:
+
 ```bash
-ls ~/my-vault/.git/hooks/post-commit
+git -C ~/my-vault config --unset core.hooksPath
+schist --vault ~/my-vault hooks reinstall
 ```
-
-If missing, reinstall the vault or manually copy the hook script.
 
 ### 6. `MCP server fails to start`
 
