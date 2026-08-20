@@ -94,3 +94,24 @@ def _no_stray_runtime_artifacts():
             problems.append(f"wrote to {path}")
     if problems:
         pytest.fail(f"test {'; '.join(problems)} — {_HINT}")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_git_config(monkeypatch, tmp_path_factory):
+    """Pin git's global/system config away from the developer's own.
+
+    Nothing in this suite isolated it, so any ambient `core.hooksPath` — which
+    a pre-commit-framework user has set as a matter of course — leaked into
+    every check that shells out to git. With one set, 8 tests failed, and the
+    failures were not the suite's fault so much as evidence that the checks
+    were reading config discovered outside the repo under test.
+
+    Also keeps a test that fabricates a repo from being silently answered by
+    an ancestor repository's config: this source tree is itself a git repo, so
+    `git -C <tmp>` walking upward is a real path when tmp is not isolated.
+    """
+    empty = tmp_path_factory.mktemp("gitconfig") / "empty"
+    empty.write_text("")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(empty))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
