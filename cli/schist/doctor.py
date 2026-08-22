@@ -293,9 +293,13 @@ def _hook_state(hooks_dir: Optional[Path], name: str, configured: Optional[str],
         # Never PASS on "I don't know" — see _hooks_dir.
         return "FAIL", f"cannot determine where git looks for hooks: {error}"
     if hooks_dir is None:
+        # Deliberately names no directory: this message is shared with the
+        # bare-repo hub, whose hooks live at <repo>/hooks rather than
+        # <repo>/.git/hooks, so the old ".git/hooks" wording was simply false
+        # there (#550). The point is that NO directory is consulted.
         return "FAIL", (
-            "core.hooksPath is set to an empty value — git runs no hook from "
-            ".git/hooks, so this hook never fires"
+            "core.hooksPath is set to an empty value — git consults no hooks "
+            f"directory at all, so {name} never fires"
         )
     where = f" (via core.hooksPath '{configured}')" if configured else ""
     hook = hooks_dir / name
@@ -423,9 +427,17 @@ def check_hooks_freshness(vault_path: Optional[str]) -> CheckResult:
         return CheckResult(
             "FAIL", "Hooks freshness",
             "; ".join(unreadable),
-            fix=f"Check filesystem permissions on {hooks_dir}/ — schist cannot read the installed hooks.",
+            fix=(f"Check filesystem permissions on {hooks_dir}/ — schist cannot "
+                 f"read the installed hooks."),
         )
     if stale:
+        # Name the hook that is ACTUALLY stale (#548). The remedy used to be
+        # built for "pre-commit" unconditionally, so a vault whose post-commit
+        # was the stale one got instructions pointing at the other hook — and
+        # under a redirect those instructions include a symlink path, which
+        # made the wrong-hook version actively misleading rather than merely
+        # imprecise. `stale` entries are "<name>: <detail>".
+        stale_names = [entry.split(":", 1)[0] for entry in stale]
         return CheckResult(
             "WARN", "Hooks freshness",
             "; ".join(stale),
@@ -433,7 +445,7 @@ def check_hooks_freshness(vault_path: Optional[str]) -> CheckResult:
             # .git/hooks — the one directory this check is NOT reading — so
             # the WARN could never clear no matter how many times the user ran
             # the suggested command.
-            fix=_hook_fix(vault_path, hooks_dir, "pre-commit", configured),
+            fix=_hook_fix(vault_path, hooks_dir, ", ".join(stale_names), configured),
         )
     where = f" (via core.hooksPath '{configured}')" if configured else ""
     if pinned:
