@@ -2,6 +2,14 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "rootDir": "..",
+    // Never emit from this config. It sets rootDir ".." and includes
+    // ../scripts, so `tsc -p tsconfig.test.json` without --noEmit writes a
+    // SECOND tree into dist/ rooted at the repo root (dist/mcp-server/src,
+    // dist/mcp-server/tests, dist/scripts). Jest then collected the compiled
+    // test copies as extra suites, which failed on path resolution: 35
+    // phantom failures that never appeared in CI, because CI always passes
+    // --noEmit. ts-jest ignores this flag for its own transform.
+    "noEmit": true,
     "paths": {
       "gpt-tokenizer": ["./node_modules/gpt-tokenizer"]
     }
