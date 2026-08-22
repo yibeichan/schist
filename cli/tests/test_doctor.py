@@ -378,6 +378,39 @@ class TestHookChecksRespectHooksPath:
         assert check_hooks_path(str(repo)).status == "FAIL"
         assert check_pre_commit_hook(str(repo)).status == "FAIL"
 
+    def test_empty_hookspath_message_names_no_directory(self, tmp_path):
+        """#550: the message hardcoded ".git/hooks", but this string is shared
+        with the bare-repo hub check, whose hooks live at <repo>/hooks — so it
+        stated a path that does not exist there. It must describe the
+        condition, not guess a location."""
+        import subprocess as sp
+        hub = _real_bare_hub(tmp_path / "hub.git")
+        sp.run(["git", "--git-dir", str(hub), "config", "core.hooksPath", ""], check=True)
+        r = check_hub_pre_receive_hook(str(hub))
+        assert r.status == "FAIL"
+        assert ".git/hooks" not in r.message
+        assert "no hooks directory" in r.message
+        assert "pre-receive" in r.message
+
+    def test_stale_fix_names_the_hook_that_is_actually_stale(self, tmp_path):
+        """#548: the stale remedy was built for "pre-commit" unconditionally,
+        so a vault whose POST-commit was stale got instructions pointing at
+        the other hook — and under a redirect those instructions carry a
+        symlink path, making the wrong name actively misleading."""
+        from schist import sync as sync_mod
+        repo = _real_repo(tmp_path)
+        hooks = repo / ".git" / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
+        # pre-commit current, post-commit stale.
+        (hooks / "pre-commit").write_text(
+            f"#!/bin/sh\n# schist-hook-version: {sync_mod.HOOK_VERSION}\n")
+        (hooks / "post-commit").write_text("#!/bin/sh\n# schist-hook-version: 1\n")
+        r = check_hooks_freshness(str(repo))
+        assert r.status == "WARN"
+        assert "post-commit" in r.message
+        assert "post-commit" in (r.fix or ""), r.fix
+        assert "pre-commit" not in (r.fix or ""), r.fix
+
     def test_a_directory_named_like_a_hook_is_not_a_hook(self, tmp_path):
         """os.access(X_OK) is true for a directory, so without an is_file()
         guard a directory named `pre-commit` reported PASS | installed."""
@@ -541,7 +574,16 @@ class TestCheckHubPreReceiveHook:
 
 class TestCheckHooksFreshness:
     """Issue #103 — detect spokes still running an older hook template so
-    fixes to the secret regex actually reach existing installations."""
+    fixes to the secret regex actually reach existing installations.
+
+    NOTE: this check's core.hooksPath redirect behaviour is covered in
+    TestHookChecksRespectHooksPath — `test_freshness_reads_the_redirected_dir`
+    (reads the directory git actually uses) and
+    `test_stale_fix_names_the_hook_that_is_actually_stale` (the remedy under a
+    redirect). They live there because they share that class's redirect
+    fixture; noted here because reading only this class made the coverage look
+    missing (#549).
+    """
 
     def _install_hook(self, vault: Path, name: str, body: str) -> None:
         hooks = vault / ".git" / "hooks"
