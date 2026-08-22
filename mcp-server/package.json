@@ -39,7 +39,9 @@
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
-    "audit": "NODE_PATH=./node_modules tsx ../scripts/audit_mcp_response_sizes.ts"
+    "audit": "NODE_PATH=./node_modules tsx ../scripts/audit_mcp_response_sizes.ts",
+    "typecheck": "tsc --noEmit",
+    "typecheck:tests": "tsc -p tsconfig.test.json --noEmit"
   },
   "jest": {
     "preset": "ts-jest/presets/default-esm",
@@ -60,7 +62,11 @@
           "tsconfig": "tsconfig.test.json"
         }
       ]
-    }
+    },
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "<rootDir>/dist/"
+    ]
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
