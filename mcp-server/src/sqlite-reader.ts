@@ -1185,9 +1185,52 @@ CREATE TABLE IF NOT EXISTS agent_state (
 );
 `;
 
-function memoryDbPath(): string {
-  return process.env.SCHIST_MEMORY_DB ??
-    path.join(os.homedir(), ".openclaw", "memory", "agent-state.db");
+/**
+ * Canonical home of the cross-project memory DB. `.schist/` matches the
+ * per-vault metadata directory name, so every path schist owns reads as
+ * schist's. Kept in sync with cli/schist/doctor.py's mirror by the
+ * memory-db path drift test.
+ */
+export const MEMORY_DB_RELPATH = [".schist", "memory", "agent-state.db"] as const;
+
+/**
+ * Pre-#565 home. `.openclaw` is not a schist directory and never was — the
+ * name came in with the memory-v2 slice (#340/#349) and nothing else on a
+ * spoke writes there. New installs must never create it; deployments that
+ * already have it keep working from it until migrated, because the
+ * alternative is 250+ recorded lessons silently becoming invisible the
+ * moment the server is upgraded. `check_memory_db_path` reports the
+ * migration; doctor's remedy is a `.backup` to a temp name plus an atomic
+ * rename, so the canonical path never appears half-written to a concurrent
+ * reader and no -wal/-shm has to be moved as a unit (a stray -wal beside a
+ * moved DB is replayed into it — corruption that passes integrity_check).
+ */
+export const LEGACY_MEMORY_DB_RELPATH = [".openclaw", "memory", "agent-state.db"] as const;
+
+/**
+ * `homeDir` is an explicit seam for tests: os.homedir() does not follow a
+ * reassigned process.env.HOME under jest, and mocking a namespace import
+ * under ESM is worse than passing the one value the function needs.
+ * Production callers never pass it.
+ */
+export function memoryDbPath(homeDir: string = os.homedir()): string {
+  // `?.trim() ||`, not `??`: an exported-but-empty SCHIST_MEMORY_DB used to
+  // reach `new Database("")` and throw. Empty means unset, as it does for
+  // SCHIST_BIN in tools.ts.
+  const override = process.env.SCHIST_MEMORY_DB?.trim();
+  if (override) return override;
+
+  const canonical = path.join(homeDir, ...MEMORY_DB_RELPATH);
+  if (fs.existsSync(canonical)) return canonical;
+
+  // Only fall back when the legacy file actually exists. Resolution by
+  // absence is safe in exactly this direction: a missing canonical file on a
+  // fresh install must be CREATED at the canonical path, never at the legacy
+  // one, so the legacy path can only ever be inherited, never introduced.
+  const legacy = path.join(homeDir, ...LEGACY_MEMORY_DB_RELPATH);
+  if (fs.existsSync(legacy)) return legacy;
+
+  return canonical;
 }
 
 function openMemoryDb(): Database.Database {

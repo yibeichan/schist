@@ -1,5 +1,6 @@
 import * as fs from "fs/promises";
 import { readFileSync } from "node:fs";
+import * as fsSync from "node:fs";
 import * as path from "path";
 import * as os from "os";
 import { fileURLToPath } from "url";
@@ -9,7 +10,7 @@ import { load as yamlLoadSync } from "js-yaml";
 import { jest } from "@jest/globals";
 import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, formatPushFailure, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES } from "../src/tools.js";
 import Database from "better-sqlite3";
-import { INDEX_SCHEMA_VERSION } from "../src/sqlite-reader.js";
+import { INDEX_SCHEMA_VERSION, memoryDbPath } from "../src/sqlite-reader.js";
 import { parseConnections, parseNote } from "../src/markdown-parser.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -4658,5 +4659,66 @@ describe("spawn-failure diagnosis names its cause (#560)", () => {
     const msg = formatPushFailure(spawnError("spawn EACCES"), "retry push failed");
     expect(msg).toContain("spawn EACCES");
     expect(msg).not.toContain("SCHIST_BIN");
+  });
+});
+
+describe("memory DB path resolution (#565)", () => {
+  // `.openclaw` is not a schist directory. It must never be CREATED by a new
+  // install, but a deployment that already has one keeps reading it until
+  // migrated — 250+ recorded lessons would otherwise go invisible on upgrade.
+  let home: string;
+  let prevHome: string | undefined;
+  let prevOverride: string | undefined;
+
+  const canonicalOf = (h: string) => path.join(h, ".schist", "memory", "agent-state.db");
+  const legacyOf = (h: string) => path.join(h, ".openclaw", "memory", "agent-state.db");
+
+  const seed = (p: string) => {
+    fsSync.mkdirSync(path.dirname(p), { recursive: true });
+    fsSync.writeFileSync(p, "");
+  };
+
+  beforeEach(() => {
+    home = fsSync.mkdtempSync(path.join(os.tmpdir(), "schist-memhome-"));
+    prevHome = process.env.HOME;
+    prevOverride = process.env.SCHIST_MEMORY_DB;
+    process.env.HOME = home;
+    delete process.env.SCHIST_MEMORY_DB;
+  });
+
+  afterEach(() => {
+    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+    if (prevOverride === undefined) delete process.env.SCHIST_MEMORY_DB;
+    else process.env.SCHIST_MEMORY_DB = prevOverride;
+    fsSync.rmSync(home, { recursive: true, force: true });
+  });
+
+  test("a fresh install resolves to .schist, never .openclaw", () => {
+    expect(memoryDbPath(home)).toBe(canonicalOf(home));
+    expect(memoryDbPath(home)).not.toContain(".openclaw");
+  });
+
+  test("an existing legacy DB is still used, so no entries go invisible", () => {
+    seed(legacyOf(home));
+    expect(memoryDbPath(home)).toBe(legacyOf(home));
+  });
+
+  test("canonical wins once it exists, even with the legacy file still present", () => {
+    seed(legacyOf(home));
+    seed(canonicalOf(home));
+    expect(memoryDbPath(home)).toBe(canonicalOf(home));
+  });
+
+  test("an empty SCHIST_MEMORY_DB means unset, not new Database(\"\")", () => {
+    // `??` returned "" here, which reached better-sqlite3 and threw.
+    process.env.SCHIST_MEMORY_DB = "   ";
+    expect(memoryDbPath(home)).toBe(canonicalOf(home));
+  });
+
+  test("an explicit override still wins over both", () => {
+    seed(legacyOf(home));
+    seed(canonicalOf(home));
+    process.env.SCHIST_MEMORY_DB = "/tmp/pinned-agent-state.db";
+    expect(memoryDbPath(home)).toBe("/tmp/pinned-agent-state.db");
   });
 });

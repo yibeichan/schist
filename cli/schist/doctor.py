@@ -2086,6 +2086,92 @@ def _extract_mcp_index_schema_version(dist_dir: Path) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+# ── Memory DB location (#565) ─────────────────────────────────────────────
+#
+# Mirrors MEMORY_DB_RELPATH / LEGACY_MEMORY_DB_RELPATH in
+# mcp-server/src/sqlite-reader.ts. `.openclaw` is not a schist directory —
+# the name arrived with the memory-v2 slice (#340/#349) and nothing else on a
+# spoke writes there. The server no longer CREATES it, but still reads an
+# existing one so an upgrade never makes 250+ recorded lessons invisible.
+# Pinned against the TS literals by the drift test in test_doctor.py.
+MEMORY_DB_RELPATH = (".schist", "memory", "agent-state.db")
+LEGACY_MEMORY_DB_RELPATH = (".openclaw", "memory", "agent-state.db")
+
+
+def _memory_entry_count(db: Path) -> Optional[int]:
+    """Row count in agent_memory, or None if unreadable/not a schist memory DB."""
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return None
+    try:
+        row = con.execute("SELECT count(*) FROM agent_memory").fetchone()
+        return int(row[0]) if row else None
+    except (sqlite3.Error, ValueError, TypeError):
+        return None
+    finally:
+        con.close()
+
+
+def _memory_migration_fix(legacy: Path, canonical: Path) -> str:
+    """The verified migration. `.backup` folds WAL content into ONE file (no
+    -wal/-shm to move as a unit — a stray -wal beside a moved DB is replayed
+    into it, corruption that passes integrity_check), and writing it under a
+    temp name in the destination directory plus an atomic rename means the
+    canonical path never appears half-written to a concurrent reader."""
+    return (
+        f"mkdir -p {canonical.parent} && "
+        f"sqlite3 {legacy} \".backup '{canonical.parent}/.agent-state.db.new'\" && "
+        f"mv {canonical.parent}/.agent-state.db.new {canonical} "
+        f"# then confirm the counts match and remove {legacy.parent.parent}"
+    )
+
+
+def check_memory_db_path(vault_path: Optional[str]) -> CheckResult:
+    """Is cross-project memory living under a schist-owned path?"""
+    label = "Memory DB path"
+    override = (os.environ.get("SCHIST_MEMORY_DB") or "").strip()
+    if override:
+        # Matches the server: `?.trim() ||`, so an empty value is unset and
+        # falls through to the default resolution rather than pinning "".
+        return CheckResult("PASS", label, f"pinned by SCHIST_MEMORY_DB={override}")
+
+    home = Path.home()
+    canonical = home / Path(*MEMORY_DB_RELPATH)
+    legacy = home / Path(*LEGACY_MEMORY_DB_RELPATH)
+
+    if not legacy.exists():
+        return CheckResult("PASS", label, f"{canonical}")
+
+    legacy_n = _memory_entry_count(legacy)
+    legacy_desc = f"{legacy} ({legacy_n} entries)" if legacy_n is not None else str(legacy)
+
+    if canonical.exists():
+        # Post-migration leftover, or writes that landed in the legacy file
+        # between a `.backup` and the rename. Reads go to canonical now, so
+        # anything only in the legacy file is unreachable.
+        canonical_n = _memory_entry_count(canonical)
+        return CheckResult(
+            "WARN", label,
+            f"reads resolve to {canonical}"
+            + (f" ({canonical_n} entries)" if canonical_n is not None else "")
+            + f", but a legacy {legacy_desc} is still on disk — entries only in the "
+              "legacy file are now unreachable",
+            fix=f"Compare the counts; once {canonical} has everything, remove "
+                f"{legacy.parent.parent}. If the legacy file is AHEAD, re-run the "
+                f"migration: {_memory_migration_fix(legacy, canonical)}",
+        )
+
+    return CheckResult(
+        "WARN", label,
+        f"still reading the legacy {legacy_desc}. `.openclaw` is not a schist "
+        f"directory; the canonical path is {canonical}. Nothing breaks until you "
+        "migrate — the server reads an existing legacy DB on purpose so an "
+        "upgrade never hides recorded entries",
+        fix=_memory_migration_fix(legacy, canonical),
+    )
+
+
 def check_index_schema_version(vault_path: Optional[str],
                                db_path: Optional[str] = None) -> CheckResult:
     """Detect index-schema-VERSION skew — the axis the column-based 'MCP
@@ -2264,6 +2350,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_mcp_cli_spawn(vault_path),
         check_mcp_schema_alignment(vault_path),
         check_mcp_vocab_alignment(vault_path),
+        check_memory_db_path(vault_path),
         check_index_schema_version(vault_path, db_path),
         check_skill_tool_references(vault_path),
     ]

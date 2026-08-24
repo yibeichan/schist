@@ -2753,3 +2753,121 @@ class TestCheckMcpCliSpawn:
         assert "MCP CLI spawn" in labels
         r = next(x for x in results if x.label == "MCP CLI spawn")
         assert r.status == "FAIL", r.message
+
+
+class TestCheckMemoryDbPath:
+    """#565: cross-project memory defaulted to ~/.openclaw/memory/agent-state.db.
+    `.openclaw` is not a schist directory — the name arrived with the memory-v2
+    slice and nothing else on a spoke writes there. The server now creates the
+    DB under ~/.schist/ but still READS an existing legacy file, so an upgrade
+    never makes recorded entries invisible; doctor is what surfaces the move.
+    """
+
+    def _run(self, monkeypatch, home):
+        from schist.doctor import check_memory_db_path
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        monkeypatch.delenv("SCHIST_MEMORY_DB", raising=False)
+        return check_memory_db_path(None)
+
+    def _seed_db(self, path, rows=3, table="agent_memory"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(str(path))
+        con.execute(f"CREATE TABLE {table}(id INTEGER PRIMARY KEY, content TEXT)")
+        con.executemany(f"INSERT INTO {table}(content) VALUES (?)",
+                        [(f"e{i}",) for i in range(rows)])
+        con.commit()
+        con.close()
+
+    def test_clean_machine_reports_canonical(self, tmp_path, monkeypatch):
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "PASS"
+        assert ".schist" in r.message
+        assert ".openclaw" not in r.message
+
+    def test_legacy_only_warns_and_counts_entries(self, tmp_path, monkeypatch):
+        self._seed_db(tmp_path / ".openclaw" / "memory" / "agent-state.db", rows=7)
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "WARN"
+        assert "7 entries" in r.message
+        # The remedy must be the verified one: .backup to a temp name in the
+        # DESTINATION dir, then an atomic rename. A plain `mv` of the .db would
+        # strand the -wal, and `cp` mid-write yields a torn file.
+        assert ".backup" in r.fix
+        assert ".agent-state.db.new" in r.fix
+        assert "mv " in r.fix
+
+    def test_both_present_warns_that_legacy_entries_are_unreachable(self, tmp_path, monkeypatch):
+        self._seed_db(tmp_path / ".openclaw" / "memory" / "agent-state.db", rows=5)
+        self._seed_db(tmp_path / ".schist" / "memory" / "agent-state.db", rows=5)
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "WARN"
+        assert "unreachable" in r.message
+
+    def test_unreadable_legacy_db_does_not_raise(self, tmp_path, monkeypatch):
+        """run_doctor has no per-check exception shield (#437, #441). A file at
+        the legacy path that is not a SQLite DB at all must still WARN."""
+        p = tmp_path / ".openclaw" / "memory" / "agent-state.db"
+        p.parent.mkdir(parents=True)
+        p.write_text("this is not a database\n")
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "WARN"
+        # A bare `"entries" not in message` would be satisfied by the prose
+        # ("...never hides recorded entries") — the assertion has to name the
+        # parenthesised count specifically, or it passes for the wrong reason.
+        import re as _re
+        assert _re.search(r"\(\d+ entries\)", r.message) is None, r.message
+
+    def test_legacy_db_without_agent_memory_table_does_not_raise(self, tmp_path, monkeypatch):
+        p = tmp_path / ".openclaw" / "memory" / "agent-state.db"
+        self._seed_db(p, rows=2, table="something_else")
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "WARN"
+
+    def test_override_pins_the_path(self, tmp_path, monkeypatch):
+        from schist.doctor import check_memory_db_path
+        self._seed_db(tmp_path / ".openclaw" / "memory" / "agent-state.db")
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setenv("SCHIST_MEMORY_DB", "/srv/memory.db")
+        r = check_memory_db_path(None)
+        assert r.status == "PASS"
+        assert "/srv/memory.db" in r.message
+
+    def test_empty_override_is_unset(self, tmp_path, monkeypatch):
+        """Parity with memoryDbPath's `?.trim() ||` — an exported-but-empty
+        value means unset, so doctor must not report a pin of ""."""
+        from schist.doctor import check_memory_db_path
+        self._seed_db(tmp_path / ".openclaw" / "memory" / "agent-state.db")
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setenv("SCHIST_MEMORY_DB", "   ")
+        r = check_memory_db_path(None)
+        assert r.status == "WARN"
+        assert "pinned" not in r.message
+
+    def test_mirror_matches_the_typescript_literals(self):
+        """Duplicated per-language constants drift (#339). The server owns the
+        resolution; this mirror only feeds the message and remedy, so it must
+        be pinned against the source of truth."""
+        from schist.doctor import MEMORY_DB_RELPATH, LEGACY_MEMORY_DB_RELPATH
+        src = Path(__file__).resolve().parents[2] / "mcp-server" / "src" / "sqlite-reader.ts"
+        if not src.exists():
+            import pytest as _pytest
+            _pytest.skip("mcp-server source not present (installed-wheel run)")
+        text = src.read_text(encoding="utf-8")
+        for name, relpath in (("MEMORY_DB_RELPATH", MEMORY_DB_RELPATH),
+                             ("LEGACY_MEMORY_DB_RELPATH", LEGACY_MEMORY_DB_RELPATH)):
+            declared = ", ".join(f'"{part}"' for part in relpath)
+            assert f"export const {name} = [{declared}]" in text, (
+                f"{name} mirror {relpath} does not match sqlite-reader.ts")
+
+    def test_wired_into_run_doctor(self, tmp_path, monkeypatch):
+        """A check nothing asserts is registered can be deleted from
+        run_doctor() with the suite green (#556)."""
+        from schist.doctor import run_doctor
+        self._seed_db(tmp_path / ".openclaw" / "memory" / "agent-state.db", rows=4)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.delenv("SCHIST_MEMORY_DB", raising=False)
+        results = run_doctor(None, None, as_json=False)
+        labels = [r.label for r in results]
+        assert "Memory DB path" in labels
+        r = next(x for x in results if x.label == "Memory DB path")
+        assert r.status == "WARN", r.message

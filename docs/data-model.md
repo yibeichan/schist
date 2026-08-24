@@ -37,7 +37,7 @@ by both suites.** The parity fixtures (`frontmatter-parser-parity.json`,
 |-------|----------|---------|-----------|------------------|
 | Vault markdown | `<vault>/…/*.md` | Durable curated knowledge (source of truth) | yes | `schema/SCHEMA.md` prose, "Version 1.0" |
 | Vault index `schist.db` | `<vault>/.schist/schist.db` | Derived, disposable query index | no (rebuilt by ingest) | `PRAGMA user_version`: 0 = incomplete ingest, 1 = complete (#244/#328) |
-| Memory side DB `agent-state.db` | `~/.openclaw/memory/agent-state.db` (`SCHIST_MEMORY_DB` override) | Fast, ephemeral "fuel station": `agent_memory` (+FTS), `agent_state` (TTL) | no | none |
+| Memory side DB `agent-state.db` | `~/.schist/memory/agent-state.db` (`SCHIST_MEMORY_DB` override; pre-#565 `~/.openclaw/...` still read if present) | Fast, ephemeral "fuel station": `agent_memory` (+FTS), `agent_state` (TTL) | no | none |
 
 Key facts the design builds on:
 
@@ -74,7 +74,7 @@ Key facts the design builds on:
    to vault; the data layer stays predictable. The bridge is the
    back-reference (D4), not a write hook.
 3. `SCHIST_MEMORY_DB` stays **outside the vault** (default
-   `~/.openclaw/memory/`). Putting it at `<vault>/.schist/memory.db` would
+   `~/.schist/memory/`). Putting it at `<vault>/.schist/memory.db` would
    make ephemeral, un-reviewed content sweepable by vault tooling and backups
    (the #309 class of artifact-in-vault problems) and would entangle memory
    writes with vault sync/locking.
