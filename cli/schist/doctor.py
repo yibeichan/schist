@@ -1703,12 +1703,18 @@ def _gui_launch_path() -> str:
                 return out.stdout.strip()
         except (OSError, subprocess.SubprocessError):
             pass
-    try:
-        cs = os.confstr("CS_PATH")
-        if cs:
-            return cs
-    except (ValueError, OSError):
-        pass
+    # getattr, not os.confstr: the function does not EXIST on Windows, and an
+    # AttributeError here aborts the whole doctor run — run_doctor has no
+    # per-check exception shield (#437, #441). ValueError/OSError cover an
+    # unknown or unreadable confstr name on POSIX.
+    confstr = getattr(os, "confstr", None)
+    if confstr is not None:
+        try:
+            cs = confstr("CS_PATH")
+            if cs:
+                return cs
+        except (ValueError, OSError):
+            pass
     return _GUI_FALLBACK_PATH
 
 
@@ -1728,6 +1734,12 @@ def _resolve_like_spawn(configured: Optional[str], default_name: str,
     # verbatim; a bare name goes through PATH lookup.
     if os.sep in pinned or (os.altsep and os.altsep in pinned):
         p = Path(pinned).expanduser()
+        # A RELATIVE pin resolves against the CHILD's cwd — spawn() is called
+        # with cwd=vaultRoot — not against doctor's. Checking it here would
+        # answer a question about the wrong base directory, so report it as
+        # unresolved rather than guessing; the remedy already says "absolute".
+        if not p.is_absolute():
+            return None, True
         if p.is_file() and os.access(p, os.X_OK):
             return str(p), True
         return None, True
@@ -1801,7 +1813,15 @@ def check_mcp_cli_spawn(vault_path: Optional[str]) -> CheckResult:
             if resolved is not None:
                 continue
             if was_pinned:
-                problems.append(f"{var}={configured!r} does not resolve to an executable")
+                pin = (configured or "").strip()
+                sep_in_pin = os.sep in pin or bool(os.altsep and os.altsep in pin)
+                if sep_in_pin and not Path(pin).expanduser().is_absolute():
+                    problems.append(
+                        f"{var}={configured!r} is a RELATIVE path — spawn() resolves it "
+                        f"against the vault root, not the client's cwd; use an absolute path"
+                    )
+                else:
+                    problems.append(f"{var}={configured!r} does not resolve to an executable")
             else:
                 problems.append(
                     f"`{default_name}` not found on a GUI-launched client's PATH "

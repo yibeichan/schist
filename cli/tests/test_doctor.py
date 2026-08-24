@@ -2639,9 +2639,15 @@ class TestCheckMcpCliSpawn:
         assert r.status == "FAIL"
         assert "2 MCP client entries" in r.message
 
-    def test_malformed_configs_do_not_raise(self, tmp_path, monkeypatch):
+    def test_malformed_configs_degrade_without_raising(self, tmp_path, monkeypatch):
         """run_doctor has no per-check exception shield (#437, #441): a
-        null/list/scalar config must degrade, never abort the whole run."""
+        null/list/scalar config must degrade, never abort the whole run.
+
+        `status in (...)` would have been a vacuous assertion — it is satisfied
+        by every possible verdict, so it only ever caught a raise. The null and
+        list files must be SKIPPED while the one well-formed entry beside them
+        is still audited, which pins both halves.
+        """
         (tmp_path / ".claude.json").write_text("null")
         (tmp_path / ".claude").mkdir()
         (tmp_path / ".claude" / "settings.json").write_text("[1, 2, 3]")
@@ -2649,7 +2655,65 @@ class TestCheckMcpCliSpawn:
         (tmp_path / ".claude-science" / "mcp" / "local-mcp.json").write_text(
             json.dumps({"servers": [None, {"name": "schist-vault"}]}))
         r = self._run(monkeypatch, tmp_path)
-        assert r.status in ("SKIP", "FAIL", "PASS")
+        assert r.status == "FAIL", r.message
+        # the sole survivable entry was audited...
+        assert "schist-vault" in r.message
+        # ...and exactly one, so the junk files contributed no phantom entries.
+        assert "1 MCP client entry" in r.message
+
+    def test_non_dict_env_does_not_raise(self, tmp_path, monkeypatch):
+        """`"env": "oops"` is valid JSON in an invalid shape — the same #441
+        crash class one level down from the server entry."""
+        stub = tmp_path / "fake-mcp" / "dist" / "index.js"
+        stub.parent.mkdir(parents=True)
+        stub.write_text("// stub\n")
+        (tmp_path / ".claude.json").write_text(json.dumps({
+            "mcpServers": {"schist": {"command": "node", "args": [str(stub)],
+                                      "env": "oops"}}}))
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL"
+        assert "is not pinned" in r.message
+
+    def test_relative_pin_is_reported_as_relative(self, tmp_path, monkeypatch):
+        """spawn() resolves a separator-bearing value against the CHILD's cwd
+        (vaultRoot), not doctor's — so a relative pin cannot be verified here
+        and must not be silently checked against the wrong base."""
+        self._client(tmp_path, env={"SCHIST_BIN": "./bin/schist",
+                                    "SCHIST_INGEST_BIN": "./bin/schist-ingest"})
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL"
+        assert "RELATIVE path" in r.message
+        assert "does not resolve to an executable" not in r.message
+
+    def test_relative_pin_is_not_resolved_against_doctors_cwd(self, tmp_path, monkeypatch):
+        """The guard the previous test does NOT reach.
+
+        `./bin/schist` that exists relative to DOCTOR's cwd would resolve to a
+        real executable here and report PASS, while spawn() resolves the same
+        string against the child's cwd (vaultRoot) and finds nothing. Without
+        the is_absolute() guard this is a false PASS on the one condition the
+        check exists to catch. Verified by reverting the guard: the message-only
+        assertion in the sibling test still passed, this one does not.
+        """
+        cwd = tmp_path / "elsewhere" / "bin"
+        cwd.mkdir(parents=True)
+        for n in ("schist", "schist-ingest"):
+            (cwd / n).write_text("#!/bin/sh\nexit 0\n")
+            (cwd / n).chmod(0o755)
+        self._client(tmp_path, env={"SCHIST_BIN": "./bin/schist",
+                                    "SCHIST_INGEST_BIN": "./bin/schist-ingest"})
+        monkeypatch.chdir(tmp_path / "elsewhere")
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL", r.message
+        assert "RELATIVE path" in r.message
+
+    def test_confstr_absence_does_not_raise(self, monkeypatch):
+        """os.confstr does not EXIST on Windows, and an AttributeError in a
+        check aborts the entire doctor run (#437, #441)."""
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "win32")
+        monkeypatch.delattr(d.os, "confstr", raising=False)
+        assert d._gui_launch_path() == d._GUI_FALLBACK_PATH
 
     def test_remedy_never_names_an_ephemeral_uv_path(self, tmp_path, monkeypatch):
         """The remedy is written into a config by hand, so it must name a path
