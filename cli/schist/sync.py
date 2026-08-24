@@ -522,6 +522,17 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
     if not ok:
         if "CONFLICT" in output or "conflict" in output.lower():
             _print_conflict_recovery(vault_path, config, output)
+        elif output.startswith(git_ops.PULL_NO_RESPONSE_PREFIX) or _is_network_error(output):
+            # Parity with sync_push (#567): pull had no network branch at all,
+            # so an unreachable hub printed a generic "pull failed" and every
+            # downstream consumer — the launchd daily-health classifier
+            # included — had to guess. Guessing defaulted to "probably a
+            # rebase conflict", which sent the user hunting a conflict that
+            # never existed. Refused vs unreachable is the axis that matters:
+            # the hub never answered, so there is nothing to resolve.
+            print("Hub unreachable — no changes pulled. Retry when network is "
+                  "available.", file=sys.stderr)
+            print(f"  Detail: {output}", file=sys.stderr)
         else:
             print(f"Error: pull failed — {output}", file=sys.stderr)
         sys.exit(1)
