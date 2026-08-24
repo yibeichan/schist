@@ -124,7 +124,7 @@ ACLs. Create one with `schist init --hub --hub-path /path --name X
 ### SQLite tables
 Vault DB (`<vault>/.schist/schist.db`): `docs`, `concepts`, `edges`, `docs_fts` (FTS5), `concept_aliases` — defined in `cli/schist/schema.sql` (shipped as package data). `docs`/`concepts`/`edges`/`docs_fts` are dropped and rebuilt on every ingest from markdown. `concept_aliases` uses `CREATE TABLE IF NOT EXISTS` and survives commit-path rebuilds; on spoke-pull rebuilds it's copied forward from the backup by `_preserve_side_tables` in `cli/schist/sync.py`.
 
-Memory DB (`~/.openclaw/memory/agent-state.db` by default, or `SCHIST_MEMORY_DB`): `agent_memory`, `agent_memory_fts`, `agent_state` — schema inlined in `mcp-server/src/sqlite-reader.ts` as `MEMORY_SCHEMA`. Separate file from the vault DB, never touched by ingestion.
+Memory DB (`~/.schist/memory/agent-state.db` by default — an existing pre-#565 `~/.openclaw/memory/agent-state.db` is still read until migrated; or `SCHIST_MEMORY_DB`): `agent_memory`, `agent_memory_fts`, `agent_state` — schema inlined in `mcp-server/src/sqlite-reader.ts` as `MEMORY_SCHEMA`. Separate file from the vault DB, never touched by ingestion.
 
 ## Git Hooks
 - **post-commit** — triggers SQLite ingestion

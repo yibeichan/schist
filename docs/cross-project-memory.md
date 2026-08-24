@@ -1,7 +1,7 @@
 # Cross-Project Agent Memory
 
 Schist ships a small memory subsystem — a single SQLite database at
-`~/.openclaw/memory/agent-state.db` — that stores lessons, decisions, and
+`~/.schist/memory/agent-state.db` — that stores lessons, decisions, and
 keyed state for AI agents. It is **user-home-level, not per-vault**: every
 Claude project on the same machine that talks to the schist MCP server
 shares the same memory DB, scoped by agent identity, not by project.
@@ -24,7 +24,7 @@ project boundaries.
 
 | | |
 |---|---|
-| Default path | `~/.openclaw/memory/agent-state.db` |
+| Default path | `~/.schist/memory/agent-state.db` (a pre-#565 `~/.openclaw/memory/agent-state.db` is read if it exists, until migrated — `schist doctor` reports the move) |
 | Override env var | `SCHIST_MEMORY_DB=/custom/path.db` |
 | Ownership | one file per user, shared across every schist MCP invocation |
 | Relation to vault DB | independent — the vault SQLite at `<vault>/.schist/schist.db` is a separate file and is rebuilt on every commit; the memory DB is never touched by ingestion |

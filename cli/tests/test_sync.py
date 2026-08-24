@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -412,9 +413,16 @@ class TestSyncPull:
         assert "cluster-mario" in err  # identity from _make_spoke()
         assert "git@pi.local:vault.git" in err  # hub URL from _make_spoke()
 
-    def test_pull_non_conflict_error_keeps_raw_output(self, tmp_path, capsys):
-        """Non-conflict errors (e.g. network failure) skip the rich recovery
-        block and just surface the raw git output."""
+    def test_pull_network_error_says_unreachable_and_keeps_detail(self, tmp_path, capsys):
+        """A transport failure is "the hub never answered", not "pull failed".
+
+        Behaviour change in #567: this case used to print the generic
+        `Error: pull failed — <raw>`, which gave every downstream consumer
+        nothing to classify on. The launchd daily-health job guessed from that
+        string and defaulted to "probably a rebase conflict", writing a
+        write-blocking sentinel for a dead VPN. The raw output is still
+        carried — on the Detail line — so nothing is lost.
+        """
         from schist.sync import sync_pull
 
         vault = _make_spoke(tmp_path)
@@ -425,9 +433,29 @@ class TestSyncPull:
         ), pytest.raises(SystemExit):
             sync_pull(args, vault, "db.sqlite")
         err = capsys.readouterr().err
-        assert "Error: pull failed" in err
+        assert "Hub unreachable" in err
         assert "Could not resolve hostname" in err
         # None of the rich-recovery headers should appear
+        assert "INSPECT" not in err
+        assert "RE-CLONE" not in err
+
+    def test_pull_unclassified_error_keeps_raw_output(self, tmp_path, capsys):
+        """Neither a conflict nor a transport failure: still the generic
+        message, still the raw output, still no recovery block. Pins that the
+        new network branch did not swallow the fallback."""
+        from schist.sync import sync_pull
+
+        vault = _make_spoke(tmp_path)
+        args = MagicMock()
+        with patch(
+            "schist.sync.git_ops.pull_rebase",
+            return_value=(False, "error: cannot rebase: You have unstaged changes."),
+        ), pytest.raises(SystemExit):
+            sync_pull(args, vault, "db.sqlite")
+        err = capsys.readouterr().err
+        assert "Error: pull failed" in err
+        assert "You have unstaged changes" in err
+        assert "Hub unreachable" not in err
         assert "INSPECT" not in err
         assert "RE-CLONE" not in err
 
@@ -1562,3 +1590,206 @@ def test_hooks_reinstall_exclude_retrofit_idempotent(tmp_path):
 
     lines = (target / ".git" / "info" / "exclude").read_text().splitlines()
     assert lines.count(".schist/") == 1
+
+
+# ---------------------------------------------------------------------------
+# sync-error sentinel recovery (#560)
+# ---------------------------------------------------------------------------
+
+
+class TestSyncErrorSentinelRecovery:
+    """The MCP server writes .schist/last-sync-error on a failed background
+    push and then REFUSES every vault write while it exists
+    (blockWriteIfSyncDirty → SYNC_DIRTY). Before #560 only the MCP server
+    cleared it, so a push that succeeded from any other process — a terminal
+    `schist sync push`, or the out-of-band launchd watcher that exists
+    precisely because a sandboxed MCP client cannot spawn/exec — left the
+    vault write-blocked indefinitely. Recovery lived only in the component
+    whose inability to push wrote the sentinel in the first place.
+    """
+
+    SENTINEL = ".schist/last-sync-error"
+
+    def _sentinel(self, vault):
+        return Path(vault) / self.SENTINEL
+
+    def _write_sentinel(self, vault, text="2026-08-24T03:05:41.227Z retry push failed"):
+        p = self._sentinel(vault)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text + "\n")
+        return p
+
+    @patch("schist.sync.git_ops.push", return_value=(True, ""))
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_successful_push_clears_sentinel(self, _changes, _unpushed, _push,
+                                             tmp_path, capsys):
+        vault = _make_spoke(tmp_path)
+        self._write_sentinel(vault)
+        from schist.sync import sync_push
+
+        sync_push(MagicMock(), vault, "db.sqlite")
+
+        assert not self._sentinel(vault).exists()
+        out = capsys.readouterr().out
+        assert "Pushed to hub" in out
+        assert "Cleared sync-error sentinel" in out
+
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=False)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_already_level_with_hub_clears_stale_sentinel(self, _changes, _unpushed,
+                                                          tmp_path, capsys):
+        """The exact shape the deadlock took: the launchd watcher landed the
+        commits out of band, then every later `sync push` no-op'd at
+        "Nothing to push" and left the vault write-blocked."""
+        vault = _make_spoke(tmp_path)
+        self._write_sentinel(vault)
+        from schist.sync import sync_push
+
+        sync_push(MagicMock(), vault, "db.sqlite")
+
+        assert not self._sentinel(vault).exists()
+        out = capsys.readouterr().out
+        assert "Nothing to push" in out
+        assert "Cleared stale sync-error sentinel" in out
+
+    @patch("schist.sync.git_ops.push", return_value=(False, "Connection closed"))
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_failed_push_leaves_sentinel_in_place(self, _changes, _unpushed, _push,
+                                                 tmp_path):
+        """Clearing on failure would be strictly worse than never clearing:
+        the write gate would open while the spoke is still diverged."""
+        vault = _make_spoke(tmp_path)
+        self._write_sentinel(vault)
+        from schist.sync import sync_push
+
+        with pytest.raises(SystemExit):
+            sync_push(MagicMock(), vault, "db.sqlite")
+
+        assert self._sentinel(vault).exists()
+
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_sentinel_written_during_push_is_not_destroyed(self, _changes, _unpushed,
+                                                           tmp_path):
+        """A concurrent MCP push can fail WHILE this one succeeds. Clearing
+        unconditionally would delete a report of a genuinely new failure and
+        open the write gate on a diverged spoke. Mirrors
+        clearSyncErrorIfUnchanged's mtime guard in tools.ts."""
+        vault = _make_spoke(tmp_path)
+        self._write_sentinel(vault, "2026-08-24T03:05:41.227Z old failure")
+        from schist.sync import sync_push
+
+        def _push_then_new_failure(_vault):
+            # Another process records a fresh failure mid-push. Bump mtime
+            # explicitly: the write can land inside the same filesystem
+            # timestamp tick, which would make the guard pass for the wrong
+            # reason and hide a real regression.
+            p = self._sentinel(vault)
+            p.write_text("2026-08-24T03:06:00.000Z NEW failure\n")
+            st = p.stat()
+            os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+            return (True, "")
+
+        with patch("schist.sync.git_ops.push", side_effect=_push_then_new_failure):
+            sync_push(MagicMock(), vault, "db.sqlite")
+
+        assert self._sentinel(vault).exists()
+        assert "NEW failure" in self._sentinel(vault).read_text()
+
+    @patch("schist.sync.git_ops.push", return_value=(True, ""))
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_absent_sentinel_is_not_an_error(self, _changes, _unpushed, _push,
+                                            tmp_path, capsys):
+        vault = _make_spoke(tmp_path)
+        from schist.sync import sync_push
+
+        sync_push(MagicMock(), vault, "db.sqlite")
+
+        out = capsys.readouterr().out
+        assert "Pushed to hub" in out
+        assert "Cleared" not in out
+
+
+class TestPullTransportClassification:
+    """#567: `schist sync pull` could not report an unreachable hub.
+
+    subprocess.run DISCARDS the child's captured output on TimeoutExpired, and
+    ssh's default connect timeout on macOS (~75s, the TCP SYN retry budget) is
+    LONGER than pull's 60s cap — so on a down VPN the wrapper killed the only
+    process that knew the answer and printed a bare "Pull timed out after
+    60s". sync_pull had no network branch at all, so the launchd daily-health
+    classifier had to guess from that string and defaulted to "probably a
+    rebase conflict" — writing a write-blocking sentinel that sent the user
+    hunting a conflict that never existed (observed 2026-08-24T13:02Z).
+    """
+
+    def test_timeout_message_carries_the_producer_owned_marker(self):
+        from schist import git_ops
+        assert git_ops.PULL_NO_RESPONSE_PREFIX.startswith("Pull timed out")
+
+    def test_pull_timeout_preserves_the_childs_partial_output(self, tmp_path, monkeypatch):
+        """The evidence subprocess.run throws away is the whole diagnosis."""
+        from schist import git_ops
+
+        def fake_run(cmd, **kw):
+            if cmd[:2] == ["git", "pull"]:
+                raise subprocess.TimeoutExpired(
+                    cmd, 60, output="",
+                    stderr="ssh: connect to host 100.91.250.124 port 22: Operation timed out\n")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(git_ops, "current_branch", lambda _p: "main")
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        ok, output = git_ops.pull_rebase(str(tmp_path))
+        assert ok is False
+        assert output.startswith(git_ops.PULL_NO_RESPONSE_PREFIX)
+        assert "connect to host 100.91.250.124 port 22" in output
+
+    def test_partial_output_handles_bytes_and_none(self):
+        from schist.git_ops import _partial_output
+        assert _partial_output(subprocess.TimeoutExpired("c", 1)) == ""
+        e = subprocess.TimeoutExpired("c", 1, output=b" out ", stderr=b" err ")
+        assert _partial_output(e) == "out\nerr"
+
+    @patch("schist.sync._rebuild_index")
+    def test_unreachable_hub_says_unreachable_not_pull_failed(
+            self, _rebuild, tmp_path, capsys, monkeypatch):
+        from schist import git_ops
+        from schist.sync import sync_pull
+
+        vault = _make_spoke(tmp_path)
+        monkeypatch.setattr(
+            git_ops, "pull_rebase",
+            lambda _p: (False, f"{git_ops.PULL_NO_RESPONSE_PREFIX} (hub unreachable, "
+                               "VPN down, or a stalled transport); no changes were applied."))
+        with pytest.raises(SystemExit):
+            sync_pull(MagicMock(), vault, "db.sqlite")
+        err = capsys.readouterr().err
+        assert "Hub unreachable" in err
+        assert "pull failed" not in err
+
+    @patch("schist.sync._rebuild_index")
+    def test_a_real_conflict_is_never_reported_as_unreachable(
+            self, _rebuild, tmp_path, capsys, monkeypatch):
+        """_is_network_error is loose: bare "connection", "timed out", and a
+        word-bounded \\bport\\b all match, so CONFLICT output mentioning a
+        vault file called "...port-forwarding-timed-connection.md" satisfies
+        every one of them. Only the conflict-first ordering keeps that from
+        being reported as a dead network, so the ordering is pinned here."""
+        from schist import git_ops
+        from schist.sync import sync_pull
+
+        vault = _make_spoke(tmp_path)
+        conflicty = ("CONFLICT (content): Merge conflict in "
+                     "notes/2026-08-24-port-forwarding-timed-connection.md")
+        # the fixture really does trip every network marker
+        from schist.sync import _is_network_error
+        assert _is_network_error(conflicty) is True
+        monkeypatch.setattr(git_ops, "pull_rebase", lambda _p: (False, conflicty))
+        with pytest.raises(SystemExit):
+            sync_pull(MagicMock(), vault, "db.sqlite")
+        out = capsys.readouterr()
+        assert "Hub unreachable" not in (out.err + out.out)

@@ -2507,3 +2507,367 @@ class TestAcceptEnvGlobs:
     def test_benign_tokens_pass(self, tok):
         from schist.doctor import _acceptenv_offender
         assert _acceptenv_offender(tok) is False
+
+
+class TestCheckMcpCliSpawn:
+    """#560: mcp-server/src/tools.ts spawns `schist` / `schist-ingest` BY BARE
+    NAME, resolved against the spawning client's PATH. A GUI/launchd-launched
+    client never reads the login shell's rc files, so a CLI in ~/.local/bin is
+    unreachable and every background push dies with `spawn schist ENOENT` —
+    while doctor, running in the login shell, reported everything green.
+    """
+
+    GUI_PATH_FIXTURE = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+    def _client(self, home, env=None, *, shape="mcpServers", name="schist"):
+        """Write one MCP client config under a fake home; return its path."""
+        stub = home / "fake-mcp" / "dist" / "index.js"
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_text("// stub\n")
+        entry = {"command": "node", "args": [str(stub)]}
+        if env is not None:
+            entry["env"] = env
+        if shape == "mcpServers":
+            path = home / ".claude.json"
+            path.write_text(json.dumps({"mcpServers": {name: entry}}))
+        else:
+            # Claude Science's list-of-servers registry.
+            path = home / ".claude-science" / "mcp" / "local-mcp.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            entry["name"] = name
+            path.write_text(json.dumps({"servers": [entry]}))
+        return path
+
+    def _fake_bin(self, tmp_path, name):
+        """An executable that exists but is NOT on the GUI PATH."""
+        d = tmp_path / "localbin"
+        d.mkdir(exist_ok=True)
+        b = d / name
+        b.write_text("#!/bin/sh\nexit 0\n")
+        b.chmod(0o755)
+        return b
+
+    def _run(self, monkeypatch, home, gui_path=None):
+        from schist.doctor import check_mcp_cli_spawn
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        monkeypatch.setattr("schist.doctor._gui_launch_path",
+                            lambda: gui_path if gui_path is not None else self.GUI_PATH_FIXTURE)
+        return check_mcp_cli_spawn(None)
+
+    def test_skips_when_no_client_config(self, tmp_path, monkeypatch):
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "SKIP"
+
+    def test_fails_when_unpinned_and_not_on_gui_path(self, tmp_path, monkeypatch):
+        """The production failure: bare name + GUI PATH that lacks ~/.local/bin."""
+        self._client(tmp_path)
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL"
+        assert "SCHIST_BIN is not pinned" in r.message
+        assert "SCHIST_INGEST_BIN is not pinned" in r.message
+
+    def test_passes_when_pinned_to_absolute_paths(self, tmp_path, monkeypatch):
+        """Pinning is the remedy — it must actually flip the verdict."""
+        s = self._fake_bin(tmp_path, "schist")
+        i = self._fake_bin(tmp_path, "schist-ingest")
+        self._client(tmp_path, env={"SCHIST_BIN": str(s), "SCHIST_INGEST_BIN": str(i)})
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "PASS", r.message
+
+    def test_fails_when_pin_points_at_nothing(self, tmp_path, monkeypatch):
+        """A pin to a deleted/renamed binary is a break, not a pass."""
+        self._client(tmp_path, env={
+            "SCHIST_BIN": str(tmp_path / "gone" / "schist"),
+            "SCHIST_INGEST_BIN": str(tmp_path / "gone" / "schist-ingest"),
+        })
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL"
+        assert "does not resolve to an executable" in r.message
+
+    def test_fails_when_pin_exists_but_is_not_executable(self, tmp_path, monkeypatch):
+        """git SKIPS a non-executable hook and continues (#545); spawn ENOENTs
+        on a non-executable binary. Existence is not enough."""
+        d = tmp_path / "localbin"
+        d.mkdir()
+        for n in ("schist", "schist-ingest"):
+            (d / n).write_text("#!/bin/sh\nexit 0\n")
+            (d / n).chmod(0o644)
+        self._client(tmp_path, env={"SCHIST_BIN": str(d / "schist"),
+                                    "SCHIST_INGEST_BIN": str(d / "schist-ingest")})
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL"
+        assert "does not resolve to an executable" in r.message
+
+    def test_empty_pin_is_treated_as_unpinned(self, tmp_path, monkeypatch):
+        """Parity with schistCliBin: `process.env.SCHIST_BIN?.trim() || binName`
+        falls back to the bare name for empty AND whitespace values, so an
+        exported-but-empty var must not be reported as a pin (#123 comment)."""
+        self._client(tmp_path, env={"SCHIST_BIN": "", "SCHIST_INGEST_BIN": "   "})
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL"
+        assert "is not pinned" in r.message
+        # Must not claim the empty string failed to resolve as a path.
+        assert "does not resolve to an executable" not in r.message
+
+    def test_passes_when_binaries_live_on_the_gui_path(self, tmp_path, monkeypatch):
+        """No pin needed when the install is somewhere launchd already looks."""
+        d = tmp_path / "usrlocalbin"
+        d.mkdir()
+        for n in ("schist", "schist-ingest"):
+            (d / n).write_text("#!/bin/sh\nexit 0\n")
+            (d / n).chmod(0o755)
+        self._client(tmp_path)
+        r = self._run(monkeypatch, tmp_path, gui_path=str(d))
+        assert r.status == "PASS", r.message
+
+    def test_discovers_claude_science_servers_list_shape(self, tmp_path, monkeypatch):
+        """Claude Science's registry is `{"servers": [...]}`, not `mcpServers`,
+        and was invisible to every doctor check before #560 — which is why the
+        client that kept breaking was the one nothing validated."""
+        self._client(tmp_path, shape="servers", name="schist-vault")
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL"
+        assert "schist-vault" in r.message
+        assert "local-mcp.json" in r.message
+
+    def test_reports_every_broken_client_not_just_the_first(self, tmp_path, monkeypatch):
+        """check_mcp_config stops at the first entry; a per-client
+        misconfiguration only shows up if every client is audited."""
+        self._client(tmp_path)
+        self._client(tmp_path, shape="servers", name="schist-vault")
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL"
+        assert "2 MCP client entries" in r.message
+
+    def test_malformed_configs_degrade_without_raising(self, tmp_path, monkeypatch):
+        """run_doctor has no per-check exception shield (#437, #441): a
+        null/list/scalar config must degrade, never abort the whole run.
+
+        `status in (...)` would have been a vacuous assertion — it is satisfied
+        by every possible verdict, so it only ever caught a raise. The null and
+        list files must be SKIPPED while the one well-formed entry beside them
+        is still audited, which pins both halves.
+        """
+        (tmp_path / ".claude.json").write_text("null")
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "settings.json").write_text("[1, 2, 3]")
+        (tmp_path / ".claude-science" / "mcp").mkdir(parents=True)
+        (tmp_path / ".claude-science" / "mcp" / "local-mcp.json").write_text(
+            json.dumps({"servers": [None, {"name": "schist-vault"}]}))
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL", r.message
+        # the sole survivable entry was audited...
+        assert "schist-vault" in r.message
+        # ...and exactly one, so the junk files contributed no phantom entries.
+        assert "1 MCP client entry" in r.message
+
+    def test_non_dict_env_does_not_raise(self, tmp_path, monkeypatch):
+        """`"env": "oops"` is valid JSON in an invalid shape — the same #441
+        crash class one level down from the server entry."""
+        stub = tmp_path / "fake-mcp" / "dist" / "index.js"
+        stub.parent.mkdir(parents=True)
+        stub.write_text("// stub\n")
+        (tmp_path / ".claude.json").write_text(json.dumps({
+            "mcpServers": {"schist": {"command": "node", "args": [str(stub)],
+                                      "env": "oops"}}}))
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL"
+        assert "is not pinned" in r.message
+
+    def test_relative_pin_is_reported_as_relative(self, tmp_path, monkeypatch):
+        """spawn() resolves a separator-bearing value against the CHILD's cwd
+        (vaultRoot), not doctor's — so a relative pin cannot be verified here
+        and must not be silently checked against the wrong base."""
+        self._client(tmp_path, env={"SCHIST_BIN": "./bin/schist",
+                                    "SCHIST_INGEST_BIN": "./bin/schist-ingest"})
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL"
+        assert "RELATIVE path" in r.message
+        assert "does not resolve to an executable" not in r.message
+
+    def test_relative_pin_is_not_resolved_against_doctors_cwd(self, tmp_path, monkeypatch):
+        """The guard the previous test does NOT reach.
+
+        `./bin/schist` that exists relative to DOCTOR's cwd would resolve to a
+        real executable here and report PASS, while spawn() resolves the same
+        string against the child's cwd (vaultRoot) and finds nothing. Without
+        the is_absolute() guard this is a false PASS on the one condition the
+        check exists to catch. Verified by reverting the guard: the message-only
+        assertion in the sibling test still passed, this one does not.
+        """
+        cwd = tmp_path / "elsewhere" / "bin"
+        cwd.mkdir(parents=True)
+        for n in ("schist", "schist-ingest"):
+            (cwd / n).write_text("#!/bin/sh\nexit 0\n")
+            (cwd / n).chmod(0o755)
+        self._client(tmp_path, env={"SCHIST_BIN": "./bin/schist",
+                                    "SCHIST_INGEST_BIN": "./bin/schist-ingest"})
+        monkeypatch.chdir(tmp_path / "elsewhere")
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL", r.message
+        assert "RELATIVE path" in r.message
+
+    def test_confstr_absence_does_not_raise(self, monkeypatch):
+        """os.confstr does not EXIST on Windows, and an AttributeError in a
+        check aborts the entire doctor run (#437, #441)."""
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "win32")
+        monkeypatch.delattr(d.os, "confstr", raising=False)
+        assert d._gui_launch_path() == d._GUI_FALLBACK_PATH
+
+    def test_remedy_never_names_an_ephemeral_uv_path(self, tmp_path, monkeypatch):
+        """The remedy is written into a config by hand, so it must name a path
+        that survives: doctor is routinely run under `uv run --with ./cli`,
+        whose PATH prepends ~/.cache/uv/archive-v0/<hash>/bin. Pinning that is
+        a config that breaks at the next cache eviction."""
+        from schist.doctor import _stable_cli_path
+        ephemeral = tmp_path / ".cache" / "uv" / "archive-v0" / "abc" / "bin"
+        ephemeral.mkdir(parents=True)
+        b = ephemeral / "schist"
+        b.write_text("#!/bin/sh\nexit 0\n")
+        b.chmod(0o755)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("shutil.which", lambda n, path=None: str(b) if n == "schist" else None)
+        assert _stable_cli_path("schist") is None
+
+    def test_stable_path_prefers_local_bin(self, tmp_path, monkeypatch):
+        from schist.doctor import _stable_cli_path
+        lb = tmp_path / ".local" / "bin"
+        lb.mkdir(parents=True)
+        b = lb / "schist"
+        b.write_text("#!/bin/sh\nexit 0\n")
+        b.chmod(0o755)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        assert _stable_cli_path("schist") == str(b)
+
+    def test_wired_into_run_doctor(self, tmp_path, monkeypatch):
+        """#556's lesson: a check nothing asserts is REGISTERED can be deleted
+        from run_doctor() with the suite green. Assert the label is present and
+        carries a real verdict, not merely that no expected label is missing."""
+        from schist.doctor import run_doctor
+        self._client(tmp_path)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("schist.doctor._gui_launch_path", lambda: self.GUI_PATH_FIXTURE)
+        results = run_doctor(None, None, as_json=False)
+        labels = [r.label for r in results]
+        assert "MCP CLI spawn" in labels
+        r = next(x for x in results if x.label == "MCP CLI spawn")
+        assert r.status == "FAIL", r.message
+
+
+class TestCheckMemoryDbPath:
+    """#565: cross-project memory defaulted to ~/.openclaw/memory/agent-state.db.
+    `.openclaw` is not a schist directory — the name arrived with the memory-v2
+    slice and nothing else on a spoke writes there. The server now creates the
+    DB under ~/.schist/ but still READS an existing legacy file, so an upgrade
+    never makes recorded entries invisible; doctor is what surfaces the move.
+    """
+
+    def _run(self, monkeypatch, home):
+        from schist.doctor import check_memory_db_path
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        monkeypatch.delenv("SCHIST_MEMORY_DB", raising=False)
+        return check_memory_db_path(None)
+
+    def _seed_db(self, path, rows=3, table="agent_memory"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(str(path))
+        con.execute(f"CREATE TABLE {table}(id INTEGER PRIMARY KEY, content TEXT)")
+        con.executemany(f"INSERT INTO {table}(content) VALUES (?)",
+                        [(f"e{i}",) for i in range(rows)])
+        con.commit()
+        con.close()
+
+    def test_clean_machine_reports_canonical(self, tmp_path, monkeypatch):
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "PASS"
+        assert ".schist" in r.message
+        assert ".openclaw" not in r.message
+
+    def test_legacy_only_warns_and_counts_entries(self, tmp_path, monkeypatch):
+        self._seed_db(tmp_path / ".openclaw" / "memory" / "agent-state.db", rows=7)
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "WARN"
+        assert "7 entries" in r.message
+        # The remedy must be the verified one: .backup to a temp name in the
+        # DESTINATION dir, then an atomic rename. A plain `mv` of the .db would
+        # strand the -wal, and `cp` mid-write yields a torn file.
+        assert ".backup" in r.fix
+        assert ".agent-state.db.new" in r.fix
+        assert "mv " in r.fix
+
+    def test_both_present_warns_that_legacy_entries_are_unreachable(self, tmp_path, monkeypatch):
+        self._seed_db(tmp_path / ".openclaw" / "memory" / "agent-state.db", rows=5)
+        self._seed_db(tmp_path / ".schist" / "memory" / "agent-state.db", rows=5)
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "WARN"
+        assert "unreachable" in r.message
+
+    def test_unreadable_legacy_db_does_not_raise(self, tmp_path, monkeypatch):
+        """run_doctor has no per-check exception shield (#437, #441). A file at
+        the legacy path that is not a SQLite DB at all must still WARN."""
+        p = tmp_path / ".openclaw" / "memory" / "agent-state.db"
+        p.parent.mkdir(parents=True)
+        p.write_text("this is not a database\n")
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "WARN"
+        # A bare `"entries" not in message` would be satisfied by the prose
+        # ("...never hides recorded entries") — the assertion has to name the
+        # parenthesised count specifically, or it passes for the wrong reason.
+        import re as _re
+        assert _re.search(r"\(\d+ entries\)", r.message) is None, r.message
+
+    def test_legacy_db_without_agent_memory_table_does_not_raise(self, tmp_path, monkeypatch):
+        p = tmp_path / ".openclaw" / "memory" / "agent-state.db"
+        self._seed_db(p, rows=2, table="something_else")
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "WARN"
+
+    def test_override_pins_the_path(self, tmp_path, monkeypatch):
+        from schist.doctor import check_memory_db_path
+        self._seed_db(tmp_path / ".openclaw" / "memory" / "agent-state.db")
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setenv("SCHIST_MEMORY_DB", "/srv/memory.db")
+        r = check_memory_db_path(None)
+        assert r.status == "PASS"
+        assert "/srv/memory.db" in r.message
+
+    def test_empty_override_is_unset(self, tmp_path, monkeypatch):
+        """Parity with memoryDbPath's `?.trim() ||` — an exported-but-empty
+        value means unset, so doctor must not report a pin of ""."""
+        from schist.doctor import check_memory_db_path
+        self._seed_db(tmp_path / ".openclaw" / "memory" / "agent-state.db")
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setenv("SCHIST_MEMORY_DB", "   ")
+        r = check_memory_db_path(None)
+        assert r.status == "WARN"
+        assert "pinned" not in r.message
+
+    def test_mirror_matches_the_typescript_literals(self):
+        """Duplicated per-language constants drift (#339). The server owns the
+        resolution; this mirror only feeds the message and remedy, so it must
+        be pinned against the source of truth."""
+        from schist.doctor import MEMORY_DB_RELPATH, LEGACY_MEMORY_DB_RELPATH
+        src = Path(__file__).resolve().parents[2] / "mcp-server" / "src" / "sqlite-reader.ts"
+        if not src.exists():
+            import pytest as _pytest
+            _pytest.skip("mcp-server source not present (installed-wheel run)")
+        text = src.read_text(encoding="utf-8")
+        for name, relpath in (("MEMORY_DB_RELPATH", MEMORY_DB_RELPATH),
+                             ("LEGACY_MEMORY_DB_RELPATH", LEGACY_MEMORY_DB_RELPATH)):
+            declared = ", ".join(f'"{part}"' for part in relpath)
+            assert f"export const {name} = [{declared}]" in text, (
+                f"{name} mirror {relpath} does not match sqlite-reader.ts")
+
+    def test_wired_into_run_doctor(self, tmp_path, monkeypatch):
+        """A check nothing asserts is registered can be deleted from
+        run_doctor() with the suite green (#556)."""
+        from schist.doctor import run_doctor
+        self._seed_db(tmp_path / ".openclaw" / "memory" / "agent-state.db", rows=4)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.delenv("SCHIST_MEMORY_DB", raising=False)
+        results = run_doctor(None, None, as_json=False)
+        labels = [r.label for r in results]
+        assert "Memory DB path" in labels
+        r = next(x for x in results if x.label == "Memory DB path")
+        assert r.status == "WARN", r.message

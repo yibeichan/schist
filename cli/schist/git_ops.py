@@ -370,6 +370,34 @@ def setup_sparse_checkout(vault_path: str, scope: str) -> tuple[bool, str]:
         return False, (e.stdout or '') + (e.stderr or '')
 
 
+# pull_rebase's own timeout banner. sync_pull matches it with startswith
+# rather than re-deriving "was this a network problem?" from the string
+# git_ops just built: a substring round-trip through _is_network_error broke
+# the first cut of #567 (the honest rewording dropped the bare "timed out"
+# token the matcher keyed on) and _is_network_error is loose enough to call a
+# CONFLICT in a file named "...port-forwarding-timed-connection.md" a network
+# error. Anchor on the producer's own token at line start (#535/#537).
+PULL_NO_RESPONSE_PREFIX = "Pull timed out after 60s with no response from the hub"
+
+
+def _partial_output(exc: subprocess.TimeoutExpired) -> str:
+    """Whatever a timed-out child had written before it was killed.
+
+    `subprocess.run` attaches it to the exception and then the usual
+    `except TimeoutExpired:` throws it away. In text mode these are str, but
+    they are bytes when a caller runs binary — and either can be None — so
+    normalize rather than assume (#567).
+    """
+    parts = []
+    for stream in (exc.stdout, exc.stderr):
+        if not stream:
+            continue
+        if isinstance(stream, bytes):
+            stream = stream.decode('utf-8', 'replace')
+        parts.append(stream.strip())
+    return "\n".join(p for p in parts if p).strip()
+
+
 def pull_rebase(vault_path: str) -> tuple[bool, str]:
     """Pull with rebase from origin. Aborts rebase on conflict."""
     try:
@@ -403,7 +431,7 @@ def pull_rebase(vault_path: str) -> tuple[bool, str]:
                 output += "\n(rebase --abort also timed out after 30s; rerun sync to clean up)"
             return False, output.strip()
         return True, output.strip()
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as timeout_exc:
         # Abort any in-progress rebase to restore clean state (bounded, #321).
         try:
             subprocess.run(
@@ -411,9 +439,25 @@ def pull_rebase(vault_path: str) -> tuple[bool, str]:
                 cwd=vault_path, capture_output=True, text=True, timeout=30,
             )
         except subprocess.TimeoutExpired:
-            return False, ("Pull timed out after 60s "
+            return False, (f"{PULL_NO_RESPONSE_PREFIX} "
                            "(rebase --abort also timed out; rerun sync to clean up)")
-        return False, "Pull timed out after 60s"
+        # Keep whatever the child managed to emit before the cap fired (#567).
+        # subprocess.run DISCARDS it on TimeoutExpired, so an unreachable hub
+        # produced a bare "Pull timed out after 60s" carrying no evidence of
+        # anything — and the caller then could not tell a dead network from a
+        # stalled rebase. Worse, ssh's default connect timeout on macOS (~75s,
+        # the TCP SYN retry budget) is LONGER than this 60s cap, so on a down
+        # VPN ssh never reaches its own "Operation timed out" line: the wrapper
+        # kills the only process that knows the answer. Naming "no response
+        # from the hub" is therefore the honest phrasing AND the one
+        # _is_network_error already classifies (bare "timed out"), which is
+        # what puts this on the unreachable side of the sync-gating axis
+        # instead of the refused side.
+        partial = _partial_output(timeout_exc)
+        detail = f"\n{partial}" if partial else ""
+        return False, (f"{PULL_NO_RESPONSE_PREFIX} "
+                       "(hub unreachable, VPN down, or a stalled transport); "
+                       "no changes were applied." + detail)
     except subprocess.CalledProcessError as e:
         return False, (e.stdout or '') + (e.stderr or '')
 

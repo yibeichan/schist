@@ -522,6 +522,17 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
     if not ok:
         if "CONFLICT" in output or "conflict" in output.lower():
             _print_conflict_recovery(vault_path, config, output)
+        elif output.startswith(git_ops.PULL_NO_RESPONSE_PREFIX) or _is_network_error(output):
+            # Parity with sync_push (#567): pull had no network branch at all,
+            # so an unreachable hub printed a generic "pull failed" and every
+            # downstream consumer — the launchd daily-health classifier
+            # included — had to guess. Guessing defaulted to "probably a
+            # rebase conflict", which sent the user hunting a conflict that
+            # never existed. Refused vs unreachable is the axis that matters:
+            # the hub never answered, so there is nothing to resolve.
+            print("Hub unreachable — no changes pulled. Retry when network is "
+                  "available.", file=sys.stderr)
+            print(f"  Detail: {output}", file=sys.stderr)
         else:
             print(f"Error: pull failed — {output}", file=sys.stderr)
         sys.exit(1)
@@ -639,6 +650,49 @@ def _is_network_error(output: str) -> bool:
     )
 
 
+# Mirror of SYNC_ERROR_SENTINEL in mcp-server/src/tools.ts. The MCP server
+# writes this file when a background push fails and REFUSES every subsequent
+# vault write while it exists (blockWriteIfSyncDirty → SYNC_DIRTY). Until #560
+# only the MCP server ever cleared it, so a push that succeeded from any other
+# process — `schist sync push` in a terminal, or the out-of-band launchd
+# watcher that exists precisely to cover a sandboxed MCP client that cannot
+# spawn/exec — left the vault write-blocked forever. Recovery lived only in the
+# component whose inability to push wrote the sentinel in the first place.
+SYNC_ERROR_SENTINEL = ".schist/last-sync-error"
+
+
+def _sentinel_mtime_ns(vault_path: str) -> int | None:
+    """mtime of the sync-error sentinel, or None when absent/unreadable."""
+    try:
+        return (Path(vault_path) / SYNC_ERROR_SENTINEL).stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _clear_sync_error_if_unchanged(vault_path: str, original_mtime_ns: int | None) -> bool:
+    """Delete the sync-error sentinel iff it is the same file we saw at entry.
+
+    Semantics mirror clearSyncErrorIfUnchanged in mcp-server/src/tools.ts,
+    deliberately including its stat-then-unlink window: a sentinel written
+    between the stat and the unlink is destroyed. Diverging here to "fix" that
+    would put the two implementations of one contract out of step, which is
+    the failure mode that keeps costing us (see the one-sided-parity ladder in
+    #454/#473). `original_mtime_ns is None` means there was nothing to clear
+    at entry, so a sentinel appearing DURING this push (a concurrent writer
+    reporting a genuinely new failure) is never removed.
+    """
+    if original_mtime_ns is None:
+        return False
+    sentinel = Path(vault_path) / SYNC_ERROR_SENTINEL
+    try:
+        if sentinel.stat().st_mtime_ns != original_mtime_ns:
+            return False
+        sentinel.unlink()
+        return True
+    except OSError:
+        return False
+
+
 def sync_push(args, vault_path: str, db_path: str) -> None:
     """Push local changes to hub."""
     if not is_spoke(vault_path):
@@ -647,6 +701,11 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
 
     config = load_spoke_config(vault_path)
     cleanup_stale_git_state(vault_path, force=_force_enabled(args))
+
+    # Snapshot the sentinel BEFORE doing any work, so a failure another process
+    # records while this push runs is never mistaken for the one we recovered
+    # from. See _clear_sync_error_if_unchanged.
+    sentinel_mtime_ns = _sentinel_mtime_ns(vault_path)
 
     # Auto-commit if there are uncommitted changes. The ignore guard runs
     # even when git sees nothing to commit: `git status --porcelain` omits
@@ -718,6 +777,12 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
     # Push
     if not git_ops.has_unpushed_commits(vault_path):
         print("Nothing to push — local is up to date with hub.")
+        # Being level with the hub IS the recovered state, and it is the shape
+        # the deadlock actually took: an out-of-band push (the launchd watcher)
+        # landed the commits, then every later `sync push` no-op'd here and
+        # left the sentinel — and the vault write-blocked — untouched.
+        if _clear_sync_error_if_unchanged(vault_path, sentinel_mtime_ns):
+            print("Cleared stale sync-error sentinel (spoke is level with hub).")
         return
 
     print(f"Pushing as {config.identity}...")
@@ -735,6 +800,8 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
         sys.exit(1)
 
     print("Pushed to hub.")
+    if _clear_sync_error_if_unchanged(vault_path, sentinel_mtime_ns):
+        print("Cleared sync-error sentinel (push succeeded).")
 
 
 def init_hub(args, hub_path: str) -> None:

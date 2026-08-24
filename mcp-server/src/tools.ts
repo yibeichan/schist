@@ -875,10 +875,36 @@ function tailOutput(s: string, cap = 500): string {
  * reads it back for sync_status — and the detail is the tail of git's own
  * output, which is where the actionable line lives.
  */
-function formatPushFailure(outcome: SyncCommandOutcome, prefix = "push failed"): string {
+// Exported for tests: this sentinel text is the ONLY diagnosis an agent gets
+// for a background push failure, and #560 was a case of that text sending the
+// reader to the wrong subsystem. The wording is behaviour, so it is tested.
+export function formatPushFailure(outcome: SyncCommandOutcome, prefix = "push failed"): string {
   const cls = classifyPushFailure(outcome);
   const detail = tailOutput(outcomeMessage(outcome));
-  return `${prefix} [${cls}]: ${detail}`;
+  // Appended AFTER tailOutput so truncation can never eat the remedy, and
+  // after the bracketed class so parseFailureClass still reads the marker.
+  return `${prefix} [${cls}]: ${detail}${spawnPathHint(cls, detail)}`;
+}
+
+/**
+ * Extra sentence for the one failure class whose cause is invisible in the
+ * underlying error text. `spawn schist ENOENT` says a name did not resolve; it
+ * does not say against WHAT, and the answer — this server process's PATH,
+ * which for a GUI/launchd-launched client excludes the ~/.local/bin that both
+ * documented install methods write to — is not discoverable from the message.
+ * In the #560 incident an agent read that bare line, went looking for a vault
+ * or hub fault, and recorded a wrong diagnosis in its own memory.
+ *
+ * ASCII only: sanitizeSentinelContent maps every non-ASCII byte to "?" before
+ * an agent reads the sentinel, so an em dash would arrive as mojibake (#238).
+ * Scoped to ENOENT: EACCES means the binary WAS found, and advising a pin the
+ * operator already has is the "remedy that cannot fix it" defect of #553.
+ */
+function spawnPathHint(cls: PushFailureClass, detail: string): string {
+  if (cls !== "spawn-failed" || !/\bENOENT\b/.test(detail)) return "";
+  return ". The schist CLI is not on this server process's PATH. Pin an absolute path " +
+    "via SCHIST_BIN (and SCHIST_INGEST_BIN) in this MCP client's env, then restart the " +
+    "client; `schist doctor` reports which clients are affected.";
 }
 
 /** Read the class marker back out of a sentinel written by formatPushFailure. */

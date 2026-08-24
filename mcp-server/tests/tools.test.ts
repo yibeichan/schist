@@ -1,5 +1,6 @@
 import * as fs from "fs/promises";
 import { readFileSync } from "node:fs";
+import * as fsSync from "node:fs";
 import * as path from "path";
 import * as os from "os";
 import { fileURLToPath } from "url";
@@ -7,9 +8,9 @@ import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { load as yamlLoadSync } from "js-yaml";
 import { jest } from "@jest/globals";
-import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES } from "../src/tools.js";
+import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, formatPushFailure, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES } from "../src/tools.js";
 import Database from "better-sqlite3";
-import { INDEX_SCHEMA_VERSION } from "../src/sqlite-reader.js";
+import { INDEX_SCHEMA_VERSION, memoryDbPath } from "../src/sqlite-reader.js";
 import { parseConnections, parseNote } from "../src/markdown-parser.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -4619,4 +4620,105 @@ describe("connection-type vocabulary token filter (#413)", () => {
     ) as { error?: string };
     expect(ok.error).toBeUndefined();
   }, 30000);
+});
+
+describe("spawn-failure diagnosis names its cause (#560)", () => {
+  // The whole incident: a GUI-launched client could not resolve `schist` on
+  // its PATH, the sentinel said only "spawn schist ENOENT", and the agent
+  // reading it concluded the vault/hub was broken and recorded a wrong
+  // lesson. The text has to point at the knob that fixes it.
+  const spawnError = (message: string) => ({ ok: false, error: message });
+
+  test("ENOENT explains it is a PATH problem and names SCHIST_BIN", () => {
+    const msg = formatPushFailure(spawnError("spawn schist ENOENT"), "retry push failed");
+    expect(msg).toContain("not on this server process's PATH");
+    expect(msg).toContain("SCHIST_BIN");
+    expect(msg).toContain("SCHIST_INGEST_BIN");
+    expect(msg).toContain("schist doctor");
+  });
+
+  test("the class marker still parses, so the sentinel stays classifiable", () => {
+    // The added prose sits in the DETAIL half. If it ever leaked a bracket
+    // ahead of the marker, parseFailureClass would return null and the
+    // fail-closed gate would treat a known class as unknown.
+    const msg = formatPushFailure(spawnError("spawn schist ENOENT"), "retry push failed");
+    expect(parseFailureClass(msg)).toBe("spawn-failed");
+  });
+
+  test("the message is ASCII-only", () => {
+    // sanitizeSentinelContent maps every non-ASCII byte to "?" before an
+    // agent reads it, so an em dash arrives as mojibake (#238).
+    const msg = formatPushFailure(spawnError("spawn schist ENOENT"), "retry push failed");
+    expect(msg).toMatch(/^[\x20-\x7e\t\n]*$/);
+  });
+
+  test("a non-ENOENT spawn error does not get PATH advice", () => {
+    // EACCES is a permission problem on a binary that WAS found. Telling the
+    // operator to pin a path they already have is the "remedy that cannot
+    // fix it" failure (#553).
+    const msg = formatPushFailure(spawnError("spawn EACCES"), "retry push failed");
+    expect(msg).toContain("spawn EACCES");
+    expect(msg).not.toContain("SCHIST_BIN");
+  });
+});
+
+describe("memory DB path resolution (#565)", () => {
+  // `.openclaw` is not a schist directory. It must never be CREATED by a new
+  // install, but a deployment that already has one keeps reading it until
+  // migrated — 250+ recorded lessons would otherwise go invisible on upgrade.
+  let home: string;
+  let prevHome: string | undefined;
+  let prevOverride: string | undefined;
+
+  const canonicalOf = (h: string) => path.join(h, ".schist", "memory", "agent-state.db");
+  const legacyOf = (h: string) => path.join(h, ".openclaw", "memory", "agent-state.db");
+
+  const seed = (p: string) => {
+    fsSync.mkdirSync(path.dirname(p), { recursive: true });
+    fsSync.writeFileSync(p, "");
+  };
+
+  beforeEach(() => {
+    home = fsSync.mkdtempSync(path.join(os.tmpdir(), "schist-memhome-"));
+    prevHome = process.env.HOME;
+    prevOverride = process.env.SCHIST_MEMORY_DB;
+    process.env.HOME = home;
+    delete process.env.SCHIST_MEMORY_DB;
+  });
+
+  afterEach(() => {
+    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+    if (prevOverride === undefined) delete process.env.SCHIST_MEMORY_DB;
+    else process.env.SCHIST_MEMORY_DB = prevOverride;
+    fsSync.rmSync(home, { recursive: true, force: true });
+  });
+
+  test("a fresh install resolves to .schist, never .openclaw", () => {
+    expect(memoryDbPath(home)).toBe(canonicalOf(home));
+    expect(memoryDbPath(home)).not.toContain(".openclaw");
+  });
+
+  test("an existing legacy DB is still used, so no entries go invisible", () => {
+    seed(legacyOf(home));
+    expect(memoryDbPath(home)).toBe(legacyOf(home));
+  });
+
+  test("canonical wins once it exists, even with the legacy file still present", () => {
+    seed(legacyOf(home));
+    seed(canonicalOf(home));
+    expect(memoryDbPath(home)).toBe(canonicalOf(home));
+  });
+
+  test("an empty SCHIST_MEMORY_DB means unset, not new Database(\"\")", () => {
+    // `??` returned "" here, which reached better-sqlite3 and threw.
+    process.env.SCHIST_MEMORY_DB = "   ";
+    expect(memoryDbPath(home)).toBe(canonicalOf(home));
+  });
+
+  test("an explicit override still wins over both", () => {
+    seed(legacyOf(home));
+    seed(canonicalOf(home));
+    process.env.SCHIST_MEMORY_DB = "/tmp/pinned-agent-state.db";
+    expect(memoryDbPath(home)).toBe("/tmp/pinned-agent-state.db");
+  });
 });

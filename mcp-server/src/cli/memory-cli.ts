@@ -11,7 +11,8 @@
  * Entry types: decision, lesson, blocker, completion, observation
  *
  * Env vars:
- *   SCHIST_MEMORY_DB — path to agent-state.db (default: ~/.openclaw/memory/agent-state.db)
+ *   SCHIST_MEMORY_DB — path to agent-state.db (default: ~/.schist/memory/agent-state.db;
+ *                      a pre-#565 ~/.openclaw copy is read if present)
  *   SCHIST_AGENT_ID       — agent identity for write validation (single-agent mode)
  *   SCHIST_ALLOWED_AGENTS — comma-separated allowlist (multi-agent shared deployments)
  *   SCHIST_TEAM_OWNER     — owner allowed to write team.* state keys
@@ -51,7 +52,7 @@ COMMANDS
     --ttl    optional  expire after N hours
 
 ENVIRONMENT
-  SCHIST_MEMORY_DB   path to SQLite database (default: ~/.openclaw/memory/agent-state.db)
+  SCHIST_MEMORY_DB   path to SQLite database (default: ~/.schist/memory/agent-state.db)
   SCHIST_AGENT_ID    agent identity — enforced on writes (single-agent mode)
   SCHIST_ALLOWED_AGENTS  comma-separated allowlist — overrides SCHIST_AGENT_ID (multi-agent shared deployments)
   SCHIST_TEAM_OWNER  owner allowed to write team.* state keys
