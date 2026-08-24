@@ -2507,3 +2507,185 @@ class TestAcceptEnvGlobs:
     def test_benign_tokens_pass(self, tok):
         from schist.doctor import _acceptenv_offender
         assert _acceptenv_offender(tok) is False
+
+
+class TestCheckMcpCliSpawn:
+    """#560: mcp-server/src/tools.ts spawns `schist` / `schist-ingest` BY BARE
+    NAME, resolved against the spawning client's PATH. A GUI/launchd-launched
+    client never reads the login shell's rc files, so a CLI in ~/.local/bin is
+    unreachable and every background push dies with `spawn schist ENOENT` —
+    while doctor, running in the login shell, reported everything green.
+    """
+
+    GUI_PATH_FIXTURE = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+    def _client(self, home, env=None, *, shape="mcpServers", name="schist"):
+        """Write one MCP client config under a fake home; return its path."""
+        stub = home / "fake-mcp" / "dist" / "index.js"
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_text("// stub\n")
+        entry = {"command": "node", "args": [str(stub)]}
+        if env is not None:
+            entry["env"] = env
+        if shape == "mcpServers":
+            path = home / ".claude.json"
+            path.write_text(json.dumps({"mcpServers": {name: entry}}))
+        else:
+            # Claude Science's list-of-servers registry.
+            path = home / ".claude-science" / "mcp" / "local-mcp.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            entry["name"] = name
+            path.write_text(json.dumps({"servers": [entry]}))
+        return path
+
+    def _fake_bin(self, tmp_path, name):
+        """An executable that exists but is NOT on the GUI PATH."""
+        d = tmp_path / "localbin"
+        d.mkdir(exist_ok=True)
+        b = d / name
+        b.write_text("#!/bin/sh\nexit 0\n")
+        b.chmod(0o755)
+        return b
+
+    def _run(self, monkeypatch, home, gui_path=None):
+        from schist.doctor import check_mcp_cli_spawn
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        monkeypatch.setattr("schist.doctor._gui_launch_path",
+                            lambda: gui_path if gui_path is not None else self.GUI_PATH_FIXTURE)
+        return check_mcp_cli_spawn(None)
+
+    def test_skips_when_no_client_config(self, tmp_path, monkeypatch):
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "SKIP"
+
+    def test_fails_when_unpinned_and_not_on_gui_path(self, tmp_path, monkeypatch):
+        """The production failure: bare name + GUI PATH that lacks ~/.local/bin."""
+        self._client(tmp_path)
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL"
+        assert "SCHIST_BIN is not pinned" in r.message
+        assert "SCHIST_INGEST_BIN is not pinned" in r.message
+
+    def test_passes_when_pinned_to_absolute_paths(self, tmp_path, monkeypatch):
+        """Pinning is the remedy — it must actually flip the verdict."""
+        s = self._fake_bin(tmp_path, "schist")
+        i = self._fake_bin(tmp_path, "schist-ingest")
+        self._client(tmp_path, env={"SCHIST_BIN": str(s), "SCHIST_INGEST_BIN": str(i)})
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "PASS", r.message
+
+    def test_fails_when_pin_points_at_nothing(self, tmp_path, monkeypatch):
+        """A pin to a deleted/renamed binary is a break, not a pass."""
+        self._client(tmp_path, env={
+            "SCHIST_BIN": str(tmp_path / "gone" / "schist"),
+            "SCHIST_INGEST_BIN": str(tmp_path / "gone" / "schist-ingest"),
+        })
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL"
+        assert "does not resolve to an executable" in r.message
+
+    def test_fails_when_pin_exists_but_is_not_executable(self, tmp_path, monkeypatch):
+        """git SKIPS a non-executable hook and continues (#545); spawn ENOENTs
+        on a non-executable binary. Existence is not enough."""
+        d = tmp_path / "localbin"
+        d.mkdir()
+        for n in ("schist", "schist-ingest"):
+            (d / n).write_text("#!/bin/sh\nexit 0\n")
+            (d / n).chmod(0o644)
+        self._client(tmp_path, env={"SCHIST_BIN": str(d / "schist"),
+                                    "SCHIST_INGEST_BIN": str(d / "schist-ingest")})
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL"
+        assert "does not resolve to an executable" in r.message
+
+    def test_empty_pin_is_treated_as_unpinned(self, tmp_path, monkeypatch):
+        """Parity with schistCliBin: `process.env.SCHIST_BIN?.trim() || binName`
+        falls back to the bare name for empty AND whitespace values, so an
+        exported-but-empty var must not be reported as a pin (#123 comment)."""
+        self._client(tmp_path, env={"SCHIST_BIN": "", "SCHIST_INGEST_BIN": "   "})
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL"
+        assert "is not pinned" in r.message
+        # Must not claim the empty string failed to resolve as a path.
+        assert "does not resolve to an executable" not in r.message
+
+    def test_passes_when_binaries_live_on_the_gui_path(self, tmp_path, monkeypatch):
+        """No pin needed when the install is somewhere launchd already looks."""
+        d = tmp_path / "usrlocalbin"
+        d.mkdir()
+        for n in ("schist", "schist-ingest"):
+            (d / n).write_text("#!/bin/sh\nexit 0\n")
+            (d / n).chmod(0o755)
+        self._client(tmp_path)
+        r = self._run(monkeypatch, tmp_path, gui_path=str(d))
+        assert r.status == "PASS", r.message
+
+    def test_discovers_claude_science_servers_list_shape(self, tmp_path, monkeypatch):
+        """Claude Science's registry is `{"servers": [...]}`, not `mcpServers`,
+        and was invisible to every doctor check before #560 — which is why the
+        client that kept breaking was the one nothing validated."""
+        self._client(tmp_path, shape="servers", name="schist-vault")
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL"
+        assert "schist-vault" in r.message
+        assert "local-mcp.json" in r.message
+
+    def test_reports_every_broken_client_not_just_the_first(self, tmp_path, monkeypatch):
+        """check_mcp_config stops at the first entry; a per-client
+        misconfiguration only shows up if every client is audited."""
+        self._client(tmp_path)
+        self._client(tmp_path, shape="servers", name="schist-vault")
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "FAIL"
+        assert "2 MCP client entries" in r.message
+
+    def test_malformed_configs_do_not_raise(self, tmp_path, monkeypatch):
+        """run_doctor has no per-check exception shield (#437, #441): a
+        null/list/scalar config must degrade, never abort the whole run."""
+        (tmp_path / ".claude.json").write_text("null")
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "settings.json").write_text("[1, 2, 3]")
+        (tmp_path / ".claude-science" / "mcp").mkdir(parents=True)
+        (tmp_path / ".claude-science" / "mcp" / "local-mcp.json").write_text(
+            json.dumps({"servers": [None, {"name": "schist-vault"}]}))
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status in ("SKIP", "FAIL", "PASS")
+
+    def test_remedy_never_names_an_ephemeral_uv_path(self, tmp_path, monkeypatch):
+        """The remedy is written into a config by hand, so it must name a path
+        that survives: doctor is routinely run under `uv run --with ./cli`,
+        whose PATH prepends ~/.cache/uv/archive-v0/<hash>/bin. Pinning that is
+        a config that breaks at the next cache eviction."""
+        from schist.doctor import _stable_cli_path
+        ephemeral = tmp_path / ".cache" / "uv" / "archive-v0" / "abc" / "bin"
+        ephemeral.mkdir(parents=True)
+        b = ephemeral / "schist"
+        b.write_text("#!/bin/sh\nexit 0\n")
+        b.chmod(0o755)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("shutil.which", lambda n, path=None: str(b) if n == "schist" else None)
+        assert _stable_cli_path("schist") is None
+
+    def test_stable_path_prefers_local_bin(self, tmp_path, monkeypatch):
+        from schist.doctor import _stable_cli_path
+        lb = tmp_path / ".local" / "bin"
+        lb.mkdir(parents=True)
+        b = lb / "schist"
+        b.write_text("#!/bin/sh\nexit 0\n")
+        b.chmod(0o755)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        assert _stable_cli_path("schist") == str(b)
+
+    def test_wired_into_run_doctor(self, tmp_path, monkeypatch):
+        """#556's lesson: a check nothing asserts is REGISTERED can be deleted
+        from run_doctor() with the suite green. Assert the label is present and
+        carries a real verdict, not merely that no expected label is missing."""
+        from schist.doctor import run_doctor
+        self._client(tmp_path)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("schist.doctor._gui_launch_path", lambda: self.GUI_PATH_FIXTURE)
+        results = run_doctor(None, None, as_json=False)
+        labels = [r.label for r in results]
+        assert "MCP CLI spawn" in labels
+        r = next(x for x in results if x.label == "MCP CLI spawn")
+        assert r.status == "FAIL", r.message

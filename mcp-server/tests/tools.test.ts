@@ -7,7 +7,7 @@ import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { load as yamlLoadSync } from "js-yaml";
 import { jest } from "@jest/globals";
-import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES } from "../src/tools.js";
+import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, formatPushFailure, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES } from "../src/tools.js";
 import Database from "better-sqlite3";
 import { INDEX_SCHEMA_VERSION } from "../src/sqlite-reader.js";
 import { parseConnections, parseNote } from "../src/markdown-parser.js";
@@ -4619,4 +4619,44 @@ describe("connection-type vocabulary token filter (#413)", () => {
     ) as { error?: string };
     expect(ok.error).toBeUndefined();
   }, 30000);
+});
+
+describe("spawn-failure diagnosis names its cause (#560)", () => {
+  // The whole incident: a GUI-launched client could not resolve `schist` on
+  // its PATH, the sentinel said only "spawn schist ENOENT", and the agent
+  // reading it concluded the vault/hub was broken and recorded a wrong
+  // lesson. The text has to point at the knob that fixes it.
+  const spawnError = (message: string) => ({ ok: false, error: message });
+
+  test("ENOENT explains it is a PATH problem and names SCHIST_BIN", () => {
+    const msg = formatPushFailure(spawnError("spawn schist ENOENT"), "retry push failed");
+    expect(msg).toContain("not on this server process's PATH");
+    expect(msg).toContain("SCHIST_BIN");
+    expect(msg).toContain("SCHIST_INGEST_BIN");
+    expect(msg).toContain("schist doctor");
+  });
+
+  test("the class marker still parses, so the sentinel stays classifiable", () => {
+    // The added prose sits in the DETAIL half. If it ever leaked a bracket
+    // ahead of the marker, parseFailureClass would return null and the
+    // fail-closed gate would treat a known class as unknown.
+    const msg = formatPushFailure(spawnError("spawn schist ENOENT"), "retry push failed");
+    expect(parseFailureClass(msg)).toBe("spawn-failed");
+  });
+
+  test("the message is ASCII-only", () => {
+    // sanitizeSentinelContent maps every non-ASCII byte to "?" before an
+    // agent reads it, so an em dash arrives as mojibake (#238).
+    const msg = formatPushFailure(spawnError("spawn schist ENOENT"), "retry push failed");
+    expect(msg).toMatch(/^[\x20-\x7e\t\n]*$/);
+  });
+
+  test("a non-ENOENT spawn error does not get PATH advice", () => {
+    // EACCES is a permission problem on a binary that WAS found. Telling the
+    // operator to pin a path they already have is the "remedy that cannot
+    // fix it" failure (#553).
+    const msg = formatPushFailure(spawnError("spawn EACCES"), "retry push failed");
+    expect(msg).toContain("spawn EACCES");
+    expect(msg).not.toContain("SCHIST_BIN");
+  });
 });

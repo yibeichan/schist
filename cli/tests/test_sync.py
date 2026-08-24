@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1562,3 +1563,124 @@ def test_hooks_reinstall_exclude_retrofit_idempotent(tmp_path):
 
     lines = (target / ".git" / "info" / "exclude").read_text().splitlines()
     assert lines.count(".schist/") == 1
+
+
+# ---------------------------------------------------------------------------
+# sync-error sentinel recovery (#560)
+# ---------------------------------------------------------------------------
+
+
+class TestSyncErrorSentinelRecovery:
+    """The MCP server writes .schist/last-sync-error on a failed background
+    push and then REFUSES every vault write while it exists
+    (blockWriteIfSyncDirty → SYNC_DIRTY). Before #560 only the MCP server
+    cleared it, so a push that succeeded from any other process — a terminal
+    `schist sync push`, or the out-of-band launchd watcher that exists
+    precisely because a sandboxed MCP client cannot spawn/exec — left the
+    vault write-blocked indefinitely. Recovery lived only in the component
+    whose inability to push wrote the sentinel in the first place.
+    """
+
+    SENTINEL = ".schist/last-sync-error"
+
+    def _sentinel(self, vault):
+        return Path(vault) / self.SENTINEL
+
+    def _write_sentinel(self, vault, text="2026-08-24T03:05:41.227Z retry push failed"):
+        p = self._sentinel(vault)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text + "\n")
+        return p
+
+    @patch("schist.sync.git_ops.push", return_value=(True, ""))
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_successful_push_clears_sentinel(self, _changes, _unpushed, _push,
+                                             tmp_path, capsys):
+        vault = _make_spoke(tmp_path)
+        self._write_sentinel(vault)
+        from schist.sync import sync_push
+
+        sync_push(MagicMock(), vault, "db.sqlite")
+
+        assert not self._sentinel(vault).exists()
+        out = capsys.readouterr().out
+        assert "Pushed to hub" in out
+        assert "Cleared sync-error sentinel" in out
+
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=False)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_already_level_with_hub_clears_stale_sentinel(self, _changes, _unpushed,
+                                                          tmp_path, capsys):
+        """The exact shape the deadlock took: the launchd watcher landed the
+        commits out of band, then every later `sync push` no-op'd at
+        "Nothing to push" and left the vault write-blocked."""
+        vault = _make_spoke(tmp_path)
+        self._write_sentinel(vault)
+        from schist.sync import sync_push
+
+        sync_push(MagicMock(), vault, "db.sqlite")
+
+        assert not self._sentinel(vault).exists()
+        out = capsys.readouterr().out
+        assert "Nothing to push" in out
+        assert "Cleared stale sync-error sentinel" in out
+
+    @patch("schist.sync.git_ops.push", return_value=(False, "Connection closed"))
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_failed_push_leaves_sentinel_in_place(self, _changes, _unpushed, _push,
+                                                 tmp_path):
+        """Clearing on failure would be strictly worse than never clearing:
+        the write gate would open while the spoke is still diverged."""
+        vault = _make_spoke(tmp_path)
+        self._write_sentinel(vault)
+        from schist.sync import sync_push
+
+        with pytest.raises(SystemExit):
+            sync_push(MagicMock(), vault, "db.sqlite")
+
+        assert self._sentinel(vault).exists()
+
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_sentinel_written_during_push_is_not_destroyed(self, _changes, _unpushed,
+                                                           tmp_path):
+        """A concurrent MCP push can fail WHILE this one succeeds. Clearing
+        unconditionally would delete a report of a genuinely new failure and
+        open the write gate on a diverged spoke. Mirrors
+        clearSyncErrorIfUnchanged's mtime guard in tools.ts."""
+        vault = _make_spoke(tmp_path)
+        self._write_sentinel(vault, "2026-08-24T03:05:41.227Z old failure")
+        from schist.sync import sync_push
+
+        def _push_then_new_failure(_vault):
+            # Another process records a fresh failure mid-push. Bump mtime
+            # explicitly: the write can land inside the same filesystem
+            # timestamp tick, which would make the guard pass for the wrong
+            # reason and hide a real regression.
+            p = self._sentinel(vault)
+            p.write_text("2026-08-24T03:06:00.000Z NEW failure\n")
+            st = p.stat()
+            os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+            return (True, "")
+
+        with patch("schist.sync.git_ops.push", side_effect=_push_then_new_failure):
+            sync_push(MagicMock(), vault, "db.sqlite")
+
+        assert self._sentinel(vault).exists()
+        assert "NEW failure" in self._sentinel(vault).read_text()
+
+    @patch("schist.sync.git_ops.push", return_value=(True, ""))
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_absent_sentinel_is_not_an_error(self, _changes, _unpushed, _push,
+                                            tmp_path, capsys):
+        vault = _make_spoke(tmp_path)
+        from schist.sync import sync_push
+
+        sync_push(MagicMock(), vault, "db.sqlite")
+
+        out = capsys.readouterr().out
+        assert "Pushed to hub" in out
+        assert "Cleared" not in out

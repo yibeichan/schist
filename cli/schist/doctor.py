@@ -1272,6 +1272,85 @@ def _auto_detect_mcp_path() -> Optional[str]:
     return None
 
 
+def _mcp_config_candidates(vault_path: Optional[str]) -> list[Path]:
+    """Every known MCP client config file, in discovery order."""
+    candidates = [
+        # Claude Code (active product) stores user-scope MCP servers here.
+        # Same `mcpServers` shape as Claude Desktop, different path.
+        Path.home() / ".claude.json",
+        # Claude Desktop / settings.json paths (legacy and project-scoped).
+        Path.home() / ".claude" / "settings.json",
+        Path.home() / ".claude" / "settings.local.json",
+        Path.home() / "Library" / "Application Support" / "Claude"
+        / "claude_desktop_config.json",
+        # Claude Science keeps its own registry, in a DIFFERENT shape
+        # (`{"servers": [...]}`, a list with per-entry "name"). It was
+        # invisible to every doctor check until #560 — which is why the client
+        # that kept breaking was also the one nothing validated.
+        Path.home() / ".claude-science" / "mcp" / "local-mcp.json",
+        Path.home() / ".cursor" / "mcp.json",
+    ]
+    if vault_path:
+        candidates.append(Path(vault_path) / ".claude" / "settings.json")
+        candidates.append(Path(vault_path) / ".claude" / "settings.local.json")
+    return candidates
+
+
+def _looks_like_schist_entry(cfg: dict) -> bool:
+    args = cfg.get("args")
+    if not isinstance(args, list):
+        return False
+    return any("schist" in str(a) or "dist/index.js" in str(a) for a in args)
+
+
+def _discover_mcp_schist_entries(
+    vault_path: Optional[str],
+) -> list[tuple[Path, str, dict]]:
+    """All schist MCP entries across every known client config.
+
+    Returns (config_path, entry_name, entry_dict) tuples. Unlike
+    check_mcp_config — which wants THE entry and stops at the first hit —
+    callers here audit every registered client, because a per-client
+    misconfiguration is exactly the class of bug that hides when only one
+    client is inspected.
+
+    Every level is shape-guarded: a settings file can be valid JSON that is
+    `null`, a list, a scalar, or carry a null server entry (mid-write
+    truncation, hand edit). run_doctor has no per-check exception shield, so
+    an unguarded .get()/.items() here aborts the WHOLE run (#437, #441).
+    """
+    found: list[tuple[Path, str, dict]] = []
+    for c in _mcp_config_candidates(vault_path):
+        try:
+            if not c.exists():
+                continue
+            data = json.loads(c.read_text())
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+
+        servers = data.get("mcpServers")
+        if isinstance(servers, dict):
+            for name, cfg in servers.items():
+                if not isinstance(cfg, dict):
+                    continue
+                if name == "schist" or _looks_like_schist_entry(cfg):
+                    found.append((c, str(name), cfg))
+
+        # Claude Science's list-of-servers shape.
+        server_list = data.get("servers")
+        if isinstance(server_list, list):
+            for cfg in server_list:
+                if not isinstance(cfg, dict):
+                    continue
+                name = cfg.get("name")
+                name = str(name) if isinstance(name, (str, int)) else "(unnamed)"
+                if "schist" in name or _looks_like_schist_entry(cfg):
+                    found.append((c, name, cfg))
+    return found
+
+
 def check_mcp_config(vault_path: Optional[str]) -> CheckResult:
     """Check if schist is configured in Claude Code or Cursor settings.
 
@@ -1280,17 +1359,10 @@ def check_mcp_config(vault_path: Optional[str]) -> CheckResult:
       2. env.SCHIST_VAULT_PATH matches vault_path if provided
       3. args[0] matches the auto-detected current mcp-server path
     """
-    candidates = [
-        # Claude Code (active product) stores user-scope MCP servers here.
-        # Same `mcpServers` shape as Claude Desktop, different path.
-        Path.home() / ".claude.json",
-        # Claude Desktop / settings.json paths (legacy and project-scoped).
-        Path.home() / ".claude" / "settings.json",
-        Path.home() / ".claude" / "settings.local.json",
-    ]
-    if vault_path:
-        candidates.append(Path(vault_path) / ".claude" / "settings.json")
-        candidates.append(Path(vault_path) / ".claude" / "settings.local.json")
+    # Shared with check_mcp_cli_spawn (#560) so the two cannot disagree about
+    # which clients exist — the drift that let Claude Science's registry go
+    # unvalidated by every check for months.
+    candidates = _mcp_config_candidates(vault_path)
 
     located = None  # tuple of (config_path, entry_name, entry_dict)
     for c in candidates:
@@ -1593,6 +1665,174 @@ def _canonical_docs_columns() -> Optional[set[str]]:
     except sqlite3.Error:
         return None
     return cols or None
+
+
+# ── MCP client spawn contract (#560) ─────────────────────────────────────
+#
+# mcp-server/src/tools.ts spawns the two CLI binaries to sync and reindex:
+# `schistCliBin()` returns `process.env.SCHIST_BIN?.trim() || "schist"` (and
+# the SCHIST_INGEST_BIN/"schist-ingest" pair), and Node's spawn() resolves a
+# bare name against the SPAWNING PROCESS's PATH. A GUI- or launchd-launched
+# client never reads the login shell's rc files, so a CLI installed the
+# documented way (`uv tool install` / `pipx` → ~/.local/bin) is simply not
+# on that PATH and every background push dies with `spawn schist ENOENT`.
+#
+# This is the failure this check exists for, and the reason it is not just
+# another shutil.which(): doctor itself runs in the login shell, where the
+# binary IS found. check_ingest_available and check_mcp_config both pass
+# green while the server they describe cannot spawn anything — a check that
+# structurally cannot observe the condition it is named for (#555's shape).
+# So resolve against the GUI/launchd PATH, not ours.
+
+# Documented launchd/systemd-user fallback when no user-domain override is set.
+_GUI_FALLBACK_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def _gui_launch_path() -> str:
+    """PATH a GUI/launchd-launched MCP client actually inherits."""
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["launchctl", "getenv", "PATH"],
+                capture_output=True, text=True, timeout=5,
+            )
+            # Unset prints nothing and still exits 0 — treat blank as unset
+            # rather than as an empty PATH (`core.hooksPath=""` lesson: the
+            # two are not the same thing, #545).
+            if out.returncode == 0 and out.stdout.strip():
+                return out.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        cs = os.confstr("CS_PATH")
+        if cs:
+            return cs
+    except (ValueError, OSError):
+        pass
+    return _GUI_FALLBACK_PATH
+
+
+def _resolve_like_spawn(configured: Optional[str], default_name: str,
+                        search_path: str) -> tuple[Optional[str], bool]:
+    """Mirror schistCliBin() + Node spawn() resolution.
+
+    Returns (resolved_absolute_path_or_None, was_pinned). `was_pinned` is
+    False for an env var that is absent, empty, or whitespace — `?.trim() ||`
+    in tools.ts falls back to the bare name in all three cases, so reporting
+    such a value as a pin would describe a resolution that never happens.
+    """
+    pinned = (configured or "").strip()
+    if not pinned:
+        return shutil.which(default_name, path=search_path), False
+    # Node spawn(): a value containing a separator is used as a path
+    # verbatim; a bare name goes through PATH lookup.
+    if os.sep in pinned or (os.altsep and os.altsep in pinned):
+        p = Path(pinned).expanduser()
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p), True
+        return None, True
+    return shutil.which(pinned, path=search_path), True
+
+
+# Directory fragments that mark an EPHEMERAL interpreter environment. A
+# remedy must name a path the operator will still have tomorrow: doctor is
+# routinely run via `uv run --with ./cli`, whose PATH prepends a throwaway
+# venv under ~/.cache/uv/archive-v0/<hash>/bin. shutil.which() finds that
+# copy first, so an un-filtered remedy tells the operator to pin a path uv
+# prunes out from under them — a config that works until the next cache
+# eviction, which is worse than the ENOENT it replaces.
+_EPHEMERAL_BIN_MARKERS = (
+    f"{os.sep}.cache{os.sep}uv{os.sep}",
+    f"{os.sep}.cache{os.sep}pip{os.sep}",
+    f"{os.sep}pip-build-env-",
+    f"{os.sep}tmp{os.sep}",
+)
+
+
+def _stable_cli_path(name: str) -> Optional[str]:
+    """Absolute path to `name` that is safe to write into a client config."""
+    # ~/.local/bin is where both documented install methods land
+    # (`uv tool install`, `pipx install`) and is stable across upgrades.
+    preferred = Path.home() / ".local" / "bin" / name
+    if preferred.is_file() and os.access(preferred, os.X_OK):
+        return str(preferred)
+    found = shutil.which(name)
+    if found and not any(m in found for m in _EPHEMERAL_BIN_MARKERS):
+        return found
+    return None
+
+
+def check_mcp_cli_spawn(vault_path: Optional[str]) -> CheckResult:
+    """Can each registered MCP client actually spawn the schist CLIs?"""
+    label = "MCP CLI spawn"
+    entries = _discover_mcp_schist_entries(vault_path)
+    if not entries:
+        return CheckResult("SKIP", label, "skipped (no MCP client config with a schist entry)")
+
+    gui_path = _gui_launch_path()
+    # Where the binaries really are, found with OUR PATH — a legitimate use:
+    # locating the install so the remedy can name an absolute path.
+    installed = {
+        name: _stable_cli_path(name)
+        for name in ("schist", "schist-ingest")
+    }
+    # The "installed at all" verdict must not depend on the stability filter:
+    # a CLI reachable only from an ephemeral env is still installed, and
+    # reporting "not on PATH at all" there would be a false diagnosis.
+    if not any(shutil.which(n) for n in ("schist", "schist-ingest")):
+        return CheckResult(
+            "FAIL", label,
+            "neither `schist` nor `schist-ingest` is on PATH at all — no MCP client "
+            "can sync or reindex",
+            fix="Install the CLI: `uv tool install schist` (or `pipx install schist`), "
+                "then re-run doctor.",
+        )
+
+    broken: list[str] = []
+    ok: list[str] = []
+    for cfg_path, entry_name, cfg in entries:
+        env = cfg.get("env") if isinstance(cfg.get("env"), dict) else {}
+        problems = []
+        for var, default_name in (("SCHIST_BIN", "schist"),
+                                  ("SCHIST_INGEST_BIN", "schist-ingest")):
+            configured = env.get(var)
+            configured = configured if isinstance(configured, str) else None
+            resolved, was_pinned = _resolve_like_spawn(configured, default_name, gui_path)
+            if resolved is not None:
+                continue
+            if was_pinned:
+                problems.append(f"{var}={configured!r} does not resolve to an executable")
+            else:
+                problems.append(
+                    f"`{default_name}` not found on a GUI-launched client's PATH "
+                    f"and {var} is not pinned"
+                )
+        if problems:
+            broken.append(f"{entry_name} ({cfg_path}): " + "; ".join(problems))
+        else:
+            ok.append(entry_name)
+
+    if broken:
+        pins = "; ".join(
+            f'"{var}": "{installed[name]}"'
+            for var, name in (("SCHIST_BIN", "schist"), ("SCHIST_INGEST_BIN", "schist-ingest"))
+            if installed.get(name)
+        )
+        return CheckResult(
+            "FAIL", label,
+            f"{len(broken)} MCP client entr{'y' if len(broken) == 1 else 'ies'} cannot spawn "
+            f"the CLI when launched from a GUI (PATH={gui_path}): " + " | ".join(broken),
+            fix="Pin absolute paths in each listed config's `env` block: "
+                + (pins or "install the CLI to a stable location (`uv tool install schist`), "
+                           "then set SCHIST_BIN / SCHIST_INGEST_BIN to those binaries")
+                + ". Bare names resolve against the launching process's PATH, which for a "
+                  "GUI/launchd client excludes ~/.local/bin.",
+        )
+    return CheckResult(
+        "PASS", label,
+        f"{len(ok)} MCP client entr{'y' if len(ok) == 1 else 'ies'} can spawn both CLIs "
+        f"from a GUI-launched process ({', '.join(ok)})",
+    )
 
 
 def check_mcp_schema_alignment(vault_path: Optional[str]) -> CheckResult:
@@ -2001,6 +2241,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_spoke_identity_env(vault_path),
         check_spoke_acl_drift(vault_path),
         check_mcp_config(vault_path),
+        check_mcp_cli_spawn(vault_path),
         check_mcp_schema_alignment(vault_path),
         check_mcp_vocab_alignment(vault_path),
         check_index_schema_version(vault_path, db_path),
