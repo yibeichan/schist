@@ -241,6 +241,13 @@ export interface SearchMemoryResponse {
   cursor?: string;
   /** Soft warning when the verbose reason pattern has exceeded the rate limit. */
   verboseNote?: string;
+  /**
+   * Present only on an empty first page of a multi-term query (#563). Says
+   * whether the zero is "your terms are too narrow" or "the store is empty" —
+   * a bare 0 cannot distinguish those, and an agent once read the former as
+   * the latter and concluded 13 successful writes had failed.
+   */
+  zeroHitDiagnostic?: string;
 }
 
 export interface AgentStateEntry {

@@ -2859,6 +2859,47 @@ class TestCheckMemoryDbPath:
             assert f"export const {name} = [{declared}]" in text, (
                 f"{name} mirror {relpath} does not match sqlite-reader.ts")
 
+    def _client(self, home, env=None, name="schist"):
+        stub = home / "fake-mcp" / "dist" / "index.js"
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_text("// stub\n")
+        entry = {"command": "node", "args": [str(stub)]}
+        if env is not None:
+            entry["env"] = env
+        (home / ".claude.json").write_text(json.dumps({"mcpServers": {name: entry}}))
+
+    def test_reports_clients_that_do_not_pin_the_memory_db(self, tmp_path, monkeypatch):
+        """#564: memoryDbPath() derives from os.homedir(), so a client whose
+        sandbox remaps $HOME resolves a PRIVATE memory DB no other agent can
+        read — 14 entries on one side, 256 on the other, no error either way.
+        Pinning is the only prevention, so doctor states which clients don't."""
+        self._client(tmp_path)
+        r = self._run(monkeypatch, tmp_path)
+        assert "do not pin SCHIST_MEMORY_DB" in r.message
+        assert "SCHIST_MEMORY_DB" in (r.fix or "")
+
+    def test_pinned_client_is_not_reported(self, tmp_path, monkeypatch):
+        self._client(tmp_path, env={"SCHIST_MEMORY_DB": "/srv/agent-state.db"})
+        r = self._run(monkeypatch, tmp_path)
+        assert "do not pin" not in r.message
+
+    def test_empty_pin_counts_as_unpinned(self, tmp_path, monkeypatch):
+        """Parity with the server's `?.trim() ||`: exported-but-empty is unset,
+        so reporting it as a pin would describe protection that isn't there."""
+        self._client(tmp_path, env={"SCHIST_MEMORY_DB": "   "})
+        r = self._run(monkeypatch, tmp_path)
+        assert "do not pin SCHIST_MEMORY_DB" in r.message
+
+    def test_unpinned_clients_alone_do_not_escalate_to_warn(self, tmp_path, monkeypatch):
+        """Deliberately NOT a WARN trigger. Most deployments have no sandboxed
+        client, and warning all of them about a hazard they don't have is how a
+        health report teaches people to stop reading it. A live fork is caught
+        where it matters — add_memory returns the db it wrote to."""
+        self._client(tmp_path)  # unpinned, but no legacy DB present
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "PASS", r.message
+        assert "do not pin SCHIST_MEMORY_DB" in r.message
+
     def test_wired_into_run_doctor(self, tmp_path, monkeypatch):
         """A check nothing asserts is registered can be deleted from
         run_doctor() with the suite green (#556)."""

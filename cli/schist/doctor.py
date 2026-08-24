@@ -2127,6 +2127,48 @@ def _memory_migration_fix(legacy: Path, canonical: Path) -> str:
     )
 
 
+def _unpinned_memory_db_clients(vault_path: Optional[str]) -> list[str]:
+    """Registered MCP clients that do not pin SCHIST_MEMORY_DB (#564).
+
+    memoryDbPath() derives from os.homedir(). A client whose sandbox remaps
+    $HOME therefore resolves a PRIVATE memory DB that no other agent can read,
+    with ids restarting at 1, and neither side errors — observed with Claude
+    Science, which had 14 entries of its own while the machine DB had 256.
+    Pinning the path is the only thing that prevents the fork.
+
+    Reported factually, never escalated to a WARN on its own: most deployments
+    have no sandboxed client, and warning every one of them about a hazard
+    they do not have is how a health report teaches people to stop reading it.
+    An actual fork is caught where it matters — add_memory returns the `db` it
+    wrote to. Detecting it here would mean hardcoding one product's internal
+    directory layout, which rots into a false PASS.
+    """
+    unpinned = []
+    for _cfg_path, name, cfg in _discover_mcp_schist_entries(vault_path):
+        env = cfg.get("env") if isinstance(cfg.get("env"), dict) else {}
+        pinned = env.get("SCHIST_MEMORY_DB")
+        # Same emptiness rule as the server: `?.trim() ||` means an
+        # exported-but-empty value is unset, not a pin.
+        if not (isinstance(pinned, str) and pinned.strip()):
+            unpinned.append(name)
+    return unpinned
+
+
+def _memory_pin_clause(vault_path: Optional[str]) -> tuple[str, str]:
+    """(message clause, fix clause) describing MCP clients' SCHIST_MEMORY_DB."""
+    unpinned = _unpinned_memory_db_clients(vault_path)
+    if not unpinned:
+        return "", ""
+    listed = ", ".join(unpinned)
+    return (
+        f" {len(unpinned)} MCP client entr"
+        f"{'y' if len(unpinned) == 1 else 'ies'} ({listed}) do not pin "
+        "SCHIST_MEMORY_DB, so a sandbox that remaps $HOME resolves a private "
+        "memory DB no other agent can read.",
+        f" Pin \"SCHIST_MEMORY_DB\" in the env block of: {listed}.",
+    )
+
+
 def check_memory_db_path(vault_path: Optional[str]) -> CheckResult:
     """Is cross-project memory living under a schist-owned path?"""
     label = "Memory DB path"
@@ -2140,8 +2182,12 @@ def check_memory_db_path(vault_path: Optional[str]) -> CheckResult:
     canonical = home / Path(*MEMORY_DB_RELPATH)
     legacy = home / Path(*LEGACY_MEMORY_DB_RELPATH)
 
+    pin_msg, pin_fix = _memory_pin_clause(vault_path)
+
     if not legacy.exists():
-        return CheckResult("PASS", label, f"{canonical}")
+        return CheckResult("PASS", label,
+                           f"{canonical}.{pin_msg}" if pin_msg else str(canonical),
+                           fix=pin_fix.strip() or None)
 
     legacy_n = _memory_entry_count(legacy)
     legacy_desc = f"{legacy} ({legacy_n} entries)" if legacy_n is not None else str(legacy)
@@ -2159,7 +2205,7 @@ def check_memory_db_path(vault_path: Optional[str]) -> CheckResult:
               "legacy file are now unreachable",
             fix=f"Compare the counts; once {canonical} has everything, remove "
                 f"{legacy.parent.parent}. If the legacy file is AHEAD, re-run the "
-                f"migration: {_memory_migration_fix(legacy, canonical)}",
+                f"migration: {_memory_migration_fix(legacy, canonical)}" + pin_fix,
         )
 
     return CheckResult(
@@ -2167,8 +2213,8 @@ def check_memory_db_path(vault_path: Optional[str]) -> CheckResult:
         f"still reading the legacy {legacy_desc}. `.openclaw` is not a schist "
         f"directory; the canonical path is {canonical}. Nothing breaks until you "
         "migrate — the server reads an existing legacy DB on purpose so an "
-        "upgrade never hides recorded entries",
-        fix=_memory_migration_fix(legacy, canonical),
+        "upgrade never hides recorded entries." + pin_msg,
+        fix=_memory_migration_fix(legacy, canonical) + pin_fix,
     )
 
 

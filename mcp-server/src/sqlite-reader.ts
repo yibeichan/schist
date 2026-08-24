@@ -1275,7 +1275,7 @@ export function addMemory(entry: {
   related_doc?: string;
   source_ref?: string;
   confidence?: string;
-}): { id: number; created_at: string } {
+}): { id: number; created_at: string; db: string } {
   validateOwner(entry.owner);
   const db = openMemoryDb();
   try {
@@ -1289,11 +1289,95 @@ export function addMemory(entry: {
     const result = stmt.run(entry.owner, date, entry.entry_type, entry.content, tags,
       entry.related_doc ?? null, entry.source_ref ?? null, confidence);
     const row = db.prepare("SELECT created_at FROM agent_memory WHERE id = ?").get(result.lastInsertRowid) as { created_at: string };
-    return { id: result.lastInsertRowid as number, created_at: row.created_at };
+    // Report WHERE the entry landed (#564). memoryDbPath() derives from
+    // os.homedir(), and a sandboxed client (Claude Science) is handed a
+    // remapped $HOME — so it writes to a private DB nothing else on the
+    // machine can read, with ids restarting at 1, and neither side errors. An
+    // agent that falls back to add_memory because a vault write was blocked
+    // then reports the content as "captured" when it is reachable only from
+    // inside that sandbox. Returning the path is what makes that visible at
+    // the moment it matters, without doctor having to know any product's
+    // internal directory layout.
+    return { id: result.lastInsertRowid as number, created_at: row.created_at, db: memoryDbPath() };
   } finally {
     db.close();
   }
 }
+
+/**
+ * Why a multi-term memory search returned nothing (#563).
+ *
+ * sanitizeFtsQuery quotes EVERY whitespace-separated term and joins them,
+ * which FTS5 reads as an implicit AND of phrases. There is no OR and no
+ * partial-match ranking, so one term absent from the corpus zeroes the whole
+ * query: `dyad reliability` returned 4 rows and `dyad reliability run-blocked`
+ * returned 0. An agent used exactly that to check whether its own writes had
+ * landed, read the 0 as "nothing was ever written", and recorded a false
+ * lesson (blaming hyphen tokenization, which works fine). A bare 0 cannot
+ * distinguish "your terms are too narrow" from "the store is empty", and
+ * those call for opposite responses — so say which one it is.
+ *
+ * Runs only on an empty first page of a multi-term query: at most one extra
+ * COUNT per term plus one for the corpus, on a result set already known to be
+ * empty. Never throws — a diagnostic that can fail the call it explains would
+ * be worse than no diagnostic.
+ */
+export function diagnoseZeroHits(opts: {
+  query: string;
+  owner?: string;
+  entry_type?: string;
+  date_from?: string;
+  date_to?: string;
+}): {
+  terms: { term: string; count: number }[];
+  totalUnderFilters: number;
+  truncatedTerms: number;
+} | null {
+  const terms = opts.query.split(/\s+/).filter(Boolean);
+  if (terms.length < 2) return null;
+  // One COUNT per term, and the query string is caller-supplied: a 200-term
+  // query would otherwise fan out to 200 scans on a result set already known
+  // to be empty. The AND semantics mean any single zero already explains the
+  // result, so the first terms are enough.
+  const MAX_DIAGNOSED_TERMS = 12;
+  const diagnosed = terms.slice(0, MAX_DIAGNOSED_TERMS);
+  let db: Database.Database | undefined;
+  try {
+    db = openMemoryDb();
+    const filters: string[] = [];
+    const filterParams: unknown[] = [];
+    if (opts.owner) { filters.push("m.owner = ?"); filterParams.push(opts.owner); }
+    if (opts.entry_type) { filters.push("m.entry_type = ?"); filterParams.push(opts.entry_type); }
+    if (opts.date_from) { filters.push("m.date >= ?"); filterParams.push(opts.date_from); }
+    if (opts.date_to) { filters.push("m.date <= ?"); filterParams.push(opts.date_to); }
+    const filterSql = filters.length ? ` AND ${filters.join(" AND ")}` : "";
+
+    const perTerm = diagnosed.map(term => {
+      const row = db!.prepare(
+        `SELECT count(*) AS n FROM agent_memory_fts f JOIN agent_memory m ON m.id = f.rowid
+         WHERE agent_memory_fts MATCH ?${filterSql}`
+      ).get(sanitizeFtsQuery(term), ...filterParams) as { n: number };
+      return { term, count: row?.n ?? 0 };
+    });
+
+    const totalRow = db.prepare(
+      `SELECT count(*) AS n FROM agent_memory m WHERE 1=1${filterSql}`
+    ).get(...filterParams) as { n: number };
+
+    return {
+      terms: perTerm,
+      totalUnderFilters: totalRow?.n ?? 0,
+      // Say so when the term list was capped. A diagnostic that silently
+      // reports on 12 of 40 terms reads as "these are all the terms".
+      truncatedTerms: terms.length - diagnosed.length,
+    };
+  } catch {
+    return null;
+  } finally {
+    db?.close();
+  }
+}
+
 
 export function searchMemory(opts: {
   query?: string;
