@@ -1084,6 +1084,45 @@ def _acceptenv_offender(token: str) -> bool:
     return _dangerous_family(t)
 
 
+def _hub_hook_fix(hub: Path, hooks_dir: Optional[Path],
+                  configured: Optional[str], error: Optional[str]) -> str:
+    """The hub's remedy, which is NOT the spoke's (#553).
+
+    `_hook_fix` recommends `schist --vault … hooks reinstall`, and that is
+    wrong here twice over: `hooks_reinstall` writes pre-commit and post-commit
+    only — it never touches pre-receive — and it hard-exits with "not a git
+    repository" when `<path>/.git` is absent, which is true of every bare hub.
+    So the security check was telling a hub admin to run a command that errors
+    out immediately and would not have helped if it had run.
+
+    There is also no hub-hook reinstall command to point at: the hook is
+    written once by `schist init --hub` (sync.py). So say what the hook has to
+    be, rather than naming a command that will not do it.
+    """
+    if error:
+        return (
+            f"Make sure {hub} is a git repository readable by this user — a "
+            f"non-repo path, an unreadable config, or git's safe.directory "
+            f"ownership check all produce this."
+        )
+    if hooks_dir is None:
+        return (
+            f"core.hooksPath is set to an empty value on the hub, so no hook "
+            f"runs at all. Unset it: "
+            f"`git --git-dir {hub} config --unset core.hooksPath`."
+        )
+    hook = hooks_dir / "pre-receive"
+    where = (f" git reads hooks from {hooks_dir} (core.hooksPath "
+             f"'{configured}'), so the hook must be there." if configured else "")
+    return (
+        f"`chmod +x {hook}` if it exists. There is no hub-hook reinstall "
+        f"command — the hook is written only by `schist init --hub` — so if it "
+        f"is missing or empty, restore it as a python3 shim that execs "
+        f"`schist.pre_receive` (PRE_RECEIVE_HOOK in cli/schist/sync.py) and "
+        f"make it executable.{where}"
+    )
+
+
 def check_hub_pre_receive_hook(hub_path: Optional[str]) -> CheckResult:
     """The hub's pre-receive hook IS the write ACL. If git skips it, there
     isn't one.
@@ -1121,7 +1160,7 @@ def check_hub_pre_receive_hook(hub_path: Optional[str]) -> CheckResult:
         return CheckResult(
             "FAIL", label,
             f"{msg} — every push is accepted with NO ACL, identity or rate-limit check",
-            _hook_fix(str(hub), hooks_dir, "pre-receive", configured, error),
+            _hub_hook_fix(hub, hooks_dir, configured, error),
         )
 
     # The exec bit is necessary but not sufficient. The threat list above —
@@ -1145,7 +1184,7 @@ def check_hub_pre_receive_hook(hub_path: Optional[str]) -> CheckResult:
             "FAIL", label,
             f"executable but EMPTY: {hook} — it exits 0, so every push is "
             f"accepted with NO ACL check",
-            "Reinstall the hub hook so `schist.pre_receive` runs on every push.",
+            _hub_hook_fix(hub, hooks_dir, configured, None),
         )
     if "pre_receive" not in body:
         return CheckResult(
