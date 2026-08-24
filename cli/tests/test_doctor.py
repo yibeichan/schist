@@ -533,6 +533,45 @@ class TestCheckHubPreReceiveHook:
         assert r.status == "PASS", r.message
         assert str(elsewhere) in r.message
 
+    def test_redirected_hub_with_no_hook_there_fails(self, tmp_path):
+        """#554: the PASS side of the hub's core.hooksPath handling was
+        covered, the FAIL side was not — and the FAIL side is the dangerous
+        one. A hub redirected at a directory with no pre-receive in it has no
+        ACL, even though a perfectly good hook still sits at <repo>/hooks."""
+        import subprocess as sp
+        hub = _real_bare_hub(tmp_path / "hub.git")
+        good = hub / "hooks" / "pre-receive"
+        good.write_text("#!/bin/sh\nexec python3 -m schist.pre_receive\n")
+        good.chmod(0o755)
+        elsewhere = tmp_path / "hub-hooks"
+        elsewhere.mkdir()
+        sp.run(["git", "--git-dir", str(hub), "config",
+                "core.hooksPath", str(elsewhere)], check=True)
+        r = check_hub_pre_receive_hook(str(hub))
+        assert r.status == "FAIL", r.message
+        assert "NO ACL" in r.message
+        assert str(elsewhere) in r.message
+        # #553: the remedy must not name `hooks reinstall`, which writes only
+        # pre/post-commit and hard-exits on a bare repo.
+        assert "hooks reinstall" not in (r.fix or "")
+        assert str(elsewhere) in (r.fix or "")
+
+    def test_hub_remedy_never_recommends_the_spoke_command(self, tmp_path):
+        """#553: `hooks reinstall` writes pre-commit and post-commit only, and
+        hard-exits with "not a git repository" when <path>/.git is absent —
+        true of every bare hub. So the old remedy named a command that errors
+        out immediately and would not have helped if it ran. There is no
+        hub-hook reinstall command at all; the hook is written once by
+        `schist init --hub`."""
+        hub = _real_bare_hub(tmp_path / "hub.git")
+        for stale in (hub / "hooks").glob("pre-receive*"):
+            stale.unlink()
+        r = check_hub_pre_receive_hook(str(hub))
+        assert r.status == "FAIL"
+        assert "hooks reinstall" not in (r.fix or ""), r.fix
+        assert "--vault" not in (r.fix or ""), r.fix
+        assert "schist init --hub" in (r.fix or ""), r.fix
+
     def test_unreadable_repo_is_not_reported_as_healthy(self, tmp_path):
         """`git config --get` exits 1 for "unset" and 128 for "I cannot read
         this repo" — a non-repo, an unreadable config, safe.directory
@@ -1722,10 +1761,15 @@ class TestRunDoctor:
         # Set up a minimal valid vault
         _real_repo(tmp_path)
         (tmp_path / ".git" / "hooks").mkdir(exist_ok=True)
-        _hook = tmp_path / ".git" / "hooks" / "post-commit"
-        _hook.write_text("#!/bin/sh\n")
-        _hook.chmod(0o755)  # #460: sync.py installs hooks 0o755; git skips
-                            # a non-executable one, so doctor now FAILs on it.
+        # Both hooks: #536 added a pre-commit check, and this "minimal valid
+        # vault" stopped being valid without one. It installed post-commit
+        # only, and its asserted-label set below omitted "Pre-commit hook", so
+        # the new check FAILed here and nothing noticed (#555).
+        for _name in ("post-commit", "pre-commit"):
+            _hook = tmp_path / ".git" / "hooks" / _name
+            _hook.write_text("#!/bin/sh\n")
+            _hook.chmod(0o755)  # #460: sync.py installs hooks 0o755; git skips
+                                # a non-executable one, so doctor FAILs on it.
         (tmp_path / "schist.yaml").write_text(yaml.dump({"name": "test"}))
 
         db = tmp_path / ".schist" / "schist.db"
@@ -1747,9 +1791,13 @@ class TestRunDoctor:
         assert "[PASS] SQLite:" in captured.out
         # Vault-specific checks should all pass
         vault_labels = {"Vault", "Git repo", "schist.yaml", "SQLite",
-                        "Post-commit hook", "Hooks path", "Ingest"}
+                        "Post-commit hook", "Pre-commit hook", "Hooks path",
+                        "Ingest"}
         vault_results = [r for r in results if r.label in vault_labels]
         assert all(r.status == "PASS" for r in vault_results)
+        # Registration, not just behaviour: an intersection assertion passes
+        # vacuously for a check that was never run.
+        assert vault_labels <= {r.label for r in results}
 
 
 # ---------------------------------------------------------------------------
@@ -2020,12 +2068,21 @@ class TestDoctorHubWiring:
         results = run_doctor(None, None, as_json=False, hub_path=str(hub))
         labels = [r.label for r in results]
         assert "Hub ACL drift" in labels
+        # #556: the pre-receive check is the write ACL's only guard, and
+        # nothing asserted it was WIRED IN — it could have been deleted from
+        # run_doctor() entirely and this suite would have stayed green. Verify
+        # a real init_hub hub PASSes it, so this covers registration AND the
+        # happy path against the actually-installed hook.
+        assert "Hub pre-receive hook" in labels
+        pr = next(r for r in results if r.label == "Hub pre-receive hook")
+        assert pr.status == "PASS", pr.message
 
     def test_run_doctor_omits_hub_check_without_path(self):
         from schist.doctor import run_doctor
         results = run_doctor(None, None, as_json=False)
         labels = [r.label for r in results]
         assert "Hub ACL drift" not in labels
+        assert "Hub pre-receive hook" not in labels
 
 
 class TestCheckMcpVocabAlignment:
