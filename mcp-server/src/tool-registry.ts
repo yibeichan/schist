@@ -66,7 +66,7 @@ export function makeMemoryReadTools(_config: VaultConfig) {
   return [
     {
       name: "search_memory",
-      description: "Search agent memory entries by text, owner, type, or date range. Returns content snippets (200 code points) by default; pass verbose: \"<reason ≥12 chars>\" to get full content. Paginated: when results are capped, the response includes a `cursor` token — echo it back on the next call to advance, or refine the query. Identical queries within 300s without a cursor are refused with CURSOR_REQUIRED.",
+      description: "Search agent memory entries by text, owner, type, or date range. **`query` is an implicit AND: every whitespace-separated term must match (each is matched as a quoted phrase), so adding one absent term zeroes the whole result — there is no OR and no partial-match ranking. Start broad, then narrow.** A zero result therefore does NOT mean nothing was written; on an empty first page of a multi-term query the response carries `zeroHitDiagnostic` with per-term match counts and the total entry count, which distinguishes \"terms too narrow\" from \"store empty\". Returns content snippets (200 code points) by default; pass verbose: \"<reason ≥12 chars>\" to get full content. Paginated: when results are capped, the response includes a `cursor` token — echo it back on the next call to advance, or refine the query. Identical queries within 300s without a cursor are refused with CURSOR_REQUIRED.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -97,7 +97,7 @@ export function makeMemoryWriteTools(_config: VaultConfig) {
   return [
     {
       name: "add_memory",
-      description: "Add a memory entry (decision, lesson, blocker, completion, or observation). owner must match SCHIST_AGENT_ID, or appear in SCHIST_ALLOWED_AGENTS for multi-agent shared deployments.",
+      description: "Add a memory entry (decision, lesson, blocker, completion, or observation). owner must match SCHIST_AGENT_ID, or appear in SCHIST_ALLOWED_AGENTS for multi-agent shared deployments. The response reports `db` — the memory database the entry actually landed in. Memory is machine-local and NOT synced to the hub, and a sandboxed client whose $HOME is remapped resolves a private database no other agent can read, so this is the LEAST durable store available: never treat add_memory as a safe substitute for a vault write. Pin SCHIST_MEMORY_DB to avoid the fork.",
       inputSchema: {
         type: "object" as const,
         properties: {

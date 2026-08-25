@@ -8,7 +8,7 @@ import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { load as yamlLoadSync } from "js-yaml";
 import { jest } from "@jest/globals";
-import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, formatPushFailure, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES } from "../src/tools.js";
+import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, formatPushFailure, search_memory, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES } from "../src/tools.js";
 import Database from "better-sqlite3";
 import { INDEX_SCHEMA_VERSION, memoryDbPath } from "../src/sqlite-reader.js";
 import { parseConnections, parseNote } from "../src/markdown-parser.js";
@@ -4720,5 +4720,155 @@ describe("memory DB path resolution (#565)", () => {
     seed(canonicalOf(home));
     process.env.SCHIST_MEMORY_DB = "/tmp/pinned-agent-state.db";
     expect(memoryDbPath(home)).toBe("/tmp/pinned-agent-state.db");
+  });
+});
+
+describe("zero-hit diagnosis distinguishes narrow terms from an empty store (#563)", () => {
+  // sanitizeFtsQuery quotes every whitespace-separated term and joins them, so
+  // FTS5 reads an implicit AND of phrases. `dyad reliability` matched 4 rows;
+  // `dyad reliability run-blocked` matched 0 — and an agent checking whether
+  // its OWN writes had landed read that 0 as "nothing was written", then
+  // recorded a false lesson blaming hyphen tokenization (which works fine).
+  let dbPath: string;
+  let prev: string | undefined;
+  let prevAgent: string | undefined;
+
+  beforeEach(() => {
+    const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "schist-zerohit-"));
+    dbPath = path.join(dir, "agent-state.db");
+    prev = process.env.SCHIST_MEMORY_DB;
+    prevAgent = process.env.SCHIST_AGENT_ID;
+    process.env.SCHIST_MEMORY_DB = dbPath;
+    // addMemory runs validateOwner; these fixtures write as "tester".
+    process.env.SCHIST_AGENT_ID = "tester";
+  });
+
+  afterEach(() => {
+    if (prev === undefined) delete process.env.SCHIST_MEMORY_DB;
+    else process.env.SCHIST_MEMORY_DB = prev;
+    if (prevAgent === undefined) delete process.env.SCHIST_AGENT_ID;
+    else process.env.SCHIST_AGENT_ID = prevAgent;
+    fsSync.rmSync(path.dirname(dbPath), { recursive: true, force: true });
+  });
+
+  const seed = async (contents: string[]) => {
+    const { addMemory } = await import("../src/sqlite-reader.js");
+    for (const content of contents) {
+      addMemory({ owner: "tester", entry_type: "lesson", content });
+    }
+  };
+
+  test("a single-term query gets no diagnostic (nothing to explain)", async () => {
+    const { diagnoseZeroHits } = await import("../src/sqlite-reader.js");
+    await seed(["alpha beta"]);
+    expect(diagnoseZeroHits({ query: "solo" })).toBeNull();
+  });
+
+  test("reports per-term counts and the corpus size", async () => {
+    const { diagnoseZeroHits } = await import("../src/sqlite-reader.js");
+    await seed(["dyad reliability is fine", "an unrelated run-blocked note", "filler"]);
+    const d = diagnoseZeroHits({ query: "dyad reliability run-blocked" })!;
+    expect(d.totalUnderFilters).toBe(3);
+    expect(d.terms).toEqual([
+      { term: "dyad", count: 1 },
+      { term: "reliability", count: 1 },
+      { term: "run-blocked", count: 1 },
+    ]);
+    // Each term matches something; only the conjunction is empty. That is the
+    // whole point — the store is demonstrably NOT empty.
+    expect(d.terms.every(t => t.count > 0)).toBe(true);
+  });
+
+  test("hyphenated terms are NOT dropped — the misdiagnosis it replaces", async () => {
+    const { diagnoseZeroHits } = await import("../src/sqlite-reader.js");
+    await seed(["a run-blocked reliability note"]);
+    const d = diagnoseZeroHits({ query: "run-blocked absentword" })!;
+    expect(d.terms.find(t => t.term === "run-blocked")!.count).toBe(1);
+  });
+
+  test("an empty store is reported as empty, not as narrow terms", async () => {
+    const { diagnoseZeroHits } = await import("../src/sqlite-reader.js");
+    await seed([]);
+    const d = diagnoseZeroHits({ query: "two terms" })!;
+    expect(d.totalUnderFilters).toBe(0);
+    expect(d.terms.every(t => t.count === 0)).toBe(true);
+  });
+
+  test("filters apply, so the corpus size is comparable to the search", async () => {
+    const { diagnoseZeroHits } = await import("../src/sqlite-reader.js");
+    await seed(["alpha only", "beta only"]);
+    const d = diagnoseZeroHits({ query: "alpha beta", owner: "nobody" })!;
+    expect(d.totalUnderFilters).toBe(0);
+  });
+
+  test("search_memory attaches the diagnostic on an empty first page", async () => {
+    await seed(["dyad reliability is fine", "an unrelated run-blocked note"]);
+    const res = await search_memory("/tmp/zerohit-vault", {
+      query: "dyad reliability run-blocked",
+    });
+    expect("error" in res).toBe(false);
+    const ok = res as { entries: unknown[]; zeroHitDiagnostic?: string };
+    expect(ok.entries).toHaveLength(0);
+    expect(ok.zeroHitDiagnostic).toBeDefined();
+    expect(ok.zeroHitDiagnostic).toContain("implicit AND");
+    expect(ok.zeroHitDiagnostic).toContain("NOT empty");
+  });
+
+  test("a non-empty result carries no diagnostic", async () => {
+    await seed(["dyad reliability is fine"]);
+    const res = await search_memory("/tmp/zerohit-vault-2", { query: "dyad reliability" });
+    const ok = res as { entries: unknown[]; zeroHitDiagnostic?: string };
+    expect(ok.entries.length).toBeGreaterThan(0);
+    expect(ok.zeroHitDiagnostic).toBeUndefined();
+  });
+
+  test("addMemory reports which database the entry landed in (#564)", async () => {
+    const { addMemory } = await import("../src/sqlite-reader.js");
+    const r = addMemory({ owner: "tester", entry_type: "lesson", content: "x" });
+    // The fork this exists to expose is invisible without it: a sandboxed
+    // client silently writes to a private DB with ids restarting at 1.
+    expect(r.db).toBe(dbPath);
+  });
+});
+
+describe("zero-hit diagnosis bounds its own work (#563)", () => {
+  let dbPath: string;
+  let prev: string | undefined;
+  let prevAgent: string | undefined;
+
+  beforeEach(() => {
+    const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "schist-zerocap-"));
+    dbPath = path.join(dir, "agent-state.db");
+    prev = process.env.SCHIST_MEMORY_DB;
+    prevAgent = process.env.SCHIST_AGENT_ID;
+    process.env.SCHIST_MEMORY_DB = dbPath;
+    process.env.SCHIST_AGENT_ID = "tester";
+  });
+
+  afterEach(() => {
+    if (prev === undefined) delete process.env.SCHIST_MEMORY_DB;
+    else process.env.SCHIST_MEMORY_DB = prev;
+    if (prevAgent === undefined) delete process.env.SCHIST_AGENT_ID;
+    else process.env.SCHIST_AGENT_ID = prevAgent;
+    fsSync.rmSync(path.dirname(dbPath), { recursive: true, force: true });
+  });
+
+  test("caps per-term COUNTs and REPORTS the cap rather than hiding it", async () => {
+    const { diagnoseZeroHits, addMemory } = await import("../src/sqlite-reader.js");
+    addMemory({ owner: "tester", entry_type: "lesson", content: "seed" });
+    const many = Array.from({ length: 40 }, (_, i) => `term${i}`).join(" ");
+    const d = diagnoseZeroHits({ query: many })!;
+    // The query string is caller-supplied; one COUNT per term is a fan-out
+    // driven by input, on a result set already known to be empty.
+    expect(d.terms).toHaveLength(12);
+    // A silent cap reads as "these are all the terms" — the #no-silent-caps rule.
+    expect(d.truncatedTerms).toBe(28);
+  });
+
+  test("an uncapped query reports no truncation", async () => {
+    const { diagnoseZeroHits, addMemory } = await import("../src/sqlite-reader.js");
+    addMemory({ owner: "tester", entry_type: "lesson", content: "seed" });
+    const d = diagnoseZeroHits({ query: "alpha beta gamma" })!;
+    expect(d.truncatedTerms).toBe(0);
   });
 });

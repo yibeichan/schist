@@ -3692,6 +3692,34 @@ export async function search_memory(
   const response: SearchMemoryResponse = { entries };
   if (cursor !== undefined) response.cursor = cursor;
   if (verboseNote !== undefined) response.verboseNote = verboseNote;
+
+  // Step 9: zero-hit diagnosis (#563). Only for an empty FIRST page of a
+  // multi-term query — a later page legitimately runs out of rows, and that
+  // is not a mystery worth explaining. See diagnoseZeroHits for the incident.
+  if (entries.length === 0 && offset === 0 && typeof args.query === "string" && args.query.trim()) {
+    const d = sqliteReader.diagnoseZeroHits({
+      query: args.query,
+      owner: args.owner,
+      entry_type: args.entry_type,
+      date_from: args.date_from,
+      date_to: args.date_to,
+    });
+    if (d !== null) {
+      const perTerm = d.terms.map(t => `"${t.term}"=${t.count}`).join(", ")
+        + (d.truncatedTerms > 0 ? ` (+${d.truncatedTerms} more term(s) not counted)` : "");
+      const anyTermMatches = d.terms.some(t => t.count > 0);
+      response.zeroHitDiagnostic =
+        `All terms must match: the query is an implicit AND of quoted phrases, ` +
+        `so one absent term zeroes the whole result. Per-term matches: ${perTerm}. ` +
+        `${d.totalUnderFilters} entr${d.totalUnderFilters === 1 ? "y" : "ies"} exist under ` +
+        `the same non-query filters. ` +
+        (d.totalUnderFilters === 0
+          ? "The store really is empty for these filters."
+          : anyTermMatches
+            ? "So the store is NOT empty — narrow term combination, not a missing write. Retry with fewer terms."
+            : "No single term matches either; try different wording rather than fewer terms.");
+    }
+  }
   return response;
 }
 
