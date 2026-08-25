@@ -520,7 +520,7 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
 
     ok, output = git_ops.pull_rebase(vault_path)
     if not ok:
-        def _unreachable() -> None:
+        def _unreachable(*, tree_certain: bool = True) -> None:
             # Parity with sync_push (#567): pull had no network branch at all,
             # so an unreachable hub printed a generic "pull failed" and every
             # downstream consumer — the launchd daily-health classifier
@@ -528,8 +528,19 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
             # rebase conflict", which sent the user hunting a conflict that
             # never existed. Refused vs unreachable is the axis that matters:
             # the hub never answered, so there is nothing to resolve.
-            print("Hub unreachable — no changes pulled. Retry when network is "
-                  "available.", file=sys.stderr)
+            if tree_certain:
+                print("Hub unreachable — no changes pulled. Retry when network is "
+                      "available.", file=sys.stderr)
+            else:
+                # pull_rebase's abort ALSO timed out, so the rebase may be
+                # half-applied. Claiming "no changes pulled" here would be the
+                # same unestablished assertion this whole branch exists to
+                # remove; the next sync's cleanup_stale_git_state clears the
+                # leftover state before retrying.
+                print("Hub unreachable, and the rebase could not be aborted — the "
+                      "working tree may be mid-rebase. Re-run `schist sync pull` "
+                      "when the network is back; it clears leftover rebase state "
+                      "first.", file=sys.stderr)
             print(f"  Detail: {output}", file=sys.stderr)
 
         # ORDER MATTERS, and these three tests are not interchangeable (#571).
@@ -551,7 +562,8 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
         # "...port-forwarding-timed-connection.md" satisfies all three. That
         # looseness is tracked separately; the ordering is what contains it.
         if output.startswith(git_ops.PULL_NO_RESPONSE_PREFIX):
-            _unreachable()
+            _unreachable(
+                tree_certain=git_ops.PULL_ABORT_FAILED_MARKER not in output)
         elif "CONFLICT" in output or "conflict" in output.lower():
             _print_conflict_recovery(vault_path, config, output)
         elif _is_network_error(output):

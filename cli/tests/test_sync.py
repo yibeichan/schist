@@ -1859,6 +1859,34 @@ class TestPullFailureBranchOrdering:
         out = self._run(tmp_path, capsys)
         assert "Hub unreachable" not in (out.out + out.err)
 
+    def test_abort_failure_does_not_claim_the_tree_is_untouched(
+            self, tmp_path, capsys, monkeypatch):
+        """Found reviewing the #571 fix itself. BOTH timeout returns open with
+        PULL_NO_RESPONSE_PREFIX, but only one of them managed to abort the
+        rebase. When the abort also timed out the tree may be mid-rebase with
+        commits partly applied, so "no changes pulled" is an unestablished
+        assertion — the exact thing this branch exists to remove."""
+        from schist import git_ops
+        self._pull_returns(monkeypatch, (
+            f"{git_ops.PULL_NO_RESPONSE_PREFIX} "
+            f"({git_ops.PULL_ABORT_FAILED_MARKER}; rerun sync to clean up)"))
+        err = self._run(tmp_path, capsys).err
+        assert "Hub unreachable" in err
+        assert "no changes pulled" not in err
+        assert "may be mid-rebase" in err
+
+    def test_a_clean_abort_does_still_claim_the_tree_is_untouched(
+            self, tmp_path, capsys, monkeypatch):
+        """The other direction — the common case must keep its stronger, and
+        true, statement, or the fix just makes every timeout vague."""
+        from schist import git_ops
+        self._pull_returns(monkeypatch, (
+            f"{git_ops.PULL_NO_RESPONSE_PREFIX} (hub unreachable, VPN down, or a "
+            "stalled transport); no changes were applied."))
+        err = self._run(tmp_path, capsys).err
+        assert "no changes pulled" in err
+        assert "mid-rebase" not in err
+
     def test_a_plain_transport_error_still_reports_unreachable(
             self, tmp_path, capsys, monkeypatch):
         """Third branch: no marker, no conflict, but a real ssh failure."""
