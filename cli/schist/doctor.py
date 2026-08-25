@@ -11,7 +11,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import yaml
 
@@ -1307,14 +1307,22 @@ def _discover_mcp_schist_entries(
     vault_path: Optional[str],
     *,
     include_malformed: bool = False,
-) -> list[tuple[Path, str, dict]]:
+) -> list[tuple[Path, str, Any]]:
     """All schist MCP entries across every known client config.
 
-    Returns (config_path, entry_name, entry_dict) tuples. Unlike
-    check_mcp_config — which wants THE entry and stops at the first hit —
-    callers here audit every registered client, because a per-client
-    misconfiguration is exactly the class of bug that hides when only one
-    client is inspected.
+    Returns (config_path, entry_name, entry) tuples in candidate-file order.
+    Callers that audit every registered client (check_mcp_cli_spawn,
+    check_memory_db_path) use the whole list; check_mcp_config wants only the
+    first and takes [0]. The third element is typed `Any`, not `dict`, because
+    `include_malformed=True` can yield a non-dict entry — see below.
+
+    Asymmetry worth knowing: `include_malformed` can only ever surface a
+    malformed entry from the `{"mcpServers": {...}}` shape, where the KEY
+    carries the name. In the `{"servers": [...]}` shape the name lives inside
+    the object, so a `null` list element carries nothing that identifies it as
+    a schist entry at all — there is no way to report it as "your schist entry
+    is malformed" rather than absent. That is inherent to the format, not an
+    oversight.
 
     Every level is shape-guarded: a settings file can be valid JSON that is
     `null`, a list, a scalar, or carry a null server entry (mid-write
@@ -1369,7 +1377,11 @@ def _discover_mcp_schist_entries(
 
 
 def check_mcp_config(vault_path: Optional[str]) -> CheckResult:
-    """Check if schist is configured in Claude Code or Cursor settings.
+    """Check if schist is configured in any known MCP client config.
+
+    Covers every path in _mcp_config_candidates — Claude Code, Claude Desktop,
+    project-scoped settings, Claude Science, Cursor — and both registry shapes,
+    via the shared parser.
 
     Beyond locating the entry, validates (issue #43):
       1. args[0] exists on disk (REQUIRED)

@@ -3015,3 +3015,57 @@ class TestMcpDiscoveryAgreement:
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         first = _discover_mcp_schist_entries(None)[0]
         assert first[1] == "schist"
+
+    def test_an_earlier_files_args_match_outranks_a_later_files_name_match(
+            self, tmp_path, monkeypatch):
+        """Precedence I CLAIMED to preserve in the #569 refactor, previously
+        untested. Pre-#569 check_mcp_config broke out of the candidate loop at
+        the first file with any match; the new code collects across all files
+        then takes [0]. Those agree only because the "schist"-name preference
+        is applied WITHIN a file, not across files — so pin that, or a later
+        "improvement" that sorts globally silently changes which config the
+        check reports on."""
+        from schist.doctor import _discover_mcp_schist_entries
+        stub = tmp_path / "fake-mcp" / "dist" / "index.js"
+        stub.parent.mkdir(parents=True)
+        stub.write_text("// stub\n")
+        # ~/.claude.json is candidate #1: args-match only, no "schist" key.
+        (tmp_path / ".claude.json").write_text(json.dumps({
+            "mcpServers": {"zz-args-match": {"command": "node", "args": [str(stub)]}}}))
+        # ~/.claude/settings.json is candidate #2 and HAS the exact name.
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "settings.json").write_text(json.dumps({
+            "mcpServers": {"schist": {"command": "node", "args": [str(stub)]}}}))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        first = _discover_mcp_schist_entries(None)[0]
+        assert first[1] == "zz-args-match", "file order must beat name preference"
+        assert first[0].name == ".claude.json"
+
+    def test_malformed_entry_is_not_offered_to_default_callers(self, tmp_path, monkeypatch):
+        """The include_malformed contract, asserted on the helper directly:
+        the same config yields the entry for the reporting caller and nothing
+        for callers that will read cfg["env"]."""
+        from schist.doctor import _discover_mcp_schist_entries
+        (tmp_path / ".claude.json").write_text(json.dumps({"mcpServers": {"schist": None}}))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        assert _discover_mcp_schist_entries(None) == []
+        surfaced = _discover_mcp_schist_entries(None, include_malformed=True)
+        assert len(surfaced) == 1
+        assert surfaced[0][2] is None
+
+    def test_non_string_server_keys_do_not_raise(self, tmp_path, monkeypatch):
+        """The name-preference sort keys on a BOOLEAN (`kv[0] != "schist"`),
+        never on the names themselves — sorting mixed-type dict keys directly
+        would TypeError. JSON object keys are always strings, so this is
+        defence against a future caller passing a hand-built dict."""
+        from schist.doctor import _discover_mcp_schist_entries
+        import schist.doctor as d
+        stub = tmp_path / "s.js"
+        stub.write_text("//")
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setattr(d, "_mcp_config_candidates", lambda _v: [tmp_path / "x.json"])
+        monkeypatch.setattr(d.json, "loads", lambda _t: {
+            "mcpServers": {3: {"args": ["schist"]}, "schist": {"args": ["schist"]}}})
+        (tmp_path / "x.json").write_text("{}")
+        out = _discover_mcp_schist_entries(None)
+        assert [n for _c, n, _e in out][0] == "schist"
