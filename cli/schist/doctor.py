@@ -1305,6 +1305,8 @@ def _looks_like_schist_entry(cfg: dict) -> bool:
 
 def _discover_mcp_schist_entries(
     vault_path: Optional[str],
+    *,
+    include_malformed: bool = False,
 ) -> list[tuple[Path, str, dict]]:
     """All schist MCP entries across every known client config.
 
@@ -1320,6 +1322,15 @@ def _discover_mcp_schist_entries(
     an unguarded .get()/.items() here aborts the WHOLE run (#437, #441).
     """
     found: list[tuple[Path, str, dict]] = []
+
+    # `include_malformed` surfaces an entry that EXISTS under a schist name but
+    # is not a JSON object (`{"mcpServers": {"schist": null}}` — a mid-write
+    # truncation or hand edit). Callers that go on to read `cfg["env"]` must
+    # keep the default and never see one; check_mcp_config asks for them so it
+    # can say "your schist entry is malformed" instead of the flatly wrong "no
+    # schist entry found". Without this the two callers cannot share one
+    # parser, and not sharing it is what #569 was (#561 shared the FILE LIST
+    # and claimed to have shared the parsing).
     for c in _mcp_config_candidates(vault_path):
         try:
             if not c.exists():
@@ -1332,8 +1343,14 @@ def _discover_mcp_schist_entries(
 
         servers = data.get("mcpServers")
         if isinstance(servers, dict):
-            for name, cfg in servers.items():
+            # An entry literally named "schist" outranks one merely matched on
+            # its args, within the same file. Preserved from the pre-#569
+            # check_mcp_config, which tested the exact key before scanning.
+            ordered = sorted(servers.items(), key=lambda kv: kv[0] != "schist")
+            for name, cfg in ordered:
                 if not isinstance(cfg, dict):
+                    if include_malformed and name == "schist":
+                        found.append((c, str(name), cfg))
                     continue
                 if name == "schist" or _looks_like_schist_entry(cfg):
                     found.append((c, str(name), cfg))
@@ -1359,59 +1376,20 @@ def check_mcp_config(vault_path: Optional[str]) -> CheckResult:
       2. env.SCHIST_VAULT_PATH matches vault_path if provided
       3. args[0] matches the auto-detected current mcp-server path
     """
-    # Shared with check_mcp_cli_spawn (#560) so the two cannot disagree about
-    # which clients exist — the drift that let Claude Science's registry go
-    # unvalidated by every check for months.
-    candidates = _mcp_config_candidates(vault_path)
-
-    located = None  # tuple of (config_path, entry_name, entry_dict)
-    for c in candidates:
-        if not c.exists():
-            continue
-        try:
-            data = json.loads(c.read_text())
-        except Exception:
-            continue
-        # A settings file can be valid JSON that isn't the shape we expect —
-        # `null`, a list, a scalar, `{"mcpServers": null}`, or a null server
-        # entry — from a mid-write truncation or a hand edit. run_doctor has no
-        # per-check exception shield (see the comment near its definition), so
-        # an unguarded `.get()`/`in`/`.items()` here would abort the WHOLE
-        # doctor run with a raw traceback (#437, #441). Guard each level.
-        if not isinstance(data, dict):
-            continue
-        servers = data.get("mcpServers")
-        if not isinstance(servers, dict):
-            continue
-        if "schist" in servers:
-            # entry value may still be non-dict (e.g. null) — validated at the
-            # `located` unpack below so a malformed entry becomes a WARN.
-            located = (c, "schist", servers["schist"])
-            break
-        for name, cfg in servers.items():
-            if not isinstance(cfg, dict):
-                continue
-            args = cfg.get("args")
-            if not isinstance(args, list):
-                continue  # null/scalar args is not iterable — #441 crash class
-            if any("schist" in str(a) or "dist/index.js" in str(a) for a in args):
-                located = (c, name, cfg)
-                break
-        if located:
-            break
-
-    if not located:
-        # Also check Cursor as a final fallback.
-        cursor = Path.home() / ".cursor" / "mcp.json"
-        if cursor.exists():
-            try:
-                data = json.loads(cursor.read_text())
-                if isinstance(data, dict):
-                    servers = data.get("mcpServers")
-                    if isinstance(servers, dict) and "schist" in servers:
-                        located = (cursor, "schist", servers["schist"])
-            except Exception:
-                pass
+    # ENTRY PARSING is shared with check_mcp_cli_spawn and
+    # check_memory_db_path, not just the file list (#569). #561 shared
+    # _mcp_config_candidates and claimed to have shared the parsing; it had
+    # not, so this check still understood only `{"mcpServers": {...}}` and
+    # skipped Claude Science's `{"servers": [...]}` registry entirely. A user
+    # whose only client is Claude Science then got two checks contradicting
+    # each other in one run: `MCP CLI spawn` PASS naming the entry, and this
+    # one WARNing "no schist entry found". Sharing the parser is what makes
+    # that impossible rather than merely unlikely.
+    #
+    # include_malformed: a present-but-null schist entry must report as
+    # malformed, not as absent (#441).
+    entries = _discover_mcp_schist_entries(vault_path, include_malformed=True)
+    located = entries[0] if entries else None
 
     if not located:
         return CheckResult(
