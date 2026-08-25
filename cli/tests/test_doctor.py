@@ -2912,3 +2912,93 @@ class TestCheckMemoryDbPath:
         assert "Memory DB path" in labels
         r = next(x for x in results if x.label == "Memory DB path")
         assert r.status == "WARN", r.message
+
+
+class TestHubHookRemedyLeadsWithTheRightAction:
+    """#572: check_hub_pre_receive_hook has two FAIL paths sharing one remedy
+    generator, and the shared text opened with `chmod +x`. For the
+    "executable but EMPTY" verdict that is the one action the check had just
+    confirmed was already done — the #553 defect (a remedy naming an action
+    that cannot fix the condition) in a softer form, in the same function that
+    fixed it.
+
+    Also covers the two remedy branches #559 left untested, both of which
+    print an ASSERTED cause.
+    """
+
+    @staticmethod
+    def _bare(tmp_path, name="hub.git"):
+        import subprocess, shutil
+        if shutil.which("git") is None:
+            pytest.skip("git not available")
+        h = tmp_path / name
+        subprocess.run(["git", "init", "--bare", "-q", str(h)], check=True)
+        return h
+
+    def _hook(self, hub, body, mode):
+        k = hub / "hooks" / "pre-receive"
+        k.parent.mkdir(exist_ok=True)
+        k.write_text(body)
+        k.chmod(mode)
+        return k
+
+    def test_empty_hook_remedy_does_not_open_with_chmod(self, tmp_path):
+        from schist.doctor import check_hub_pre_receive_hook
+        hub = self._bare(tmp_path)
+        self._hook(hub, "", 0o755)
+        r = check_hub_pre_receive_hook(str(hub))
+        assert r.status == "FAIL"
+        assert "EMPTY" in r.message
+        # The bit is already set; leading with chmod sends the admin to do
+        # nothing and lose confidence in the rest of the remedy.
+        assert not r.fix.startswith("`chmod +x"), r.fix
+        assert "chmod" not in r.fix, r.fix
+        assert "schist.pre_receive" in r.fix
+
+    def test_non_executable_hook_remedy_still_opens_with_chmod(self, tmp_path):
+        """The other direction: for the branch where chmod IS the fix, it must
+        stay first — otherwise this change just moves the defect."""
+        from schist.doctor import check_hub_pre_receive_hook
+        hub = self._bare(tmp_path)
+        self._hook(hub, "#!/usr/bin/env python3\nimport schist.pre_receive\n", 0o644)
+        r = check_hub_pre_receive_hook(str(hub))
+        assert r.status == "FAIL"
+        assert r.fix.startswith("`chmod +x"), r.fix
+
+    def test_empty_core_hookspath_remedy_states_that_cause(self, tmp_path):
+        """#559 left this untested while it ASSERTS a cause. The assertion is
+        only sound because _hub_hook_fix tests `error` before `hooks_dir is
+        None`, and _hooks_dir's contract is that dir=None with no error means
+        exactly an empty core.hooksPath — a distinction (set-but-empty vs
+        unset) that has already produced one real bug here."""
+        import subprocess
+        from schist.doctor import check_hub_pre_receive_hook
+        hub = self._bare(tmp_path)
+        subprocess.run(["git", "--git-dir", str(hub), "config", "core.hooksPath", ""],
+                       check=True)
+        r = check_hub_pre_receive_hook(str(hub))
+        assert r.status == "FAIL"
+        assert "core.hooksPath is set to an empty value" in r.fix
+        assert "--unset core.hooksPath" in r.fix
+        # Must NOT claim a specific hook file when git reads none.
+        assert "chmod" not in r.fix
+
+    def test_unreadable_repo_remedy_blames_readability_not_the_hook(self, tmp_path):
+        """The `error` branch — the safe.directory case, which is the NORMAL
+        situation for an admin scanning another user's hub."""
+        from schist.doctor import _hub_hook_fix
+        fix = _hub_hook_fix(tmp_path / "hub.git", None, None, "fatal: detected dubious ownership")
+        assert "git repository readable by this user" in fix
+        assert "chmod" not in fix
+        assert "core.hooksPath is set to an empty value" not in fix
+
+    def test_redirect_clause_is_appended_to_both_shapes(self, tmp_path):
+        """core.hooksPath redirect must be stated whichever remedy is chosen —
+        installing the hook in the default directory would be useless."""
+        from schist.doctor import _hub_hook_fix
+        elsewhere = tmp_path / "elsewhere"
+        for empty in (True, False):
+            fix = _hub_hook_fix(tmp_path / "hub.git", elsewhere, str(elsewhere), None,
+                                empty=empty)
+            assert str(elsewhere) in fix, (empty, fix)
+            assert "core.hooksPath" in fix, (empty, fix)
