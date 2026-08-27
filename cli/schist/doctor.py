@@ -1085,7 +1085,8 @@ def _acceptenv_offender(token: str) -> bool:
 
 
 def _hub_hook_fix(hub: Path, hooks_dir: Optional[Path],
-                  configured: Optional[str], error: Optional[str]) -> str:
+                  configured: Optional[str], error: Optional[str],
+                  *, empty: bool = False) -> str:
     """The hub's remedy, which is NOT the spoke's (#553).
 
     `_hook_fix` recommends `schist --vault … hooks reinstall`, and that is
@@ -1112,14 +1113,24 @@ def _hub_hook_fix(hub: Path, hooks_dir: Optional[Path],
             f"`git --git-dir {hub} config --unset core.hooksPath`."
         )
     hook = hooks_dir / "pre-receive"
-    where = (f" git reads hooks from {hooks_dir} (core.hooksPath "
+    where = (f" Git reads hooks from {hooks_dir} (core.hooksPath "
              f"'{configured}'), so the hook must be there." if configured else "")
+    restore = (
+        f"There is no hub-hook reinstall command — the hook is written only by "
+        f"`schist init --hub` — so restore {hook} as a python3 shim that execs "
+        f"`schist.pre_receive` (PRE_RECEIVE_HOOK in cli/schist/sync.py)"
+    )
+    if empty:
+        # The verdict for this branch is "executable but EMPTY". Leading with
+        # `chmod +x` told the admin to do the one thing the check had just
+        # confirmed was already done — the #553 defect (a remedy naming an
+        # action that cannot fix the condition) in a softer form, in the same
+        # function that fixed it. Lead with the action that matches the cause
+        # and drop the chmod entirely: the bit is already set (#572).
+        return f"{restore}. Its current contents are empty, which exits 0 and accepts every push.{where}"
     return (
-        f"`chmod +x {hook}` if it exists. There is no hub-hook reinstall "
-        f"command — the hook is written only by `schist init --hub` — so if it "
-        f"is missing or empty, restore it as a python3 shim that execs "
-        f"`schist.pre_receive` (PRE_RECEIVE_HOOK in cli/schist/sync.py) and "
-        f"make it executable.{where}"
+        f"`chmod +x {hook}` if it exists. {restore} and make it "
+        f"executable.{where}"
     )
 
 
@@ -1184,7 +1195,7 @@ def check_hub_pre_receive_hook(hub_path: Optional[str]) -> CheckResult:
             "FAIL", label,
             f"executable but EMPTY: {hook} — it exits 0, so every push is "
             f"accepted with NO ACL check",
-            _hub_hook_fix(hub, hooks_dir, configured, None),
+            _hub_hook_fix(hub, hooks_dir, configured, None, empty=True),
         )
     if "pre_receive" not in body:
         return CheckResult(

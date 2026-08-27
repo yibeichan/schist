@@ -1793,3 +1793,111 @@ class TestPullTransportClassification:
             sync_pull(MagicMock(), vault, "db.sqlite")
         out = capsys.readouterr()
         assert "Hub unreachable" not in (out.err + out.out)
+
+
+class TestPullFailureBranchOrdering:
+    """#571: the three classification tests in sync_pull are not interchangeable.
+
+    pull_rebase aborts the rebase before returning, so after a timeout there is
+    no conflict left to resolve. #567 began attaching the child's partial
+    output to the timeout message, and if the pull reached a conflict before
+    it hung, that text now contains "CONFLICT" — so testing conflict first
+    printed the full INSPECT / MANUAL REBASE / RE-CLONE guide for a tree that
+    had already been restored. Safe by accident before #567 only because the
+    timeout message carried no content.
+    """
+
+    def _pull_returns(self, monkeypatch, output):
+        from schist import git_ops
+        monkeypatch.setattr(git_ops, "pull_rebase", lambda _p: (False, output))
+
+    def _run(self, tmp_path, capsys):
+        from schist.sync import sync_pull
+        vault = _make_spoke(tmp_path)
+        with patch("schist.sync._rebuild_index"), pytest.raises(SystemExit):
+            sync_pull(MagicMock(), vault, "db.sqlite")
+        return capsys.readouterr()
+
+    def test_timeout_carrying_conflict_text_is_reported_as_unreachable(
+            self, tmp_path, capsys, monkeypatch):
+        from schist import git_ops
+        self._pull_returns(monkeypatch, (
+            f"{git_ops.PULL_NO_RESPONSE_PREFIX} (hub unreachable, VPN down, or a "
+            "stalled transport); no changes were applied.\n"
+            "CONFLICT (content): Merge conflict in research/note.md"))
+        out = self._run(tmp_path, capsys)
+        combined = out.out + out.err
+        assert "Hub unreachable" in combined
+        # The recovery guide would tell the user to resolve conflicts in a tree
+        # pull_rebase already aborted.
+        assert "RE-CLONE" not in combined
+        assert "MANUAL REBASE" not in combined
+
+    def test_a_conflict_without_a_timeout_still_gets_the_recovery_guide(
+            self, tmp_path, capsys, monkeypatch):
+        """The other direction — moving the marker test to the front must not
+        swallow real conflicts, which are the case the guide exists for."""
+        self._pull_returns(
+            monkeypatch,
+            "CONFLICT (content): Merge conflict in research/note.md")
+        out = self._run(tmp_path, capsys)
+        combined = out.out + out.err
+        assert "RE-CLONE" in combined
+        assert "Hub unreachable" not in combined
+
+    def test_a_conflict_whose_filename_trips_every_network_marker_is_still_a_conflict(
+            self, tmp_path, capsys, monkeypatch):
+        """_is_network_error matches a bare "connection", "timed out" and a
+        word-bounded \\bport\\b, so this filename satisfies all three. Only the
+        conflict-before-network ordering keeps it from being reported as a dead
+        network — pinned here because #571 reordered the branch above it."""
+        from schist.sync import _is_network_error
+        output = ("CONFLICT (content): Merge conflict in "
+                  "notes/2026-08-24-port-forwarding-timed-connection.md")
+        assert _is_network_error(output) is True
+        self._pull_returns(monkeypatch, output)
+        out = self._run(tmp_path, capsys)
+        assert "Hub unreachable" not in (out.out + out.err)
+
+    def test_abort_failure_does_not_claim_the_tree_is_untouched(
+            self, tmp_path, capsys, monkeypatch):
+        """Found reviewing the #571 fix itself. BOTH timeout returns open with
+        PULL_NO_RESPONSE_PREFIX, but only one of them managed to abort the
+        rebase. When the abort also timed out the tree may be mid-rebase with
+        commits partly applied, so "no changes pulled" is an unestablished
+        assertion — the exact thing this branch exists to remove."""
+        from schist import git_ops
+        self._pull_returns(monkeypatch, (
+            f"{git_ops.PULL_NO_RESPONSE_PREFIX} "
+            f"({git_ops.PULL_ABORT_FAILED_MARKER}; rerun sync to clean up)"))
+        err = self._run(tmp_path, capsys).err
+        assert "Hub unreachable" in err
+        assert "no changes pulled" not in err
+        assert "may be mid-rebase" in err
+
+    def test_a_clean_abort_does_still_claim_the_tree_is_untouched(
+            self, tmp_path, capsys, monkeypatch):
+        """The other direction — the common case must keep its stronger, and
+        true, statement, or the fix just makes every timeout vague."""
+        from schist import git_ops
+        self._pull_returns(monkeypatch, (
+            f"{git_ops.PULL_NO_RESPONSE_PREFIX} (hub unreachable, VPN down, or a "
+            "stalled transport); no changes were applied."))
+        err = self._run(tmp_path, capsys).err
+        assert "no changes pulled" in err
+        assert "mid-rebase" not in err
+
+    def test_a_plain_transport_error_still_reports_unreachable(
+            self, tmp_path, capsys, monkeypatch):
+        """Third branch: no marker, no conflict, but a real ssh failure."""
+        self._pull_returns(
+            monkeypatch,
+            "ssh: connect to host pi port 22: Operation timed out")
+        assert "Hub unreachable" in self._run(tmp_path, capsys).err
+
+    def test_an_unclassified_failure_still_reaches_the_generic_message(
+            self, tmp_path, capsys, monkeypatch):
+        self._pull_returns(monkeypatch, "error: cannot rebase: You have unstaged changes.")
+        err = self._run(tmp_path, capsys).err
+        assert "Error: pull failed" in err
+        assert "Hub unreachable" not in err

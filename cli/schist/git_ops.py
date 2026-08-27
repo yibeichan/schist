@@ -379,6 +379,13 @@ def setup_sparse_checkout(vault_path: str, scope: str) -> tuple[bool, str]:
 # error. Anchor on the producer's own token at line start (#535/#537).
 PULL_NO_RESPONSE_PREFIX = "Pull timed out after 60s with no response from the hub"
 
+# Distinguishes the two timeout returns below. Both open with
+# PULL_NO_RESPONSE_PREFIX, but only one of them managed to abort the rebase.
+# When the abort ALSO timed out the working tree may be mid-rebase with
+# commits partly applied, so "no changes were pulled" is not established and
+# callers must not print it (#571 review).
+PULL_ABORT_FAILED_MARKER = "rebase --abort also timed out"
+
 
 def _partial_output(exc: subprocess.TimeoutExpired) -> str:
     """Whatever a timed-out child had written before it was killed.

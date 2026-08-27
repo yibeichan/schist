@@ -520,9 +520,7 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
 
     ok, output = git_ops.pull_rebase(vault_path)
     if not ok:
-        if "CONFLICT" in output or "conflict" in output.lower():
-            _print_conflict_recovery(vault_path, config, output)
-        elif output.startswith(git_ops.PULL_NO_RESPONSE_PREFIX) or _is_network_error(output):
+        def _unreachable(*, tree_certain: bool = True) -> None:
             # Parity with sync_push (#567): pull had no network branch at all,
             # so an unreachable hub printed a generic "pull failed" and every
             # downstream consumer — the launchd daily-health classifier
@@ -530,9 +528,46 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
             # rebase conflict", which sent the user hunting a conflict that
             # never existed. Refused vs unreachable is the axis that matters:
             # the hub never answered, so there is nothing to resolve.
-            print("Hub unreachable — no changes pulled. Retry when network is "
-                  "available.", file=sys.stderr)
+            if tree_certain:
+                print("Hub unreachable — no changes pulled. Retry when network is "
+                      "available.", file=sys.stderr)
+            else:
+                # pull_rebase's abort ALSO timed out, so the rebase may be
+                # half-applied. Claiming "no changes pulled" here would be the
+                # same unestablished assertion this whole branch exists to
+                # remove; the next sync's cleanup_stale_git_state clears the
+                # leftover state before retrying.
+                print("Hub unreachable, and the rebase could not be aborted — the "
+                      "working tree may be mid-rebase. Re-run `schist sync pull` "
+                      "when the network is back; it clears leftover rebase state "
+                      "first.", file=sys.stderr)
             print(f"  Detail: {output}", file=sys.stderr)
+
+        # ORDER MATTERS, and these three tests are not interchangeable (#571).
+        #
+        # The timeout marker goes FIRST. pull_rebase aborts the rebase before
+        # returning, so after a timeout there is no conflict left to resolve —
+        # but #567 started attaching the child's partial output to that
+        # message, and if the pull had reached a conflict before it hung, that
+        # text now contains "CONFLICT". Testing conflict first therefore
+        # printed the whole INSPECT / MANUAL REBASE / RE-CLONE recovery guide
+        # for a tree that had already been restored. It was safe by accident
+        # before #567 only because the timeout message carried no content.
+        # The marker is producer-owned and line-anchored, so no file content
+        # can spoof it.
+        #
+        # _is_network_error goes LAST of the three, and must stay behind the
+        # conflict test: its markers include a bare "connection", "timed out"
+        # and a word-bounded \bport\b, so a genuine conflict in a file named
+        # "...port-forwarding-timed-connection.md" satisfies all three. That
+        # looseness is tracked separately; the ordering is what contains it.
+        if output.startswith(git_ops.PULL_NO_RESPONSE_PREFIX):
+            _unreachable(
+                tree_certain=git_ops.PULL_ABORT_FAILED_MARKER not in output)
+        elif "CONFLICT" in output or "conflict" in output.lower():
+            _print_conflict_recovery(vault_path, config, output)
+        elif _is_network_error(output):
+            _unreachable()
         else:
             print(f"Error: pull failed — {output}", file=sys.stderr)
         sys.exit(1)
