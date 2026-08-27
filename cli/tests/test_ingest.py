@@ -98,6 +98,45 @@ def _assert_vault_ingested(db_path: Path) -> None:
         conn.close()
 
 
+def test_ingest_honors_configured_content_directory_boundary(tmp_path: Path) -> None:
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "schist.yaml").write_text(
+        "directories: [notes]\n",
+        encoding="utf-8",
+    )
+    notes = vault / "notes"
+    notes.mkdir()
+    (notes / "kept.md").write_text(
+        "---\ntitle: Kept\n---\n\nIndexed.\n",
+        encoding="utf-8",
+    )
+    (vault / "README.md").write_text("# Repository documentation\n", encoding="utf-8")
+    (vault / "2026-08-25-root-note.md").write_text(
+        "---\ntitle: Root note\n---\n\nIndexed root content.\n",
+        encoding="utf-8",
+    )
+    (notes / "README.md").write_text("# Notes guide\n", encoding="utf-8")
+    shared = vault / "shared"
+    shared.mkdir()
+    (shared / "skill.md").write_text(
+        "---\ntitle: Excluded\n---\n\nNot indexed.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir()
+
+    ingest(str(vault), str(db))
+
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT id FROM docs ORDER BY id").fetchall() == [
+            ("2026-08-25-root-note.md",),
+            ("notes/kept.md",),
+        ]
+
+
 @pytest.mark.parametrize("case", _frontmatter_parity_cases(), ids=lambda c: c["name"])
 def test_ingest_frontmatter_parser_matches_shared_parity_cases(case: dict) -> None:
     """Python ingest and TS parseNote must agree on frontmatter pre-patching."""

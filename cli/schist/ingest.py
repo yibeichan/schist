@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import frontmatter
+import yaml
 
 try:
     from .env_utils import env_flag
@@ -43,6 +44,7 @@ except ImportError:  # pragma: no cover — running as a bare script (a legacy
     from index_contract import INDEX_SCHEMA_VERSION
 
 SKIP_DIRS = {'.git', '.schist'}
+ROOT_SUPPORT_DOCS = {'readme.md', 'schema.md', 'tags.md', 'conventions.md'}
 HASHTAG_AT_START_RE = re.compile(r'^#[^\s,\]\}]+')
 # CONNECTION_RE is defined below _SLUG_WS_CHARS — it is built from the same
 # explicit whitespace class (#338).
@@ -110,6 +112,37 @@ def _normalize_concept_slug(value: str) -> str:
 
 def _normalize_tag(value: str) -> str:
     return value.strip().lstrip('#').strip()
+
+
+def _configured_content_roots(vault: Path) -> set[str]:
+    """Return configured top-level content directories for this vault.
+
+    ``schist.yaml`` is the write-side boundary used by both CLI and MCP.  The
+    derived index must honor the same boundary; otherwise repository support
+    files (README, shared skills, CI documentation) silently become notes and
+    make schema validation impossible to use as a quality gate.
+    """
+    vault_schema = vault / 'schist.yaml'
+    config_path = vault_schema if vault_schema.exists() else Path(__file__).parent / 'default.yaml'
+    try:
+        parsed = yaml.safe_load(config_path.read_text(encoding='utf-8')) or {}
+    except (yaml.YAMLError, OSError, UnicodeDecodeError) as e:
+        raise RuntimeError(f'could not read schema config {config_path}: {e}') from e
+
+    directories = parsed.get('directories') if isinstance(parsed, dict) else None
+    if not isinstance(directories, list):
+        default = yaml.safe_load(
+            (Path(__file__).parent / 'default.yaml').read_text(encoding='utf-8'),
+        ) or {}
+        canonical = default.get('directories') or {}
+        directories = list(canonical.values()) if isinstance(canonical, dict) else canonical
+
+    roots = set()
+    for value in directories or []:
+        parts = Path(str(value).rstrip('/')).parts
+        if parts:
+            roots.add(parts[0].casefold())
+    return roots
 
 
 # Authority tiers for a concept definition, LOWER wins. Three tiers and not
@@ -460,9 +493,19 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     # themselves symlinks), hence the containment check on the resolved
     # path.
     vault_real = vault.resolve()
+    content_roots = _configured_content_roots(vault)
 
     for md_file in sorted(vault.rglob('*.md')):
         rel = md_file.relative_to(vault)
+        if not rel.parts:
+            continue
+        if rel.name.casefold() == 'readme.md':
+            continue
+        if len(rel.parts) == 1:
+            if rel.name.casefold() in ROOT_SUPPORT_DOCS:
+                continue
+        elif rel.parts[0].casefold() not in content_roots:
+            continue
         # Skip hidden/excluded dirs
         if any(part in SKIP_DIRS for part in rel.parts):
             continue

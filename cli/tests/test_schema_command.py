@@ -70,6 +70,34 @@ class TestSchemaCommand:
         assert "1 violation(s):" in out
         assert "notes/bad.md: missing title/topic/concept in frontmatter" in out
 
+    def test_validate_ignores_markdown_outside_configured_content_dirs(
+        self, tmp_path, capsys,
+    ):
+        (tmp_path / "README.md").write_text("# Support documentation\n", encoding="utf-8")
+        (tmp_path / "SCHEMA.md").write_text("# Schema documentation\n", encoding="utf-8")
+        (tmp_path / "2026-08-25-root-note.md").write_text(
+            "---\ntitle: Root note\n---\n\nValid root content.\n",
+            encoding="utf-8",
+        )
+        shared = tmp_path / "shared" / "skills"
+        shared.mkdir(parents=True)
+        (shared / "SKILL.md").write_text("# Not a vault note\n", encoding="utf-8")
+        notes = tmp_path / "notes"
+        notes.mkdir()
+        (notes / "README.md").write_text("# Notes guide\n", encoding="utf-8")
+        (notes / "good.md").write_text(
+            "---\ntitle: Valid Note\nstatus: draft\n---\n\nBody\n",
+            encoding="utf-8",
+        )
+
+        commands.schema(
+            _schema_args(validate=True),
+            str(tmp_path),
+            str(tmp_path / ".schist" / "schist.db"),
+        )
+
+        assert capsys.readouterr().out.strip() == "All documents valid."
+
     def test_validate_accepts_stable_concept_shape(self, tmp_path, capsys):
         concepts_dir = tmp_path / "concepts"
         concepts_dir.mkdir()
