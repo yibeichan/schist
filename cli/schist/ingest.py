@@ -154,7 +154,28 @@ def _configured_content_roots(vault: Path) -> set[str]:
         # reads was a window in which the file could change underneath us.
         default = parsed if config_path == default_path else _read_schema_config(default_path)
         canonical = default.get('directories') or {}
-        directories = list(canonical.values()) if isinstance(canonical, dict) else canonical
+        if isinstance(canonical, dict):
+            directories = list(canonical.values())
+        elif isinstance(canonical, list):
+            directories = canonical
+        else:
+            # A scalar would otherwise be iterated CHARACTERWISE below, making
+            # roots like {'n', 'o', 't', ...} — every real directory excluded,
+            # no error.
+            directories = []
+        if not directories:
+            # The packaged list is the last authority; if it yields nothing,
+            # every file below the vault root is excluded (see the roots check
+            # in `ingest`) and the index comes out near-empty with no error.
+            # That is the same class of defect as #574 in the other direction,
+            # and it means a broken install rather than a choice: an explicit
+            # `directories: []` in schist.yaml is a list, so it never reaches
+            # here. Fail loud instead.
+            raise RuntimeError(
+                f'no content directories configured: {default_path} defines no usable '
+                '`directories`. The packaged schema config is missing or corrupt; '
+                'reinstall the CLI (`uv tool install --reinstall <path-to-cli>`).',
+            )
 
     roots = set()
     for value in directories or []:

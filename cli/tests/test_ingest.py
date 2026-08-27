@@ -205,6 +205,40 @@ def test_default_config_is_read_once_when_it_is_also_the_only_config(
     assert len(reads) == 1, f"default.yaml read {len(reads)} times: {reads}"
 
 
+def test_unusable_packaged_directories_fails_loud_instead_of_indexing_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty root set is not a benign default: `ingest` skips every path
+    whose first component is not in it, so the index comes out near-empty with
+    no error at all — #574's defect in the other direction, and much harder to
+    notice than an over-broad index."""
+    from schist import ingest as ingest_mod
+
+    for body in ("- notes\n- papers\n", "directories: notes/\n", "directories: {}\n"):
+        broken = tmp_path / f"default-{abs(hash(body))}.yaml"
+        broken.write_text(body, encoding="utf-8")
+        monkeypatch.setattr(ingest_mod, "_default_schema_path", lambda b=broken: b)
+        vault = tmp_path / "vault"
+        vault.mkdir(exist_ok=True)
+        with pytest.raises(RuntimeError, match="no content directories configured"):
+            ingest_mod._configured_content_roots(vault)
+
+
+def test_an_explicitly_empty_directories_list_is_honored_not_treated_as_broken(
+    tmp_path: Path,
+) -> None:
+    """The other direction: `directories: []` in a vault's own schist.yaml is a
+    LIST, so it returns before the fallback and must not trip the broken-install
+    guard. Otherwise that guard converts a deliberate configuration into a hard
+    error."""
+    from schist.ingest import _configured_content_roots
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "schist.yaml").write_text("directories: []\n", encoding="utf-8")
+    assert _configured_content_roots(vault) == set()
+
+
 def test_unreadable_default_config_raises_runtime_error_from_the_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
