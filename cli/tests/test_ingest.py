@@ -137,6 +137,102 @@ def test_ingest_honors_configured_content_directory_boundary(tmp_path: Path) -> 
         ]
 
 
+def test_ingest_respects_default_content_roots_when_no_schist_yaml(tmp_path: Path) -> None:
+    """No ``schist.yaml`` — the shape of every standard vault — must still be
+    bounded, by the packaged ``default.yaml``.
+
+    #574's only boundary test always wrote an explicit ``schist.yaml`` with a
+    LIST ``directories``, which returns before the fallback ever runs.  The
+    dict-valued default is the branch production actually takes, and it is
+    where #578 lived.
+    """
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    # Deliberately no schist.yaml.
+    notes = vault / "notes"
+    notes.mkdir()
+    (notes / "kept.md").write_text(
+        "---\ntitle: Kept\n---\n\nIndexed.\n",
+        encoding="utf-8",
+    )
+    # `shared` is not among default.yaml's directories, so it stays out even
+    # though nothing in this vault says so explicitly.
+    shared = vault / "shared"
+    shared.mkdir()
+    (shared / "skill.md").write_text(
+        "---\ntitle: Excluded\n---\n\nNot a vault note.\n",
+        encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir()
+
+    ingest(str(vault), str(db))
+
+    with sqlite3.connect(db) as conn:
+        ids = [r[0] for r in conn.execute("SELECT id FROM docs ORDER BY id")]
+    assert ids == ["notes/kept.md"]
+
+
+def test_default_config_is_read_once_when_it_is_also_the_only_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The no-schist.yaml path used to read default.yaml TWICE (#578).
+
+    Beyond the wasted IO, the two reads were not a unit: the file could change
+    between them, and only the first was guarded.  Counting reads is the only
+    way to pin this — the return value is identical either way.
+    """
+    from schist import ingest as ingest_mod
+
+    default_path = ingest_mod._default_schema_path()
+    reads: list[str] = []
+    real_read_text = Path.read_text
+
+    def counting_read_text(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if self == default_path:
+            reads.append(str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    roots = ingest_mod._configured_content_roots(vault)
+
+    assert "notes" in roots and "shared" not in roots
+    assert len(reads) == 1, f"default.yaml read {len(reads)} times: {reads}"
+
+
+def test_unreadable_default_config_raises_runtime_error_from_the_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback read is reached when schist.yaml exists but `directories`
+    is not a list — a hand-edited dict, or the key missing entirely.  That
+    read was bare, so callers got a raw OSError from one branch of the same
+    function that promises RuntimeError from the other (#578)."""
+    from schist import ingest as ingest_mod
+
+    default_path = ingest_mod._default_schema_path()
+    real_read_text = Path.read_text
+
+    def failing_read_text(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if self == default_path:
+            raise OSError("simulated: default.yaml unreadable")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", failing_read_text)
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    # A DICT `directories` — valid-looking YAML that is not the list shape.
+    (vault / "schist.yaml").write_text("directories:\n  notes: notes/\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="could not read schema config"):
+        ingest_mod._configured_content_roots(vault)
+
+
 @pytest.mark.parametrize("case", _frontmatter_parity_cases(), ids=lambda c: c["name"])
 def test_ingest_frontmatter_parser_matches_shared_parity_cases(case: dict) -> None:
     """Python ingest and TS parseNote must agree on frontmatter pre-patching."""

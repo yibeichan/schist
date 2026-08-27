@@ -114,6 +114,25 @@ def _normalize_tag(value: str) -> str:
     return value.strip().lstrip('#').strip()
 
 
+def _default_schema_path() -> Path:
+    return Path(__file__).parent / 'default.yaml'
+
+
+def _read_schema_config(path: Path) -> dict:
+    """Parse a schema config, reporting every failure as the same RuntimeError.
+
+    Both reads in ``_configured_content_roots`` go through here.  The fallback
+    read used to be bare, so a vault with no ``schist.yaml`` — the common case,
+    and the only one that reaches the fallback at all — surfaced a raw
+    ``OSError`` where the guarded first read promised a ``RuntimeError`` (#578).
+    """
+    try:
+        parsed = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+    except (yaml.YAMLError, OSError, UnicodeDecodeError) as e:
+        raise RuntimeError(f'could not read schema config {path}: {e}') from e
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _configured_content_roots(vault: Path) -> set[str]:
     """Return configured top-level content directories for this vault.
 
@@ -123,17 +142,17 @@ def _configured_content_roots(vault: Path) -> set[str]:
     make schema validation impossible to use as a quality gate.
     """
     vault_schema = vault / 'schist.yaml'
-    config_path = vault_schema if vault_schema.exists() else Path(__file__).parent / 'default.yaml'
-    try:
-        parsed = yaml.safe_load(config_path.read_text(encoding='utf-8')) or {}
-    except (yaml.YAMLError, OSError, UnicodeDecodeError) as e:
-        raise RuntimeError(f'could not read schema config {config_path}: {e}') from e
+    default_path = _default_schema_path()
+    config_path = vault_schema if vault_schema.exists() else default_path
+    parsed = _read_schema_config(config_path)
 
-    directories = parsed.get('directories') if isinstance(parsed, dict) else None
+    directories = parsed.get('directories')
     if not isinstance(directories, list):
-        default = yaml.safe_load(
-            (Path(__file__).parent / 'default.yaml').read_text(encoding='utf-8'),
-        ) or {}
+        # Fall back to the packaged canonical list, whose `directories` is a
+        # dict.  When config_path IS default.yaml we already hold that parse:
+        # re-reading the same file was redundant, and the gap between the two
+        # reads was a window in which the file could change underneath us.
+        default = parsed if config_path == default_path else _read_schema_config(default_path)
         canonical = default.get('directories') or {}
         directories = list(canonical.values()) if isinstance(canonical, dict) else canonical
 
