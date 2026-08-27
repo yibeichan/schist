@@ -722,9 +722,16 @@ def schema(args, vault_path: str, db_path: str):
         print(yaml.dump(cfg, default_flow_style=False).rstrip())
         return
 
-    # Validate: check every .md in vault for title in frontmatter
+    # Validate only configured content directories. Repository support files
+    # (root README/SCHEMA docs, shared skills, CI docs) are not vault notes and
+    # must not make the content validator permanently red.
     violations = []
     vault = Path(vault_path)
+    content_roots = {
+        Path(directory).parts[0].casefold()
+        for directory in _directories(vault_path)
+        if Path(directory).parts
+    }
     # rglob follows file symlinks (any Python) and directory symlinks (<=3.12
     # patch releases before the glob reimplementation), so a symlink escaping
     # the vault would otherwise be read and validated — mixing external state
@@ -738,6 +745,17 @@ def schema(args, vault_path: str, db_path: str):
     vault_real = vault.resolve()
     for md_file in sorted(vault.rglob('*.md')):
         rel = md_file.relative_to(vault)
+        if not rel.parts:
+            continue
+        if rel.name.casefold() == 'readme.md':
+            continue
+        if len(rel.parts) == 1:
+            if rel.name.casefold() in {
+                'readme.md', 'schema.md', 'tags.md', 'conventions.md',
+            }:
+                continue
+        elif rel.parts[0].casefold() not in content_roots:
+            continue
         if any(part.startswith('.') for part in rel.parts):
             continue
         # Skip escaping/excluded symlinks with a stderr WARN rather than
