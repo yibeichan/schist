@@ -4814,6 +4814,75 @@ describe("zero-hit diagnosis distinguishes narrow terms from an empty store (#56
     expect(ok.zeroHitDiagnostic).toContain("NOT empty");
   });
 
+  // #573: the three closing sentences are what the AGENT reads, and only the
+  // "NOT empty" one was asserted. The untested pair includes the branch an
+  // agent would act on by concluding its own writes had failed — the original
+  // #563 incident — so a refactor that swapped two branches would have kept
+  // every test green.
+  test("the empty-store branch says the store is empty, not that terms are narrow", async () => {
+    await seed(["dyad reliability is fine"]);
+    const res = await search_memory("/tmp/zerohit-vault-empty", {
+      query: "dyad reliability",
+      owner: "nobody",
+    });
+    const ok = res as { entries: unknown[]; zeroHitDiagnostic?: string };
+    expect(ok.entries).toHaveLength(0);
+    expect(ok.zeroHitDiagnostic).toContain("really is empty for these filters");
+    expect(ok.zeroHitDiagnostic).not.toContain("NOT empty");
+    expect(ok.zeroHitDiagnostic).not.toContain("fewer terms");
+  });
+
+  test("the no-term-matches branch says reword, not use fewer terms", async () => {
+    await seed(["dyad reliability is fine", "an unrelated note"]);
+    const res = await search_memory("/tmp/zerohit-vault-reword", {
+      query: "absentone absenttwo",
+    });
+    const ok = res as { entries: unknown[]; zeroHitDiagnostic?: string };
+    expect(ok.entries).toHaveLength(0);
+    expect(ok.zeroHitDiagnostic).toContain("different wording");
+    expect(ok.zeroHitDiagnostic).toContain("rather than fewer terms");
+    expect(ok.zeroHitDiagnostic).not.toContain("really is empty");
+    expect(ok.zeroHitDiagnostic).not.toContain("NOT empty");
+  });
+
+  // #580: `anyTermMatches` speaks only for the terms diagnoseZeroHits actually
+  // COUNTED, and it counts at most MAX_DIAGNOSED_TERMS (12). Past that, "no
+  // single term matches" asserts something about terms nobody looked at, and
+  // the advice it carries ("reword") is the opposite of what helps.
+  test("with terms left uncounted, the diagnostic does not claim no term matches", async () => {
+    await seed(["a note mentioning alpha", "filler one", "filler two"]);
+    // 12 absent terms, then one that IS in the corpus but falls past the cap.
+    const absent = Array.from({ length: 12 }, (_v, i) => `zz${i}`);
+    const res = await search_memory("/tmp/zerohit-vault-truncated", {
+      query: [...absent, "alpha"].join(" "),
+    });
+    const ok = res as { entries: unknown[]; zeroHitDiagnostic?: string };
+    expect(ok.entries).toHaveLength(0);
+    const msg = ok.zeroHitDiagnostic!;
+    // The truncation must be visible in the assembled message, not only at the
+    // data layer where it was already asserted.
+    expect(msg).toContain("(+1 more term(s) not counted)");
+    // The defect: this exact sentence, on a partial check.
+    expect(msg).not.toContain("No single term matches");
+    expect(msg).not.toContain("different wording");
+    expect(msg).toContain("1 term(s) were not checked");
+    expect(msg).toContain("retry with fewer terms");
+  });
+
+  test("with NO terms left uncounted, the reword advice is still given", async () => {
+    // The other direction: the new branch must not swallow the case it was
+    // carved out of, or #580's fix just moves the wrong advice elsewhere.
+    await seed(["a note mentioning alpha", "filler"]);
+    const res = await search_memory("/tmp/zerohit-vault-untruncated", {
+      query: "zz0 zz1 zz2",
+    });
+    const ok = res as { entries: unknown[]; zeroHitDiagnostic?: string };
+    const msg = ok.zeroHitDiagnostic!;
+    expect(msg).not.toContain("not counted");
+    expect(msg).not.toContain("were not checked");
+    expect(msg).toContain("No single term matches either");
+  });
+
   test("a non-empty result carries no diagnostic", async () => {
     await seed(["dyad reliability is fine"]);
     const res = await search_memory("/tmp/zerohit-vault-2", { query: "dyad reliability" });
