@@ -3717,7 +3717,15 @@ export async function search_memory(
           ? "The store really is empty for these filters."
           : anyTermMatches
             ? "So the store is NOT empty — narrow term combination, not a missing write. Retry with fewer terms."
-            : "No single term matches either; try different wording rather than fewer terms.");
+            // `anyTermMatches` only speaks for the terms that were COUNTED, and
+            // diagnoseZeroHits caps that at MAX_DIAGNOSED_TERMS. With terms left
+            // over, "no single term matches" is a claim about data we never
+            // looked at — and it steers the agent the wrong way, telling it to
+            // reword (keeping the terms proven not to match) when the right move
+            // is to drop terms until the unchecked ones are in view (#580).
+            : d.truncatedTerms > 0
+              ? `None of the ${d.terms.length} term(s) checked matched individually, but ${d.truncatedTerms} term(s) were not checked — retry with fewer terms to find which ones match.`
+              : "No single term matches either; try different wording rather than fewer terms.");
     }
   }
   return response;
