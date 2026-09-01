@@ -1,4 +1,6 @@
+import builtins
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 import yaml
@@ -317,3 +319,143 @@ class TestSchemaCommand:
         captured = capsys.readouterr()
         # The loop is handled one of two ways; both mention it, neither crashes.
         assert "unresolvable path" in captured.err or "failed to parse" in captured.out
+
+
+class TestDirectoriesConfigResolution:
+    """#583 — `_directories()` carried the two defects #578/#581 fixed for
+    `ingest._configured_content_roots`. The parity gap mattered because this
+    function is what `schema --validate` uses as its content-root set."""
+
+    @staticmethod
+    def _count_default_yaml_reads(fn):
+        """Count reads of the PACKAGED default.yaml while `fn` runs.
+
+        Counts both `Path.read_text` and builtin `open` so a read that moves
+        between the two idioms cannot silently drop out of the count.
+        """
+        default_yaml = Path(commands.__file__).resolve().parent / "default.yaml"
+        reads = []
+        real_read_text, real_open = Path.read_text, builtins.open
+
+        def counting_read_text(self, *a, **k):
+            if Path(self).resolve() == default_yaml:
+                reads.append("read_text")
+            return real_read_text(self, *a, **k)
+
+        def counting_open(file, *a, **k):
+            try:
+                if Path(file).resolve() == default_yaml:
+                    reads.append("open")
+            except TypeError:  # fd or buffer — not our file
+                pass
+            return real_open(file, *a, **k)
+
+        Path.read_text = counting_read_text
+        builtins.open = counting_open
+        try:
+            fn()
+        finally:
+            Path.read_text = real_read_text
+            builtins.open = real_open
+        return reads
+
+    def test_packaged_default_is_read_once_not_twice(self, tmp_path):
+        """Defect 1. The packaged `directories` is a DICT, so the `not
+        isinstance(list)` fallback is reached on EVERY call for a vault with
+        no schist.yaml — the common case. The fallback used to re-read the
+        very file the first read had just parsed: a wasted read, and a window
+        in which the file could change between the two parses."""
+        reads = self._count_default_yaml_reads(
+            lambda: commands._directories(str(tmp_path)))
+        assert len(reads) == 1, f"expected 1 read of default.yaml, got {reads}"
+
+    def test_schema_validate_does_not_reread_the_default_it_discards(self, tmp_path):
+        """Defect 1, at the command level: `schema --validate` parsed the
+        config for the print path and then threw the result away."""
+        (tmp_path / "notes").mkdir()
+        (tmp_path / "notes" / "good.md").write_text(
+            "---\ntitle: Valid\nstatus: draft\n---\n\nBody\n", encoding="utf-8")
+        reads = self._count_default_yaml_reads(
+            lambda: commands.schema(
+                _schema_args(validate=True), str(tmp_path),
+                str(tmp_path / ".schist" / "schist.db")))
+        assert len(reads) == 1, f"expected 1 read of default.yaml, got {reads}"
+
+    def test_unusable_packaged_default_raises_instead_of_validating_zero_files(
+            self, tmp_path, capsys):
+        """Defect 2, the severe half: an existing-but-unusable packaged
+        default made `_directories()` return `[]`, so `schema --validate`
+        iterated zero directories, called zero validators, and printed
+        "All documents valid." over a vault with a real violation.
+
+        The broken default is a REAL empty file read through the real
+        `_load_default_config`, not a stubbed return value — an empty or
+        whitespace-only default.yaml is exactly what `safe_load(...) or {}`
+        turns into `{}`.
+        """
+        broken = tmp_path / "broken-default.yaml"
+        broken.write_text("", encoding="utf-8")
+        vault = tmp_path / "vault"
+        (vault / "notes").mkdir(parents=True)
+        (vault / "notes" / "bad.md").write_text(
+            "---\nstatus: draft\n---\n\nBody\n", encoding="utf-8")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(commands, "_default_schema_path", lambda: broken)
+            with pytest.raises(RuntimeError) as excinfo:
+                commands._directories(str(vault))
+
+        msg = str(excinfo.value)
+        assert "no content directories configured" in msg
+        assert str(broken) in msg, "the message must name the file that is wrong"
+        assert "reinstall" in msg.lower(), "the message must carry a remedy"
+        assert "All documents valid" not in capsys.readouterr().out
+
+    def test_scalar_directories_raises_instead_of_iterating_characterwise(
+            self, tmp_path):
+        """A scalar `directories:` in the packaged default used to be assigned
+        straight through and then iterated CHARACTERWISE by the final
+        comprehension, yielding roots like ['n', 'o', 't', ...]: every real
+        directory excluded, and no error raised."""
+        broken = tmp_path / "scalar-default.yaml"
+        broken.write_text("directories: notes\n", encoding="utf-8")
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(commands, "_default_schema_path", lambda: broken)
+            with pytest.raises(RuntimeError):
+                commands._directories(str(tmp_path))
+
+    def test_explicit_empty_directories_in_schist_yaml_is_still_honored(
+            self, tmp_path, capsys):
+        """Guard PLACEMENT, not just guard logic. The broken-install guard
+        lives INSIDE the non-list fallback, so an explicit `directories: []`
+        — a list, and a deliberate choice (#574) — never reaches it and must
+        not raise."""
+        (tmp_path / "schist.yaml").write_text(
+            "directories: []\n", encoding="utf-8")
+        (tmp_path / "notes").mkdir()
+        (tmp_path / "notes" / "bad.md").write_text(
+            "---\nstatus: draft\n---\n\nBody\n", encoding="utf-8")
+
+        assert commands._directories(str(tmp_path)) == []
+        commands.schema(_schema_args(validate=True), str(tmp_path),
+                        str(tmp_path / ".schist" / "schist.db"))
+        assert capsys.readouterr().out.strip() == "All documents valid."
+
+    def test_vault_schist_yaml_directories_take_precedence(self, tmp_path):
+        """The refactor split _load_schema_config into a resolver returning
+        (parsed, came_from_default); pin that the flag does not leak into the
+        answer for a vault that HAS a schist.yaml."""
+        (tmp_path / "schist.yaml").write_text(
+            "directories:\n  - lab/\n  - notes\n", encoding="utf-8")
+        assert commands._directories(str(tmp_path)) == ["lab", "notes"]
+
+    def test_load_schema_config_keeps_its_dict_shape_for_existing_callers(
+            self, tmp_path):
+        """_load_schema_config is still the dict-returning helper the
+        vocabulary resolvers and doctor rely on."""
+        (tmp_path / "schist.yaml").write_text(
+            "statuses:\n  - draft\n", encoding="utf-8")
+        cfg = commands._load_schema_config(str(tmp_path))
+        assert isinstance(cfg, dict) and cfg["statuses"] == ["draft"]
+        assert commands._resolve_schema_config(str(tmp_path))[1] is False
+        assert commands._resolve_schema_config(str(tmp_path.parent / "nope"))[1] is True

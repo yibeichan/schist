@@ -58,22 +58,37 @@ def _assert_resolves_inside_vault(vault_path: str, candidate_path: str, what: st
 _vault_write_lock = git_ops.vault_write_lock
 
 
+def _default_schema_path() -> Path:
+    """The packaged canonical schema config that ships inside the package.
+
+    One source of truth for the path, so `_load_default_config`, `schema()`
+    and the broken-install message in `_directories` cannot drift apart —
+    and so a test can point all three at a deliberately broken stand-in.
+    """
+    return Path(__file__).resolve().parent / 'default.yaml'
+
+
 def _load_default_config() -> dict:
     """Load the packaged default.yaml (the canonical default `schist init`
     copies into new vaults)."""
     import yaml
 
-    default_schema = Path(__file__).resolve().parent / 'default.yaml'
+    default_schema = _default_schema_path()
     if not default_schema.exists():
         return {}
     return yaml.safe_load(default_schema.read_text()) or {}
 
 
-def _load_schema_config(vault_path: str) -> dict:
+def _resolve_schema_config(vault_path: str) -> tuple[dict, bool]:
     """Load the vault's schist.yaml, falling back to the packaged default.
 
     Used by link() (via _connection_types) so the CLI's write-side vocabulary
     check reads the same config the MCP server and ingest validate against.
+
+    Returns `(parsed, came_from_packaged_default)`. The flag exists because a
+    fallback that re-reads `default.yaml` when the primary read ALREADY read
+    it is both a wasted read and a TOCTOU window in which the file can change
+    between the two parses (#578, fixed for ingest.py by #581; #583 here).
     """
     import yaml
 
@@ -93,8 +108,15 @@ def _load_schema_config(vault_path: str) -> dict:
         # "no keys" — MCP's loadVaultConfig reads raw[key] as undefined on a
         # non-mapping and falls back to defaults; .get() on a list would
         # instead crash every command that resolves a vocabulary.
-        return parsed if isinstance(parsed, dict) else {}
-    return _load_default_config()
+        return (parsed if isinstance(parsed, dict) else {}), False
+    return _load_default_config(), True
+
+
+def _load_schema_config(vault_path: str) -> dict:
+    """Back-compat shape: just the parsed config. Callers that need to know
+    whether the packaged default supplied it (to avoid re-reading the very
+    file they already hold) use `_resolve_schema_config` instead."""
+    return _resolve_schema_config(vault_path)[0]
 
 
 def _connection_types(vault_path: str) -> list:
@@ -162,11 +184,51 @@ def _statuses(vault_path: str) -> list:
 
 
 def _directories(vault_path: str) -> list:
-    """Resolve configured directory names with MCP loadVaultConfig parity."""
-    directories = _load_schema_config(vault_path).get('directories')
+    """Resolve configured directory names with MCP loadVaultConfig parity.
+
+    This mirrors `ingest._configured_content_roots` (#581). Keeping the two in
+    the same shape matters because they answer the same question on the two
+    sides of the same boundary: ingest decides what becomes a note, and
+    `schema --validate` decides what gets checked. A vault whose default is
+    read differently by the two is a vault whose index and its quality gate
+    disagree.
+    """
+    parsed, from_default = _resolve_schema_config(vault_path)
+    directories = parsed.get('directories')
     if not isinstance(directories, list):
-        canonical = _load_default_config().get('directories') or {}
-        directories = list(canonical.values()) if isinstance(canonical, dict) else canonical
+        # The packaged canonical list is a DICT, so this branch is reached on
+        # EVERY call for a vault with no schist.yaml — the common case. When
+        # the config we already parsed IS default.yaml, reuse it rather than
+        # reading the same file a second time (#578/#583).
+        default = parsed if from_default else _load_default_config()
+        canonical = default.get('directories') or {}
+        if isinstance(canonical, dict):
+            directories = list(canonical.values())
+        elif isinstance(canonical, list):
+            directories = canonical
+        else:
+            # A scalar would be iterated CHARACTERWISE by the comprehension
+            # below, yielding roots like ['n', 'o', 't', ...]: every real
+            # directory excluded, and no error. Drop to empty so the guard
+            # underneath reports the broken install instead.
+            directories = []
+        if not directories:
+            # Guarded INSIDE the fallback so an explicit `directories: []` in
+            # schist.yaml is still honored: that is a list, so it never
+            # reaches here. Reaching here means the packaged default is
+            # missing or corrupt — a broken install, not a choice.
+            #
+            # Failing loud is the point. `schema --validate` uses this as its
+            # content-root set, so an empty list makes it iterate zero
+            # directories, call zero validators, and print "All documents
+            # valid." over a vault full of violations (#583) — the silent
+            # wrong answer that #581 fixed on the ingest side.
+            raise RuntimeError(
+                f'no content directories configured: {_default_schema_path()} defines '
+                'no usable `directories`. The packaged schema config is missing or '
+                'corrupt; reinstall the CLI '
+                '(`uv tool install --reinstall <path-to-cli>`).',
+            )
     return [str(value).rstrip('/') for value in directories if str(value).rstrip('/')]
 
 
@@ -705,20 +767,24 @@ def schema(args, vault_path: str, db_path: str):
     # Find schema config
     vault_schema = os.path.join(vault_path, 'schist.yaml')
     # Canonical default ships inside the package — see cli/schist/default.yaml.
-    # Path(__file__).parent works for both editable and wheel installs;
-    # the legacy <repo>/schema/default.yaml path was removed in the
+    # _default_schema_path() works for both editable and wheel installs; the
+    # legacy <repo>/schema/default.yaml path was removed in the
     # flatten-spoke-dirs refactor (single source of truth).
-    default_schema = str(Path(__file__).resolve().parent / 'default.yaml')
+    default_schema = str(_default_schema_path())
 
     schema_path = vault_schema if os.path.exists(vault_schema) else default_schema
     if not os.path.exists(schema_path):
         print('Error: no schema found', file=sys.stderr)
         sys.exit(1)
 
-    with open(schema_path) as f:
-        cfg = yaml.safe_load(f)
-
     if not args.validate:
+        # Read only on the path that actually prints it. The validate path
+        # below resolves its own directories through _directories(), so
+        # parsing the file here as well was a read whose result was
+        # discarded — the third read of default.yaml per `schema --validate`
+        # invocation that #583 counted.
+        with open(schema_path) as f:
+            cfg = yaml.safe_load(f)
         print(yaml.dump(cfg, default_flow_style=False).rstrip())
         return
 
