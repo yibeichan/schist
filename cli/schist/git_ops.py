@@ -386,6 +386,12 @@ PULL_NO_RESPONSE_PREFIX = "Pull timed out after 60s with no response from the hu
 # callers must not print it (#571 review).
 PULL_ABORT_FAILED_MARKER = "rebase --abort also timed out"
 
+# push()'s own timeout banner. Named for the same reason as the pull prefix
+# above: sync classifies it by matching the producer's token at line start
+# rather than by finding a bare "timed out" substring anywhere in the output,
+# which a vault FILE NAME can also satisfy (#584).
+PUSH_NO_RESPONSE_PREFIX = "Push timed out after"
+
 
 def _partial_output(exc: subprocess.TimeoutExpired) -> str:
     """Whatever a timed-out child had written before it was killed.
@@ -493,7 +499,7 @@ def push(vault_path: str) -> tuple[bool, str]:
         output = result.stdout + result.stderr
         return result.returncode == 0, output.strip()
     except subprocess.TimeoutExpired:
-        return False, f"Push timed out after {PUSH_TIMEOUT}s"
+        return False, f"{PUSH_NO_RESPONSE_PREFIX} {PUSH_TIMEOUT}s"
     except subprocess.CalledProcessError as e:
         return False, (e.stdout or '') + (e.stderr or '')
 

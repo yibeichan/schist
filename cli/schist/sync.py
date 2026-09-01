@@ -660,29 +660,72 @@ def _print_conflict_recovery(
 # prefix is NOT network evidence — git stamps it on purely local failures too
 # (invalid refspec, detached HEAD, shallow-update rejection), and claiming
 # "Hub unreachable" for those sends the user debugging the wrong layer (#321).
+# Each marker names a TRANSPORT failure specifically. Two of these used to be
+# bare — "connection" and "timed out" — plus a lone word-bounded \bport\b, and
+# any of the three alone was sufficient. That made the classifier steerable by
+# vault CONTENT: a conflict in `notes/port-forwarding-timed-connection.md`
+# satisfied all three, and only sync_pull's conflict-first ordering kept it
+# from being reported as a dead network (#584; the looseness e6a1a36 said was
+# "tracked separately"). Narrowing to the real phrasings is the fix at the
+# level of the RULE — the ordering below is now defence in depth rather than
+# the only thing standing between a filename and a wrong diagnosis (#535/#537).
+#
+# `unable to access` is deliberately NOT here. It is git's generic HTTP
+# wrapper, stamped on 401/403/404 as readily as on a dead socket, so it
+# classified an AUTH failure as "Hub unreachable" — the same misdiagnosis in
+# the other direction. Nothing is lost by dropping it: git always pairs it
+# with the underlying curl reason, and those reasons are enumerated here.
 _NETWORK_ERROR_MARKERS = (
     "could not resolve",                     # DNS (curl and ssh phrasings)
     "temporary failure in name resolution",  # DNS (getaddrinfo)
-    "unable to access",                      # git http transport wrapper
     "failed to connect",                     # curl
-    "couldn't connect",                      # curl
-    "connection",                            # refused / reset / closed / timed out
-    "timed out",
+    "couldn't connect",                       # curl
+    "connection refused",                    # was the bare "connection"
+    "connection reset",
+    "connection closed",
+    "connection timed out",
+    "operation timed out",                   # was the bare "timed out"
+    "recv failure",                          # curl mid-transfer transport drop
+    "send failure",
+    "empty reply from server",
     "network is unreachable",
     "no route to host",
 )
 
-# ssh transport errors name the port ("connect to host pi port 22: ...").
-# Word-bounded so "support"/"report"/"exported" in unrelated stderr don't match.
-_NETWORK_PORT_RE = re.compile(r"\bport\b", re.IGNORECASE)
+# ssh names the host and port when its transport fails ("ssh: connect to host
+# pi port 22: ..."). Matching that whole SHAPE rather than a lone \bport\b
+# keeps a file called `port-22-notes.md` out of this branch while still
+# catching ssh tail phrasings not enumerated above.
+_NETWORK_CONNECT_RE = re.compile(r"connect to host \S+ port \d+", re.IGNORECASE)
 
 
 def _is_network_error(output: str) -> bool:
-    """Heuristic: does this git-push stderr describe a network failure?"""
+    """Heuristic: does this git stderr describe a network failure?"""
     low = output.lower()
-    return any(marker in low for marker in _NETWORK_ERROR_MARKERS) or bool(
-        _NETWORK_PORT_RE.search(output)
+    return (
+        _is_wrapper_timeout(output)
+        or any(marker in low for marker in _NETWORK_ERROR_MARKERS)
+        or bool(_NETWORK_CONNECT_RE.search(output))
     )
+
+
+# Our OWN timeout banners, from git_ops. These carry no transport evidence:
+# the wrapper killed the child before it could explain itself, and on a down
+# VPN ssh's connect timeout (~75s on macOS) outlives our cap, so ssh never
+# reaches its own "Operation timed out" line (#567). A timeout still means we
+# got NO ANSWER from the hub, which is the unreachable side of the sync-gating
+# axis rather than the refused side — so they stay classified, but via the
+# producer's own token at LINE START, which no vault content can spoof. Before
+# #584 they landed here only by accident, on the bare "timed out" substring.
+_WRAPPER_TIMEOUT_PREFIXES = (
+    git_ops.PULL_NO_RESPONSE_PREFIX,
+    git_ops.PUSH_NO_RESPONSE_PREFIX,
+)
+
+
+def _is_wrapper_timeout(output: str) -> bool:
+    """Did OUR wrapper time out, as opposed to git reporting a transport error?"""
+    return output.lstrip().startswith(_WRAPPER_TIMEOUT_PREFIXES)
 
 
 # Mirror of SYNC_ERROR_SENTINEL in mcp-server/src/tools.ts. The MCP server
