@@ -679,7 +679,7 @@ _NETWORK_ERROR_MARKERS = (
     "could not resolve",                     # DNS (curl and ssh phrasings)
     "temporary failure in name resolution",  # DNS (getaddrinfo)
     "failed to connect",                     # curl
-    "couldn't connect",                       # curl
+    "couldn't connect",                      # curl
     "connection refused",                    # was the bare "connection"
     "connection reset",
     "connection closed",
