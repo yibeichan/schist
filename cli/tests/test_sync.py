@@ -2073,7 +2073,9 @@ def _git(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProce
     return result
 
 
-def _live_push_failure(tmp_path: Path, *, hook: str | None) -> str:
+def _live_push_failure(
+    tmp_path: Path, *, hook: str | None, offending_path: str = "g.md",
+) -> str:
     """Drive a REAL `git push` into a refusal and return its combined output.
 
     Every hub-refusal classification test we have is a hand-written stub
@@ -2127,8 +2129,10 @@ def _live_push_failure(tmp_path: Path, *, hook: str | None) -> str:
         _git("fetch", "-q", "origin", cwd=spoke)
         _git("rebase", "-q", "origin/main", cwd=spoke)
 
-    (spoke / "g.md").write_text("local work\n")
-    _git("add", "g.md", cwd=spoke)
+    target = spoke / offending_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("local work\n")
+    _git("add", "--", offending_path, cwd=spoke)
     _git("commit", "-qm", "local", cwd=spoke)
 
     result = _git("push", "origin", "main", cwd=spoke, check=False)
@@ -2137,13 +2141,29 @@ def _live_push_failure(tmp_path: Path, *, hook: str | None) -> str:
     return result.stdout + result.stderr
 
 
-# The hub's pre-receive writes its verdict exactly like this (pre_receive.py).
-_ACL_HOOK = (
-    "#!/bin/sh\n"
-    "echo 'REJECTED: push contains out-of-scope writes' >&2\n"
-    "echo '  g.md (identity may write: research/mario/)' >&2\n"
-    "exit 1\n"
-)
+def _acl_hook(offending_path: str = "g.md") -> str:
+    """A pre-receive that refuses the push the way the real hub does.
+
+    `format_rejection` (pre_receive.py) echoes the offending FILEPATH verbatim
+    into the message, and git relays every line of it prefixed with `remote: `.
+    That is how vault-controlled text reaches the push classifier, so the
+    fixture has to reproduce it — a hook that prints only fixed strings cannot
+    exercise the steering the classifier has to survive.
+    """
+    return (
+        "#!/bin/sh\n"
+        "echo 'REJECTED: push contains out-of-scope writes' >&2\n"
+        "echo 'Identity: cluster-mario' >&2\n"
+        "echo '' >&2\n"
+        "echo 'Violations:' >&2\n"
+        f"echo '  - {offending_path} (scope: research/mario)' >&2\n"
+        "echo '' >&2\n"
+        "echo 'Check vault.yaml access rules for your identity.' >&2\n"
+        "exit 1\n"
+    )
+
+
+_ACL_HOOK = _acl_hook()
 
 
 class TestPushRefusalIsNotAllOneThing:
@@ -2192,6 +2212,35 @@ class TestPushRefusalIsNotAllOneThing:
         acl = classify(_live_push_failure(tmp_path / "b", hook=_ACL_HOOK))
 
         assert (non_ff, acl) == ("behind", "acl")
+
+    @pytest.mark.parametrize("filename", [
+        "notes/updates were rejected.md",
+        "notes/(fetch first).md",
+        "notes/(non-fast-forward).md",
+    ])
+    def test_a_filename_cannot_steer_an_acl_refusal_into_the_pull_branch(
+            self, tmp_path, filename):
+        """The regression this fix first SHIPPED, caught in review.
+
+        The hub echoes the offending filepath into its rejection, so a note
+        named after git's own non-fast-forward wording made a genuine ACL
+        refusal match the free-floating tokens — and because the
+        non-fast-forward branch is tested first, it sent the user to
+        `schist sync pull` for something only a scope grant fixes. A steerable
+        substring that OPENS a gate is the worse direction of the very defect
+        this commit removes.
+
+        git prefixes remote output with `remote: `, so anchoring on a line
+        that BEGINS with `!` or `hint:` is what makes this unforgeable.
+        """
+        from schist.sync import _is_acl_rejection, _is_non_fast_forward
+
+        output = _live_push_failure(
+            tmp_path, hook=_acl_hook(filename), offending_path=filename)
+
+        assert filename in output, "fixture must actually echo the filename"
+        assert _is_acl_rejection(output) is True
+        assert _is_non_fast_forward(output) is False
 
     @pytest.mark.parametrize("stderr", [
         # Every other verdict the hub's pre-receive can write must keep

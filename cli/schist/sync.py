@@ -752,23 +752,41 @@ _ACL_REJECTION_RE = re.compile(
 _REMOTE_DECLINED_RE = re.compile(
     r"^\s*!\s*\[remote rejected\]", re.MULTILINE)
 
-# The token set here is deliberately the SAME as classifyPushFailure's
-# non-fast-forward branch in mcp-server/src/tools.ts, which already made this
-# distinction — the CLI is the half that never got it. Keeping one contract
-# with two spellings is the ladder that keeps costing us (#454/#473), so the
-# two lists and the branch ORDER are kept in step on purpose. Nothing ENFORCES
-# that yet — no fixture covers push-failure classification (#543/#594) — so
-# this comment is currently the only link between them; the shared fixture
-# lands with the #594 half, where both consumers can be written at once.
+# classifyPushFailure in mcp-server/src/tools.ts already made this
+# distinction — the CLI is the half that never got it — and the branch ORDER
+# here matches it deliberately. The token MATCHING does not: tools.ts tests
+# `text.includes("updates were rejected")` and the two parentheticals as bare
+# substrings against combined output, which the filepath-echo described below
+# steers exactly as it steered this regex's first draft. There it is worse
+# than a wrong header, because a `non-fast-forward` verdict is what triggers
+# #500's auto-recovery, so a crafted filename aims a pull-rebase-push loop at
+# a refusal that can never succeed. Filed separately rather than fixed here.
 #
-# `! [rejected]` is added on top of the MCP tokens because it is the one part
-# of the line git always prints, parenthetical or not. `! [remote rejected]`
-# deliberately does NOT satisfy it: the literal "! [rejected]" is absent from
-# that string.
+# Nothing ENFORCES the alignment either — no fixture covers push-failure
+# classification (#543/#594) — so this comment is the only link between them;
+# the shared fixture lands with the #594 half, where both consumers can be
+# written at once.
+#
+# Both alternatives are anchored at LINE START, and that anchoring is the
+# whole point rather than tidiness. The hub echoes the offending FILEPATH
+# verbatim into its rejection (`format_rejection` in pre_receive.py), and git
+# relays it, so vault filenames reach this matcher. A note committed as
+# `notes/updates were rejected.md` made a genuine ACL refusal match the
+# free-floating tokens this regex first shipped with — and since the
+# non-fast-forward branch is tested first, it routed the user to
+# `schist sync pull` for something only a scope grant fixes. That is the same
+# defect this commit exists to remove, re-introduced by the fix and pointing
+# the worse way: a steerable substring that OPENS a gate (#593).
+#
+# git prefixes every line that came from the remote with `remote: `, so a
+# line that BEGINS with `!` or `hint:` is git's own and cannot be forged by
+# anything the hub prints or any path inside the vault. The `(fetch first)` /
+# `(non-fast-forward)` parentheticals are dropped as separate alternatives:
+# they only ever appear ON the `! [rejected]` line, which is already matched,
+# and free-floating they were steerable by a filename too.
 _NON_FAST_FORWARD_RE = re.compile(
     r"^\s*!\s*\[rejected\]"
-    r"|\((?:fetch first|non-fast-forward)\)"
-    r"|updates were rejected",
+    r"|^\s*hint:.*updates were rejected",
     re.MULTILINE | re.IGNORECASE)
 
 
