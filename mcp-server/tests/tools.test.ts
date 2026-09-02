@@ -2691,6 +2691,184 @@ describe("sync error sentinel", () => {
 // more local commits while the spoke is already known to be diverged.
 // ---------------------------------------------------------------------------
 
+describe("class-aware write gate (#531)", () => {
+  const TRANSPORT_SENTINEL =
+    "push failed [transport]: ssh: connect to host hub.example.ts.net port 22: " +
+    "Connection refused\nfatal: Could not read from remote repository.";
+
+  async function withSentinel(contents: string, timestamp?: string): Promise<string> {
+    const vault = await makeTempSpokeVault();
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    const stamp = timestamp ?? new Date().toISOString();
+    await fs.writeFile(
+      path.join(vault, ".schist", "last-sync-error"), `${stamp} ${contents}\n`);
+    return vault;
+  }
+
+  const write = async (vault: string, title: string) =>
+    (await create_note(
+      vault, { owner: TEST_AGENT, title, body: "body" }, await loadVaultConfig(vault),
+    )) as { error?: string; message?: string; syncWarning?: string };
+
+  afterEach(() => {
+    delete process.env.SCHIST_SYNC_OFFLINE_GRACE_MS;
+    resetSpokePushTrackerForTesting();
+  });
+
+  test("an unreachable hub warns instead of blocking — and says so in the response", async () => {
+    // A write is the only in-band trigger for a background push, so blocking
+    // writes on a transport failure removes the very mechanism that would
+    // clear the sentinel. The laptop-asleep case then wedges the vault until
+    // a human runs sync_retry.
+    const vault = await withSentinel(TRANSPORT_SENTINEL);
+    const result = await write(vault, "Written while the hub was unreachable");
+
+    expect(result.error).toBeUndefined();
+    // The trade is "refuse" for "inform" — it only holds if the telling happens.
+    expect(result.syncWarning).toContain("Recent background sync failure");
+  }, 15000);
+
+  test("a hub REFUSAL still blocks, and names the remedy for its class", async () => {
+    const acl = await withSentinel(
+      "push failed [acl-rejected]: remote: REJECTED: push contains out-of-scope writes");
+    const aclResult = await write(acl, "Blocked by ACL");
+    expect(aclResult.error).toBe("SYNC_DIRTY");
+    expect(aclResult.message).toContain("out of scope");
+    expect(aclResult.message).toContain("vault.yaml");
+
+    const nff = await withSentinel(
+      "push failed [non-fast-forward]: working tree dirty, so it was not rebased");
+    const nffResult = await write(nff, "Blocked by divergence");
+    expect(nffResult.error).toBe("SYNC_DIRTY");
+    expect(nffResult.message).toContain("sync_retry mode=pull-rebase-push");
+  }, 20000);
+
+  test("rate-limited blocks even though it clears with time (notes_per_sync)", async () => {
+    // The hub DID answer, and letting notes pile up can turn "wait an hour"
+    // into a batch too big for the per-push note limit to ever accept.
+    const vault = await withSentinel(
+      "push failed [rate-limited]: remote: REJECTED: rate limit exceeded (git_syncs_per_hour: 3/2)");
+    const result = await write(vault, "Blocked by rate limit");
+    expect(result.error).toBe("SYNC_DIRTY");
+    expect(result.message).toContain("notes_per_sync");
+  }, 15000);
+
+  test("fails closed on a pre-#501 sentinel and on an unknown class", async () => {
+    // This gate is where a classification bug would become real divergence,
+    // so anything it cannot positively identify must block.
+    const legacy = await withSentinel("push exited with code 1");
+    expect((await write(legacy, "Legacy sentinel")).error).toBe("SYNC_DIRTY");
+
+    const unknown = await withSentinel("push failed [teleport-glitch]: who knows");
+    expect((await write(unknown, "Unknown class")).error).toBe("SYNC_DIRTY");
+  }, 20000);
+
+  test("an unreachable hub stops being a warning once it is old", async () => {
+    const old = new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString();
+    const vault = await withSentinel(TRANSPORT_SENTINEL, old);
+    const result = await write(vault, "Offline too long");
+    expect(result.error).toBe("SYNC_DIRTY");
+    expect(result.message).toContain("unreachable");
+    expect(result.message).toMatch(/for \d+h/);
+  }, 15000);
+
+  test("the grace period is configurable, and 0 means block immediately", async () => {
+    // Number(raw) || DEFAULT would silently discard 0 — the one setting an
+    // operator would reach for to opt out of the new behavior entirely.
+    process.env.SCHIST_SYNC_OFFLINE_GRACE_MS = "0";
+    const vault = await withSentinel(TRANSPORT_SENTINEL);
+    expect((await write(vault, "Opted out")).error).toBe("SYNC_DIRTY");
+  }, 15000);
+});
+
+describe("offline spoke self-heals against the real schist CLI (#531)", () => {
+  afterEach(() => {
+    resetSpokePushTrackerForTesting();
+  });
+
+  /**
+   * The whole point of #531 is a deadlock: writes are the only in-band push
+   * trigger, so blocking them on an unreachable hub means nothing ever
+   * retries. A stub can assert the gate's decision, but only the real binary
+   * against a real hub shows the loop actually closing — write while offline,
+   * hub returns, next write pushes everything and clears the sentinel.
+   */
+  test("writes continue while the hub is unreachable, then the loop closes", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "schist-531-"));
+    createdDirs.add(root);
+    const hub = path.join(root, "hub.git");
+    await execFile("git", ["init", "--bare", hub]);
+
+    const vault = await makeTempSpokeVault();
+    await execFile("git", ["remote", "add", "origin", hub], { cwd: vault });
+    const branch = (await execFile("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: vault }))
+      .stdout.trim();
+    await execFile("git", ["push", "-u", "origin", branch], { cwd: vault });
+    await fs.writeFile(
+      path.join(vault, ".schist", "spoke.yaml"),
+      `hub: ${hub}\nidentity: test\nscope: notes\n`,
+    );
+
+    // The hub goes away: an ssh URL that refuses instantly, which is what a
+    // sleeping VPN looks like to git.
+    await execFile("git", ["remote", "set-url", "origin", "ssh://127.0.0.1:1/nope.git"],
+      { cwd: vault });
+
+    const config = await loadVaultConfig(vault);
+    const first = (await create_note(
+      vault, { owner: TEST_AGENT, title: "Note while offline one", body: "one" }, config,
+    )) as { error?: string; id?: string };
+    expect(first.error).toBeUndefined();
+
+    const sentinelPath = path.join(vault, ".schist", "last-sync-error");
+    let sentinel = "";
+    for (let i = 0; i < 150; i++) {
+      try {
+        sentinel = await fs.readFile(sentinelPath, "utf-8");
+        if (sentinel.includes("[transport]")) break;
+      } catch { /* not written yet */ }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(sentinel).toContain("[transport]");
+
+    // THE point: before #531 this returned SYNC_DIRTY, and since writes are
+    // the only push trigger, nothing would ever have retried.
+    const second = (await create_note(
+      vault, { owner: TEST_AGENT, title: "Note while offline two", body: "two" }, config,
+    )) as { error?: string; syncWarning?: string };
+    expect(second.error).toBeUndefined();
+    expect(second.syncWarning).toBeDefined();
+
+    // Hub comes back. The next write's push carries both notes and clears the
+    // sentinel — no sync_retry, no human.
+    await execFile("git", ["remote", "set-url", "origin", hub], { cwd: vault });
+    const third = (await create_note(
+      vault, { owner: TEST_AGENT, title: "Note after hub returns", body: "three" }, config,
+    )) as { error?: string };
+    expect(third.error).toBeUndefined();
+
+    let cleared = false;
+    let hubLog = "";
+    for (let i = 0; i < 200; i++) {
+      hubLog = (await execFile("git", ["log", "--oneline", "--all"], { cwd: hub })).stdout;
+      try {
+        await fs.access(sentinelPath);
+      } catch {
+        cleared = true;
+      }
+      if (cleared && hubLog.includes("Note while offline one")) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    expect(cleared).toBe(true);
+    // Commit subjects carry the note TITLE, not the slug. Distinct trailing
+    // words ("one"/"two") so neither assertion can be satisfied by the other
+    // note's commit.
+    expect(hubLog).toContain("Note while offline one");
+    expect(hubLog).toContain("Note while offline two");
+  }, 90000);
+});
+
 describe("write-tool sync dirty blocking (#75)", () => {
   test("create_note returns SYNC_DIRTY when sentinel exists", async () => {
     const vault = await makeTempSpokeVault();
