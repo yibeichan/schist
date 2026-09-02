@@ -771,3 +771,76 @@ def test_run_group_killable_takes_grandchildren_with_the_group(tmp_path) -> None
     else:
         os.kill(grandchild, signal.SIGKILL)
         raise AssertionError("grandchild survived the group kill")
+
+
+class TestGlobalScopeDirsFallback:
+    """#588 — `_global_scope_dirs` has a designed fallback for "cannot read
+    the canonical list", but an EMPTY parse was returned instead of reaching
+    it. Empty is the dangerous value: `_scope_targets` feeds both `git add`
+    staging and the #361 ignore guard, so a `global` push staged nothing and
+    the guard inspected nothing, with no error and no way to tell it apart
+    from a vault that genuinely has no content.
+    """
+
+    @staticmethod
+    def _with_packaged_default(monkeypatch, tmp_path, text):
+        """Point git_ops at a stand-in packaged default.yaml.
+
+        `_global_scope_dirs` resolves the file relative to its own module, so
+        the stand-in is installed by patching that anchor rather than by
+        writing over the real installed package.
+        """
+        from schist import git_ops
+
+        stand_in = tmp_path / "pkg"
+        stand_in.mkdir(exist_ok=True)
+        (stand_in / "default.yaml").write_text(text, encoding="utf-8")
+        monkeypatch.setattr(
+            git_ops, "__file__", str(stand_in / "git_ops.py"))
+
+    @pytest.mark.parametrize("text, why", [
+        ("name: x\ndirectories: {}\n", "empty mapping — the old dict branch"),
+        ("name: x\ndirectories: []\n", "empty list — the old list branch"),
+        ("name: x\ndirectories:\n  bad: \"/\"\n",
+         ('a value that rstrips to "" — became the pathspec "/", which git '
+          'rejects as outside the repository')),
+        ("name: x\n", "key absent entirely"),
+        ("name: x\ndirectories: notes\n", "scalar, neither dict nor list"),
+    ])
+    def test_unusable_directories_falls_back_to_canonical_list(
+            self, tmp_path, monkeypatch, text, why):
+        from schist import git_ops
+
+        self._with_packaged_default(monkeypatch, tmp_path, text)
+        assert git_ops._global_scope_dirs() == git_ops.GLOBAL_SCOPE_FALLBACK_DIRS, why
+
+    def test_a_real_declared_list_is_still_honored(self, tmp_path, monkeypatch):
+        """The fallback must not swallow a usable answer."""
+        from schist import git_ops
+
+        self._with_packaged_default(
+            monkeypatch, tmp_path, "directories:\n  a: lab/\n  b: notes/\n")
+        assert git_ops._global_scope_dirs() == ["lab", "notes"]
+
+    def test_empty_entries_are_dropped_but_real_ones_kept(
+            self, tmp_path, monkeypatch):
+        """A partially-mangled list keeps its usable entries rather than
+        falling back wholesale — the fallback is for NO usable answer."""
+        from schist import git_ops
+
+        self._with_packaged_default(
+            monkeypatch, tmp_path, 'directories:\n  a: "/"\n  b: notes/\n')
+        assert git_ops._global_scope_dirs() == ["notes"]
+
+    def test_staging_targets_are_nonempty_for_a_vault_with_content(
+            self, tmp_path, monkeypatch):
+        """The consequence the fix exists for: an unusable packaged default
+        must not make `global` scope stage nothing."""
+        from schist import git_ops
+
+        self._with_packaged_default(
+            monkeypatch, tmp_path, "name: x\ndirectories: {}\n")
+        vault = tmp_path / "vault"
+        (vault / "notes").mkdir(parents=True)
+        (vault / "notes" / "a.md").write_text("x", encoding="utf-8")
+        assert git_ops._scope_targets(str(vault), "global") == ["notes/"]

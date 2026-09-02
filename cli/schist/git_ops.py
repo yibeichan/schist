@@ -672,16 +672,33 @@ def ignored_scope_files(vault_path: str, scope: str) -> tuple[list[str], list[st
 def _global_scope_dirs() -> list[str]:
     """Return canonical content directories for logical `global` scope."""
     default_yaml = Path(__file__).resolve().parent / "default.yaml"
+    resolved: list[str] = []
     try:
         raw = yaml.safe_load(default_yaml.read_text(encoding="utf-8"))
         dirs = raw.get("directories") if isinstance(raw, dict) else None
         if isinstance(dirs, dict):
-            return [str(v).rstrip("/") for v in dirs.values()]
-        if isinstance(dirs, list):
-            return [str(v).rstrip("/") for v in dirs]
+            resolved = [str(v).rstrip("/") for v in dirs.values()]
+        elif isinstance(dirs, list):
+            resolved = [str(v).rstrip("/") for v in dirs]
     except Exception:
         pass
-    return GLOBAL_SCOPE_FALLBACK_DIRS
+    # An empty result is "could not read the canonical list" — the very case
+    # GLOBAL_SCOPE_FALLBACK_DIRS exists for — but it used to be RETURNED
+    # instead of reaching it: `directories: {}` is a dict, so the old dict
+    # branch returned [] and the fallback below was unreachable. Only a
+    # missing or unparseable file ever got the fallback (#588).
+    #
+    # Empty is the dangerous value here, not a harmless one. _scope_targets
+    # feeds both `git add` staging AND the #361 ignore guard, so an empty
+    # list makes a `global` push stage nothing and the guard inspect
+    # nothing — no error, and identical in every signal to a vault that
+    # genuinely has no content yet. Same class as #583/#581.
+    #
+    # Entries that rstrip to empty are dropped for a smaller reason: a
+    # `"/"` value became the pathspec "/", which git rejects outright
+    # ("'/' is outside repository"), failing the whole staging run with a
+    # message that names neither the config nor the install.
+    return [d for d in resolved if d] or GLOBAL_SCOPE_FALLBACK_DIRS
 
 
 def _global_scope_targets(vault_path: str) -> list[str]:
