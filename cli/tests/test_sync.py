@@ -1774,20 +1774,27 @@ class TestPullTransportClassification:
     @patch("schist.sync._rebuild_index")
     def test_a_real_conflict_is_never_reported_as_unreachable(
             self, _rebuild, tmp_path, capsys, monkeypatch):
-        """_is_network_error is loose: bare "connection", "timed out", and a
-        word-bounded \\bport\\b all match, so CONFLICT output mentioning a
-        vault file called "...port-forwarding-timed-connection.md" satisfies
-        every one of them. Only the conflict-first ordering keeps that from
-        being reported as a dead network, so the ordering is pinned here."""
+        """A CONFLICT in a vault file called
+        "...port-forwarding-timed-connection.md" must never be reported as a
+        dead network.
+
+        This filename used to satisfy every network marker on its own — bare
+        "connection", bare "timed out", and a lone word-bounded \\bport\\b — so
+        the conflict-first ordering was the ONLY thing preventing the wrong
+        diagnosis. #584 narrowed the markers to real transport phrasings, so
+        the classifier is no longer steerable by vault content and the
+        precondition below now asserts the opposite. Both halves are kept: the
+        classifier must reject it, AND the ordering must still route it to the
+        conflict branch."""
         from schist import git_ops
         from schist.sync import sync_pull
 
         vault = _make_spoke(tmp_path)
         conflicty = ("CONFLICT (content): Merge conflict in "
                      "notes/2026-08-24-port-forwarding-timed-connection.md")
-        # the fixture really does trip every network marker
+        # No longer steerable: vault content cannot reach the network branch.
         from schist.sync import _is_network_error
-        assert _is_network_error(conflicty) is True
+        assert _is_network_error(conflicty) is False
         monkeypatch.setattr(git_ops, "pull_rebase", lambda _p: (False, conflicty))
         with pytest.raises(SystemExit):
             sync_pull(MagicMock(), vault, "db.sqlite")
@@ -1847,14 +1854,17 @@ class TestPullFailureBranchOrdering:
 
     def test_a_conflict_whose_filename_trips_every_network_marker_is_still_a_conflict(
             self, tmp_path, capsys, monkeypatch):
-        """_is_network_error matches a bare "connection", "timed out" and a
-        word-bounded \\bport\\b, so this filename satisfies all three. Only the
-        conflict-before-network ordering keeps it from being reported as a dead
-        network — pinned here because #571 reordered the branch above it."""
+        """This filename used to satisfy all three loose markers (bare
+        "connection", bare "timed out", word-bounded \\bport\\b), leaving the
+        conflict-before-network ordering as the only defence — pinned here
+        because #571 reordered the branch above it. #584 fixed the rule rather
+        than relying on the ordering, so the classifier now rejects the
+        filename outright; the ordering assertion below stays as defence in
+        depth."""
         from schist.sync import _is_network_error
         output = ("CONFLICT (content): Merge conflict in "
                   "notes/2026-08-24-port-forwarding-timed-connection.md")
-        assert _is_network_error(output) is True
+        assert _is_network_error(output) is False
         self._pull_returns(monkeypatch, output)
         out = self._run(tmp_path, capsys)
         assert "Hub unreachable" not in (out.out + out.err)
@@ -1901,3 +1911,138 @@ class TestPullFailureBranchOrdering:
         err = self._run(tmp_path, capsys).err
         assert "Error: pull failed" in err
         assert "Hub unreachable" not in err
+
+
+_REAL_TRANSPORT_FAILURES = [
+    ("fatal: unable to access 'https://pi.local/vault.git/': "
+     "Could not resolve host: pi.local"),
+    ("ssh: connect to host pi.local port 22: Connection refused\n"
+     "fatal: Could not read from remote repository."),
+    "ssh: connect to host pi.local port 22: Operation timed out",
+    ("fatal: unable to access 'https://pi.local/vault.git/': "
+     "Failed to connect to pi.local port 443: No route to host"),
+    ("ssh: Could not resolve hostname schist-hub: "
+     "Temporary failure in name resolution"),
+    ("fatal: unable to access 'https://pi/v.git/': "
+     "Recv failure: Connection reset by peer"),
+    "ssh: connect to host pi port 22: Network is unreachable",
+    ("Connection closed by remote host\n"
+     "fatal: Could not read from remote repository."),
+]
+
+_NOT_TRANSPORT_FAILURES = [
+    # An HTTP auth/permission answer. git stamps its generic "unable to
+    # access" wrapper on 401/403/404 exactly as on a dead socket, which is why
+    # that marker was dropped rather than narrowed.
+    ("fatal: unable to access 'https://pi.local/vault.git/': "
+     "The requested URL returned error: 403"),
+    # The issue's own scenarios: application-level failures that merely
+    # contain the word "connection" or "timed out".
+    "Error: repository connection rejected (authentication required)",
+    "connection to jump host blocked by security policy",
+    "request timed out after 30s",
+    # Vault CONTENT must never be able to reach the network branch.
+    ("CONFLICT (content): Merge conflict in "
+     "notes/2026-08-24-port-forwarding-timed-connection.md"),
+    "CONFLICT (content): Merge conflict in notes/port-22-notes.md",
+    # #321: `fatal:` alone is not network evidence.
+    "fatal: invalid refspec ''",
+    "remote: REJECTED: push contains out-of-scope writes",
+]
+
+
+class TestNetworkMarkerPrecision:
+    """#584 — `_is_network_error` keyed on a bare "connection", a bare
+    "timed out" and a lone word-bounded \\bport\\b, any one of which was
+    sufficient. e6a1a36 called that looseness "tracked separately" and relied
+    on sync_pull's branch ORDERING to contain it; sync_push has no such
+    ordering, so an application-level auth failure whose stderr merely
+    contains "connection" was reported as "Hub unreachable".
+
+    These two parametrized sets are the contract in both directions. The
+    second set is the point of the change; the first set is what must not be
+    sacrificed to get it, and is the half a narrowing fix silently breaks.
+    """
+
+    @pytest.mark.parametrize("stderr", _REAL_TRANSPORT_FAILURES)
+    def test_real_transport_failures_still_classify_as_network(self, stderr):
+        """The half that a narrowing fix breaks. Every string here classified
+        as network BEFORE #584 and must still do so after."""
+        from schist.sync import _is_network_error
+
+        assert _is_network_error(stderr) is True
+
+    @pytest.mark.parametrize("stderr", _NOT_TRANSPORT_FAILURES)
+    def test_application_and_content_strings_are_not_network(self, stderr):
+        from schist.sync import _is_network_error
+
+        assert _is_network_error(stderr) is False
+
+    def test_our_own_timeout_banners_stay_on_the_unreachable_side(self):
+        """A wrapper timeout carries no transport evidence — the cap killed the
+        child before it could explain, and on a down VPN ssh's own connect
+        timeout outlives ours (#567). It still means we got NO ANSWER, which is
+        the unreachable side of the sync-gating axis. Before #584 these landed
+        there by accident, on the bare "timed out" substring; now they are
+        matched on the producer's own token at line start."""
+        from schist import git_ops
+        from schist.sync import _is_network_error
+
+        assert _is_network_error(
+            f"{git_ops.PUSH_NO_RESPONSE_PREFIX} 60s") is True
+        assert _is_network_error(
+            f"{git_ops.PULL_NO_RESPONSE_PREFIX} (hub unreachable, VPN down, "
+            "or a stalled transport); no changes were applied.") is True
+
+    def test_the_banner_is_matched_at_line_start_not_as_a_substring(self):
+        """The anchor is what makes it unspoofable: the same words embedded in
+        vault content must not classify."""
+        from schist import git_ops
+        from schist.sync import _is_network_error
+
+        embedded = ("CONFLICT (content): Merge conflict in "
+                    f"notes/{git_ops.PUSH_NO_RESPONSE_PREFIX} 60s.md")
+        assert _is_network_error(embedded) is False
+
+    @patch("schist.sync.git_ops.push", return_value=(
+        False, "connection to jump host blocked by security policy"))
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_push_auth_failure_is_not_reported_as_unreachable(
+            self, _changes, _unpushed, _push, tmp_path, capsys):
+        """The consequence at the command level. sync_push has no CONFLICT
+        guard ahead of the network test, so unlike sync_pull there was no
+        ordering containing the loose markers here at all: the bare
+        "connection" marker alone told a user with an SSH-policy problem to go
+        check their network.
+
+        The fixture avoids the word "rejected" on purpose — sync_push's FIRST
+        branch matches that as a bare substring, which would mask what this
+        test is measuring. That looseness is a separate defect (it also reads
+        a plain non-fast-forward as a hub ACL rejection) and is filed on its
+        own rather than widened into this change."""
+        from schist.sync import sync_push
+
+        vault = _make_spoke(tmp_path)
+        with pytest.raises(SystemExit):
+            sync_push(MagicMock(), vault, "db.sqlite")
+        err = capsys.readouterr().err
+        assert "unreachable" not in err.lower()
+        assert "Push failed" in err
+        assert "blocked by security policy" in err
+
+    @patch("schist.sync.git_ops.push", return_value=(
+        False, "ssh: connect to host pi port 22: Connection refused"))
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_push_transport_failure_is_still_reported_as_unreachable(
+            self, _changes, _unpushed, _push, tmp_path, capsys):
+        """The other half at the command level: a genuine dead socket must
+        still get the "saved locally" message, not a bare "Push failed"."""
+        from schist.sync import sync_push
+
+        vault = _make_spoke(tmp_path)
+        with pytest.raises(SystemExit):
+            sync_push(MagicMock(), vault, "db.sqlite")
+        err = capsys.readouterr().err
+        assert "Hub unreachable" in err
