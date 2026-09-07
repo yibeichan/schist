@@ -1,0 +1,346 @@
+{
+  "description": "Pins transport-failure classification across the CLI/MCP boundary: cli/schist/sync.py `_is_network_error` and mcp-server/src/tools.ts `classifyPushFailure` (its TRANSPORT_PATTERNS / TRANSPORT_SHAPE_RES branch). The two lists were hand-maintained and diverged in BOTH directions (#594 #601 #604 #605 #606): seven phrasings the CLI knew were absent from MCP, four MCP knew were absent from the CLI, and `unable to access` survived in MCP after #592 removed it from the CLI as an HTTP-auth false positive. Every case here is asserted against BOTH implementations, so a phrasing added to one side and not the other fails CI. Consumed by cli/tests/test_sync.py and mcp-server/tests/transport-classification-parity.test.ts.",
+  "notes": [
+    "`network` is the CLI's _is_network_error verdict. `mcp_class` is the class classifyPushFailure must return; null means this case is not asserted against MCP, with `mcp_skip_why` saying why.",
+    "Wrapper timeout banners (PULL/PUSH_NO_RESPONSE_PREFIX) are deliberately absent: the CLI matches them on its own producer token at line start, while MCP learns of a spawn timeout from outcome.timedOut rather than from text. Pinning a text verdict for those would encode a contract neither side actually implements.",
+    "Negative cases named steer-* are the discriminating half. The hub echoes offending FILEPATHS into its output and git relays local failures with paths attached, so every phrasing added here must be matched in a shape that a vault filename cannot forge (#535/#584). Each newly added matcher has a steer-* twin."
+  ],
+  "cases": [
+    {
+      "name": "dns-ssh-temporary-failure",
+      "input": "ssh: Could not resolve hostname schist-hub: Temporary failure in name resolution",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "ssh + getaddrinfo phrasing; MCP had only the narrower 'could not resolve hostname'"
+    },
+    {
+      "name": "dns-curl-could-not-resolve-host",
+      "input": "fatal: unable to access 'https://pi.local/vault.git/': Could not resolve host: pi.local",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "curl says 'host', ssh says 'hostname' \u2014 the shared prefix is 'could not resolve'"
+    },
+    {
+      "name": "connect-refused",
+      "input": "ssh: connect to host pi.local port 22: Connection refused\nfatal: Could not read from remote repository.",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "the phrasing the bare 'connection' marker used to cover"
+    },
+    {
+      "name": "connect-operation-timed-out",
+      "input": "ssh: connect to host pi.local port 22: Operation timed out",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "ssh's own timeout line, distinct from our wrapper banner"
+    },
+    {
+      "name": "connect-connection-timed-out",
+      "input": "ssh: connect to host pi port 22: Connection timed out",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "the other timeout phrasing"
+    },
+    {
+      "name": "connect-curl-failed-to-connect-no-route",
+      "input": "fatal: unable to access 'https://pi.local/vault.git/': Failed to connect to pi.local port 443: No route to host",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "curl error 7; MCP had neither 'failed to connect' nor the pairing"
+    },
+    {
+      "name": "connect-curl-couldnt-connect",
+      "input": "fatal: unable to access 'https://pi/v.git/': curl: (7) couldn't connect to host",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "curl error 7 alternate phrasing; had no CLI test case either (#600)"
+    },
+    {
+      "name": "connect-network-unreachable",
+      "input": "ssh: connect to host pi port 22: Network is unreachable",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "ENETUNREACH"
+    },
+    {
+      "name": "connect-closed-by-remote-host",
+      "input": "Connection closed by remote host\nfatal: Could not read from remote repository.",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "MCP had only 'connection closed by remote host'; CLI's 'connection closed' is broader"
+    },
+    {
+      "name": "midxfer-curl-recv-failure",
+      "input": "fatal: unable to access 'https://pi/v.git/': Recv failure: Connection reset by peer",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "curl error 56; added to the CLI by #592, never to MCP (#604)"
+    },
+    {
+      "name": "midxfer-curl-send-failure",
+      "input": "fatal: unable to access 'https://pi.local/vault.git/': Send failure: Connection reset by peer",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "curl error 55; #592 added it to the CLI with no test (#600) and not to MCP (#604)"
+    },
+    {
+      "name": "midxfer-curl-empty-reply",
+      "input": "fatal: unable to access 'https://pi.local/vault.git/': Empty reply from server",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "curl error 52; same gap as above (#600/#604)"
+    },
+    {
+      "name": "midxfer-git-write-error-broken-pipe",
+      "input": "fatal: write error: Broken pipe",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "git's pack-write drop; MCP had bare 'broken pipe', CLI had nothing (#605)"
+    },
+    {
+      "name": "midxfer-ssh-packet-write-wait",
+      "input": "packet_write_wait: Connection to pi.local port 22: Broken pipe\nfatal: Could not read from remote repository.",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "OpenSSH 7.7+ mid-transfer drop. Says 'Connection to', not 'connect to host', so the old _NETWORK_CONNECT_RE missed it (#601)"
+    },
+    {
+      "name": "midxfer-git-remote-end-hung-up",
+      "input": "fatal: the remote end hung up unexpectedly",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "MCP had it, CLI did not (#605)"
+    },
+    {
+      "name": "midxfer-git-early-eof",
+      "input": "fatal: early EOF\nfatal: index-pack failed",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "remote closed before the full pack; MCP had it, CLI did not (#606)"
+    },
+    {
+      "name": "kex-connection-closed",
+      "input": "kex_exchange_identification: Connection closed by remote host",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "#606 cited this as misclassified; it already passed via 'connection closed'. Kept to pin that it stays classified whichever tail ssh chooses"
+    },
+    {
+      "name": "kex-banner-exchange-invalid-format",
+      "input": "kex_exchange_identification: banner exchange: Connection to 10.0.0.2 port 22: invalid format",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "the tail #606 was actually right about: no existing marker matched this one"
+    },
+    {
+      "name": "kex-invalid-protocol-identifier",
+      "input": "kex_exchange_identification: server sent invalid protocol identifier",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "fail2ban/LB closing before negotiation; no existing marker matched"
+    },
+    {
+      "name": "refusal-http-403",
+      "input": "fatal: unable to access 'https://pi.local/vault.git/': The requested URL returned error: 403",
+      "network": false,
+      "mcp_class": "other",
+      "why": "git stamps 'unable to access' on 401/403/404 as readily as on a dead socket \u2014 the #594 false positive"
+    },
+    {
+      "name": "refusal-http-401",
+      "input": "fatal: unable to access 'https://pi.local/vault.git/': The requested URL returned error: 401",
+      "network": false,
+      "mcp_class": "other",
+      "why": "same wrapper, same reason"
+    },
+    {
+      "name": "refusal-hub-acl",
+      "input": "remote: REJECTED: push contains out-of-scope writes\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": false,
+      "mcp_class": "acl-rejected",
+      "why": "a refusal about our content, never a transport blip"
+    },
+    {
+      "name": "app-connection-rejected",
+      "input": "Error: repository connection rejected (authentication required)",
+      "network": false,
+      "mcp_class": "other",
+      "why": "contains 'connection' but is an auth answer"
+    },
+    {
+      "name": "app-jump-host-policy",
+      "input": "connection to jump host blocked by security policy",
+      "network": false,
+      "mcp_class": "other",
+      "why": "#584's original report"
+    },
+    {
+      "name": "app-request-timed-out",
+      "input": "request timed out after 30s",
+      "network": false,
+      "mcp_class": "other",
+      "why": "contains 'timed out' but is not a transport failure"
+    },
+    {
+      "name": "local-invalid-refspec",
+      "input": "fatal: invalid refspec ''",
+      "network": false,
+      "mcp_class": "other",
+      "why": "#321: a bare `fatal:` is not network evidence"
+    },
+    {
+      "name": "midxfer-ssh-packet-write-host-is-down",
+      "input": "packet_write_wait: Connection to 10.0.0.5 port 22: Host is down\nfatal: Could not read from remote repository.",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "OpenSSH formats this as 'Connection to %s port %d: %s' with a raw strerror tail, so the tail set is every socket errno \u2014 EHOSTDOWN here. No marker covers 'host is down', which makes this the case that the connect-SHAPE matcher exists for: without it the only packet_write_wait tails classified are the ones that happen to collide with a marker (#601)"
+    },
+    {
+      "name": "steer-conflict-port-forwarding-filename",
+      "input": "CONFLICT (content): Merge conflict in notes/2026-08-24-port-forwarding-timed-connection.md",
+      "network": false,
+      "mcp_class": "other",
+      "why": "the original #584 filename, which satisfied all three pre-#592 loose markers"
+    },
+    {
+      "name": "steer-conflict-port-22-filename",
+      "input": "CONFLICT (content): Merge conflict in notes/port-22-notes.md",
+      "network": false,
+      "mcp_class": "other",
+      "why": "pins that the ssh port SHAPE, not a bare \\bport\\b, is what matches"
+    },
+    {
+      "name": "steer-local-rebase-echoes-could-not-resolve",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/could not resolve.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'could not resolve'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-local-rebase-echoes-temporary-failure-in-name-resolution",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/temporary failure in name resolution.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'temporary failure in name resolution'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-local-rebase-echoes-failed-to-connect",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/failed to connect.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'failed to connect'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-local-rebase-echoes-couldnt-connect",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/couldn't connect.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'couldn't connect'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-local-rebase-echoes-connection-refused",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/connection refused.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'connection refused'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-local-rebase-echoes-connection-reset",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/connection reset.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'connection reset'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-local-rebase-echoes-connection-closed",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/connection closed.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'connection closed'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-local-rebase-echoes-connection-timed-out",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/connection timed out.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'connection timed out'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-local-rebase-echoes-operation-timed-out",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/operation timed out.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'operation timed out'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-local-rebase-echoes-recv-failure",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/recv failure.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'recv failure'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-local-rebase-echoes-send-failure",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/send failure.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'send failure'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-local-rebase-echoes-empty-reply-from-server",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/empty reply from server.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'empty reply from server'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-local-rebase-echoes-network-is-unreachable",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/network is unreachable.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'network is unreachable'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-local-rebase-echoes-no-route-to-host",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/no route to host.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'no route to host'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-local-rebase-echoes-broken-pipe",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/broken pipe.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'broken pipe'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-local-rebase-echoes-the-remote-end-hung-up",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/the remote end hung up.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'the remote end hung up'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-local-rebase-echoes-early-eof",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/early eof.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'early eof'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-local-rebase-echoes-kex-exchange-identification",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/kex_exchange_identification.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "a LOCAL failure echoing a vault path containing 'kex_exchange_identification'. The phrase arrives as DATA on a line no transport producer wrote, so it must not classify \u2014 reporting 'Hub unreachable' for a dirty worktree sends the user to the wrong layer, and is #584's defect pointing the worse way. One case per marker: a marker whose anchoring is untested is a marker that will be narrowed wrong later (#601/#604/#605/#606 were all that)."
+    },
+    {
+      "name": "steer-filename-forging-the-connect-shape",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tnotes/connection to pi port 22.md\nPlease commit your changes or stash them before you rebase.",
+      "network": false,
+      "mcp_class": "other",
+      "why": "the connect SHAPE is the one matcher a filename can reproduce verbatim, so it needs its own steer case: producer-line anchoring is the only thing keeping this out of the network branch"
+    }
+  ]
+}
