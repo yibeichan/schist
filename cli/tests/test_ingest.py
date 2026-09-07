@@ -2438,3 +2438,41 @@ def test_bare_script_env_flag_fallback_matches_env_utils(tmp_path: Path) -> None
             if old is not None:
                 os.environ[name] = old
     assert got == expected
+
+
+def test_ingest_entrypoint_reports_a_broken_install_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """The twin of #603's CLI half, one console script over.
+
+    `ingest.main()` had no handler either, so the same broken install produced
+    a raw traceback from `schist-ingest`. That path matters more than it looks:
+    the MCP server spawns this script (tools.ts) and surfaces its stderr to an
+    agent, and it also runs from the post-commit hook — both readers see a
+    traceback as an internal crash rather than "reinstall the CLI".
+
+    #603 named only the two `commands.py` call sites; fixing those alone would
+    have left this side raising, which is the one-sided-parity shape that put
+    #583 and #588 in the tree in the first place.
+    """
+    from schist import ingest as ingest_mod
+
+    broken = tmp_path / "broken-default.yaml"
+    broken.write_text("directories: {}\n", encoding="utf-8")
+    monkeypatch.setattr(ingest_mod, "_default_schema_path", lambda: broken)
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setattr("sys.argv", [
+        "schist-ingest", "--vault", str(vault), "--db", str(tmp_path / "i.sqlite"),
+    ])
+
+    with pytest.raises(SystemExit) as exc:
+        ingest_mod.main()
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert err.startswith("Error: "), f"not the CLI's error shape: {err!r}"
+    assert "no content directories configured" in err
+    assert "reinstall the CLI" in err
+    assert "Traceback" not in err
