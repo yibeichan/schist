@@ -487,6 +487,86 @@ async function readSyncWarning(vaultRoot: string): Promise<string | undefined> {
   return `Recent background sync failure:${ageClause} ${parsed.contents}. Writes may not have reached the hub. \`sync_status\` reports divergence and \`sync_retry\` can retry and clear this state.`;
 }
 
+/**
+ * Failure classes that mean "we never got an answer from the hub", as opposed
+ * to "the hub refused our content" (#531).
+ *
+ * The distinction decides whether writing again makes things worse. An
+ * unreachable hub is just being offline: commits land locally, in order, and
+ * push when the network returns — and #500 rebases whatever divergence
+ * accumulated meanwhile. A refusal is a decision about the content that will
+ * not change by itself, and every subsequent write rides on the same
+ * all-or-nothing push.
+ *
+ * `rate-limited` is deliberately NOT here even though it clears with time:
+ * the hub DID answer, and `notes_per_sync` is a per-push limit, so letting
+ * notes pile up can turn "wait an hour" into a batch too big to push at all.
+ */
+const SELF_CLEARING_FAILURE_CLASSES: ReadonlySet<PushFailureClass> = new Set([
+  "transport",
+  "timeout",
+]);
+
+const DEFAULT_SYNC_OFFLINE_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How long an unreachable hub stays a warning before it becomes a block.
+ *
+ * A guess, on purpose: the MCP server deliberately does not parse the hub's
+ * `rate_limits` (hub-only, to avoid parser skew — see #511), so it cannot
+ * know how large an accumulated batch is too large to push. Conservative and
+ * overridable beats clever and wrong. Read per call so tests and operators
+ * can change it without a restart.
+ */
+function syncOfflineGraceMs(): number {
+  const raw = process.env.SCHIST_SYNC_OFFLINE_GRACE_MS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_SYNC_OFFLINE_GRACE_MS;
+  const parsed = Number(raw);
+  // Note `>= 0`, not a truthiness check: 0 is a meaningful setting ("never
+  // allow writes on a stale sentinel"), and `||` would silently discard it.
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_SYNC_OFFLINE_GRACE_MS;
+}
+
+/** Age of the sentinel, preferring its own timestamp over the file mtime. */
+function sentinelAgeMs(
+  state: { timestamp?: string; mtimeMs: number },
+  now: number,
+): number | null {
+  if (state.timestamp !== undefined) {
+    const parsed = Date.parse(state.timestamp);
+    if (!Number.isNaN(parsed)) return Math.max(0, now - parsed);
+  }
+  if (Number.isFinite(state.mtimeMs)) return Math.max(0, now - state.mtimeMs);
+  return null;
+}
+
+/** Per-class remedy, so the message names the actual way out. */
+function syncDirtyRemedy(cls: PushFailureClass | null, ageClause: string): string {
+  switch (cls) {
+    case "acl-rejected":
+      return "The hub refused this content as out of scope, and retrying pushes the same " +
+        "rejection. Move the note under a directory your identity may write (see vault.yaml), " +
+        "then run `sync_retry`.";
+    case "rate-limited":
+      return "The hub rate-limited the push. It will accept a retry once the window resets; " +
+        "writes stay blocked until then so the pending batch doesn't outgrow the hub's " +
+        "notes_per_sync limit. Run `sync_retry` after the retry-after window in `sync_status`.";
+    case "non-fast-forward":
+      return "The spoke diverged from the hub and automatic recovery could not rebase it " +
+        "(dirty working tree, or a rebase conflict). Run `sync_retry mode=pull-rebase-push` " +
+        "after committing or stashing local changes.";
+    case "transport":
+    case "timeout":
+      return `The hub has been unreachable${ageClause}. Writes were allowed while it looked ` +
+        "like a transient outage; blocking now to stop unbounded local-only accumulation. " +
+        "Check connectivity to the hub, then run `sync_retry`.";
+    default:
+      return "Run `sync_retry` after checking `sync_status`; writes resume after a successful " +
+        "push clears the sync error. If recovery keeps failing, remove " +
+        "`.schist/last-sync-error` manually only as a last resort.";
+  }
+}
+
 async function blockWriteIfSyncDirty(vaultRoot: string): Promise<ToolError | null> {
   // Only spokes can diverge from a hub, and only spokes have a recovery path:
   // both `sync_retry` and `triggerSpokePush` are spoke-gated. Blocking a
@@ -497,12 +577,37 @@ async function blockWriteIfSyncDirty(vaultRoot: string): Promise<ToolError | nul
   if (!(await isSpokeVault(vaultRoot))) return null;
   const syncWarning = await readSyncWarning(vaultRoot);
   if (syncWarning === undefined) return null;
+
+  // #531: a write is the ONLY in-band trigger for a background push, so
+  // blocking writes also removes the mechanism that would clear the sentinel
+  // — the same no-recovery deadlock this function already refuses to create
+  // for non-spokes. For an unreachable hub that deadlock is pure cost: the
+  // failure fixes itself, and letting the write through re-tests it.
+  //
+  // Fail closed everywhere else. An unknown class, an unparseable or
+  // unreadable sentinel, or a pre-#501 sentinel with no [class] marker all
+  // block: this gate is where a classifier bug would turn into real
+  // divergence, so it is never the optimistic party.
+  const state = await readSyncErrorState(vaultRoot);
+  const cls = state?.failure_class ?? null;
+  let ageClause = "";
+  if (state !== null && cls !== null && SELF_CLEARING_FAILURE_CLASSES.has(cls)) {
+    const age = sentinelAgeMs(state, Date.now());
+    if (age !== null && age < syncOfflineGraceMs()) {
+      // Allowed, not silent: every gated write tool attaches `syncWarning` to
+      // its response, so the agent is still told the note has not reached the
+      // hub. The trade is "refuse" for "inform", which only holds if the
+      // telling actually happens.
+      return null;
+    }
+    if (age !== null) ageClause = ` for ${Math.floor(age / (60 * 60 * 1000))}h`;
+  }
+
   return {
     error: "SYNC_DIRTY",
     message:
       `${syncWarning} Refusing this write to avoid compounding spoke/hub divergence. ` +
-      "Run `sync_retry` after checking `sync_status`; writes resume after a successful push clears the sync error. " +
-      "If recovery keeps failing, remove `.schist/last-sync-error` manually only as a last resort.",
+      syncDirtyRemedy(cls, ageClause),
   };
 }
 
