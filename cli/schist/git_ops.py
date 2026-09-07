@@ -463,9 +463,11 @@ def pull_rebase(vault_path: str) -> tuple[bool, str]:
         # VPN ssh never reaches its own "Operation timed out" line: the wrapper
         # kills the only process that knows the answer. Naming "no response
         # from the hub" is therefore the honest phrasing AND the one
-        # _is_network_error already classifies (bare "timed out"), which is
-        # what puts this on the unreachable side of the sync-gating axis
-        # instead of the refused side.
+        # _is_network_error already classifies — since #584 via the
+        # line-anchored PULL_NO_RESPONSE_PREFIX rather than the bare
+        # "timed out" substring this comment used to name — which is what
+        # puts this on the unreachable side of the sync-gating axis instead
+        # of the refused side.
         partial = _partial_output(timeout_exc)
         detail = f"\n{partial}" if partial else ""
         return False, (f"{PULL_NO_RESPONSE_PREFIX} "

@@ -728,6 +728,89 @@ def _is_wrapper_timeout(output: str) -> bool:
     return output.lstrip().startswith(_WRAPPER_TIMEOUT_PREFIXES)
 
 
+# Push refusals split into two kinds with OPPOSITE remedies, and until #593
+# `sync_push` read both as the ACL one on a bare "rejected" substring —
+# unchanged since #10. git's ordinary non-fast-forward output always contains
+# `! [rejected]`, and its hint text says "rejected" again, so a clone that was
+# merely behind was announced as `Push rejected by hub:` and sent the user to
+# change hub ACLs for something only `schist sync pull` fixes.
+#
+# Both matchers anchor on tokens the PRODUCER owns, per #535/#537:
+#
+#   * `remote:` at line start is git's own marking of text that came back over
+#     the wire from the hub. Local git never prefixes its own diagnostics with
+#     it, so `remote: REJECTED:` is the hub's verdict and nothing local — no
+#     branch name, no path in a vault file — can forge it.
+#   * `! [remote rejected]` is git's wording for "the REMOTE declined this",
+#     which is a different string from the `! [rejected]` it prints after its
+#     own local fast-forward check. Keeping them apart is the whole fix.
+#
+# Verified against real `git push` output on git 2.50 rather than hand-written
+# stubs, which is the gap #541 names.
+_ACL_REJECTION_RE = re.compile(
+    r"^\s*remote:\s*REJECTED:", re.MULTILINE)
+_REMOTE_DECLINED_RE = re.compile(
+    r"^\s*!\s*\[remote rejected\]", re.MULTILINE)
+
+# classifyPushFailure in mcp-server/src/tools.ts already made this
+# distinction — the CLI is the half that never got it — and the branch ORDER
+# here matches it deliberately. The token MATCHING does not: tools.ts tests
+# `text.includes("updates were rejected")` and the two parentheticals as bare
+# substrings against combined output, which the filepath-echo described below
+# steers exactly as it steered this regex's first draft. There it is worse
+# than a wrong header, because a `non-fast-forward` verdict is what triggers
+# #500's auto-recovery, so a crafted filename aims a pull-rebase-push loop at
+# a refusal that can never succeed. Filed separately rather than fixed here.
+#
+# Nothing ENFORCES the alignment either — no fixture covers push-failure
+# classification (#543/#594) — so this comment is the only link between them;
+# the shared fixture lands with the #594 half, where both consumers can be
+# written at once.
+#
+# Both alternatives are anchored at LINE START, and that anchoring is the
+# whole point rather than tidiness. The hub echoes the offending FILEPATH
+# verbatim into its rejection (`format_rejection` in pre_receive.py), and git
+# relays it, so vault filenames reach this matcher. A note committed as
+# `notes/updates were rejected.md` made a genuine ACL refusal match the
+# free-floating tokens this regex first shipped with — and since the
+# non-fast-forward branch is tested first, it routed the user to
+# `schist sync pull` for something only a scope grant fixes. That is the same
+# defect this commit exists to remove, re-introduced by the fix and pointing
+# the worse way: a steerable substring that OPENS a gate (#593).
+#
+# git prefixes every line that came from the remote with `remote: `, so a
+# line that BEGINS with `!` or `hint:` is git's own and cannot be forged by
+# anything the hub prints or any path inside the vault. The `(fetch first)` /
+# `(non-fast-forward)` parentheticals are dropped as separate alternatives:
+# they only ever appear ON the `! [rejected]` line, which is already matched,
+# and free-floating they were steerable by a filename too.
+_NON_FAST_FORWARD_RE = re.compile(
+    r"^\s*!\s*\[rejected\]"
+    r"|^\s*hint:.*updates were rejected",
+    re.MULTILINE | re.IGNORECASE)
+
+
+def _is_acl_rejection(output: str) -> bool:
+    """Did the HUB refuse this push (pre-receive declined), as opposed to git
+    refusing it locally because the clone is behind?
+
+    `pre-receive hook declined` is git's wrapper around EVERY hook refusal, so
+    it catches verdicts whose wording pre_receive.py may change — matching
+    isAclRejection in mcp-server/src/tools.ts.
+    """
+    return bool(_ACL_REJECTION_RE.search(output)
+                or _REMOTE_DECLINED_RE.search(output)
+                or "pre-receive hook declined" in output.lower())
+
+
+def _is_non_fast_forward(output: str) -> bool:
+    """Was the push refused because the hub has commits we do not have?
+
+    Fixed on the spoke with `schist sync pull` — never with a scope grant.
+    """
+    return bool(_NON_FAST_FORWARD_RE.search(output))
+
+
 # Mirror of SYNC_ERROR_SENTINEL in mcp-server/src/tools.ts. The MCP server
 # writes this file when a background push fails and REFUSES every subsequent
 # vault write while it exists (blockWriteIfSyncDirty → SYNC_DIRTY). Until #560
@@ -866,7 +949,20 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
     print(f"Pushing as {config.identity}...")
     ok, output = git_ops.push(vault_path)
     if not ok:
-        if "REJECTED" in output.upper() or "rejected" in output:
+        # ORDER MATTERS, and it is the SAME order as classifyPushFailure in
+        # mcp-server/src/tools.ts: non-fast-forward is tested first. git emits
+        # its "Updates were rejected because…" hint block only for a stale
+        # ref, and a hub refusal carries no such hint, so this cannot steal a
+        # genuine ACL case — while testing it first stops a shared word in the
+        # surrounding output from stealing a divergence (#593).
+        if _is_non_fast_forward(output):
+            # NOT an ACL problem, and not fixable on the hub: the hub simply
+            # has commits we do not. Name the remedy the user can actually run.
+            print("Push rejected — the hub has commits this clone does not.\n"
+                  "Run `schist sync pull` to rebase onto them, then push again.",
+                  file=sys.stderr)
+            print(f"  Detail: {output}", file=sys.stderr)
+        elif _is_acl_rejection(output):
             print(f"Push rejected by hub:\n{output}", file=sys.stderr)
         elif _is_network_error(output):
             print("Hub unreachable — changes saved locally. Push when network available.", file=sys.stderr)
