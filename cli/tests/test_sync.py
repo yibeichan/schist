@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -9,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from schist import git_ops as git_ops_mod
 from schist.spoke_config import SpokeConfig, save_spoke_config
 
 
@@ -2005,6 +2007,31 @@ class TestNetworkMarkerPrecision:
         assert _is_network_error(embedded) is False
 
     @patch("schist.sync.git_ops.push", return_value=(
+        False, f"{git_ops_mod.PUSH_NO_RESPONSE_PREFIX} "
+               f"{git_ops_mod.PUSH_TIMEOUT}s"))
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_push_timeout_is_reported_as_unreachable(
+            self, _changes, _unpushed, _push, tmp_path, capsys):
+        """#607: the timeout path had only a unit assertion on
+        `_is_network_error`, never a command-level one.
+
+        The two siblings below both check the CONSEQUENCE — what sync_push
+        actually prints — while the timeout case checked only the predicate.
+        A refactor that routed the timeout separately (a dedicated
+        `_is_push_timeout` branch, say, the way MCP reads outcome.timedOut
+        instead of text) would have broken the message with nothing failing.
+        """
+        from schist.sync import sync_push
+
+        vault = _make_spoke(tmp_path)
+        with pytest.raises(SystemExit):
+            sync_push(MagicMock(), vault, "db.sqlite")
+        err = capsys.readouterr().err
+        assert "Hub unreachable" in err
+        assert "changes saved locally" in err.lower()
+
+    @patch("schist.sync.git_ops.push", return_value=(
         False, "connection to jump host blocked by security policy"))
     @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
     @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
@@ -2353,3 +2380,76 @@ class TestAbortTimeoutSuffixDoesNotForgeATransportError:
 
         assert _is_network_error(output) is True
         assert git_ops.PULL_ABORT_FAILED_MARKER in output
+
+
+def _transport_parity_cases() -> list[dict]:
+    """The corpus shared with mcp-server/tests/transport-classification-parity."""
+    fixture = (Path(__file__).resolve().parents[2]
+               / "schema" / "transport-classification-parity.json")
+    return json.loads(fixture.read_text(encoding="utf-8"))["cases"]
+
+
+def test_transport_parity_fixture_is_nontrivial() -> None:
+    """An emptied or mangled fixture must fail loudly, not collect as a single
+    skipped test — parametrize over an empty list reports green."""
+    cases = _transport_parity_cases()
+    assert len(cases) >= 30
+    assert sum(1 for c in cases if c["network"]) >= 15
+    assert sum(1 for c in cases if not c["network"]) >= 10
+
+
+@pytest.mark.parametrize("case", _transport_parity_cases(),
+                         ids=lambda c: c["name"])
+def test_is_network_error_matches_shared_parity_cases(case: dict) -> None:
+    """`_is_network_error` and MCP's classifyPushFailure must agree on the same
+    git stderr. The two vocabularies were hand-maintained and drifted in BOTH
+    directions — seven phrasings the CLI knew were absent from MCP (#604), four
+    MCP knew were absent here (#605/#606), and `unable to access` outlived its
+    removal from this side (#594). CI structurally could not see it: `schema/`
+    held eight parity fixtures and none covered this classifier.
+
+    The fixture is the single source of truth, consumed here and by
+    mcp-server/tests/transport-classification-parity.test.ts.
+    """
+    from schist.sync import _is_network_error
+
+    assert _is_network_error(case["input"]) is case["network"], case["why"]
+
+
+def test_every_network_marker_is_exercised_by_the_corpus() -> None:
+    """The coverage half (#600).
+
+    `"couldn't connect"`, `"send failure"` and `"empty reply from server"` sat
+    in `_NETWORK_ERROR_MARKERS` with no case behind any of them, so a
+    misspelling or a deletion would have failed nothing. Asserting a SUBSET
+    rather than an intersection is the point: an intersection filter cannot
+    detect absence, so an unexercised marker would pass vacuously.
+    """
+    from schist.sync import _NETWORK_ERROR_MARKERS
+
+    transport_text = "\n".join(
+        c["input"].lower() for c in _transport_parity_cases() if c["network"])
+    unexercised = [m for m in _NETWORK_ERROR_MARKERS
+                   if m not in transport_text]
+    assert unexercised == [], (
+        f"markers with no corpus case: {unexercised}. Add a real producer "
+        "string to schema/transport-classification-parity.json.")
+
+
+def test_every_network_marker_has_a_steering_negative() -> None:
+    """The other half of coverage, and the one that matters more.
+
+    Every marker is ordinary enough to be a FILENAME, and filenames reach the
+    classifier. A marker with positive cases but no steer-* twin is one whose
+    anchoring nobody has tested — which is how a bare `"recv failure"` shipped
+    in #592 and stayed steerable until the shared corpus caught it.
+    """
+    from schist.sync import _NETWORK_ERROR_MARKERS
+
+    steer_text = "\n".join(
+        c["input"].lower() for c in _transport_parity_cases()
+        if not c["network"] and c["name"].startswith("steer-"))
+    missing = [m for m in _NETWORK_ERROR_MARKERS if m not in steer_text]
+    assert missing == [], (
+        f"markers with no steer-* negative: {missing}. Add a local failure "
+        "that echoes a vault path containing the phrase.")

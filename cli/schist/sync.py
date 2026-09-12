@@ -556,11 +556,18 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
         # The marker is producer-owned and line-anchored, so no file content
         # can spoof it.
         #
-        # _is_network_error goes LAST of the three, and must stay behind the
-        # conflict test: its markers include a bare "connection", "timed out"
-        # and a word-bounded \bport\b, so a genuine conflict in a file named
-        # "...port-forwarding-timed-connection.md" satisfies all three. That
-        # looseness is tracked separately; the ordering is what contains it.
+        # _is_network_error still goes LAST of the three, but the reason has
+        # changed and the comment that used to stand here no longer described
+        # the code (#598). Its markers WERE a bare "connection", a bare
+        # "timed out" and a word-bounded \bport\b, so a conflict in a file
+        # named "...port-forwarding-timed-connection.md" satisfied all three
+        # and this ordering was the only thing containing it. #584 (PR #592)
+        # narrowed those to real transport phrasings, and the marker match is
+        # now confined to producer-owned lines, so vault content cannot reach
+        # this branch on its own. The ordering is defence in depth now, not
+        # the primary guard — keep it anyway: a conflict and a dead network
+        # can co-occur, and the conflict is the one with a recovery procedure
+        # the user has to see.
         if output.startswith(git_ops.PULL_NO_RESPONSE_PREFIX):
             _unreachable(
                 tree_certain=git_ops.PULL_ABORT_FAILED_MARKER not in output)
@@ -675,6 +682,11 @@ def _print_conflict_recovery(
 # classified an AUTH failure as "Hub unreachable" — the same misdiagnosis in
 # the other direction. Nothing is lost by dropping it: git always pairs it
 # with the underlying curl reason, and those reasons are enumerated here.
+#
+# WHERE these are matched is now part of the rule, not an afterthought: see
+# `_TRANSPORT_PRODUCER_LINE_RE` below. Every entry is matched only on a line
+# a transport PRODUCER wrote, which is what lets ordinary-English phrasings
+# like "broken pipe" live here at all.
 _NETWORK_ERROR_MARKERS = (
     "could not resolve",                     # DNS (curl and ssh phrasings)
     "temporary failure in name resolution",  # DNS (getaddrinfo)
@@ -690,22 +702,64 @@ _NETWORK_ERROR_MARKERS = (
     "empty reply from server",
     "network is unreachable",
     "no route to host",
+    # Present in MCP's TRANSPORT_PATTERNS since before #592 and never ported
+    # here, so the two sides disagreed on the same git stderr (#605/#606).
+    "broken pipe",                # git pack-write drop; ssh packet_write_wait
+    "the remote end hung up",     # connection dropped mid-transfer
+    "early eof",                  # remote closed before the full pack
+    "kex_exchange_identification",  # ssh key exchange closed by the server
 )
+
+# The markers above are matched ONLY within a line that a transport producer
+# wrote. That restriction is the rule #584 established, applied structurally
+# instead of phrasing by phrasing.
+#
+# Every marker is ordinary enough to be a FILENAME, and filenames reach this
+# classifier: the hub echoes offending paths into its rejections, and git
+# relays local failures with the paths attached. So before this, a dirty
+# worktree whose blocking file was `notes/recv failure.md` produced
+#
+#     error: Your local changes to the following files would be overwritten
+#     by rebase:
+#         notes/recv failure.md
+#
+# and `"recv failure" in output.lower()` reported a dead network for a purely
+# local problem — #584's defect surviving inside #584's own fix, and pointing
+# the worse way. Narrowing each phrase individually is the treadmill that
+# produced #601/#604/#605/#606; requiring a producer-owned line START is the
+# rule that ends it, and it is why the four MCP phrasings above could simply
+# be added rather than each given its own bespoke shape.
+#
+# `error:` is deliberately absent from the prefix list: git writes it for
+# local faults, and a ref name it quotes ("cannot lock ref
+# 'refs/heads/connection reset'") would steer exactly like a filename.
+_TRANSPORT_PRODUCER_LINE_RE = re.compile(
+    r"^(?:ssh|curl|fatal|remote|packet_write_wait"
+    r"|kex_exchange_identification|connection closed by remote host)\b[^\n]*",
+    re.MULTILINE | re.IGNORECASE)
 
 # ssh names the host and port when its transport fails ("ssh: connect to host
 # pi port 22: ..."). Matching that whole SHAPE rather than a lone \bport\b
 # keeps a file called `port-22-notes.md` out of this branch while still
 # catching ssh tail phrasings not enumerated above.
-_NETWORK_CONNECT_RE = re.compile(r"connect to host \S+ port \d+", re.IGNORECASE)
+# ssh uses TWO phrasings: "ssh: connect to host pi port 22: ..." at connect
+# time, and "packet_write_wait: Connection to pi port 22: Broken pipe" when an
+# established connection drops mid-transfer. Only the first was covered, so a
+# mid-transfer SSH drop printed "Error: pull failed" and sent the user to
+# debug git rather than the network (#601).
+_NETWORK_CONNECT_RE = re.compile(
+    r"conn(?:ect to host|ection to) \S+ port \d+", re.IGNORECASE)
 
 
 def _is_network_error(output: str) -> bool:
     """Heuristic: does this git stderr describe a network failure?"""
-    low = output.lower()
+    if _is_wrapper_timeout(output):
+        return True
+    producer_text = "\n".join(
+        _TRANSPORT_PRODUCER_LINE_RE.findall(output)).lower()
     return (
-        _is_wrapper_timeout(output)
-        or any(marker in low for marker in _NETWORK_ERROR_MARKERS)
-        or bool(_NETWORK_CONNECT_RE.search(output))
+        any(marker in producer_text for marker in _NETWORK_ERROR_MARKERS)
+        or bool(_NETWORK_CONNECT_RE.search(producer_text))
     )
 
 
