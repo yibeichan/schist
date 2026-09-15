@@ -2476,3 +2476,117 @@ def test_every_network_marker_has_a_steering_negative() -> None:
     assert missing == [], (
         f"markers with no steer-* negative: {missing}. Add a local failure "
         "that echoes a vault path containing the phrase.")
+
+
+# ---------------------------------------------------------------------------
+# The same corpus at the CLASSIFIER altitude, not the predicate's (#617)
+# ---------------------------------------------------------------------------
+
+# `mcp_class` is what MCP's whole classifyPushFailure must return; this is the
+# CLI branch that has to correspond to it. Derived, not stored per case: an
+# expectation duplicated into all 66 cases is free to drift from the class it
+# exists to agree with, and the drift would look like data rather than a bug.
+CLI_BRANCH_FOR_MCP_CLASS = {
+    "non-fast-forward": "non-fast-forward",
+    "acl-rejected": "acl",
+    "transport": "network",
+    "other": "other",
+}
+
+
+def _expected_cli_branch(case: dict) -> str:
+    """The branch this case pins, from `mcp_class` or an explicit override.
+
+    `cli_branch` is only for a case that opts out of the MCP assertion
+    (`mcp_class: null`); without it such a case would be asserted on neither
+    side, which is the vacuous-pass shape #600 was about.
+    """
+    if case.get("mcp_class") is None:
+        return case["cli_branch"]
+    return CLI_BRANCH_FOR_MCP_CLASS[case["mcp_class"]]
+
+
+def test_every_parity_case_is_asserted_at_classifier_altitude() -> None:
+    """No case may sit outside the branch assertion.
+
+    The fixture pinned MCP's classifier against `mcp_class` but this side only
+    against the bare `_is_network_error`, so the branch ORDER the CLI's
+    correctness rests on was asserted nowhere here. A case whose `mcp_class`
+    is null and which carries no `cli_branch` would silently restore that gap,
+    so name the offenders rather than skipping them.
+    """
+    unasserted = [c["name"] for c in _transport_parity_cases()
+                  if c.get("mcp_class") is None and "cli_branch" not in c]
+    assert unasserted == [], (
+        f"cases asserted on neither side: {unasserted}. A case with "
+        "`mcp_class: null` must carry an explicit `cli_branch`.")
+
+
+@pytest.mark.parametrize("case", _transport_parity_cases(),
+                         ids=lambda c: c["name"])
+def test_classify_push_failure_matches_shared_parity_cases(case: dict) -> None:
+    """The ordering half of parity, which the predicate test cannot express.
+
+    `_is_network_error` returns True for every one of the 18 order-* cases —
+    the hub echoes the offending filepath onto a `remote:` line, and `remote`
+    is a transport producer prefix — so a fixture that could only assert the
+    predicate had no way to say "matches, and the verdict is still ACL". The
+    issue proposing these cases assumed `network: false` would express it;
+    that assertion fails today, because nothing consults the branch order.
+
+    This is the assertion that does: a reordering of sync_push that put the
+    network test ahead of the ACL test would turn a scope-grant problem into
+    "Hub unreachable" and be caught here, on the same input MCP is checked on.
+    """
+    from schist.sync import classify_push_failure
+
+    assert classify_push_failure(case["input"]) == _expected_cli_branch(case), (
+        case["why"])
+
+
+def test_every_network_marker_has_an_ordering_twin() -> None:
+    """The coverage half for the `remote:` producer prefix.
+
+    `test_every_network_marker_has_a_steering_negative` covers the shape where
+    a filename must NOT make a matcher fire. This covers the other shape: the
+    hub relays the filename on a line a producer really did write, so the
+    matcher DOES fire and only branch order saves the verdict. A marker added
+    with a steer-* twin but no order-* twin leaves that vector untested, which
+    is how #617 was filed in the first place.
+    """
+    from schist.sync import _NETWORK_ERROR_MARKERS
+
+    order_text = "\n".join(
+        c["input"].lower() for c in _transport_parity_cases()
+        if c["name"].startswith("order-hub-acl-echoes-"))
+    missing = [m for m in _NETWORK_ERROR_MARKERS if m not in order_text]
+    assert missing == [], (
+        f"markers with no order-* twin: {missing}. Add a hub ACL rejection "
+        "that echoes a vault path containing the phrase.")
+
+
+@patch("schist.sync.git_ops.push", return_value=(
+    False,
+    "remote: REJECTED: notes/broken pipe.md out of scope\n"
+    " ! [remote rejected] main -> main (pre-receive hook declined)\n"))
+@patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+@patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+def test_hub_acl_echoing_a_transport_marker_still_names_the_hub(
+        _changes, _unpushed, _push, tmp_path, capsys):
+    """The consequence, at the command level.
+
+    `classify_push_failure` is only worth asserting if `sync_push` still routes
+    by it, so one case drives the real command: a genuine out-of-scope refusal
+    carrying `notes/broken pipe.md` must print the hub header, never "Hub
+    unreachable" — the wrong one sends the user to check their network for a
+    problem only a scope grant fixes, and marks it retriable besides.
+    """
+    from schist.sync import sync_push
+
+    vault = _make_spoke(tmp_path)
+    with pytest.raises(SystemExit):
+        sync_push(MagicMock(), vault, "db.sqlite")
+    err = capsys.readouterr().err
+    assert "Push rejected by hub" in err
+    assert "unreachable" not in err.lower()
+    assert "saved locally" not in err.lower()
