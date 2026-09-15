@@ -711,6 +711,19 @@ def check_spoke_identity_env(vault_path: Optional[str]) -> CheckResult:
     )
 
 
+# Directories that appear in the schema's directory list but are NEVER
+# expected participant write grants, so they must not be reported as ACL
+# drift. `logs/` is infra-owned (rate-limit DB, audit records) and `projects/`
+# is per-installation; `_build_seed_vault` in sync.py grants neither, and says
+# why: "This is an ACL grant list, NOT the note-bearing-dirs list — the two
+# are semantically distinct and deliberately not coupled."
+#
+# Module-level because BOTH acl-drift checks need the same answer — it lived
+# inside _hub_expected_dirs, and the spoke-side check reaching a different
+# conclusion about the same directory is the drift these checks exist to find.
+_INFRA_DIRS = {"logs", "projects"}
+
+
 def check_spoke_acl_drift(vault_path: Optional[str]) -> CheckResult:
     """Flag schist.yaml directories not present in this spoke's hub write grant.
 
@@ -740,23 +753,65 @@ def check_spoke_acl_drift(vault_path: Optional[str]) -> CheckResult:
     except Exception as e:  # noqa: BLE001 — surface as SKIP so doctor never crashes
         return CheckResult("SKIP", label, f"could not read spoke.yaml: {e}")
 
-    # Schema dirs from schist.yaml — inline yaml.safe_load
+    # Schema dirs. Two sources, and they are NOT interchangeable (#614).
+    #
+    # This used to read `vault/schist.yaml` directly and return SKIP on
+    # FileNotFoundError, so the check was blind for every vault on the default
+    # directory layout — the common case, and the one where drift is least
+    # likely to be noticed. That is the bug. But the fix is only the ABSENT
+    # branch: an authored `directories:` still has to be honoured as written.
+    declared: Any = None
     try:
-        schist_data = yaml.safe_load((vault / "schist.yaml").read_text()) or {}
-    except Exception as e:  # noqa: BLE001
-        return CheckResult("SKIP", label, f"could not read schist.yaml: {e}")
+        declared = (yaml.safe_load(
+            (vault / "schist.yaml").read_text()) or {}).get("directories")
+    except (OSError, yaml.YAMLError):
+        declared = None
 
-    dirs_field = schist_data.get("directories") or {}
-    # `directories:` can be either a dict (canonical default.yaml form) or a list (some test fixtures).
-    if isinstance(dirs_field, dict):
-        schema_dirs = [v.rstrip("/") for v in dirs_field.values()]
-    elif isinstance(dirs_field, list):
-        schema_dirs = [str(v).rstrip("/") for v in dirs_field]
+    if declared:
+        # Authored intent, honoured in BOTH shapes exactly as before. Note
+        # `_directories` cannot stand in here: it only accepts `directories`
+        # as a LIST and silently substitutes the packaged default for a dict
+        # — which is the canonical shape — so routing this branch through it
+        # would discard an explicit config and report the default's
+        # directories instead (`test_no_drift_passes` catches that).
+        if isinstance(declared, dict):
+            schema_dirs = [str(v).rstrip("/") for v in declared.values()]
+        elif isinstance(declared, list):
+            schema_dirs = [str(v).rstrip("/") for v in declared]
+        else:
+            return CheckResult(
+                "SKIP", label,
+                "schist.yaml 'directories' field is malformed")
+        # No infra filter: a spoke that explicitly lists `logs:` has declared
+        # it intends to write there, so an ungranted directory it asked for is
+        # exactly the drift this check exists to report
+        # (`test_drift_present_warns`).
     else:
-        return CheckResult("SKIP", label, "schist.yaml 'directories' field is malformed")
+        # Nothing authored — inherit the shared resolver's fallback, which is
+        # what makes the check work at all for a default-layout vault. Its own
+        # comment notes this path "is reached on EVERY call for a vault with
+        # no schist.yaml".
+        try:
+            from schist.commands import _directories
+            schema_dirs = _directories(str(vault))
+        except (FileNotFoundError, RuntimeError) as e:
+            # SchemaConfigError subclasses RuntimeError and is what a broken
+            # install raises; SKIP rather than crash keeps doctor diagnostic.
+            return CheckResult(
+                "SKIP", label, f"could not determine directories: {e}")
+        # Here, and ONLY here, the infra dirs come off. The default list
+        # carries `projects/` and `logs/` while `_build_seed_vault`
+        # deliberately grants neither — "This is an ACL grant list, NOT the
+        # note-bearing-dirs list — the two are semantically distinct and
+        # deliberately not coupled." Without this, a DEFAULT hub plus a
+        # DEFAULT spoke reports "no hub write grant for: projects, logs" and
+        # sends the user to ask an admin for grants withheld on purpose: a
+        # silent SKIP traded for a confident wrong answer on every stock
+        # install.
+        schema_dirs = [d for d in schema_dirs if d not in _INFRA_DIRS]
 
     if not schema_dirs:
-        return CheckResult("SKIP", label, "schist.yaml has no directories declared")
+        return CheckResult("SKIP", label, "no content directories to check")
 
     # Parse vault.yaml and resolve the identity's write grant
     try:
@@ -794,8 +849,6 @@ def _hub_expected_dirs(hub: Path) -> list[str]:
     """
     import subprocess
 
-    INFRA = {"logs", "projects"}
-
     def _dirs_from(text: str) -> list[str]:
         d = yaml.safe_load(text) or {}
         dirs = d.get("directories") or {}
@@ -814,7 +867,7 @@ def _hub_expected_dirs(hub: Path) -> list[str]:
         dirs = _dirs_from(default_path.read_text())
 
     # Infra dirs are never expected participant grants, regardless of source.
-    return [d for d in dirs if d not in INFRA]
+    return [d for d in dirs if d not in _INFRA_DIRS]
 
 
 def check_hub_acl_drift(hub_path: Optional[str]) -> CheckResult:

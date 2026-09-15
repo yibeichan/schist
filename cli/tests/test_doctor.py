@@ -1923,6 +1923,116 @@ access:
     assert result.status == "PASS"
 
 
+# ---------------------------------------------------------------------------
+# Default directory layout: the configuration the check was blind to (#614)
+# ---------------------------------------------------------------------------
+
+_SEED_GRANT = ["research", "concepts", "decisions", "notes", "ops", "papers"]
+
+
+def _write_default_layout_vault(tmp_path: Path, write_grant: list[str]) -> Path:
+    """A spoke with NO schist.yaml — the common case, and the blind one.
+
+    The grant defaults to exactly what `_build_seed_vault` gives a
+    participant, so a PASS here means the stock install is clean rather than
+    that the check gave up.
+    """
+    (tmp_path / "vault.yaml").write_text(
+        "vault_version: 1\n"
+        "name: test\n"
+        "scope_convention: flat\n"
+        "participants:\n"
+        "  - name: orcd\n"
+        "    type: spoke\n"
+        "    default_scope: global\n"
+        "access:\n"
+        "  orcd:\n"
+        '    read: ["*"]\n'
+        f"    write: [{', '.join(write_grant)}]\n"
+    )
+    (tmp_path / ".schist").mkdir(exist_ok=True)
+    (tmp_path / ".schist" / "spoke.yaml").write_text(
+        "hub: file:///fake\nidentity: orcd\nscope: global\n")
+    assert not (tmp_path / "schist.yaml").exists()
+    return tmp_path
+
+
+def test_default_layout_vault_is_checked_not_skipped(tmp_path: Path) -> None:
+    """The defect itself. Reading schist.yaml directly and SKIPping on
+    FileNotFoundError meant ACL drift was never detected for any vault on the
+    default layout — a no-op diagnostic in exactly the configuration where
+    drift is least likely to be noticed."""
+    vault = _write_default_layout_vault(tmp_path, _SEED_GRANT)
+    result = check_spoke_acl_drift(str(vault))
+    assert result.status == "PASS", result.message
+    assert "schist.yaml" not in result.message
+
+
+def test_default_layout_vault_detects_real_drift(tmp_path: Path) -> None:
+    """The capability the SKIP was hiding: a stock spoke whose grant really is
+    short must now be reported."""
+    vault = _write_default_layout_vault(
+        tmp_path, [d for d in _SEED_GRANT if d != "ops"])
+    result = check_spoke_acl_drift(str(vault))
+    assert result.status == "WARN"
+    assert "ops" in result.message
+    assert "orcd" in result.message
+
+
+def test_default_layout_does_not_flag_infra_dirs(tmp_path: Path) -> None:
+    """The half the issue's suggested fix omits, and the reason it cannot be
+    applied as written.
+
+    The default directory list carries `projects/` and `logs/`, which
+    `_build_seed_vault` deliberately does not grant. Resolving directories
+    through the shared helper without dropping them makes a DEFAULT hub plus a
+    DEFAULT spoke report drift, telling the user to request grants that are
+    withheld on purpose — a silent SKIP traded for a confident wrong answer on
+    every stock install.
+    """
+    vault = _write_default_layout_vault(tmp_path, _SEED_GRANT)
+    result = check_spoke_acl_drift(str(vault))
+    assert result.status == "PASS", result.message
+    assert "projects" not in result.message
+    assert "logs" not in result.message
+
+
+def test_explicit_dict_directories_are_not_replaced_by_the_default(
+        tmp_path: Path) -> None:
+    """An authored `directories:` must survive the new fallback.
+
+    `commands._directories` honours `directories` only when it is a LIST and
+    silently substitutes the packaged default for a DICT — which is the
+    canonical shape this check documents. So routing the authored branch
+    through it discards the user's config and reports the default's
+    directories instead: this vault declares only `notes` and grants only
+    `notes`, and would WARN about papers/research/decisions/ops it never
+    asked for.
+    """
+    _write_vault(
+        tmp_path,
+        schist_yaml="directories:\n  notes: notes/\n",
+        vault_yaml="""\
+vault_version: 1
+name: test
+scope_convention: flat
+participants:
+  - name: orcd
+    type: spoke
+    default_scope: global
+access:
+  orcd:
+    read: ["*"]
+    write: [notes]
+""",
+        spoke_yaml="hub: file:///fake\nidentity: orcd\nscope: global\n",
+    )
+    result = check_spoke_acl_drift(str(tmp_path))
+    assert result.status == "PASS", result.message
+    for inherited in ("papers", "research", "decisions", "ops"):
+        assert inherited not in result.message
+
+
 class TestHubAclDrift:
     def _make_hub(self, tmp_path):
         import shutil
