@@ -1573,19 +1573,100 @@ describe("push failure classification (#501)", () => {
   });
 
   test("REAL `schist sync push` output for a diverged spoke — not raw git", () => {
-    // The literal transcript the CLI produces: sync.py wraps ANY push output
-    // containing "rejected" in "Push rejected by hub:", and git's non-ff
-    // output always contains "! [rejected]". Keying ACL detection off that
-    // wrapper classified every diverged spoke as acl-rejected, which made
-    // #500 auto-recovery unreachable in production while stubs that emitted
-    // bare git stderr passed. Pin the real string.
+    // This classifier's input is the CLI's output, not git's: runSchistSync
+    // spawns `schist sync push`, so sync.py's wording IS the contract here.
+    //
+    // Before #595 sync.py wrapped ANY push output containing "rejected" in
+    // "Push rejected by hub:", so a merely-behind spoke arrived under the ACL
+    // header; keying ACL detection off that wrapper classified every diverged
+    // spoke as acl-rejected and made #500 auto-recovery unreachable in
+    // production while stubs emitting bare git stderr passed.
+    //
+    // #595 split that branch in two, and this is what sync.py now prints for
+    // a divergence (sync.py:1015-1019): its own two-line header, then
+    // "  Detail: " and git's raw stderr. The combination this test used to
+    // pin — the ACL header above git's own non-fast-forward output — is no
+    // longer reachable: the branches are mutually exclusive, and the
+    // non-fast-forward one is tested first, so whenever git's output would
+    // match it the ACL header is never printed (#611).
+    //
+    // Narrowly that, and not "the MCP can never see both": a vault FILENAME
+    // carrying "fetch first" is echoed into a genuine ACL rejection by the
+    // hub, under the ACL header, and this classifier still matches those
+    // tokens as bare substrings. That route is #617's, not this test's.
     expect(classifyPushFailure(failed(
-      "Push rejected by hub:\n" +
-      "To /tmp/hub.git\n" +
+      "Push rejected — the hub has commits this clone does not.\n" +
+      "Run `schist sync pull` to rebase onto them, then push again.\n" +
+      "  Detail: To /tmp/hub.git\n" +
       " ! [rejected]        main -> main (fetch first)\n" +
       "error: failed to push some refs to '/tmp/hub.git'\n" +
       "hint: Updates were rejected because the remote contains work that you do not\n" +
       "hint: have locally.\n",
+    ))).toBe("non-fast-forward");
+  });
+
+  test("git's `Detail:` echo is load-bearing: the CLI's own header does not classify", () => {
+    // The coverage gap #611 names, PINNED here rather than fixed. Every token
+    // this classifier reads a divergence from — "non-fast-forward",
+    // "fetch first", "updates were rejected" — comes from git's stderr as
+    // relayed by sync.py's `Detail:` line, never from the header sync.py
+    // authors itself. So the verdict rests entirely on a passthrough, and
+    // "non-fast-forward" is what arms #500 auto-recovery (tools.ts:1077):
+    // trim or drop that echo and recovery silently stops firing, with the
+    // test above still passing because it feeds the detail in.
+    //
+    // Asserting "other" states today's behaviour instead of pretending the
+    // authored header is recognized. Teaching this classifier that header is
+    // a production change to the same transport vocabulary #610/#617 are
+    // about, so it is filed separately rather than smuggled into a
+    // test-fidelity fix.
+    expect(classifyPushFailure(failed(
+      "Push rejected — the hub has commits this clone does not.\n" +
+      "Run `schist sync pull` to rebase onto them, then push again.\n",
+    ))).toBe("other");
+  });
+
+  // Until these two, NO test in this file discriminated any single one of the
+  // three tokens the non-fast-forward branch matches: every fixture carried at
+  // least two, so each could be deleted individually with the whole suite
+  // green, and only removing all three failed anything. A corpus that cannot
+  // tell which half is load-bearing is the shape memory #295 is about.
+  //
+  // What makes a single token reachable is `advice.pushNonFastForward=false`
+  // or `advice.pushUpdateRejected=false` — either one suppresses git's
+  // "hint: Updates were rejected…" block and leaves the parenthetical on the
+  // `! [rejected]` line as the only evidence. (`advice.pushFetchFirst` and
+  // `advice.pushNeedsForce` do NOT: both keep the hint block. Checked on git
+  // 2.50.1 rather than assumed from the key names.) Both transcripts below
+  // are real `git push` output, wrapped the way sync.py wraps it.
+  //
+  // That covers two of the three. "updates were rejected" stays covered only
+  // in combination, and deliberately: no real git transcript emits the hint
+  // block WITHOUT the `! [rejected]` line above it, so there is no honest
+  // fixture in which it is the sole signal. It is kept as the deliberate
+  // mirror of the CLI's second anchor (`^\s*hint:.*updates were rejected` in
+  // sync.py) rather than because a test needs it — stated here so the next
+  // reader does not read a green suite as proof that all three are pinned.
+  test("advice off, unfetched: `(fetch first)` is the ONLY divergence signal", () => {
+    expect(classifyPushFailure(failed(
+      "Push rejected — the hub has commits this clone does not.\n" +
+      "Run `schist sync pull` to rebase onto them, then push again.\n" +
+      "  Detail: To ssh://hub/vault.git\n" +
+      " ! [rejected]        main -> main (fetch first)\n" +
+      "error: failed to push some refs to 'ssh://hub/vault.git'\n",
+    ))).toBe("non-fast-forward");
+  });
+
+  test("advice off, already fetched: `(non-fast-forward)` is the ONLY signal", () => {
+    // Same spoke one `git fetch` later: git swaps the parenthetical, so a
+    // deployment with advice disabled reaches this classifier through a
+    // different single token depending only on whether it had fetched.
+    expect(classifyPushFailure(failed(
+      "Push rejected — the hub has commits this clone does not.\n" +
+      "Run `schist sync pull` to rebase onto them, then push again.\n" +
+      "  Detail: To ssh://hub/vault.git\n" +
+      " ! [rejected]        main -> main (non-fast-forward)\n" +
+      "error: failed to push some refs to 'ssh://hub/vault.git'\n",
     ))).toBe("non-fast-forward");
   });
 
