@@ -291,12 +291,12 @@ source ~/schist-venv/bin/activate
 uv pip install git+https://github.com/yibeichan/schist.git
 ```
 
-If Node.js >= 20 is not available via modules:
+If Node.js >= 22 is not available via modules:
 
 ```bash
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
 source ~/.bashrc
-nvm install 20
+nvm install 22
 ```
 
 #### Initialize the spoke
@@ -316,7 +316,7 @@ schist doctor --vault ~/schist-vault
 
 ### Option B: Singularity/Apptainer (fallback)
 
-Use this only if the HPC cluster lacks Python 3.12+ or Node 20+ and you cannot install them.
+Use this only if the HPC cluster lacks Python 3.12+ or Node 22+ and you cannot install them.
 
 #### Definition file
 
@@ -324,7 +324,7 @@ Create `schist.def`:
 
 ```
 Bootstrap: docker
-From: node:20-bookworm-slim
+From: node:22-bookworm-slim
 
 %post
     apt-get update && apt-get install -y \
