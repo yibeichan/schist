@@ -1920,6 +1920,55 @@ class TestPullFailureBranchOrdering:
         assert "no changes pulled" in err
         assert "mid-rebase" not in err
 
+    def test_a_conflict_whose_abort_failed_does_not_claim_state_unchanged(
+            self, tmp_path, capsys, monkeypatch):
+        """#613, and the same defect as the pair above one branch over.
+
+        #571 taught the PULL_NO_RESPONSE_PREFIX branch to read the abort
+        marker and left the conflict branch asserting a clean abort
+        unconditionally. But `pull_rebase` runs the same bounded
+        `rebase --abort` on its ordinary `returncode != 0` path, appends the
+        same marker when that stalls, and returns git's own output — which
+        does NOT start with the timeout prefix, so it lands on the conflict
+        branch. The fixture therefore omits the prefix deliberately: with it,
+        the branch above would handle the input and this test would pass
+        without the fix.
+        """
+        from schist import git_ops
+        output = ("CONFLICT (content): Merge conflict in research/note.md\n"
+                  f"({git_ops.PULL_ABORT_FAILED_MARKER} after 30s; "
+                  "rerun sync to clean up)")
+        assert not output.startswith(git_ops.PULL_NO_RESPONSE_PREFIX)
+        self._pull_returns(monkeypatch, output)
+        err = self._run(tmp_path, capsys).err
+
+        # The false reassurance itself.
+        assert "Local state is unchanged" not in err
+        assert "NOT guaranteed unchanged" in err
+        assert "may be mid-rebase" in err
+        # Still a conflict, and the hub answered — this must not be rerouted
+        # to the unreachable branch, which has no recovery procedure.
+        assert "Hub unreachable" not in err
+        assert "RE-CLONE" in err
+        # Option 2 aborts with "rebase in progress" while one is in progress,
+        # so the block has to lead with clearing it (lens: does the remedy
+        # work in the state that triggers it?).
+        assert "rebase --abort" in err
+
+    def test_a_conflict_with_a_clean_abort_keeps_the_stronger_claim(
+            self, tmp_path, capsys, monkeypatch):
+        """The other direction. An ordinary conflict — the overwhelmingly
+        common case — must keep the true, stronger statement, or the fix just
+        makes every conflict sound dangerous and buries the real one."""
+        self._pull_returns(
+            monkeypatch,
+            "CONFLICT (content): Merge conflict in research/note.md")
+        err = self._run(tmp_path, capsys).err
+        assert "Local state is unchanged" in err
+        assert "mid-rebase" not in err
+        assert "NOT guaranteed" not in err
+        assert "RE-CLONE" in err
+
     def test_a_plain_transport_error_still_reports_unreachable(
             self, tmp_path, capsys, monkeypatch):
         """Third branch: no marker, no conflict, but a real ssh failure."""
