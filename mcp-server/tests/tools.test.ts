@@ -2551,6 +2551,71 @@ describe("sync_status + sync_retry (#135)", () => {
     }
   }, 10000);
 
+  test("a rebase conflict whose tree stays mid-operation does not claim unchanged", async () => {
+    // The MCP half of #613. `reason` was "Rebase conflict" with the abort's
+    // outcome discarded, which reads as "your tree is fine, go resolve it".
+    //
+    // The fixture leaves a `.git/rebase-merge` directory in place, which is
+    // what a real stalled or failed abort leaves behind, so the check sees
+    // the tree's ACTUAL state. Note the condition is deliberately NOT the
+    // abort's exit code: `git rebase --abort` exits 128 with "no rebase in
+    // progress", which is the ordinary case here because `schist sync pull`
+    // already aborts internally — keying on that would fire this message on
+    // every routine conflict (the sibling test below is what pins that).
+    const vault = await makeTempSpokeVault();
+    await fs.mkdir(path.join(vault, ".git", "rebase-merge"), { recursive: true });
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const stub = path.join(stubDir, "schist");
+    await fs.writeFile(
+      stub,
+      "#!/bin/sh\necho 'CONFLICT: could not apply commit' >&2\nexit 1\n",
+      { mode: 0o755 },
+    );
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as unknown as Record<string, unknown>;
+      expect(result.ok).toBe(false);
+      expect(result.retriable).toBe(false);
+      const reason = String(result.reason);
+      expect(reason).toContain("NOT known unchanged");
+      expect(reason).toContain("mid-operation");
+      // The bare reassuring reason must be gone, not merely appended to.
+      expect(reason).not.toBe("Rebase conflict");
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  test("an ordinary rebase conflict keeps the plain reason", async () => {
+    // The other direction, and the one that catches the tempting wrong fix.
+    // No leftover rebase state here, so `git rebase --abort` exits 128 with
+    // "no rebase in progress" — exactly what the real flow produces, since
+    // the CLI aborted already. A fix keyed on `!abort.ok` passes the test
+    // above and fails this one, warning about a mid-rebase tree on every
+    // conflict there has ever been.
+    const vault = await makeTempSpokeVault();
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const stub = path.join(stubDir, "schist");
+    await fs.writeFile(
+      stub,
+      "#!/bin/sh\necho 'CONFLICT: could not apply commit' >&2\nexit 1\n",
+      { mode: 0o755 },
+    );
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as unknown as Record<string, unknown>;
+      expect(result.reason).toBe("Rebase conflict");
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
   test("a pull-phase failure carries no push failure_class", async () => {
     // syncFailureResponse is shared by the push, in-flight and pull-rebase
     // paths. Populating failure_class for a PULL outcome from a function
