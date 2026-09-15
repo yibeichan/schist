@@ -118,6 +118,26 @@ def _default_schema_path() -> Path:
     return Path(__file__).parent / 'default.yaml'
 
 
+class SchemaConfigError(RuntimeError):
+    """A schema-config problem the OPERATOR can act on, as opposed to a defect.
+
+    Two conditions reach a user this way: a packaged ``default.yaml`` that is
+    missing or defines no usable ``directories`` (a broken install), and a
+    schema config that cannot be read or parsed. Both used to surface as a
+    bare ``RuntimeError``, which the console-script entrypoints did not catch
+    — so an actionable "reinstall the CLI" message arrived as a raw Python
+    traceback, indistinguishable from an internal crash to a reader or to an
+    agent parsing stderr (#603).
+
+    Subclasses ``RuntimeError`` deliberately. The two ``except (OSError,
+    RuntimeError)`` symlink-loop guards, and any caller written against the
+    older contract, keep working unchanged; the narrower type only lets the
+    entrypoints tell "the install is broken" apart from "this is a bug",
+    which must still surface its traceback rather than be dressed up as
+    operator error.
+    """
+
+
 def _read_schema_config(path: Path) -> dict:
     """Parse a schema config, reporting every failure as the same RuntimeError.
 
@@ -129,7 +149,7 @@ def _read_schema_config(path: Path) -> dict:
     try:
         parsed = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
     except (yaml.YAMLError, OSError, UnicodeDecodeError) as e:
-        raise RuntimeError(f'could not read schema config {path}: {e}') from e
+        raise SchemaConfigError(f'could not read schema config {path}: {e}') from e
     return parsed if isinstance(parsed, dict) else {}
 
 
@@ -171,7 +191,7 @@ def _configured_content_roots(vault: Path) -> set[str]:
             # and it means a broken install rather than a choice: an explicit
             # `directories: []` in schist.yaml is a list, so it never reaches
             # here. Fail loud instead.
-            raise RuntimeError(
+            raise SchemaConfigError(
                 f'no content directories configured: {default_path} defines no usable '
                 '`directories`. The packaged schema config is missing or corrupt; '
                 'reinstall the CLI (`uv tool install --reinstall <path-to-cli>`).',
@@ -875,7 +895,19 @@ def main() -> None:
     parser.add_argument('--vault', required=True, help='Path to vault root')
     parser.add_argument('--db', required=True, help='Path to SQLite database')
     args = parser.parse_args()
-    ingest(args.vault, args.db)
+    # A broken install or an unreadable schema config is operator-actionable,
+    # and this is the shape every other error path in the CLI uses. The MCP
+    # server spawns this console script (tools.ts) and surfaces its stderr, so
+    # a traceback here reached an agent as an internal crash (#603).
+    # A broken install or an unreadable schema config is operator-actionable,
+    # and this is the shape every other error path in the CLI uses. The MCP
+    # server spawns this console script (tools.ts) and surfaces its stderr, so
+    # a traceback here reached an agent as an internal crash (#603).
+    try:
+        ingest(args.vault, args.db)
+    except SchemaConfigError as e:
+        print(f'Error: {e}', file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == '__main__':

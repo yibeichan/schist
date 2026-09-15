@@ -729,21 +729,73 @@ async function hasStaleGitOperation(vaultRoot: string): Promise<boolean> {
   return false;
 }
 
+// Single-sourced in BEHAVIOUR with cli/schist/sync.py's
+// `_NETWORK_ERROR_MARKERS` via schema/transport-classification-parity.json,
+// which both this file's tests and cli/tests/test_sync.py run. The two lists
+// were hand-maintained and drifted in both directions: seven phrasings the
+// CLI knew were missing here (#604 — "recv failure", "send failure" and
+// "empty reply from server" among them, so a curl mid-transfer drop was
+// sentinel-classified "other"), four here were missing from the CLI
+// (#605/#606), and `unable to access` outlived its removal from the CLI.
+//
+// `unable to access` is GONE (#594). It is git's generic HTTP wrapper,
+// stamped on 401/403/404 as readily as on a dead socket, so it classified an
+// auth refusal as retriable transport — and under #531, which would treat
+// transport as self-clearing, that would OPEN the write gate for a refusal
+// no wait can fix. Nothing is lost: git always pairs the wrapper with the
+// underlying curl reason, and those reasons are enumerated here.
 const TRANSPORT_PATTERNS = [
-  "could not resolve hostname",
-  "connection timed out",
+  "could not resolve",                     // ssh "hostname" and curl "host"
+  "temporary failure in name resolution",
+  "failed to connect",
+  "couldn't connect",
   "connection refused",
-  "connection closed by remote host",
+  "connection reset",
+  "connection closed",
+  "connection timed out",
+  "operation timed out",
+  "recv failure",
+  "send failure",
+  "empty reply from server",
   "network is unreachable",
   "no route to host",
-  "operation timed out",
-  "ssh: connect to host",
-  "kex_exchange_identification",
   "broken pipe",
-  "unable to access",
-  "early eof",
   "the remote end hung up",
+  "early eof",
+  "kex_exchange_identification",
 ];
+
+// WHERE those match is half the rule. Every entry above is ordinary enough to
+// be a FILENAME, and filenames reach this classifier: `classifyPushFailure`
+// runs against combined stdout+stderr, the hub echoes offending paths into
+// its rejections, and two purely LOCAL failures echo vault paths verbatim
+// (the ignore guard's blocking list and the pre-commit secret scanner). A
+// dirty worktree blocked by `notes/recv failure.md` would otherwise be
+// classified `transport` — steerable by anyone with vault write, and in the
+// direction that #531 would turn into an opened gate. Restricting the match
+// to lines a transport PRODUCER wrote is the same rule the CLI applies, and
+// it is why ordinary phrasings can be listed above at all.
+//
+// `error:` is deliberately not a producer prefix: git writes it for local
+// faults, and a ref name it quotes would steer exactly like a filename.
+const TRANSPORT_PRODUCER_LINE_RE =
+  /^(?:ssh|curl|fatal|remote|packet_write_wait|kex_exchange_identification|connection closed by remote host)\b[^\n]*/gim;
+
+// ssh's two phrasings: "connect to host X port N" at connect time, and
+// "Connection to X port N" when an established connection drops mid-transfer
+// (packet_write_wait). The CLI missed the second until #601.
+const TRANSPORT_CONNECT_SHAPE_RE = /conn(?:ect to host|ection to) \S+ port \d+/i;
+
+/** Transport evidence, counted only on producer-owned lines. */
+function isTransportFailure(text: string): boolean {
+  const producerLines = text.match(TRANSPORT_PRODUCER_LINE_RE);
+  if (!producerLines) return false;
+  const producerText = producerLines.join("\n").toLowerCase();
+  return (
+    TRANSPORT_PATTERNS.some((pattern) => producerText.includes(pattern)) ||
+    TRANSPORT_CONNECT_SHAPE_RE.test(producerText)
+  );
+}
 
 // The hub telling us IT is having trouble, not that our push is wrong: the
 // `ERROR:`-prefixed paths in cli/schist/pre_receive.py:458-464, as opposed to
@@ -856,7 +908,7 @@ export function classifyPushFailure(outcome: SyncCommandOutcome): PushFailureCla
     return "non-fast-forward";
   }
   if (isAclRejection(outcome)) return "acl-rejected";
-  if (TRANSPORT_PATTERNS.some((pattern) => text.includes(pattern))) return "transport";
+  if (isTransportFailure(text)) return "transport";
   if (STALE_STATE_PATTERNS.some((pattern) => text.includes(pattern))) return "stale-git-state";
   return "other";
 }
@@ -967,7 +1019,30 @@ async function recoverDivergedSpoke(
     // sync_retry reports under phase "push", and a pull error there reads as
     // a push error. The pull's detail goes into the sentinel instead.
     if (isRebaseConflict(pull)) {
-      await runGit(vaultRoot, ["rebase", "--abort"], 5_000);
+      // "tree unchanged" was asserted unconditionally with the abort's
+      // outcome discarded — the same unestablished claim #613 fixed in the
+      // CLI's conflict branch, and likelier here because this abort is capped
+      // at 5s against the CLI's 30s. The sentinel is the only diagnosis an
+      // operator gets, so claiming it over a half-applied rebase sends them
+      // to resolve a conflict in a tree whose state they were told wrong.
+      //
+      // The condition is the tree's ACTUAL state, not the abort's exit code.
+      // `git rebase --abort` exits 128 with "fatal: no rebase in progress",
+      // and that is the ORDINARY case here: `schist sync pull` already aborts
+      // internally before returning, so this second abort usually has nothing
+      // to do. Keying on a non-zero exit would print the scary message on
+      // every routine conflict — trading a claim that is rarely wrong for one
+      // that is usually wrong.
+      const abort = await runGit(vaultRoot, ["rebase", "--abort"], 5_000);
+      if (await hasStaleGitOperation(vaultRoot)) {
+        return "push failed [non-fast-forward]: rebase conflict during " +
+          "auto-recovery, and the tree is still mid-operation after " +
+          "`git rebase --abort`" +
+          (abort.timedOut ? " (which timed out after 5s)" : "") +
+          " -- local state is NOT known unchanged. Clear it with " +
+          "`git rebase --abort` in the vault, then sync_retry " +
+          "mode=pull-rebase-push";
+      }
       return "push failed [non-fast-forward]: rebase conflict during auto-recovery " +
         "(rebase aborted, tree unchanged). Resolve manually, then run " +
         "sync_retry mode=pull-rebase-push";
@@ -1563,11 +1638,23 @@ export async function sync_retry(
       const pull = await runSchistSync(vaultRoot, "pull", SYNC_RETRY_TIMEOUT_MS);
       if (!pull.ok) {
         if (isRebaseConflict(pull)) {
-          await runGit(vaultRoot, ["rebase", "--abort"], 5_000);
+          // Same discarded outcome as the background path above (#613), and
+          // the same state check rather than the abort's exit code. `reason`
+          // is what the caller acts on, so a tree left mid-operation has to
+          // change it: "Rebase conflict" alone reads as "your tree is fine,
+          // go resolve the conflict", when the first thing needed is clearing
+          // the leftover state.
+          const abort = await runGit(vaultRoot, ["rebase", "--abort"], 5_000);
+          const stillDirty = await hasStaleGitOperation(vaultRoot);
           return {
             ...syncFailureResponse(mode, "pull-rebase", pull),
             retriable: false,
-            reason: "Rebase conflict",
+            reason: stillDirty
+              ? "Rebase conflict, and the tree is still mid-operation after " +
+                "`git rebase --abort`" +
+                (abort.timedOut ? " (which timed out after 5s)" : "") +
+                " -- local state is NOT known unchanged"
+              : "Rebase conflict",
           };
         }
         return syncFailureResponse(mode, "pull-rebase", pull);

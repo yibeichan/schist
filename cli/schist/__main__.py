@@ -314,7 +314,23 @@ def main():
         'context': commands.context,
         'schema': commands.schema,
     }
-    dispatch[args.command](args, vault_path, db_path)
+    # `_directories()` raises SchemaConfigError on a broken install, and two
+    # dispatched commands (add-concept, schema --validate) call it before any
+    # of their own error handling. Uncaught, that reached the user as a raw
+    # traceback — alarming for what is a "reinstall the CLI" condition, and
+    # unparseable for an agent, which reads a traceback as an internal crash
+    # rather than a recoverable one (#603). Caught HERE rather than at each
+    # call site so a future caller of `_directories()` inherits the clean
+    # message instead of re-opening the same hole one seam over.
+    #
+    # Deliberately NOT `except RuntimeError`: an unexpected RuntimeError is a
+    # defect, and dressing it up as operator error would both hide the bug and
+    # print reinstall advice for something reinstalling cannot fix.
+    try:
+        dispatch[args.command](args, vault_path, db_path)
+    except commands.SchemaConfigError as e:
+        print(f'Error: {e}', file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == '__main__':

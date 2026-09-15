@@ -556,16 +556,39 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
         # The marker is producer-owned and line-anchored, so no file content
         # can spoof it.
         #
-        # _is_network_error goes LAST of the three, and must stay behind the
-        # conflict test: its markers include a bare "connection", "timed out"
-        # and a word-bounded \bport\b, so a genuine conflict in a file named
-        # "...port-forwarding-timed-connection.md" satisfies all three. That
-        # looseness is tracked separately; the ordering is what contains it.
+        # _is_network_error still goes LAST of the three, but the reason has
+        # changed and the comment that used to stand here no longer described
+        # the code (#598). Its markers WERE a bare "connection", a bare
+        # "timed out" and a word-bounded \bport\b, so a conflict in a file
+        # named "...port-forwarding-timed-connection.md" satisfied all three
+        # and this ordering was the only thing containing it. #584 (PR #592)
+        # narrowed those to real transport phrasings, and the marker match is
+        # now confined to producer-owned lines, so vault content cannot reach
+        # this branch on its own. The ordering is defence in depth now, not
+        # the primary guard — keep it anyway: a conflict and a dead network
+        # can co-occur, and the conflict is the one with a recovery procedure
+        # the user has to see.
         if output.startswith(git_ops.PULL_NO_RESPONSE_PREFIX):
             _unreachable(
                 tree_certain=git_ops.PULL_ABORT_FAILED_MARKER not in output)
         elif "CONFLICT" in output or "conflict" in output.lower():
-            _print_conflict_recovery(vault_path, config, output)
+            # The abort marker has to be read on THIS branch too (#613). #571
+            # added that check one branch up, where the pull itself timed out,
+            # and left this one asserting the abort succeeded unconditionally
+            # — but `pull_rebase` attempts the same bounded abort on its
+            # ordinary `returncode != 0` path, appends the same marker when it
+            # stalls, and returns git's own output. That output does not start
+            # with PULL_NO_RESPONSE_PREFIX, so it lands here, and a genuine
+            # conflict whose abort hit an NFS stall or a stale lock was told
+            # "Local state is unchanged".
+            #
+            # It stays on THIS branch rather than being routed to
+            # `_unreachable`: the hub answered, so nothing here is unreachable,
+            # and the conflict is real and has a recovery procedure the user
+            # still needs. Only the claim about the tree changes.
+            _print_conflict_recovery(
+                vault_path, config, output,
+                tree_restored=git_ops.PULL_ABORT_FAILED_MARKER not in output)
         elif _is_network_error(output):
             _unreachable()
         else:
@@ -598,22 +621,45 @@ def _extract_conflicting_files(git_output: str) -> list[str]:
 
 
 def _print_conflict_recovery(
-    vault_path: str, config: SpokeConfig, git_output: str
+    vault_path: str, config: SpokeConfig, git_output: str,
+    *, tree_restored: bool = True,
 ) -> None:
     """Render the pull-conflict error block with concrete recovery steps.
 
-    `pull_rebase` in git_ops.py auto-aborts the failed rebase, so by the time
-    we land here the local working tree is already back to pre-pull state.
-    The user's work is NOT lost — they just couldn't automatically absorb the
-    hub's changes. This message tells them that explicitly and gives three
-    concrete recovery paths sized from safest to most-hands-on."""
+    `pull_rebase` in git_ops.py auto-aborts the failed rebase, so ORDINARILY
+    the local working tree is already back to pre-pull state by the time we
+    land here. The user's work is NOT lost — they just couldn't automatically
+    absorb the hub's changes. This message tells them that explicitly and
+    gives three concrete recovery paths sized from safest to most-hands-on.
+
+    `tree_restored=False` when that abort ALSO timed out (#613). The rebase may
+    be half-applied, so the caller must not let this function assert otherwise
+    — it is the same unestablished claim the `_unreachable` branch already
+    stopped making for its own timeout path in #571. The recovery options below
+    all assume no rebase is in progress (option 2 would abort with "rebase in
+    progress"), so in that state the block leads with clearing the leftover
+    state instead of with reassurance."""
     conflicts = _extract_conflicting_files(git_output)
 
-    print(
-        "Error: pull failed with conflicts. Local state is unchanged "
-        "(the rebase was auto-aborted).",
-        file=sys.stderr,
-    )
+    if tree_restored:
+        print(
+            "Error: pull failed with conflicts. Local state is unchanged "
+            "(the rebase was auto-aborted).",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "Error: pull failed with conflicts, AND the rebase could not be "
+            "aborted — the working tree may be mid-rebase, so local state is "
+            "NOT guaranteed unchanged.",
+            file=sys.stderr,
+        )
+        print("", file=sys.stderr)
+        print("  0. CLEAR the leftover rebase state first — the options below "
+              "assume no rebase is in progress:", file=sys.stderr)
+        print(f"       git -C {vault_path} rebase --abort", file=sys.stderr)
+        print("       # or re-run `schist sync pull`, which clears it before "
+              "retrying", file=sys.stderr)
     if conflicts:
         print("", file=sys.stderr)
         print("Conflicting files:", file=sys.stderr)
@@ -675,6 +721,11 @@ def _print_conflict_recovery(
 # classified an AUTH failure as "Hub unreachable" — the same misdiagnosis in
 # the other direction. Nothing is lost by dropping it: git always pairs it
 # with the underlying curl reason, and those reasons are enumerated here.
+#
+# WHERE these are matched is now part of the rule, not an afterthought: see
+# `_TRANSPORT_PRODUCER_LINE_RE` below. Every entry is matched only on a line
+# a transport PRODUCER wrote, which is what lets ordinary-English phrasings
+# like "broken pipe" live here at all.
 _NETWORK_ERROR_MARKERS = (
     "could not resolve",                     # DNS (curl and ssh phrasings)
     "temporary failure in name resolution",  # DNS (getaddrinfo)
@@ -690,22 +741,64 @@ _NETWORK_ERROR_MARKERS = (
     "empty reply from server",
     "network is unreachable",
     "no route to host",
+    # Present in MCP's TRANSPORT_PATTERNS since before #592 and never ported
+    # here, so the two sides disagreed on the same git stderr (#605/#606).
+    "broken pipe",                # git pack-write drop; ssh packet_write_wait
+    "the remote end hung up",     # connection dropped mid-transfer
+    "early eof",                  # remote closed before the full pack
+    "kex_exchange_identification",  # ssh key exchange closed by the server
 )
+
+# The markers above are matched ONLY within a line that a transport producer
+# wrote. That restriction is the rule #584 established, applied structurally
+# instead of phrasing by phrasing.
+#
+# Every marker is ordinary enough to be a FILENAME, and filenames reach this
+# classifier: the hub echoes offending paths into its rejections, and git
+# relays local failures with the paths attached. So before this, a dirty
+# worktree whose blocking file was `notes/recv failure.md` produced
+#
+#     error: Your local changes to the following files would be overwritten
+#     by rebase:
+#         notes/recv failure.md
+#
+# and `"recv failure" in output.lower()` reported a dead network for a purely
+# local problem — #584's defect surviving inside #584's own fix, and pointing
+# the worse way. Narrowing each phrase individually is the treadmill that
+# produced #601/#604/#605/#606; requiring a producer-owned line START is the
+# rule that ends it, and it is why the four MCP phrasings above could simply
+# be added rather than each given its own bespoke shape.
+#
+# `error:` is deliberately absent from the prefix list: git writes it for
+# local faults, and a ref name it quotes ("cannot lock ref
+# 'refs/heads/connection reset'") would steer exactly like a filename.
+_TRANSPORT_PRODUCER_LINE_RE = re.compile(
+    r"^(?:ssh|curl|fatal|remote|packet_write_wait"
+    r"|kex_exchange_identification|connection closed by remote host)\b[^\n]*",
+    re.MULTILINE | re.IGNORECASE)
 
 # ssh names the host and port when its transport fails ("ssh: connect to host
 # pi port 22: ..."). Matching that whole SHAPE rather than a lone \bport\b
 # keeps a file called `port-22-notes.md` out of this branch while still
 # catching ssh tail phrasings not enumerated above.
-_NETWORK_CONNECT_RE = re.compile(r"connect to host \S+ port \d+", re.IGNORECASE)
+# ssh uses TWO phrasings: "ssh: connect to host pi port 22: ..." at connect
+# time, and "packet_write_wait: Connection to pi port 22: Broken pipe" when an
+# established connection drops mid-transfer. Only the first was covered, so a
+# mid-transfer SSH drop printed "Error: pull failed" and sent the user to
+# debug git rather than the network (#601).
+_NETWORK_CONNECT_RE = re.compile(
+    r"conn(?:ect to host|ection to) \S+ port \d+", re.IGNORECASE)
 
 
 def _is_network_error(output: str) -> bool:
     """Heuristic: does this git stderr describe a network failure?"""
-    low = output.lower()
+    if _is_wrapper_timeout(output):
+        return True
+    producer_text = "\n".join(
+        _TRANSPORT_PRODUCER_LINE_RE.findall(output)).lower()
     return (
-        _is_wrapper_timeout(output)
-        or any(marker in low for marker in _NETWORK_ERROR_MARKERS)
-        or bool(_NETWORK_CONNECT_RE.search(output))
+        any(marker in producer_text for marker in _NETWORK_ERROR_MARKERS)
+        or bool(_NETWORK_CONNECT_RE.search(producer_text))
     )
 
 
@@ -726,6 +819,126 @@ _WRAPPER_TIMEOUT_PREFIXES = (
 def _is_wrapper_timeout(output: str) -> bool:
     """Did OUR wrapper time out, as opposed to git reporting a transport error?"""
     return output.lstrip().startswith(_WRAPPER_TIMEOUT_PREFIXES)
+
+
+# Push refusals split into two kinds with OPPOSITE remedies, and until #593
+# `sync_push` read both as the ACL one on a bare "rejected" substring —
+# unchanged since #10. git's ordinary non-fast-forward output always contains
+# `! [rejected]`, and its hint text says "rejected" again, so a clone that was
+# merely behind was announced as `Push rejected by hub:` and sent the user to
+# change hub ACLs for something only `schist sync pull` fixes.
+#
+# Both matchers anchor on tokens the PRODUCER owns, per #535/#537:
+#
+#   * `remote:` at line start is git's own marking of text that came back over
+#     the wire from the hub. Local git never prefixes its own diagnostics with
+#     it, so `remote: REJECTED:` is the hub's verdict and nothing local — no
+#     branch name, no path in a vault file — can forge it.
+#   * `! [remote rejected]` is git's wording for "the REMOTE declined this",
+#     which is a different string from the `! [rejected]` it prints after its
+#     own local fast-forward check. Keeping them apart is the whole fix.
+#
+# Verified against real `git push` output on git 2.50 rather than hand-written
+# stubs, which is the gap #541 names.
+_ACL_REJECTION_RE = re.compile(
+    r"^\s*remote:\s*REJECTED:", re.MULTILINE)
+_REMOTE_DECLINED_RE = re.compile(
+    r"^\s*!\s*\[remote rejected\]", re.MULTILINE)
+
+# classifyPushFailure in mcp-server/src/tools.ts already made this
+# distinction — the CLI is the half that never got it — and the branch ORDER
+# here matches it deliberately. The token MATCHING does not: tools.ts tests
+# `text.includes("updates were rejected")` and the two parentheticals as bare
+# substrings against combined output, which the filepath-echo described below
+# steers exactly as it steered this regex's first draft. There it is worse
+# than a wrong header, because a `non-fast-forward` verdict is what triggers
+# #500's auto-recovery, so a crafted filename aims a pull-rebase-push loop at
+# a refusal that can never succeed. Filed separately rather than fixed here.
+#
+# Nothing ENFORCES the alignment either — no fixture covers push-failure
+# classification (#543/#594) — so this comment is the only link between them;
+# the shared fixture lands with the #594 half, where both consumers can be
+# written at once.
+#
+# Both alternatives are anchored at LINE START, and that anchoring is the
+# whole point rather than tidiness. The hub echoes the offending FILEPATH
+# verbatim into its rejection (`format_rejection` in pre_receive.py), and git
+# relays it, so vault filenames reach this matcher. A note committed as
+# `notes/updates were rejected.md` made a genuine ACL refusal match the
+# free-floating tokens this regex first shipped with — and since the
+# non-fast-forward branch is tested first, it routed the user to
+# `schist sync pull` for something only a scope grant fixes. That is the same
+# defect this commit exists to remove, re-introduced by the fix and pointing
+# the worse way: a steerable substring that OPENS a gate (#593).
+#
+# git prefixes every line that came from the remote with `remote: `, so a
+# line that BEGINS with `!` or `hint:` is git's own and cannot be forged by
+# anything the hub prints or any path inside the vault. The `(fetch first)` /
+# `(non-fast-forward)` parentheticals are dropped as separate alternatives:
+# they only ever appear ON the `! [rejected]` line, which is already matched,
+# and free-floating they were steerable by a filename too.
+_NON_FAST_FORWARD_RE = re.compile(
+    r"^\s*!\s*\[rejected\]"
+    r"|^\s*hint:.*updates were rejected",
+    re.MULTILINE | re.IGNORECASE)
+
+
+def _is_acl_rejection(output: str) -> bool:
+    """Did the HUB refuse this push (pre-receive declined), as opposed to git
+    refusing it locally because the clone is behind?
+
+    `pre-receive hook declined` is git's wrapper around EVERY hook refusal, so
+    it catches verdicts whose wording pre_receive.py may change — matching
+    isAclRejection in mcp-server/src/tools.ts.
+    """
+    return bool(_ACL_REJECTION_RE.search(output)
+                or _REMOTE_DECLINED_RE.search(output)
+                or "pre-receive hook declined" in output.lower())
+
+
+def _is_non_fast_forward(output: str) -> bool:
+    """Was the push refused because the hub has commits we do not have?
+
+    Fixed on the spoke with `schist sync pull` — never with a scope grant.
+    """
+    return bool(_NON_FAST_FORWARD_RE.search(output))
+
+
+# The branch ORDER, as a value rather than as control flow, so the shared
+# parity corpus can assert it (#617).
+#
+# The individual predicates above are each steerable on their own, and
+# `_is_network_error` provably is: the hub echoes the offending FILEPATH onto
+# its `remote:` lines, `remote` is a transport producer prefix, so a note
+# committed as `notes/broken pipe.md` makes `_is_network_error` return True on
+# a pure ACL refusal. What makes the user's answer correct anyway is that this
+# order tests the refusal branches FIRST — ordering is the only guard, which
+# is precisely why it has to be pinned rather than assumed.
+#
+# schema/transport-classification-parity.json asserted the two sides at
+# different altitudes before this existed: `mcp_class` against MCP's whole
+# `classifyPushFailure`, but `network` against this module's bare
+# `_is_network_error`. So no case could express "the predicate matches and the
+# verdict is still ACL", and the ordering the correctness depends on had no
+# test on this side at all.
+_PUSH_FAILURE_BRANCHES = ("non-fast-forward", "acl", "network", "other")
+
+
+def classify_push_failure(output: str) -> str:
+    """Which branch `sync_push` takes for a failed push.
+
+    Returns one of `_PUSH_FAILURE_BRANCHES`. Mirrors the CLASS taxonomy of
+    classifyPushFailure in mcp-server/src/tools.ts (`acl` is its
+    `acl-rejected`, `network` its `transport`), and the order is the same on
+    both sides deliberately.
+    """
+    if _is_non_fast_forward(output):
+        return "non-fast-forward"
+    if _is_acl_rejection(output):
+        return "acl"
+    if _is_network_error(output):
+        return "network"
+    return "other"
 
 
 # Mirror of SYNC_ERROR_SENTINEL in mcp-server/src/tools.ts. The MCP server
@@ -866,9 +1079,27 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
     print(f"Pushing as {config.identity}...")
     ok, output = git_ops.push(vault_path)
     if not ok:
-        if "REJECTED" in output.upper() or "rejected" in output:
+        # ORDER MATTERS, and it is the SAME order as classifyPushFailure in
+        # mcp-server/src/tools.ts: non-fast-forward is tested first. git emits
+        # its "Updates were rejected because…" hint block only for a stale
+        # ref, and a hub refusal carries no such hint, so this cannot steal a
+        # genuine ACL case — while testing it first stops a shared word in the
+        # surrounding output from stealing a divergence (#593).
+        #
+        # The order itself lives in classify_push_failure so the shared parity
+        # corpus can assert it; there is deliberately no second copy here to
+        # drift from it (#617).
+        branch = classify_push_failure(output)
+        if branch == "non-fast-forward":
+            # NOT an ACL problem, and not fixable on the hub: the hub simply
+            # has commits we do not. Name the remedy the user can actually run.
+            print("Push rejected — the hub has commits this clone does not.\n"
+                  "Run `schist sync pull` to rebase onto them, then push again.",
+                  file=sys.stderr)
+            print(f"  Detail: {output}", file=sys.stderr)
+        elif branch == "acl":
             print(f"Push rejected by hub:\n{output}", file=sys.stderr)
-        elif _is_network_error(output):
+        elif branch == "network":
             print("Hub unreachable — changes saved locally. Push when network available.", file=sys.stderr)
             print(f"  Detail: {output}", file=sys.stderr)
         else:

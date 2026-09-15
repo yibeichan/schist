@@ -1061,3 +1061,87 @@ class TestContextAliasAnnotation:
         out = capsys.readouterr().out
         assert "Top 10 concepts" in out
         assert "(alias of" not in out
+
+
+class TestBrokenInstallReachesTheUserAsAnError:
+    """A broken install must not arrive as a Python traceback (#603).
+
+    `_directories()` raises on a packaged default.yaml that defines no usable
+    `directories`, and two dispatched commands call it before any of their own
+    error handling. The message was already actionable; the SHAPE was not —
+    `__main__.main()` caught only `HubAdminError`, so the reader got a raw
+    traceback for a "reinstall the CLI" condition, and an agent parsing stderr
+    read an internal crash.
+
+    These drive `main()` rather than the command functions, because the defect
+    lived at the entrypoint: calling `commands.add_concept()` directly raises
+    either way and pins nothing.
+    """
+
+    @staticmethod
+    def _break_the_install(monkeypatch, tmp_path):
+        broken = tmp_path / "broken-default.yaml"
+        broken.write_text("directories: {}\n", encoding="utf-8")
+        monkeypatch.setattr(commands, "_default_schema_path", lambda: broken)
+        from schist import ingest as ingest_mod
+        monkeypatch.setattr(ingest_mod, "_default_schema_path", lambda: broken)
+        return broken
+
+    @pytest.mark.parametrize("argv", [
+        ["schist", "add-concept", "--slug", "foo", "--title", "Foo"],
+        ["schist", "schema", "--validate"],
+    ])
+    def test_dispatched_commands_report_cleanly_not_as_a_traceback(
+            self, argv, tmp_path, monkeypatch, capsys):
+        from schist import __main__ as main_mod
+
+        self._break_the_install(monkeypatch, tmp_path)
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        monkeypatch.setattr(
+            "sys.argv", argv[:1] + ["--vault", str(vault), "--db",
+                                    str(tmp_path / "i.sqlite")] + argv[1:])
+
+        with pytest.raises(SystemExit) as exc:
+            main_mod.main()
+
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert err.startswith("Error: "), f"not the CLI's error shape: {err!r}"
+        assert "no content directories configured" in err
+        assert "reinstall the CLI" in err, "the actionable half must survive"
+        assert "Traceback" not in err
+        assert "SchemaConfigError" not in err, (
+            "the exception TYPE name leaking still reads as a crash")
+
+    def test_an_unexpected_runtimeerror_still_surfaces_as_a_defect(
+            self, tmp_path, monkeypatch):
+        """The other half, and the reason this is not `except RuntimeError`.
+
+        A bare RuntimeError is a BUG. Reporting it as `Error: …` would both
+        hide the defect and tell the operator to reinstall the CLI, which
+        cannot fix it. Only the narrow type is dressed up; everything else
+        must keep its traceback.
+        """
+        from schist import __main__ as main_mod
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        monkeypatch.setattr("sys.argv", [
+            "schist", "--vault", str(vault), "--db", str(tmp_path / "i.sqlite"),
+            "schema", "--validate",
+        ])
+
+        def boom(*a, **k):
+            raise RuntimeError("synthetic internal defect")
+
+        monkeypatch.setattr(commands, "schema", boom)
+
+        with pytest.raises(RuntimeError, match="synthetic internal defect"):
+            main_mod.main()
+
+    def test_the_narrow_type_is_still_a_runtimeerror(self):
+        """Subclassing is load-bearing: two `except (OSError, RuntimeError)`
+        symlink-loop guards and the pre-#603 tests catch RuntimeError, and
+        narrowing the raise must not quietly step out from under them."""
+        assert issubclass(commands.SchemaConfigError, RuntimeError)

@@ -8,7 +8,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from . import git_ops, markdown_io, sqlite_query
-from .ingest import _normalize_concept_slug, _normalize_tag
+from .ingest import SchemaConfigError, _normalize_concept_slug, _normalize_tag
 
 
 def _reject_escaping_relpath(value: str, what: str):
@@ -223,7 +223,7 @@ def _directories(vault_path: str) -> list:
             # directories, call zero validators, and print "All documents
             # valid." over a vault full of violations (#583) — the silent
             # wrong answer that #581 fixed on the ingest side.
-            raise RuntimeError(
+            raise SchemaConfigError(
                 f'no content directories configured: {_default_schema_path()} defines '
                 'no usable `directories`. The packaged schema config is missing or '
                 'corrupt; reinstall the CLI '
