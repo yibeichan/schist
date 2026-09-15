@@ -1585,8 +1585,15 @@ describe("push failure classification (#501)", () => {
     // #595 split that branch in two, and this is what sync.py now prints for
     // a divergence (sync.py:1015-1019): its own two-line header, then
     // "  Detail: " and git's raw stderr. The combination this test used to
-    // pin — the ACL header ABOVE non-fast-forward git detail — is no longer
-    // reachable at all; the two branches are mutually exclusive (#611).
+    // pin — the ACL header above git's own non-fast-forward output — is no
+    // longer reachable: the branches are mutually exclusive, and the
+    // non-fast-forward one is tested first, so whenever git's output would
+    // match it the ACL header is never printed (#611).
+    //
+    // Narrowly that, and not "the MCP can never see both": a vault FILENAME
+    // carrying "fetch first" is echoed into a genuine ACL rejection by the
+    // hub, under the ACL header, and this classifier still matches those
+    // tokens as bare substrings. That route is #617's, not this test's.
     expect(classifyPushFailure(failed(
       "Push rejected — the hub has commits this clone does not.\n" +
       "Run `schist sync pull` to rebase onto them, then push again.\n" +
@@ -1625,10 +1632,13 @@ describe("push failure classification (#501)", () => {
   // green, and only removing all three failed anything. A corpus that cannot
   // tell which half is load-bearing is the shape memory #295 is about.
   //
-  // What makes a single token reachable is `advice.*=false`, which suppresses
-  // git's "hint: Updates were rejected…" block and leaves the parenthetical on
-  // the `! [rejected]` line as the only evidence. Both transcripts below are
-  // real `git push` output (git 2.50.1), wrapped the way sync.py wraps it.
+  // What makes a single token reachable is `advice.pushNonFastForward=false`
+  // or `advice.pushUpdateRejected=false` — either one suppresses git's
+  // "hint: Updates were rejected…" block and leaves the parenthetical on the
+  // `! [rejected]` line as the only evidence. (`advice.pushFetchFirst` and
+  // `advice.pushNeedsForce` do NOT: both keep the hint block. Checked on git
+  // 2.50.1 rather than assumed from the key names.) Both transcripts below
+  // are real `git push` output, wrapped the way sync.py wraps it.
   //
   // That covers two of the three. "updates were rejected" stays covered only
   // in combination, and deliberately: no real git transcript emits the hint
@@ -1658,20 +1668,6 @@ describe("push failure classification (#501)", () => {
       " ! [rejected]        main -> main (non-fast-forward)\n" +
       "error: failed to push some refs to 'ssh://hub/vault.git'\n",
     ))).toBe("non-fast-forward");
-  });
-
-  test("the post-#595 ACL transcript still carries the `Push rejected by hub:` header", () => {
-    // #595's other half, and the shape the sibling above is mutually
-    // exclusive with. The hub's verdict survives because sync.py echoes git's
-    // stderr verbatim under its header, keeping the `remote:` prefix that
-    // HUB_REFUSAL_RE anchors on — the existing ACL test one screen up feeds
-    // bare git stderr, so nothing covered the real CLI-wrapped input.
-    expect(classifyPushFailure(failed(
-      "Push rejected by hub:\n" +
-      "remote: REJECTED: push contains out-of-scope writes\n" +
-      "remote: Identity: cluster-mario\n" +
-      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
-    ))).toBe("acl-rejected");
   });
 
   test("a hostname containing the letters a-c-l is not an ACL rejection", () => {
