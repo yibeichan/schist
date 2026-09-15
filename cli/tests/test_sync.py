@@ -625,7 +625,21 @@ class TestSyncPush:
         assert "failed to stage scope" in err
         assert "pathspec" in err
 
-    @patch("schist.sync.git_ops.push", return_value=(False, "REJECTED: push contains out-of-scope writes"))
+    # The mock output is git's REAL relay of a pre-receive decline, not the
+    # hub's bare message. #595 narrowed `_is_acl_rejection` to producer-owned
+    # anchors (`^remote:\s*REJECTED:`, `^!\s*\[remote rejected\]`, or git's
+    # "pre-receive hook declined"), and the old fixture
+    # ("REJECTED: push contains out-of-scope writes", no `remote:` prefix)
+    # satisfied none of them. It fell through to the else branch's raw
+    # "Push failed:\n{output}" dump, where the word "REJECTED" from the mock
+    # itself still satisfied a case-insensitive `"rejected" in err` — so the
+    # test passed while `_is_acl_rejection` was never entered. Deleting the
+    # ACL branch outright would not have failed it (#616).
+    @patch("schist.sync.git_ops.push", return_value=(
+        False,
+        "remote: REJECTED: push contains out-of-scope writes\n"
+        "remote: Identity: cluster-mario\n"
+        " ! [remote rejected] main -> main (pre-receive hook declined)\n"))
     @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
     @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
     def test_push_rejection(self, mock_changes, mock_unpushed, mock_push, tmp_path, capsys):
@@ -635,7 +649,14 @@ class TestSyncPush:
         args = MagicMock()
         with pytest.raises(SystemExit):
             sync_push(args, vault, "db.sqlite")
-        assert "rejected" in capsys.readouterr().err.lower()
+        err = capsys.readouterr().err
+        # Pin the HEADER the user sees, which only the ACL branch prints, not
+        # a word that the raw-output dump also happens to contain.
+        assert "Push rejected by hub" in err
+        assert "Push failed" not in err
+        # The remedies are opposite: this one needs a hub-side scope grant and
+        # must never route the user to the spoke-side fix (#593).
+        assert "schist sync pull" not in err
 
     @patch("schist.sync.git_ops.push", return_value=(False, "fatal: Could not resolve hostname"))
     @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
@@ -2043,11 +2064,13 @@ class TestNetworkMarkerPrecision:
         "connection" marker alone told a user with an SSH-policy problem to go
         check their network.
 
-        The fixture avoids the word "rejected" on purpose — sync_push's FIRST
-        branch matches that as a bare substring, which would mask what this
-        test is measuring. That looseness is a separate defect (it also reads
-        a plain non-fast-forward as a hub ACL rejection) and is filed on its
-        own rather than widened into this change."""
+        The fixture carries no `! [rejected]` git output on purpose: the
+        non-fast-forward classifier is tested FIRST and would mask what this
+        test is measuring. It is anchored now (`_NON_FAST_FORWARD_RE`), so an
+        incidental "rejected" in the surrounding text no longer reaches it —
+        the bare-substring looseness this comment used to describe as an open
+        defect was #593, fixed by #595 and no longer present in sync_push
+        (#615)."""
         from schist.sync import sync_push
 
         vault = _make_spoke(tmp_path)

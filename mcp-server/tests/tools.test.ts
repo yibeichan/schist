@@ -1573,20 +1573,64 @@ describe("push failure classification (#501)", () => {
   });
 
   test("REAL `schist sync push` output for a diverged spoke — not raw git", () => {
-    // The literal transcript the CLI produces: sync.py wraps ANY push output
-    // containing "rejected" in "Push rejected by hub:", and git's non-ff
-    // output always contains "! [rejected]". Keying ACL detection off that
-    // wrapper classified every diverged spoke as acl-rejected, which made
-    // #500 auto-recovery unreachable in production while stubs that emitted
-    // bare git stderr passed. Pin the real string.
+    // This classifier's input is the CLI's output, not git's: runSchistSync
+    // spawns `schist sync push`, so sync.py's wording IS the contract here.
+    //
+    // Before #595 sync.py wrapped ANY push output containing "rejected" in
+    // "Push rejected by hub:", so a merely-behind spoke arrived under the ACL
+    // header; keying ACL detection off that wrapper classified every diverged
+    // spoke as acl-rejected and made #500 auto-recovery unreachable in
+    // production while stubs emitting bare git stderr passed.
+    //
+    // #595 split that branch in two, and this is what sync.py now prints for
+    // a divergence (sync.py:1015-1019): its own two-line header, then
+    // "  Detail: " and git's raw stderr. The combination this test used to
+    // pin — the ACL header ABOVE non-fast-forward git detail — is no longer
+    // reachable at all; the two branches are mutually exclusive (#611).
     expect(classifyPushFailure(failed(
-      "Push rejected by hub:\n" +
-      "To /tmp/hub.git\n" +
+      "Push rejected — the hub has commits this clone does not.\n" +
+      "Run `schist sync pull` to rebase onto them, then push again.\n" +
+      "  Detail: To /tmp/hub.git\n" +
       " ! [rejected]        main -> main (fetch first)\n" +
       "error: failed to push some refs to '/tmp/hub.git'\n" +
       "hint: Updates were rejected because the remote contains work that you do not\n" +
       "hint: have locally.\n",
     ))).toBe("non-fast-forward");
+  });
+
+  test("git's `Detail:` echo is load-bearing: the CLI's own header does not classify", () => {
+    // The coverage gap #611 names, PINNED here rather than fixed. Every token
+    // this classifier reads a divergence from — "non-fast-forward",
+    // "fetch first", "updates were rejected" — comes from git's stderr as
+    // relayed by sync.py's `Detail:` line, never from the header sync.py
+    // authors itself. So the verdict rests entirely on a passthrough, and
+    // "non-fast-forward" is what arms #500 auto-recovery (tools.ts:1077):
+    // trim or drop that echo and recovery silently stops firing, with the
+    // test above still passing because it feeds the detail in.
+    //
+    // Asserting "other" states today's behaviour instead of pretending the
+    // authored header is recognized. Teaching this classifier that header is
+    // a production change to the same transport vocabulary #610/#617 are
+    // about, so it is filed separately rather than smuggled into a
+    // test-fidelity fix.
+    expect(classifyPushFailure(failed(
+      "Push rejected — the hub has commits this clone does not.\n" +
+      "Run `schist sync pull` to rebase onto them, then push again.\n",
+    ))).toBe("other");
+  });
+
+  test("the post-#595 ACL transcript still carries the `Push rejected by hub:` header", () => {
+    // #595's other half, and the shape the sibling above is mutually
+    // exclusive with. The hub's verdict survives because sync.py echoes git's
+    // stderr verbatim under its header, keeping the `remote:` prefix that
+    // HUB_REFUSAL_RE anchors on — the existing ACL test one screen up feeds
+    // bare git stderr, so nothing covered the real CLI-wrapped input.
+    expect(classifyPushFailure(failed(
+      "Push rejected by hub:\n" +
+      "remote: REJECTED: push contains out-of-scope writes\n" +
+      "remote: Identity: cluster-mario\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+    ))).toBe("acl-rejected");
   });
 
   test("a hostname containing the letters a-c-l is not an ACL rejection", () => {
