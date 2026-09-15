@@ -89,4 +89,61 @@ describe("transport-classification parity (#604)", () => {
       "Please commit your changes or stash them before you rebase."));
     expect(cls).not.toBe("transport");
   });
+
+  test("a hub refusal echoing a transport marker is still acl-rejected", () => {
+    // The other steering shape, and the one the fixture had no case for
+    // (#617). Here the marker arrives on a line a producer really did write —
+    // git prefixes everything from the hub with `remote: `, and the hub echoes
+    // the offending FILEPATH into its verdict — so the producer-line filter
+    // does NOT screen it out and isTransportFailure genuinely matches. What
+    // keeps the answer right is only that isAclRejection is tested first.
+    //
+    // Getting this wrong is worse than a wrong header: transport is the
+    // retriable class, so a note named `notes/broken pipe.md` would turn a
+    // permanent scope-grant problem into something an agent retries forever.
+    const cls = classifyPushFailure(failed(
+      "remote: REJECTED: notes/broken pipe.md out of scope\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)"));
+    expect(cls).toBe("acl-rejected");
+  });
+
+  test("every network marker has an order-* twin on the `remote:` prefix", () => {
+    // Coverage for the shape above, mirroring the CLI's
+    // test_every_network_marker_has_an_ordering_twin. The steer-* family
+    // covers "a filename must not make the matcher fire"; order-* covers
+    // "the matcher fires and branch order has to save the verdict". A marker
+    // added with only a steer-* twin leaves this vector untested, which is
+    // exactly how #617 came to be filed.
+    //
+    // Subset, not intersection: an intersection filter shrinks and passes
+    // vacuously for a marker nobody covered (#600).
+    const orderText = cases
+      .filter((c) => c.name.startsWith("order-hub-acl-echoes-"))
+      .map((c) => c.input.toLowerCase())
+      .join("\n");
+    const missing = [
+      "could not resolve", "temporary failure in name resolution",
+      "failed to connect", "couldn't connect", "connection refused",
+      "connection reset", "connection closed", "connection timed out",
+      "operation timed out", "recv failure", "send failure",
+      "empty reply from server", "network is unreachable", "no route to host",
+      "broken pipe", "the remote end hung up", "early eof",
+      "kex_exchange_identification",
+    ].filter((marker) => !orderText.includes(marker));
+    expect(missing).toEqual([]);
+  });
+
+  test("every order-* case asserts the refusal class, never transport", () => {
+    // The family's whole purpose is that transport must LOSE here. Pinning it
+    // as a property of the family keeps a future order-* case from being
+    // added with `mcp_class: "transport"`, which would encode the defect
+    // these cases exist to catch.
+    const orderCases = cases.filter((c) => c.name.startsWith("order-"));
+    expect(orderCases.length).toBeGreaterThanOrEqual(18);
+    for (const c of orderCases) {
+      expect(c.mcp_class).toBe("acl-rejected");
+      // network=true is the point: the predicate matches and ACL still wins.
+      expect(c.network).toBe(true);
+    }
+  });
 });
