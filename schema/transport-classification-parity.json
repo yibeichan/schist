@@ -3,7 +3,9 @@
   "notes": [
     "`network` is the CLI's _is_network_error verdict. `mcp_class` is the class classifyPushFailure must return; null means this case is not asserted against MCP, with `mcp_skip_why` saying why.",
     "Wrapper timeout banners (PULL/PUSH_NO_RESPONSE_PREFIX) are deliberately absent: the CLI matches them on its own producer token at line start, while MCP learns of a spawn timeout from outcome.timedOut rather than from text. Pinning a text verdict for those would encode a contract neither side actually implements.",
-    "Negative cases named steer-* are the discriminating half. The hub echoes offending FILEPATHS into its output and git relays local failures with paths attached, so every phrasing added here must be matched in a shape that a vault filename cannot forge (#535/#584). Each newly added matcher has a steer-* twin."
+    "Negative cases named steer-* are the discriminating half. The hub echoes offending FILEPATHS into its output and git relays local failures with paths attached, so every phrasing added here must be matched in a shape that a vault filename cannot forge (#535/#584). Each newly added matcher has a steer-* twin.",
+    "Two altitudes, deliberately. `network` is the bare _is_network_error predicate; `mcp_class` is MCP's whole classifyPushFailure. So a case can honestly carry network=true with a non-transport mcp_class: the predicate matches and an earlier branch wins. The CLI is asserted at MCP's altitude through classify_push_failure, whose expected value is DERIVED from mcp_class rather than stored per case \u2014 a stored copy would be duplicated data free to drift from the class it has to agree with (#617).",
+    "order-* cases are the ordering half, as steer-* is the anchoring half. A steer-* case proves a vault filename cannot make a matcher fire at all; an order-* case covers the shapes where a matcher DOES fire on vault-controlled text and only branch order keeps the verdict right. Every network marker needs both twins."
   ],
   "cases": [
     {
@@ -341,6 +343,132 @@
       "network": false,
       "mcp_class": "other",
       "why": "the connect SHAPE is the one matcher a filename can reproduce verbatim, so it needs its own steer case: producer-line anchoring is the only thing keeping this out of the network branch"
+    },
+    {
+      "name": "order-hub-acl-echoes-could-not-resolve-filename",
+      "input": "remote: REJECTED: notes/could not resolve.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'could not resolve' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "order-hub-acl-echoes-temporary-failure-in-name-resolution-filename",
+      "input": "remote: REJECTED: notes/temporary failure in name resolution.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'temporary failure in name resolution' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "order-hub-acl-echoes-failed-to-connect-filename",
+      "input": "remote: REJECTED: notes/failed to connect.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'failed to connect' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "order-hub-acl-echoes-couldnt-connect-filename",
+      "input": "remote: REJECTED: notes/couldn't connect.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'couldn't connect' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "order-hub-acl-echoes-connection-refused-filename",
+      "input": "remote: REJECTED: notes/connection refused.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'connection refused' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "order-hub-acl-echoes-connection-reset-filename",
+      "input": "remote: REJECTED: notes/connection reset.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'connection reset' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "order-hub-acl-echoes-connection-closed-filename",
+      "input": "remote: REJECTED: notes/connection closed.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'connection closed' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "order-hub-acl-echoes-connection-timed-out-filename",
+      "input": "remote: REJECTED: notes/connection timed out.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'connection timed out' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "order-hub-acl-echoes-operation-timed-out-filename",
+      "input": "remote: REJECTED: notes/operation timed out.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'operation timed out' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "order-hub-acl-echoes-recv-failure-filename",
+      "input": "remote: REJECTED: notes/recv failure.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'recv failure' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "order-hub-acl-echoes-send-failure-filename",
+      "input": "remote: REJECTED: notes/send failure.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'send failure' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "order-hub-acl-echoes-empty-reply-from-server-filename",
+      "input": "remote: REJECTED: notes/empty reply from server.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'empty reply from server' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "order-hub-acl-echoes-network-is-unreachable-filename",
+      "input": "remote: REJECTED: notes/network is unreachable.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'network is unreachable' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "order-hub-acl-echoes-no-route-to-host-filename",
+      "input": "remote: REJECTED: notes/no route to host.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'no route to host' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "order-hub-acl-echoes-broken-pipe-filename",
+      "input": "remote: REJECTED: notes/broken pipe.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'broken pipe' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "order-hub-acl-echoes-the-remote-end-hung-up-filename",
+      "input": "remote: REJECTED: notes/the remote end hung up.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'the remote end hung up' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "order-hub-acl-echoes-early-eof-filename",
+      "input": "remote: REJECTED: notes/early eof.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'early eof' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "order-hub-acl-echoes-kex-exchange-identification-filename",
+      "input": "remote: REJECTED: notes/kex_exchange_identification.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": true,
+      "mcp_class": "acl-rejected",
+      "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'kex_exchange_identification' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
     }
   ]
 }

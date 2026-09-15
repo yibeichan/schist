@@ -625,7 +625,21 @@ class TestSyncPush:
         assert "failed to stage scope" in err
         assert "pathspec" in err
 
-    @patch("schist.sync.git_ops.push", return_value=(False, "REJECTED: push contains out-of-scope writes"))
+    # The mock output is git's REAL relay of a pre-receive decline, not the
+    # hub's bare message. #595 narrowed `_is_acl_rejection` to producer-owned
+    # anchors (`^remote:\s*REJECTED:`, `^!\s*\[remote rejected\]`, or git's
+    # "pre-receive hook declined"), and the old fixture
+    # ("REJECTED: push contains out-of-scope writes", no `remote:` prefix)
+    # satisfied none of them. It fell through to the else branch's raw
+    # "Push failed:\n{output}" dump, where the word "REJECTED" from the mock
+    # itself still satisfied a case-insensitive `"rejected" in err` — so the
+    # test passed while `_is_acl_rejection` was never entered. Deleting the
+    # ACL branch outright would not have failed it (#616).
+    @patch("schist.sync.git_ops.push", return_value=(
+        False,
+        "remote: REJECTED: push contains out-of-scope writes\n"
+        "remote: Identity: cluster-mario\n"
+        " ! [remote rejected] main -> main (pre-receive hook declined)\n"))
     @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
     @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
     def test_push_rejection(self, mock_changes, mock_unpushed, mock_push, tmp_path, capsys):
@@ -635,7 +649,14 @@ class TestSyncPush:
         args = MagicMock()
         with pytest.raises(SystemExit):
             sync_push(args, vault, "db.sqlite")
-        assert "rejected" in capsys.readouterr().err.lower()
+        err = capsys.readouterr().err
+        # Pin the HEADER the user sees, which only the ACL branch prints, not
+        # a word that the raw-output dump also happens to contain.
+        assert "Push rejected by hub" in err
+        assert "Push failed" not in err
+        # The remedies are opposite: this one needs a hub-side scope grant and
+        # must never route the user to the spoke-side fix (#593).
+        assert "schist sync pull" not in err
 
     @patch("schist.sync.git_ops.push", return_value=(False, "fatal: Could not resolve hostname"))
     @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
@@ -1899,6 +1920,55 @@ class TestPullFailureBranchOrdering:
         assert "no changes pulled" in err
         assert "mid-rebase" not in err
 
+    def test_a_conflict_whose_abort_failed_does_not_claim_state_unchanged(
+            self, tmp_path, capsys, monkeypatch):
+        """#613, and the same defect as the pair above one branch over.
+
+        #571 taught the PULL_NO_RESPONSE_PREFIX branch to read the abort
+        marker and left the conflict branch asserting a clean abort
+        unconditionally. But `pull_rebase` runs the same bounded
+        `rebase --abort` on its ordinary `returncode != 0` path, appends the
+        same marker when that stalls, and returns git's own output — which
+        does NOT start with the timeout prefix, so it lands on the conflict
+        branch. The fixture therefore omits the prefix deliberately: with it,
+        the branch above would handle the input and this test would pass
+        without the fix.
+        """
+        from schist import git_ops
+        output = ("CONFLICT (content): Merge conflict in research/note.md\n"
+                  f"({git_ops.PULL_ABORT_FAILED_MARKER} after 30s; "
+                  "rerun sync to clean up)")
+        assert not output.startswith(git_ops.PULL_NO_RESPONSE_PREFIX)
+        self._pull_returns(monkeypatch, output)
+        err = self._run(tmp_path, capsys).err
+
+        # The false reassurance itself.
+        assert "Local state is unchanged" not in err
+        assert "NOT guaranteed unchanged" in err
+        assert "may be mid-rebase" in err
+        # Still a conflict, and the hub answered — this must not be rerouted
+        # to the unreachable branch, which has no recovery procedure.
+        assert "Hub unreachable" not in err
+        assert "RE-CLONE" in err
+        # Option 2 aborts with "rebase in progress" while one is in progress,
+        # so the block has to lead with clearing it (lens: does the remedy
+        # work in the state that triggers it?).
+        assert "rebase --abort" in err
+
+    def test_a_conflict_with_a_clean_abort_keeps_the_stronger_claim(
+            self, tmp_path, capsys, monkeypatch):
+        """The other direction. An ordinary conflict — the overwhelmingly
+        common case — must keep the true, stronger statement, or the fix just
+        makes every conflict sound dangerous and buries the real one."""
+        self._pull_returns(
+            monkeypatch,
+            "CONFLICT (content): Merge conflict in research/note.md")
+        err = self._run(tmp_path, capsys).err
+        assert "Local state is unchanged" in err
+        assert "mid-rebase" not in err
+        assert "NOT guaranteed" not in err
+        assert "RE-CLONE" in err
+
     def test_a_plain_transport_error_still_reports_unreachable(
             self, tmp_path, capsys, monkeypatch):
         """Third branch: no marker, no conflict, but a real ssh failure."""
@@ -2043,11 +2113,13 @@ class TestNetworkMarkerPrecision:
         "connection" marker alone told a user with an SSH-policy problem to go
         check their network.
 
-        The fixture avoids the word "rejected" on purpose — sync_push's FIRST
-        branch matches that as a bare substring, which would mask what this
-        test is measuring. That looseness is a separate defect (it also reads
-        a plain non-fast-forward as a hub ACL rejection) and is filed on its
-        own rather than widened into this change."""
+        The fixture carries no `! [rejected]` git output on purpose: the
+        non-fast-forward classifier is tested FIRST and would mask what this
+        test is measuring. It is anchored now (`_NON_FAST_FORWARD_RE`), so an
+        incidental "rejected" in the surrounding text no longer reaches it —
+        the bare-substring looseness this comment used to describe as an open
+        defect was #593, fixed by #595 and no longer present in sync_push
+        (#615)."""
         from schist.sync import sync_push
 
         vault = _make_spoke(tmp_path)
@@ -2453,3 +2525,117 @@ def test_every_network_marker_has_a_steering_negative() -> None:
     assert missing == [], (
         f"markers with no steer-* negative: {missing}. Add a local failure "
         "that echoes a vault path containing the phrase.")
+
+
+# ---------------------------------------------------------------------------
+# The same corpus at the CLASSIFIER altitude, not the predicate's (#617)
+# ---------------------------------------------------------------------------
+
+# `mcp_class` is what MCP's whole classifyPushFailure must return; this is the
+# CLI branch that has to correspond to it. Derived, not stored per case: an
+# expectation duplicated into all 66 cases is free to drift from the class it
+# exists to agree with, and the drift would look like data rather than a bug.
+CLI_BRANCH_FOR_MCP_CLASS = {
+    "non-fast-forward": "non-fast-forward",
+    "acl-rejected": "acl",
+    "transport": "network",
+    "other": "other",
+}
+
+
+def _expected_cli_branch(case: dict) -> str:
+    """The branch this case pins, from `mcp_class` or an explicit override.
+
+    `cli_branch` is only for a case that opts out of the MCP assertion
+    (`mcp_class: null`); without it such a case would be asserted on neither
+    side, which is the vacuous-pass shape #600 was about.
+    """
+    if case.get("mcp_class") is None:
+        return case["cli_branch"]
+    return CLI_BRANCH_FOR_MCP_CLASS[case["mcp_class"]]
+
+
+def test_every_parity_case_is_asserted_at_classifier_altitude() -> None:
+    """No case may sit outside the branch assertion.
+
+    The fixture pinned MCP's classifier against `mcp_class` but this side only
+    against the bare `_is_network_error`, so the branch ORDER the CLI's
+    correctness rests on was asserted nowhere here. A case whose `mcp_class`
+    is null and which carries no `cli_branch` would silently restore that gap,
+    so name the offenders rather than skipping them.
+    """
+    unasserted = [c["name"] for c in _transport_parity_cases()
+                  if c.get("mcp_class") is None and "cli_branch" not in c]
+    assert unasserted == [], (
+        f"cases asserted on neither side: {unasserted}. A case with "
+        "`mcp_class: null` must carry an explicit `cli_branch`.")
+
+
+@pytest.mark.parametrize("case", _transport_parity_cases(),
+                         ids=lambda c: c["name"])
+def test_classify_push_failure_matches_shared_parity_cases(case: dict) -> None:
+    """The ordering half of parity, which the predicate test cannot express.
+
+    `_is_network_error` returns True for every one of the 18 order-* cases —
+    the hub echoes the offending filepath onto a `remote:` line, and `remote`
+    is a transport producer prefix — so a fixture that could only assert the
+    predicate had no way to say "matches, and the verdict is still ACL". The
+    issue proposing these cases assumed `network: false` would express it;
+    that assertion fails today, because nothing consults the branch order.
+
+    This is the assertion that does: a reordering of sync_push that put the
+    network test ahead of the ACL test would turn a scope-grant problem into
+    "Hub unreachable" and be caught here, on the same input MCP is checked on.
+    """
+    from schist.sync import classify_push_failure
+
+    assert classify_push_failure(case["input"]) == _expected_cli_branch(case), (
+        case["why"])
+
+
+def test_every_network_marker_has_an_ordering_twin() -> None:
+    """The coverage half for the `remote:` producer prefix.
+
+    `test_every_network_marker_has_a_steering_negative` covers the shape where
+    a filename must NOT make a matcher fire. This covers the other shape: the
+    hub relays the filename on a line a producer really did write, so the
+    matcher DOES fire and only branch order saves the verdict. A marker added
+    with a steer-* twin but no order-* twin leaves that vector untested, which
+    is how #617 was filed in the first place.
+    """
+    from schist.sync import _NETWORK_ERROR_MARKERS
+
+    order_text = "\n".join(
+        c["input"].lower() for c in _transport_parity_cases()
+        if c["name"].startswith("order-hub-acl-echoes-"))
+    missing = [m for m in _NETWORK_ERROR_MARKERS if m not in order_text]
+    assert missing == [], (
+        f"markers with no order-* twin: {missing}. Add a hub ACL rejection "
+        "that echoes a vault path containing the phrase.")
+
+
+@patch("schist.sync.git_ops.push", return_value=(
+    False,
+    "remote: REJECTED: notes/broken pipe.md out of scope\n"
+    " ! [remote rejected] main -> main (pre-receive hook declined)\n"))
+@patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+@patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+def test_hub_acl_echoing_a_transport_marker_still_names_the_hub(
+        _changes, _unpushed, _push, tmp_path, capsys):
+    """The consequence, at the command level.
+
+    `classify_push_failure` is only worth asserting if `sync_push` still routes
+    by it, so one case drives the real command: a genuine out-of-scope refusal
+    carrying `notes/broken pipe.md` must print the hub header, never "Hub
+    unreachable" — the wrong one sends the user to check their network for a
+    problem only a scope grant fixes, and marks it retriable besides.
+    """
+    from schist.sync import sync_push
+
+    vault = _make_spoke(tmp_path)
+    with pytest.raises(SystemExit):
+        sync_push(MagicMock(), vault, "db.sqlite")
+    err = capsys.readouterr().err
+    assert "Push rejected by hub" in err
+    assert "unreachable" not in err.lower()
+    assert "saved locally" not in err.lower()

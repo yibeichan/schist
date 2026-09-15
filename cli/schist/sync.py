@@ -572,7 +572,23 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
             _unreachable(
                 tree_certain=git_ops.PULL_ABORT_FAILED_MARKER not in output)
         elif "CONFLICT" in output or "conflict" in output.lower():
-            _print_conflict_recovery(vault_path, config, output)
+            # The abort marker has to be read on THIS branch too (#613). #571
+            # added that check one branch up, where the pull itself timed out,
+            # and left this one asserting the abort succeeded unconditionally
+            # — but `pull_rebase` attempts the same bounded abort on its
+            # ordinary `returncode != 0` path, appends the same marker when it
+            # stalls, and returns git's own output. That output does not start
+            # with PULL_NO_RESPONSE_PREFIX, so it lands here, and a genuine
+            # conflict whose abort hit an NFS stall or a stale lock was told
+            # "Local state is unchanged".
+            #
+            # It stays on THIS branch rather than being routed to
+            # `_unreachable`: the hub answered, so nothing here is unreachable,
+            # and the conflict is real and has a recovery procedure the user
+            # still needs. Only the claim about the tree changes.
+            _print_conflict_recovery(
+                vault_path, config, output,
+                tree_restored=git_ops.PULL_ABORT_FAILED_MARKER not in output)
         elif _is_network_error(output):
             _unreachable()
         else:
@@ -605,22 +621,45 @@ def _extract_conflicting_files(git_output: str) -> list[str]:
 
 
 def _print_conflict_recovery(
-    vault_path: str, config: SpokeConfig, git_output: str
+    vault_path: str, config: SpokeConfig, git_output: str,
+    *, tree_restored: bool = True,
 ) -> None:
     """Render the pull-conflict error block with concrete recovery steps.
 
-    `pull_rebase` in git_ops.py auto-aborts the failed rebase, so by the time
-    we land here the local working tree is already back to pre-pull state.
-    The user's work is NOT lost — they just couldn't automatically absorb the
-    hub's changes. This message tells them that explicitly and gives three
-    concrete recovery paths sized from safest to most-hands-on."""
+    `pull_rebase` in git_ops.py auto-aborts the failed rebase, so ORDINARILY
+    the local working tree is already back to pre-pull state by the time we
+    land here. The user's work is NOT lost — they just couldn't automatically
+    absorb the hub's changes. This message tells them that explicitly and
+    gives three concrete recovery paths sized from safest to most-hands-on.
+
+    `tree_restored=False` when that abort ALSO timed out (#613). The rebase may
+    be half-applied, so the caller must not let this function assert otherwise
+    — it is the same unestablished claim the `_unreachable` branch already
+    stopped making for its own timeout path in #571. The recovery options below
+    all assume no rebase is in progress (option 2 would abort with "rebase in
+    progress"), so in that state the block leads with clearing the leftover
+    state instead of with reassurance."""
     conflicts = _extract_conflicting_files(git_output)
 
-    print(
-        "Error: pull failed with conflicts. Local state is unchanged "
-        "(the rebase was auto-aborted).",
-        file=sys.stderr,
-    )
+    if tree_restored:
+        print(
+            "Error: pull failed with conflicts. Local state is unchanged "
+            "(the rebase was auto-aborted).",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "Error: pull failed with conflicts, AND the rebase could not be "
+            "aborted — the working tree may be mid-rebase, so local state is "
+            "NOT guaranteed unchanged.",
+            file=sys.stderr,
+        )
+        print("", file=sys.stderr)
+        print("  0. CLEAR the leftover rebase state first — the options below "
+              "assume no rebase is in progress:", file=sys.stderr)
+        print(f"       git -C {vault_path} rebase --abort", file=sys.stderr)
+        print("       # or re-run `schist sync pull`, which clears it before "
+              "retrying", file=sys.stderr)
     if conflicts:
         print("", file=sys.stderr)
         print("Conflicting files:", file=sys.stderr)
@@ -865,6 +904,43 @@ def _is_non_fast_forward(output: str) -> bool:
     return bool(_NON_FAST_FORWARD_RE.search(output))
 
 
+# The branch ORDER, as a value rather than as control flow, so the shared
+# parity corpus can assert it (#617).
+#
+# The individual predicates above are each steerable on their own, and
+# `_is_network_error` provably is: the hub echoes the offending FILEPATH onto
+# its `remote:` lines, `remote` is a transport producer prefix, so a note
+# committed as `notes/broken pipe.md` makes `_is_network_error` return True on
+# a pure ACL refusal. What makes the user's answer correct anyway is that this
+# order tests the refusal branches FIRST — ordering is the only guard, which
+# is precisely why it has to be pinned rather than assumed.
+#
+# schema/transport-classification-parity.json asserted the two sides at
+# different altitudes before this existed: `mcp_class` against MCP's whole
+# `classifyPushFailure`, but `network` against this module's bare
+# `_is_network_error`. So no case could express "the predicate matches and the
+# verdict is still ACL", and the ordering the correctness depends on had no
+# test on this side at all.
+_PUSH_FAILURE_BRANCHES = ("non-fast-forward", "acl", "network", "other")
+
+
+def classify_push_failure(output: str) -> str:
+    """Which branch `sync_push` takes for a failed push.
+
+    Returns one of `_PUSH_FAILURE_BRANCHES`. Mirrors the CLASS taxonomy of
+    classifyPushFailure in mcp-server/src/tools.ts (`acl` is its
+    `acl-rejected`, `network` its `transport`), and the order is the same on
+    both sides deliberately.
+    """
+    if _is_non_fast_forward(output):
+        return "non-fast-forward"
+    if _is_acl_rejection(output):
+        return "acl"
+    if _is_network_error(output):
+        return "network"
+    return "other"
+
+
 # Mirror of SYNC_ERROR_SENTINEL in mcp-server/src/tools.ts. The MCP server
 # writes this file when a background push fails and REFUSES every subsequent
 # vault write while it exists (blockWriteIfSyncDirty → SYNC_DIRTY). Until #560
@@ -1009,16 +1085,21 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
         # ref, and a hub refusal carries no such hint, so this cannot steal a
         # genuine ACL case — while testing it first stops a shared word in the
         # surrounding output from stealing a divergence (#593).
-        if _is_non_fast_forward(output):
+        #
+        # The order itself lives in classify_push_failure so the shared parity
+        # corpus can assert it; there is deliberately no second copy here to
+        # drift from it (#617).
+        branch = classify_push_failure(output)
+        if branch == "non-fast-forward":
             # NOT an ACL problem, and not fixable on the hub: the hub simply
             # has commits we do not. Name the remedy the user can actually run.
             print("Push rejected — the hub has commits this clone does not.\n"
                   "Run `schist sync pull` to rebase onto them, then push again.",
                   file=sys.stderr)
             print(f"  Detail: {output}", file=sys.stderr)
-        elif _is_acl_rejection(output):
+        elif branch == "acl":
             print(f"Push rejected by hub:\n{output}", file=sys.stderr)
-        elif _is_network_error(output):
+        elif branch == "network":
             print("Hub unreachable — changes saved locally. Push when network available.", file=sys.stderr)
             print(f"  Detail: {output}", file=sys.stderr)
         else:
