@@ -1619,6 +1619,47 @@ describe("push failure classification (#501)", () => {
     ))).toBe("other");
   });
 
+  // Until these two, NO test in this file discriminated any single one of the
+  // three tokens the non-fast-forward branch matches: every fixture carried at
+  // least two, so each could be deleted individually with the whole suite
+  // green, and only removing all three failed anything. A corpus that cannot
+  // tell which half is load-bearing is the shape memory #295 is about.
+  //
+  // What makes a single token reachable is `advice.*=false`, which suppresses
+  // git's "hint: Updates were rejected…" block and leaves the parenthetical on
+  // the `! [rejected]` line as the only evidence. Both transcripts below are
+  // real `git push` output (git 2.50.1), wrapped the way sync.py wraps it.
+  //
+  // That covers two of the three. "updates were rejected" stays covered only
+  // in combination, and deliberately: no real git transcript emits the hint
+  // block WITHOUT the `! [rejected]` line above it, so there is no honest
+  // fixture in which it is the sole signal. It is kept as the deliberate
+  // mirror of the CLI's second anchor (`^\s*hint:.*updates were rejected` in
+  // sync.py) rather than because a test needs it — stated here so the next
+  // reader does not read a green suite as proof that all three are pinned.
+  test("advice off, unfetched: `(fetch first)` is the ONLY divergence signal", () => {
+    expect(classifyPushFailure(failed(
+      "Push rejected — the hub has commits this clone does not.\n" +
+      "Run `schist sync pull` to rebase onto them, then push again.\n" +
+      "  Detail: To ssh://hub/vault.git\n" +
+      " ! [rejected]        main -> main (fetch first)\n" +
+      "error: failed to push some refs to 'ssh://hub/vault.git'\n",
+    ))).toBe("non-fast-forward");
+  });
+
+  test("advice off, already fetched: `(non-fast-forward)` is the ONLY signal", () => {
+    // Same spoke one `git fetch` later: git swaps the parenthetical, so a
+    // deployment with advice disabled reaches this classifier through a
+    // different single token depending only on whether it had fetched.
+    expect(classifyPushFailure(failed(
+      "Push rejected — the hub has commits this clone does not.\n" +
+      "Run `schist sync pull` to rebase onto them, then push again.\n" +
+      "  Detail: To ssh://hub/vault.git\n" +
+      " ! [rejected]        main -> main (non-fast-forward)\n" +
+      "error: failed to push some refs to 'ssh://hub/vault.git'\n",
+    ))).toBe("non-fast-forward");
+  });
+
   test("the post-#595 ACL transcript still carries the `Push rejected by hub:` header", () => {
     // #595's other half, and the shape the sibling above is mutually
     // exclusive with. The hub's verdict survives because sync.py echoes git's
