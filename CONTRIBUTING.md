@@ -38,7 +38,7 @@ schist doctor --vault /tmp/test-vault
 ### Prerequisites
 
 - Python ≥ 3.12
-- Node.js ≥ 20
+- Node.js ≥ 22
 - Git ≥ 2.30
 - SQLite ≥ 3.39 (with FTS5 support)
 

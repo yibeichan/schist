@@ -7,7 +7,7 @@ Linear setup guide. Each stage ends with `schist doctor` verification.
 | Dependency | Minimum |
 |-----------|---------|
 | Python    | >=3.12  |
-| Node.js   | >=20    |
+| Node.js   | >=22    |
 | Git       | >=2.30  |
 | SQLite    | >=3.39 (with FTS5) |
 
@@ -22,7 +22,7 @@ sudo apt update
 sudo apt install -y python3 python3-pip git sqlite3
 
 # Node.js 20+ via NodeSource
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
 ```
 
@@ -31,7 +31,7 @@ Or via nvm:
 ```bash
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
 source ~/.bashrc
-nvm install 20
+nvm install 22
 ```
 
 ### macOS (Homebrew)
@@ -58,15 +58,15 @@ source ~/schist-venv/bin/activate
 uv pip install git+https://github.com/yibeichan/schist.git
 ```
 
-If Node.js >= 20 is not available via modules, install with nvm:
+If Node.js >= 22 is not available via modules, install with nvm:
 
 ```bash
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
 source ~/.bashrc
-nvm install 20
+nvm install 22
 ```
 
-If neither Python 3.12+ nor Node 20+ is available, use the Singularity fallback (see below).
+If neither Python 3.12+ nor Node 22+ is available, use the Singularity fallback (see below).
 
 ### Verify Stage 1
 
@@ -285,20 +285,37 @@ Checklist:
 - `schist.yaml` exists in vault root (created by `schist init`)
 - `SCHIST_VAULT_PATH` in the MCP config is an absolute path
 - `mcp-server/dist/index.js` exists at the path in the config
-- Node.js >=20 is on the PATH that launches the MCP server
+- Node.js >=22 is on the PATH that launches the MCP server
 
 ### 7. `better-sqlite3 build fails`
 
-This npm native addon requires a C++ toolchain. Common on HPC and minimal containers.
+Since better-sqlite3 v13 this should no longer happen: the npm package ships
+prebuilt binaries for `darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64`,
+`linuxmusl-arm64`, `linuxmusl-x64`, `win32-arm64` and `win32-x64` **inside the
+tarball**, and declares `gypfile: false`, so a normal install copies a binary
+into place and never invokes a compiler. On a supported platform the install
+takes well under a second and leaves no `build/` directory.
+
+Two things that look like this failure but are not:
+
+- `npm warn allow-scripts better-sqlite3@13.x (install: node-gyp rebuild)` is
+  inert. npm synthesizes that line from the presence of `binding.gyp`, but
+  `gypfile: false` means it is never run.
+- `EBADENGINE` naming `node: >=22` is a Node version problem, not a build
+  problem — see the requirements table at the top of this page.
+
+If you are on a platform with no bundled prebuild, a source build needs a C++
+toolchain:
 
 ```bash
-# Install build tools
 sudo apt install -y build-essential python3     # Debian
 xcode-select --install                           # macOS
-
-# Or use a prebuilt binary
-npm install --build-from-source=false better-sqlite3
+npm rebuild better-sqlite3 --build-from-source
 ```
+
+(`--build-from-source=false` was the v12-era escape hatch, when the binary was
+downloaded from GitHub releases at install time. v13 publishes no release
+assets, so that flag no longer does anything.)
 
 If building from source is not an option, use the Singularity fallback:
 
@@ -309,7 +326,7 @@ From: python:3.12-slim
 %post
     apt-get update && apt-get install -y --no-install-recommends \
         git sqlite3 curl ca-certificates && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y nodejs && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
     pip install --no-cache-dir schist

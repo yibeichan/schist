@@ -247,7 +247,7 @@ schist includes a shared memory subsystem scoped by agent identity. Any project 
 
 Full platform-specific setup guide: [`docs/getting-started.md`](./docs/getting-started.md)
 
-**Requirements:** Node.js ≥ 20, Python ≥ 3.12, SQLite ≥ 3.39 (FTS5), Git ≥ 2.30
+**Requirements:** Node.js ≥ 22, Python ≥ 3.12, SQLite ≥ 3.39 (FTS5), Git ≥ 2.30
 
 ## License
 
