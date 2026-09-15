@@ -1019,7 +1019,30 @@ async function recoverDivergedSpoke(
     // sync_retry reports under phase "push", and a pull error there reads as
     // a push error. The pull's detail goes into the sentinel instead.
     if (isRebaseConflict(pull)) {
-      await runGit(vaultRoot, ["rebase", "--abort"], 5_000);
+      // "tree unchanged" was asserted unconditionally with the abort's
+      // outcome discarded — the same unestablished claim #613 fixed in the
+      // CLI's conflict branch, and likelier here because this abort is capped
+      // at 5s against the CLI's 30s. The sentinel is the only diagnosis an
+      // operator gets, so claiming it over a half-applied rebase sends them
+      // to resolve a conflict in a tree whose state they were told wrong.
+      //
+      // The condition is the tree's ACTUAL state, not the abort's exit code.
+      // `git rebase --abort` exits 128 with "fatal: no rebase in progress",
+      // and that is the ORDINARY case here: `schist sync pull` already aborts
+      // internally before returning, so this second abort usually has nothing
+      // to do. Keying on a non-zero exit would print the scary message on
+      // every routine conflict — trading a claim that is rarely wrong for one
+      // that is usually wrong.
+      const abort = await runGit(vaultRoot, ["rebase", "--abort"], 5_000);
+      if (await hasStaleGitOperation(vaultRoot)) {
+        return "push failed [non-fast-forward]: rebase conflict during " +
+          "auto-recovery, and the tree is still mid-operation after " +
+          "`git rebase --abort`" +
+          (abort.timedOut ? " (which timed out after 5s)" : "") +
+          " -- local state is NOT known unchanged. Clear it with " +
+          "`git rebase --abort` in the vault, then sync_retry " +
+          "mode=pull-rebase-push";
+      }
       return "push failed [non-fast-forward]: rebase conflict during auto-recovery " +
         "(rebase aborted, tree unchanged). Resolve manually, then run " +
         "sync_retry mode=pull-rebase-push";
@@ -1615,11 +1638,23 @@ export async function sync_retry(
       const pull = await runSchistSync(vaultRoot, "pull", SYNC_RETRY_TIMEOUT_MS);
       if (!pull.ok) {
         if (isRebaseConflict(pull)) {
-          await runGit(vaultRoot, ["rebase", "--abort"], 5_000);
+          // Same discarded outcome as the background path above (#613), and
+          // the same state check rather than the abort's exit code. `reason`
+          // is what the caller acts on, so a tree left mid-operation has to
+          // change it: "Rebase conflict" alone reads as "your tree is fine,
+          // go resolve the conflict", when the first thing needed is clearing
+          // the leftover state.
+          const abort = await runGit(vaultRoot, ["rebase", "--abort"], 5_000);
+          const stillDirty = await hasStaleGitOperation(vaultRoot);
           return {
             ...syncFailureResponse(mode, "pull-rebase", pull),
             retriable: false,
-            reason: "Rebase conflict",
+            reason: stillDirty
+              ? "Rebase conflict, and the tree is still mid-operation after " +
+                "`git rebase --abort`" +
+                (abort.timedOut ? " (which timed out after 5s)" : "") +
+                " -- local state is NOT known unchanged"
+              : "Rebase conflict",
           };
         }
         return syncFailureResponse(mode, "pull-rebase", pull);
