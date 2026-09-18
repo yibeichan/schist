@@ -906,14 +906,28 @@ const TRANSPORT_PRODUCER_LINE_RE =
 const TRANSPORT_CONNECT_SHAPE_RE = /conn(?:ect to host|ection to) \S+ port \d+/i;
 
 /** Transport evidence, counted only on producer-owned lines. */
-function isTransportFailure(text: string): boolean {
+/**
+ * The single producer-owned line that carries transport evidence, if any —
+ * same role RETRY_WINDOW_RE plays for rate-limited (#539): the specific text
+ * a later re-read needs to see, not just the boolean verdict. Case of the
+ * returned line is preserved (callers needing a lowercase check do it
+ * themselves) so `tailOutput` (#634) can re-embed it in the sentinel without
+ * mangling casing a human reads.
+ */
+function transportEvidenceLine(text: string): string | undefined {
   const producerLines = text.match(TRANSPORT_PRODUCER_LINE_RE);
-  if (!producerLines) return false;
-  const producerText = producerLines.join("\n").toLowerCase();
-  return (
-    TRANSPORT_PATTERNS.some((pattern) => producerText.includes(pattern)) ||
-    TRANSPORT_CONNECT_SHAPE_RE.test(producerText)
-  );
+  if (!producerLines) return undefined;
+  return producerLines.find((line) => {
+    const lower = line.toLowerCase();
+    return (
+      TRANSPORT_PATTERNS.some((pattern) => lower.includes(pattern)) ||
+      TRANSPORT_CONNECT_SHAPE_RE.test(lower)
+    );
+  });
+}
+
+function isTransportFailure(text: string): boolean {
+  return transportEvidenceLine(text) !== undefined;
 }
 
 // The hub telling us IT is having trouble, not that our push is wrong: the
@@ -1035,23 +1049,35 @@ export function classifyPushFailure(outcome: SyncCommandOutcome): PushFailureCla
 /**
  * Keep the TAIL of command output: git prints the actionable line last.
  *
- * One exception (#539): the hub's `Retry after:` line comes from
- * `remote:` lines the hub prints BEFORE git's own trailing wrapper, so on a
- * long transcript it is exactly what a blind tail drops. Its presence vs.
- * absence is the ONLY thing that later tells a rate-limited failure apart
- * as self-clearing or not (see SELF_CLEARING_FAILURE_CLASSES's sibling logic
- * below) — drop the line and a later re-read of the truncated sentinel
- * can't reproduce the `retriable` verdict `sync_retry` gave when it was
- * live. Kept to this ONE hub-authored, fixed-format, line-anchored pattern
- * rather than every producer line: unlike the transport markers, it cannot
- * repeat (the hub prints it once) and its length is bounded by the format
- * string itself, so preserving it can't reopen the sentinel's size bound.
+ * Two exceptions, both cases where the deciding evidence prints BEFORE
+ * git's own trailing wrapper rather than after it, so a blind tail is
+ * exactly what drops it:
+ *
+ * - The hub's `Retry after:` line (#539) — its presence vs. absence is the
+ *   ONLY thing that later tells a rate-limited failure apart as
+ *   self-clearing or not (see SELF_CLEARING_FAILURE_CLASSES's sibling logic
+ *   below); drop it and a later re-read of the truncated sentinel can't
+ *   reproduce the `retriable` verdict `sync_retry` gave when it was live.
+ * - The transport producer line `classifyPushFailure` matched to reach the
+ *   `transport` class in the first place (#634) — without it, a long
+ *   connect-time failure (`ssh: connect to host … Connection refused`,
+ *   git's wrapper trailing after) can write a sentinel whose bracket says
+ *   `[transport]` while its own displayed detail carries none of the
+ *   evidence for it.
+ *
+ * Both are kept to exactly ONE line each — RETRY_WINDOW_RE structurally can
+ * only ever match once (the hub prints it once), and `transportEvidenceLine`
+ * returns only the FIRST matching producer line rather than every one —
+ * rather than preserving every producer line found: unbounded preservation
+ * of a widely-anchored pattern (`remote`, `fatal`, …) is what would reopen
+ * the sentinel's size bound to vault-filename steering; one bounded,
+ * producer-owned line each does not.
  *
  * Leads with a NEWLINE, not just the line itself: `formatPushFailure` glues
  * this return value directly onto `"push failed [<class>]: "` with no
- * separator, so without the leading `\n` the preserved line would sit
- * mid-line in the rendered sentinel — failing RETRY_WINDOW_RE's own
- * line-start anchor on exactly the later re-read this exists to fix.
+ * separator, so without the leading `\n` a preserved line would sit
+ * mid-line in the rendered sentinel — failing its own line-start anchor on
+ * exactly the later re-read this exists to fix.
  */
 function tailOutput(s: string, cap = 500): string {
   const trimmed = s.trim();
@@ -1059,8 +1085,9 @@ function tailOutput(s: string, cap = 500): string {
   // "?", so a Unicode ellipsis would reach the operator as noise.
   if (trimmed.length <= cap) return trimmed;
   const tail = "..." + trimmed.slice(-cap);
-  const retryLine = trimmed.match(RETRY_WINDOW_RE)?.[0];
-  return retryLine && !tail.includes(retryLine) ? `\n${retryLine}\n${tail}` : tail;
+  const mustSurvive = [trimmed.match(RETRY_WINDOW_RE)?.[0], transportEvidenceLine(trimmed)]
+    .filter((line): line is string => line !== undefined && !tail.includes(line));
+  return mustSurvive.length > 0 ? `\n${mustSurvive.join("\n")}\n${tail}` : tail;
 }
 
 /**

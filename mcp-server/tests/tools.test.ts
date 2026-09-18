@@ -2257,6 +2257,51 @@ exit 1
     }
   }, 15000);
 
+  test("a long transport-failure transcript keeps its evidence line through truncation (#634)", async () => {
+    // Sibling of the #539 test above, same mechanism: the ssh connect-time
+    // line prints BEFORE git's trailing wrapper, so on a long transcript a
+    // blind tail drops it while keeping the wrapper text that alone proves
+    // nothing about WHY the class is `transport`.
+    const vault = await makeTempSpokeVault();
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const padding = "fatal: (padding to push the ssh line past the 500-char tail) ".repeat(10);
+    const sshLine = "ssh: connect to host hub.example.ts.net port 22: Connection refused";
+    await fs.writeFile(
+      path.join(stubDir, "schist"),
+      `#!/bin/sh
+echo "${sshLine}" >&2
+echo "${padding}" >&2
+echo "fatal: Could not read from remote repository." >&2
+exit 1
+`,
+      { mode: 0o755 },
+    );
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const retryResult = await sync_retry(
+        vault, { owner: "test-agent", mode: "push-only" },
+      ) as unknown as Record<string, unknown>;
+      // The live call already had the untruncated text, so the class was
+      // always right — the point is what got WRITTEN to disk.
+      expect(retryResult.failure_class).toBe("transport");
+
+      const sentinelContents = await fs.readFile(
+        path.join(vault, ".schist", "last-sync-error"), "utf-8");
+      expect(sentinelContents.length).toBeGreaterThan(500);
+      // THE point: without preserving it, a sentinel this long would say
+      // `[transport]` while showing none of the evidence for it.
+      expect(sentinelContents).toContain(sshLine);
+
+      const statusResult = await sync_status(vault) as unknown as Record<string, unknown>;
+      const err = statusResult.last_sync_error as Record<string, unknown>;
+      expect(err.failure_class).toBe("transport");
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
   test("sync_status derives retriable=false for a stored stateless rate-limit sentinel", async () => {
     const vault = await makeTempSpokeVault();
     await fs.writeFile(
