@@ -883,8 +883,22 @@ const TRANSPORT_PATTERNS = [
 //
 // `error:` is deliberately not a producer prefix: git writes it for local
 // faults, and a ref name it quotes would steer exactly like a filename.
+//
+// The optional `Detail:` lead is sync.py's OWN wrapper (sync.py:1099/1104),
+// `print(f"  Detail: {output}", file=sys.stderr)` — not a passthrough of
+// adversary content. It mangles only OUTPUT's first line, so the classifier
+// that reads a captured `schist sync push`/pull stderr (this file, via
+// `.schist/last-sync-error` and live subprocess capture) saw e.g.
+// "  Detail: ssh: connect to host … Connection refused" fail the anchor
+// while the same text un-wrapped passed — a real push (offline hub) fell
+// through to `other`, which #531's write-gate fails closed on, silently
+// keeping the exact deadlock the gate exists to clear. Tolerating this one
+// literal prefix doesn't reopen the filename-steering risk above: the
+// producer TOKEN (ssh/curl/fatal/…) must still follow it immediately, so a
+// vault path would need to be literally named "Detail: ssh …" to forge it —
+// no narrower than the pre-existing `remote` prefix risk (#617).
 const TRANSPORT_PRODUCER_LINE_RE =
-  /^(?:ssh|curl|fatal|remote|packet_write_wait|kex_exchange_identification|connection closed by remote host)\b[^\n]*/gim;
+  /^(?:\s*Detail:\s*)?(?:ssh|curl|fatal|remote|packet_write_wait|kex_exchange_identification|connection closed by remote host)\b[^\n]*/gim;
 
 // ssh's two phrasings: "connect to host X port N" at connect time, and
 // "Connection to X port N" when an established connection drops mid-transfer
