@@ -772,8 +772,19 @@ _NETWORK_ERROR_MARKERS = (
 # `error:` is deliberately absent from the prefix list: git writes it for
 # local faults, and a ref name it quotes ("cannot lock ref
 # 'refs/heads/connection reset'") would steer exactly like a filename.
+#
+# The optional `Detail:` lead is this module's OWN wrapper
+# (`print(f"  Detail: {output}", file=sys.stderr)`, sync_push/sync_pull), not
+# adversary content — it only matters to a downstream re-classification of
+# the printed/captured text (e.g. MCP's classifyPushFailure reading
+# `.schist/last-sync-error` or a live `schist sync push` capture), since
+# _is_network_error itself always runs on raw `output` before this wrapper is
+# applied. Kept anchored the same way as MCP's mirror (tools.ts) purely for
+# parity: a producer TOKEN must still follow immediately, so this doesn't
+# widen the filename-steering surface beyond the pre-existing `remote` prefix
+# risk (#617).
 _TRANSPORT_PRODUCER_LINE_RE = re.compile(
-    r"^(?:ssh|curl|fatal|remote|packet_write_wait"
+    r"^(?:\s*Detail:\s*)?(?:ssh|curl|fatal|remote|packet_write_wait"
     r"|kex_exchange_identification|connection closed by remote host)\b[^\n]*",
     re.MULTILINE | re.IGNORECASE)
 

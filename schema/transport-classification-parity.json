@@ -469,6 +469,20 @@
       "network": true,
       "mcp_class": "acl-rejected",
       "why": "the hub echoes the offending FILEPATH onto its `remote:` line and `remote` is a transport producer prefix on both sides, so _is_network_error genuinely matches 'kex_exchange_identification' here \u2014 network is true, and that is a fact about the predicate rather than a bug in it. The verdict is still ACL because both classifiers test the refusal branches BEFORE transport, so ordering is the only thing keeping the answer right and this case is what pins it (#535/#584/#617)."
+    },
+    {
+      "name": "own-detail-wrapped-connect-refused",
+      "input": "Hub unreachable \u2014 changes saved locally. Push when network available.\n  Detail: ssh: connect to host 127.0.0.1 port 1: Connection refused\nfatal: Could not read from remote repository.",
+      "network": true,
+      "mcp_class": "transport",
+      "why": "sync_push/sync_pull print the CLI's own network banner, then `f\"  Detail: {output}\"` on the next line \u2014 wrapping ONLY output's first line and breaking the producer anchor on it (the `ssh:` token no longer starts the line). This is exactly what a live push against a refusing/dead hub writes to `.schist/last-sync-error`, and what a downstream re-classification of that captured text (MCP's classifyPushFailure) has to read, since _is_network_error/_TRANSPORT_PRODUCER_LINE_RE only see the raw pre-wrap output at the point sync.py calls them. Without tolerating this literal `Detail:` lead, this real scenario fell through to `other`, which #531's write-gate fails closed on \u2014 silently keeping the exact deadlock the gate exists to clear."
+    },
+    {
+      "name": "steer-detail-wrapped-bare-filename-no-producer-token",
+      "input": "error: Your local changes to the following files would be overwritten by rebase:\n\tDetail: connection refused.md",
+      "network": false,
+      "mcp_class": "other",
+      "why": "the `Detail:` tolerance added for own-detail-wrapped-connect-refused still requires a producer TOKEN (ssh/curl/fatal/remote/\u2026) to immediately follow it. A vault file literally named `Detail: connection refused.md`, echoed by git's own local conflict-hint block, supplies `Detail:` and the transport PHRASE 'connection refused' but no producer token \u2014 so it does not match, proving the tolerance doesn't reopen filename-steering (#535/#584/#617's risk class, not a new one)."
     }
   ]
 }
