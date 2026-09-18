@@ -2206,6 +2206,70 @@ exit 1
     }
   }, 15000);
 
+  test("a long windowed rate-limit transcript keeps the Retry after line through truncation (#539)", async () => {
+    // tailOutput keeps the last 500 chars on the assumption git's actionable
+    // line comes last — but the hub's `Retry after:` line comes from
+    // `remote:` lines printed BEFORE git's own trailing wrapper. Padding
+    // this transcript past the cap pushes the Retry-after line out of a
+    // blind tail; without preserving it, a LATER read of the stored
+    // sentinel (sync_status) cannot reproduce the `retriable: true`
+    // sync_retry gave when it was live.
+    const vault = await makeTempSpokeVault();
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const padding = "remote: (padding to push the retry line past the 500-char tail) ".repeat(10);
+    await fs.writeFile(
+      path.join(stubDir, "schist"),
+      `#!/bin/sh
+echo "Push rejected by hub:" >&2
+echo "remote: REJECTED: rate limit exceeded (git_syncs_per_hour: 10/10)" >&2
+echo "remote: Retry after: 1800 seconds (next slot available at 2026-08-20T20:00:00+00:00)" >&2
+echo "${padding}" >&2
+echo " ! [remote rejected] main -> main (pre-receive hook declined)" >&2
+exit 1
+`,
+      { mode: 0o755 },
+    );
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const retryResult = await sync_retry(
+        vault, { owner: "test-agent", mode: "push-only" },
+      ) as unknown as Record<string, unknown>;
+      // The live call already had the untruncated text, so this passed even
+      // before the fix — the point is what got WRITTEN to disk.
+      expect(retryResult.retriable).toBe(true);
+
+      const sentinelContents = await fs.readFile(
+        path.join(vault, ".schist", "last-sync-error"), "utf-8");
+      expect(sentinelContents.length).toBeGreaterThan(500);
+      expect(sentinelContents).toContain("Retry after: 1800 seconds");
+
+      const statusResult = await sync_status(vault) as unknown as Record<string, unknown>;
+      const err = statusResult.last_sync_error as Record<string, unknown>;
+      expect(err.failure_class).toBe("rate-limited");
+      // THE point: derived from the truncated-but-preserved sentinel text,
+      // matching what sync_retry said live rather than silently discarding
+      // the window evidence and defaulting to non-retriable.
+      expect(err.retriable).toBe(true);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test("sync_status derives retriable=false for a stored stateless rate-limit sentinel", async () => {
+    const vault = await makeTempSpokeVault();
+    await fs.writeFile(
+      path.join(vault, ".schist", "last-sync-error"),
+      "2026-08-18T12:00:00.000Z push failed [rate-limited]: remote: REJECTED: rate limit "
+      + "exceeded (notes_per_sync: 25/20)\n",
+    );
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
+    const err = result.last_sync_error as Record<string, unknown>;
+    expect(err.failure_class).toBe("rate-limited");
+    expect(err.retriable).toBe(false);
+  }, 10000);
+
   test("sync_status surfaces the recorded failure class", async () => {
     const vault = await makeTempSpokeVault();
     await fs.writeFile(
@@ -2334,6 +2398,8 @@ describe("sync_status + sync_retry (#135)", () => {
       contents: "push exited with code 1",
       // Pre-#501 sentinels carry no [class] marker — null, not a guess.
       failure_class: null,
+      // No class means no rule to apply either (#539).
+      retriable: null,
     });
   }, 10000);
 
