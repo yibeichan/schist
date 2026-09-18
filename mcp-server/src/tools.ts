@@ -1032,12 +1032,35 @@ export function classifyPushFailure(outcome: SyncCommandOutcome): PushFailureCla
   return "other";
 }
 
-/** Keep the TAIL of command output: git prints the actionable line last. */
+/**
+ * Keep the TAIL of command output: git prints the actionable line last.
+ *
+ * One exception (#539): the hub's `Retry after:` line comes from
+ * `remote:` lines the hub prints BEFORE git's own trailing wrapper, so on a
+ * long transcript it is exactly what a blind tail drops. Its presence vs.
+ * absence is the ONLY thing that later tells a rate-limited failure apart
+ * as self-clearing or not (see SELF_CLEARING_FAILURE_CLASSES's sibling logic
+ * below) — drop the line and a later re-read of the truncated sentinel
+ * can't reproduce the `retriable` verdict `sync_retry` gave when it was
+ * live. Kept to this ONE hub-authored, fixed-format, line-anchored pattern
+ * rather than every producer line: unlike the transport markers, it cannot
+ * repeat (the hub prints it once) and its length is bounded by the format
+ * string itself, so preserving it can't reopen the sentinel's size bound.
+ *
+ * Leads with a NEWLINE, not just the line itself: `formatPushFailure` glues
+ * this return value directly onto `"push failed [<class>]: "` with no
+ * separator, so without the leading `\n` the preserved line would sit
+ * mid-line in the rendered sentinel — failing RETRY_WINDOW_RE's own
+ * line-start anchor on exactly the later re-read this exists to fix.
+ */
 function tailOutput(s: string, cap = 500): string {
   const trimmed = s.trim();
   // ASCII only: sanitizeSentinelContent maps anything outside \x20-\x7e to
   // "?", so a Unicode ellipsis would reach the operator as noise.
-  return trimmed.length > cap ? "..." + trimmed.slice(-cap) : trimmed;
+  if (trimmed.length <= cap) return trimmed;
+  const tail = "..." + trimmed.slice(-cap);
+  const retryLine = trimmed.match(RETRY_WINDOW_RE)?.[0];
+  return retryLine && !tail.includes(retryLine) ? `\n${retryLine}\n${tail}` : tail;
 }
 
 /**
@@ -1471,6 +1494,30 @@ function isRebaseConflict(outcome: SyncCommandOutcome): boolean {
   return text.includes("conflict") || text.includes("could not apply") || text.includes("rebase --abort");
 }
 
+/**
+ * One classifier, one answer (#534) — extended to retriability (#539): a
+ * rate limit is only retriable if WAITING can clear it, and the hub
+ * enforces two that differ on exactly that. `git_syncs_per_hour` is a
+ * sliding window: rate_limit.py computes a positive retry_after and
+ * _format_rejection prints "Retry after: N seconds". `notes_per_sync` is
+ * stateless with retry_after=0 and prints no such line — the identical push
+ * is rejected identically forever, and the fix is to split it, not to wait.
+ * Both classify as "rate-limited", so require the POSITIVE evidence of a
+ * window rather than matching the limit's name: an unrecognized future
+ * stateless limit then reads non-retriable, which stops an agent rather
+ * than looping it (fail closed on the claim we can't support).
+ *
+ * `text` is deliberately whatever the caller has on hand — the full live
+ * `outcomeMessage`, or a stored sentinel's (now truncation-preserved, #539)
+ * `contents` — so a later re-read of the sentinel reproduces the SAME
+ * verdict `sync_retry` gave when it was live, instead of the class alone
+ * silently discarding the window evidence.
+ */
+function isRetriableFailure(cls: PushFailureClass, text: string): boolean {
+  const rateLimitedWithoutWindow = cls === "rate-limited" && !RETRY_WINDOW_RE.test(text);
+  return cls !== "acl-rejected" && !rateLimitedWithoutWindow;
+}
+
 function syncFailureResponse(
   mode: SyncRetryResponse["mode"],
   phase: SyncRetryResponse["phase"],
@@ -1485,23 +1532,13 @@ function syncFailureResponse(
   // fact clears itself after the window. One classifier, one answer.
   const failureClass = classifyPushFailure(outcome);
   const acl = failureClass === "acl-rejected";
-  // A rate limit is only retriable if WAITING can clear it, and the hub
-  // enforces two that differ on exactly that. `git_syncs_per_hour` is a
-  // sliding window: rate_limit.py computes a positive retry_after and
-  // _format_rejection prints "Retry after: N seconds". `notes_per_sync` is
-  // stateless with retry_after=0 and prints no such line — the identical push
-  // is rejected identically forever, and the fix is to split it, not to wait.
-  // Both classify as "rate-limited", so require the POSITIVE evidence of a
-  // window rather than matching the limit's name: an unrecognized future
-  // stateless limit then reads non-retriable, which stops an agent rather
-  // than looping it (fail closed on the claim we can't support).
   const rateLimitedWithoutWindow =
     failureClass === "rate-limited" && !RETRY_WINDOW_RE.test(outcomeMessage(outcome));
   return {
     ok: false,
     mode,
     phase,
-    retriable: !acl && !rateLimitedWithoutWindow,
+    retriable: isRetriableFailure(failureClass, outcomeMessage(outcome)),
     // Push phase only, and for ONE narrow reason: types.ts invites the agent
     // to pick its next MODE from this field, and a push class does not name a
     // pull's next move — a pull reported `non-fast-forward` would route
@@ -1705,6 +1742,9 @@ export async function sync_status(vaultRoot: string): Promise<SyncStatusResponse
             timestamp: sentinel.timestamp,
             contents: sentinel.contents,
             failure_class: sentinel.failure_class ?? null,
+            retriable: sentinel.failure_class
+              ? isRetriableFailure(sentinel.failure_class, sentinel.contents)
+              : null,
           }
         : null,
       clean_working_tree: clean.ok ? (clean.stdout ?? "").trim().length === 0 : false,

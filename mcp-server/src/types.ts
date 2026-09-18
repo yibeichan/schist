@@ -118,6 +118,13 @@ export interface SyncStatusResponse {
     /** Parsed from the sentinel's `[class]` marker; null for sentinels
      *  written before #501, or written by a path that doesn't classify. */
     failure_class?: PushFailureClass | null;
+    /**
+     * Would `sync_retry` treat this failure as worth retrying, derived from
+     * `failure_class` + `contents` by the SAME rule `sync_retry` itself uses
+     * (#539) — not a separately persisted verdict free to drift from it.
+     * null when `failure_class` is null: there is no rule to apply.
+     */
+    retriable?: boolean | null;
   } | null;
   clean_working_tree: boolean;
   /** #388: true when `schist sync push` would hard-fail on .gitignore-excluded
