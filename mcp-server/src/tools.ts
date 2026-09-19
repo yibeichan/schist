@@ -560,6 +560,27 @@ function syncDirtyRemedy(cls: PushFailureClass | null, ageClause: string): strin
       return `The hub has been unreachable${ageClause}. Writes were allowed while it looked ` +
         "like a transient outage; blocking now to stop unbounded local-only accumulation. " +
         "Check connectivity to the hub, then run `sync_retry`.";
+    // #636: this is a PERMANENT block, unlike every case above — `sync_retry`
+    // spawns the same missing binary and fails with the same ENOENT, so the
+    // generic default's "run sync_retry" (below) sends an agent toward an
+    // action that cannot work and loops it with no exit path. The correct
+    // remedy already exists, in prose, inside the sentinel itself
+    // (spawnPathHint) — this case exists so the write-BLOCK message doesn't
+    // contradict it with worse advice appended right after.
+    case "spawn-failed":
+      return "The schist CLI binary was not found by this server process — running " +
+        "`sync_retry` will fail with the same error. Set `SCHIST_BIN` to the binary's " +
+        "absolute path in this MCP client's environment and restart the client; " +
+        "`schist doctor` reports which clients are affected.";
+    // `stale-git-state` deliberately stays on the default below rather than
+    // getting its own case: unlike spawn-failed, `sync_retry` reaching this
+    // sentinel is NOT a guaranteed repeat failure by itself, but a targeted
+    // remedy (`schist sync push --force`) isn't actually reachable through
+    // `sync_retry` either — every sync_retry-driven call passes force=false
+    // (only the internal auto-retry inside triggerSpokePush ever passes
+    // true). Naming `--force` here would be advice this gate can't act on
+    // without a human running the CLI directly. Needs a `sync_retry` API
+    // change (a force option), not a string, before this gets its own case.
     default:
       return "Run `sync_retry` after checking `sync_status`; writes resume after a successful " +
         "push clears the sync error. If recovery keeps failing, remove " +

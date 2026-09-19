@@ -2324,6 +2324,24 @@ exit 1
     const result = await sync_status(vault) as unknown as Record<string, unknown>;
     const err = result.last_sync_error as Record<string, unknown>;
     expect(err.failure_class).toBe("acl-rejected");
+    // acl-rejected is the most actionable non-retriable class — an agent
+    // reading sync_status after a hub refusal must see retriable: false and
+    // stop retrying (#637). isRetriableFailure was extracted specifically so
+    // sync_retry and sync_status can't disagree on this; this is the pin.
+    expect(err.retriable).toBe(false);
+  }, 10000);
+
+  test("sync_status derives retriable=true for a stored transport sentinel (#637)", async () => {
+    const vault = await makeTempSpokeVault();
+    await fs.writeFile(
+      path.join(vault, ".schist", "last-sync-error"),
+      "2026-09-18T12:00:00.000Z push failed [transport]: ssh: connect to host hub port 22: "
+      + "Connection refused\n",
+    );
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
+    const err = result.last_sync_error as Record<string, unknown>;
+    expect(err.failure_class).toBe("transport");
+    expect(err.retriable).toBe(true);
   }, 10000);
 });
 
@@ -2985,6 +3003,20 @@ describe("class-aware write gate (#531)", () => {
     expect(result.syncWarning).toContain("Recent background sync failure");
   }, 15000);
 
+  test("a timed-out push warns instead of blocking too (#638)", async () => {
+    // timeout is SELF_CLEARING_FAILURE_CLASSES's other member, for the same
+    // reason as transport: the hub never refused our content, and blocking
+    // writes removes the only in-band retry trigger — the deadlock #533
+    // exists to prevent. The transport test above covers one of the two
+    // self-clearing classes; without this one, timeout accidentally dropped
+    // from the set would block writes with no failing test.
+    const vault = await withSentinel("push failed [timeout]: push timed out after 30000ms");
+    const result = await write(vault, "Written while a push had timed out");
+
+    expect(result.error).toBeUndefined();
+    expect(result.syncWarning).toContain("Recent background sync failure");
+  }, 15000);
+
   test("a hub REFUSAL still blocks, and names the remedy for its class", async () => {
     const acl = await withSentinel(
       "push failed [acl-rejected]: remote: REJECTED: push contains out-of-scope writes");
@@ -2999,6 +3031,17 @@ describe("class-aware write gate (#531)", () => {
     expect(nffResult.error).toBe("SYNC_DIRTY");
     expect(nffResult.message).toContain("sync_retry mode=pull-rebase-push");
   }, 20000);
+
+  test("spawn-failed names the actual remedy, not a retry that will repeat it (#636)", async () => {
+    // sync_retry re-spawns the same missing binary and fails with the same
+    // ENOENT — the generic default's "run sync_retry" would send an agent
+    // toward an action that cannot work and loop it with no exit path.
+    const vault = await withSentinel("push failed [spawn-failed]: spawn schist ENOENT");
+    const result = await write(vault, "Blocked by missing CLI binary");
+    expect(result.error).toBe("SYNC_DIRTY");
+    expect(result.message).toContain("SCHIST_BIN");
+    expect(result.message).not.toContain("Run `sync_retry` after checking `sync_status`");
+  }, 15000);
 
   test("rate-limited blocks even though it clears with time (notes_per_sync)", async () => {
     // The hub DID answer, and letting notes pile up can turn "wait an hour"
