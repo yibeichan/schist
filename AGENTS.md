@@ -86,8 +86,15 @@ When the vault is a spoke (has `.schist/spoke.yaml`), the MCP server adds two
 behaviors on top of the data flow above:
 
 - **Auto-push after writes:** `create_note` and `add_connection` fire a
-  detached `python3 -m schist sync push` after the local commit. Errors are
-  logged but never block the agent.
+  detached `python3 -m schist sync push` after the local commit. That push's
+  own errors are logged but never block the write that triggered it.
+- **The NEXT write can be blocked, separately:** before any write, a gate
+  checks whether a PRIOR push already failed and left `.schist/last-sync-
+  error`. An unreachable hub (`transport`/`timeout`) only warns, for a grace
+  period (default 24h); everything else — the hub refusing the content, an
+  unrebased divergence, an unparseable sentinel — blocks with `SYNC_DIRTY`
+  until `sync_retry` clears it. Full taxonomy, the sentinel's on-disk format,
+  and why classification order matters: `docs/sync-error-taxonomy.md`.
 - **Auto-pull before `get_context`:** bounded by a 5s timeout; falls through
   silently on failure so a flaky hub never stalls reads. Other read tools
   (`search_notes`, `query_graph`, `list_concepts`) do NOT auto-pull — agents
