@@ -762,8 +762,11 @@ def check_spoke_acl_drift(vault_path: Optional[str]) -> CheckResult:
     # branch: an authored `directories:` still has to be honoured as written.
     declared: Any = None
     try:
-        declared = (yaml.safe_load(
-            (vault / "schist.yaml").read_text()) or {}).get("directories")
+        raw = yaml.safe_load((vault / "schist.yaml").read_text()) or {}
+        # A non-dict top-level (hand-edited list/scalar) must degrade to "no
+        # keys" rather than crash `.get()` — same shape as commands.py's
+        # `_resolve_schema_config`, which this falls through to below.
+        declared = raw.get("directories") if isinstance(raw, dict) else None
     except (OSError, yaml.YAMLError):
         declared = None
 
@@ -799,6 +802,13 @@ def check_spoke_acl_drift(vault_path: Optional[str]) -> CheckResult:
             # install raises; SKIP rather than crash keeps doctor diagnostic.
             return CheckResult(
                 "SKIP", label, f"could not determine directories: {e}")
+        except SystemExit:
+            # _resolve_schema_config prints an error and calls sys.exit(1) on
+            # a syntactically invalid schist.yaml (not a RuntimeError, so the
+            # clause above doesn't catch it) — SKIP rather than take the
+            # whole `doctor` run down with it.
+            return CheckResult(
+                "SKIP", label, "schist.yaml is not valid YAML")
         # Here, and ONLY here, the infra dirs come off. The default list
         # carries `projects/` and `logs/` while `_build_seed_vault`
         # deliberately grants neither — "This is an ACL grant list, NOT the

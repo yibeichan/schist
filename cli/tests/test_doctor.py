@@ -2033,6 +2033,28 @@ access:
         assert inherited not in result.message
 
 
+def test_non_dict_schist_yaml_top_level_does_not_crash(tmp_path: Path) -> None:
+    """#630: a hand-edited schist.yaml whose top level is a list, not a dict,
+    must not raise AttributeError out of `.get("directories")`. It degrades
+    to "no directories declared" and falls through to the same default-layout
+    resolution as a vault with no schist.yaml at all — not a SKIP, since the
+    fallback resolver can still answer the question."""
+    vault = _write_default_layout_vault(tmp_path, _SEED_GRANT)
+    (vault / "schist.yaml").write_text("- notes/\n- papers/\n")
+    result = check_spoke_acl_drift(str(vault))
+    assert result.status == "PASS", result.message
+
+
+def test_malformed_yaml_skips_instead_of_exiting(tmp_path: Path) -> None:
+    """#632: syntactically invalid YAML must SKIP the check, not take down
+    the whole `doctor` run with the SystemExit that
+    `commands._resolve_schema_config` raises on a read error."""
+    vault = _write_default_layout_vault(tmp_path, _SEED_GRANT)
+    (vault / "schist.yaml").write_text("key: [unclosed\n")
+    result = check_spoke_acl_drift(str(vault))
+    assert result.status == "SKIP", result.message
+
+
 class TestHubAclDrift:
     def _make_hub(self, tmp_path):
         import shutil
