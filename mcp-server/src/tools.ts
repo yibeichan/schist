@@ -572,15 +572,19 @@ function syncDirtyRemedy(cls: PushFailureClass | null, ageClause: string): strin
         "`sync_retry` will fail with the same error. Set `SCHIST_BIN` to the binary's " +
         "absolute path in this MCP client's environment and restart the client; " +
         "`schist doctor` reports which clients are affected.";
-    // `stale-git-state` deliberately stays on the default below rather than
-    // getting its own case: unlike spawn-failed, `sync_retry` reaching this
-    // sentinel is NOT a guaranteed repeat failure by itself, but a targeted
-    // remedy (`schist sync push --force`) isn't actually reachable through
-    // `sync_retry` either — every sync_retry-driven call passes force=false
-    // (only the internal auto-retry inside triggerSpokePush ever passes
-    // true). Naming `--force` here would be advice this gate can't act on
-    // without a human running the CLI directly. Needs a `sync_retry` API
-    // change (a force option), not a string, before this gets its own case.
+    // #642: this sentinel only exists once `triggerSpokePush`'s own
+    // `hasStaleGitOperation`-gated `--force` retry already ran and failed
+    // (recoverDivergedSpoke, tools.ts:1190), so the git operation is still
+    // live — `sync_retry` passes force=false on every caller-driven path
+    // (only that internal auto-retry ever passes true), and re-running it
+    // against a still-stuck repo fails identically. The fix has to happen
+    // in the vault, not through this MCP server.
+    case "stale-git-state":
+      return "A git operation was left in progress in the vault (a stuck rebase, merge, " +
+        "or a stale `index.lock`) — `sync_retry` cannot resolve this by itself and will " +
+        "fail the same way again. Resolve the git state manually first (`git rebase " +
+        "--abort` or `git merge --abort` in the vault, or remove `.git/index.lock` after " +
+        "confirming no git process is running), then run `sync_retry mode=pull-rebase-push`.";
     default:
       return "Run `sync_retry` after checking `sync_status`; writes resume after a successful " +
         "push clears the sync error. If recovery keeps failing, remove " +
@@ -1560,10 +1564,20 @@ function isRebaseConflict(outcome: SyncCommandOutcome): boolean {
  * `contents` — so a later re-read of the sentinel reproduces the SAME
  * verdict `sync_retry` gave when it was live, instead of the class alone
  * silently discarding the window evidence.
+ *
+ * #643: the original formula ("everything but acl-rejected and windowless
+ * rate-limited") predates the write-gate's per-class remedies (#636/#642)
+ * and never accounted for classes where `sync_retry` is structurally unable
+ * to help. `spawn-failed` re-spawns the same missing binary; `stale-git-
+ * state` calls `runSchistSync` without `force` (only `triggerSpokePush`'s
+ * own internal retry ever passes it), so a still-live rebase/merge/lock
+ * fails it identically. Both need `retriable: false` so an agent reading
+ * `sync_status` before ever calling `sync_retry` doesn't loop on either.
  */
 function isRetriableFailure(cls: PushFailureClass, text: string): boolean {
+  if (cls === "acl-rejected" || cls === "spawn-failed" || cls === "stale-git-state") return false;
   const rateLimitedWithoutWindow = cls === "rate-limited" && !RETRY_WINDOW_RE.test(text);
-  return cls !== "acl-rejected" && !rateLimitedWithoutWindow;
+  return !rateLimitedWithoutWindow;
 }
 
 function syncFailureResponse(

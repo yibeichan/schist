@@ -159,28 +159,24 @@ the hub echoes filepaths onto its own `remote:` lines, so ordering (ACL/rate
 tested before transport) is the only thing keeping that one from being
 forgeable; see `order-hub-acl-echoes-*` in the parity corpus.
 
-## Known gaps (as of 2026-09-19)
+## Known gaps (as of 2026-09-22)
 
 Filed as follow-ups on the work this doc describes — don't assume these are
 fixed without checking issue state first:
 
-- **#636** — `syncDirtyRemedy` has no `spawn-failed` case, so the write-gate
-  block message tells an agent to run `sync_retry` when the actual fix is
-  pinning `SCHIST_BIN`. The same gap exists for `stale-git-state` (also no
-  explicit case) but is not separately filed as of this writing — note that a
-  `stale-git-state`-classed sentinel only exists at all if `triggerSpokePush`'s
-  own automatic `sync push --force` retry (gated on `hasStaleGitOperation`,
-  `tools.ts:1251`) already ran and failed, so "just force-push" is not
-  actually available as a remedy by the time a human/agent sees this class.
-- **#637** — `sync_status.last_sync_error.retriable` has no test coverage for
-  `acl-rejected` or the other non-rate-limited classes.
-- **#638** — the write gate's `timeout`-is-self-clearing path has no
-  regression test.
-- `isRetriableFailure`'s formula (every class but `acl-rejected`/windowless-
-  `rate-limited` is "retriable") was never revisited against the self-
-  clearing set the write-gate introduced later — `spawn-failed` and
-  `stale-git-state` read as retriable even though retrying alone fixes
-  neither.
+- **#636**, **#637**, **#638** — closed. `syncDirtyRemedy` names the actual
+  remedy for `spawn-failed`; `sync_status.last_sync_error.retriable` has test
+  coverage for `acl-rejected` and the other non-rate-limited classes; the
+  write gate's `timeout`-is-self-clearing path is regression-tested.
+- **#642**, **#643** — closed. `syncDirtyRemedy` now has an explicit
+  `stale-git-state` case naming manual git resolution (`git rebase --abort`
+  etc.) instead of falling to the generic "run `sync_retry`" default —
+  note that this sentinel only exists once `triggerSpokePush`'s own
+  automatic `--force` retry (gated on `hasStaleGitOperation`, `tools.ts:1251`)
+  already ran and failed, so "just force-push" was never actually available
+  as a remedy by the time this class surfaces. `isRetriableFailure` now
+  returns `false` for both `spawn-failed` and `stale-git-state`, since
+  `sync_retry` is structurally unable to fix either by itself.
 
 ## File map
 
