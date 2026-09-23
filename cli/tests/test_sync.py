@@ -1448,6 +1448,57 @@ class TestPushErrorClassification:
         assert "unreachable" in err.lower()
         assert "Connection refused" in err
 
+    @pytest.mark.parametrize("stderr", [
+        # #511's forced command refuses before receive-pack starts, so there
+        # is no pre-receive hook and no "declined" wrapper — matching
+        # SHELL_REFUSAL_RE in mcp-server/src/tools.ts (#597).
+        "schist-shell: key for 'dragonfly' is confined to repository "
+        "'/home/eleven/git/schist-vault.git' — access to "
+        "'/home/eleven/git/other.git' denied.\n"
+        "fatal: Could not read from remote repository.",
+        "schist-shell: command not permitted for pinned key 'dragonfly': "
+        "git-upload-archive\n"
+        "fatal: Could not read from remote repository.",
+    ])
+    def test_shell_refusal_is_an_acl_rejection(self, stderr):
+        from schist.sync import _is_acl_rejection
+
+        assert _is_acl_rejection(stderr) is True
+
+    def test_shell_exec_failure_is_not_an_acl_rejection(self):
+        """The negative lookahead: an execvp OSError is a hub-side operational
+        fault (missing binary), not an authorization decision the spoke
+        cannot fix by itself — must not be reported as a refusal."""
+        from schist.sync import _is_acl_rejection
+
+        assert _is_acl_rejection(
+            "schist-shell: failed to exec git shell: [Errno 2] "
+            "No such file or directory") is False
+
+    @patch("schist.sync.git_ops.push", return_value=(False, (
+        "schist-shell: key for 'dragonfly' is confined to repository "
+        "'/home/eleven/git/schist-vault.git' — access to "
+        "'/home/eleven/git/other.git' denied.\n"
+        "fatal: Could not read from remote repository.")))
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=True)
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
+    def test_shell_refusal_reports_hub_rejection_not_a_local_push_failure(
+        self, mock_changes, mock_unpushed, mock_push, tmp_path, capsys
+    ):
+        """Before the fix, this fell through to the generic 'other' branch
+        and printed 'Push failed:', sending the user to debug their own
+        clone for something only a hub-side authorized_keys fix resolves."""
+        from schist.sync import sync_push
+
+        vault = _make_spoke(tmp_path)
+        args = MagicMock()
+        with pytest.raises(SystemExit):
+            sync_push(args, vault, "db.sqlite")
+
+        err = capsys.readouterr().err
+        assert "Push rejected by hub" in err
+        assert "Push failed:" not in err
+
 
 # ---------------------------------------------------------------------------
 # .schist/ gitignore coverage (#309)
@@ -1891,6 +1942,25 @@ class TestPullFailureBranchOrdering:
         self._pull_returns(monkeypatch, output)
         out = self._run(tmp_path, capsys)
         assert "Hub unreachable" not in (out.out + out.err)
+
+    def test_shell_refusal_reports_hub_rejection_not_a_generic_pull_failure(
+            self, tmp_path, capsys, monkeypatch):
+        """#599: a #511 forced-command refusal happens at the SSH layer
+        before git-upload-pack starts, so it is equally reachable from a pull
+        as from a push (#597). Before the fix this matched no branch — not
+        PULL_NO_RESPONSE_PREFIX, not "CONFLICT", not _is_network_error (git's
+        generic "Could not read from remote repository" is in none of the
+        transport markers) — and fell through to "Error: pull failed",
+        telling the user to suspect a local rebase problem for something only
+        a hub-side authorized_keys fix resolves."""
+        self._pull_returns(monkeypatch, (
+            "schist-shell: key for 'dragonfly' is confined to repository "
+            "'/home/eleven/git/schist-vault.git' — access to "
+            "'/home/eleven/git/other.git' denied.\n"
+            "fatal: Could not read from remote repository."))
+        err = self._run(tmp_path, capsys).err
+        assert "Hub refused connection" in err
+        assert "pull failed" not in err.lower()
 
     def test_abort_failure_does_not_claim_the_tree_is_untouched(
             self, tmp_path, capsys, monkeypatch):
