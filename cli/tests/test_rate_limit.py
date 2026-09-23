@@ -553,6 +553,8 @@ class TestFailOpen:
         assert log_path.exists()
         content = log_path.read_text()
         assert "RATE_LIMIT_BYPASSED" in content
+        assert "identity=agent-a" in content
+        assert "src=local" in content
 
     def test_fail_open_on_unexpected_exception(
         self, acl_sub, db_path, log_path, capsys, monkeypatch,

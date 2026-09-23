@@ -673,6 +673,25 @@ class TestMainRateLimit:
         assert "RATE_LIMIT_REJECTED" in content
         assert "src=203.0.113.1" in content
 
+    def test_rate_limit_bypass_log_carries_identity_and_src(
+        self, rl_acl, tmp_path, monkeypatch,
+    ):
+        """#528: fail-open audit entries must remain attributable."""
+        monkeypatch.setenv("SSH_CONNECTION", "203.0.113.1 51000 10.0.0.1 22")
+        log_path = tmp_path / "rejected-pushes.log"
+        db_path = tmp_path / "rate-limits.sqlite"
+        db_path.write_bytes(b"not a sqlite db" * 100)
+
+        assert self._run(
+            rl_acl, "admin", ["abc def refs/heads/main"], ["notes/a.md"],
+            log_path=log_path, db_path=db_path,
+        ) == 0
+
+        content = log_path.read_text()
+        assert "RATE_LIMIT_BYPASSED" in content
+        assert "identity=admin" in content
+        assert "src=203.0.113.1" in content
+
     def test_rate_limit_log_src_local_without_ssh(self, rl_acl, tmp_path,
                                                   monkeypatch):
         """A filesystem-local push logs src=local, not an empty field."""

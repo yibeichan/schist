@@ -172,7 +172,9 @@ def _get_limits(acl: VaultACL, identity: str) -> RateLimits:
     )
 
 
-def _fail_open(err: Exception, log_path: Path | None) -> RateLimitResult:
+def _fail_open(
+    err: Exception, log_path: Path | None, identity: str, source: str
+) -> RateLimitResult:
     """Print stderr warning + append to rejection log, return allow result.
 
     The log tag ``RATE_LIMIT_BYPASSED`` is intentionally alarm-triggering so
@@ -191,7 +193,8 @@ def _fail_open(err: Exception, log_path: Path | None) -> RateLimitResult:
             timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
             with open(log_path, "a") as f:
                 f.write(
-                    f"[{timestamp}] RATE_LIMIT_BYPASSED err={err!r}\n"
+                    f"[{timestamp}] RATE_LIMIT_BYPASSED identity={identity} "
+                    f"src={source} err={err!r}\n"
                 )
         except OSError as log_err:
             logger.warning("Failed to write RATE_LIMIT_BYPASSED log: %s", log_err)
@@ -230,6 +233,7 @@ def check_rate_limit(
     now: int | None = None,
     db_path: Path | None = None,
     log_path: Path | None = None,
+    source: str = "local",
 ) -> RateLimitResult:
     """Check git-side rate limits for a push.
 
@@ -263,12 +267,12 @@ def check_rate_limit(
     try:
         import sqlite3
     except ImportError as e:
-        return _fail_open(e, log_path)
+        return _fail_open(e, log_path, identity, source)
 
     try:
         conn = _init_db(db_path)
     except Exception as e:  # noqa: BLE001 — fail-open is an explicit design choice
-        return _fail_open(e, log_path)
+        return _fail_open(e, log_path, identity, source)
 
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -319,7 +323,7 @@ def check_rate_limit(
                 pass
             raise
     except sqlite3.Error as e:
-        return _fail_open(e, log_path)
+        return _fail_open(e, log_path, identity, source)
     finally:
         try:
             conn.close()
