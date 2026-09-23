@@ -2343,6 +2343,36 @@ exit 1
     expect(err.failure_class).toBe("transport");
     expect(err.retriable).toBe(true);
   }, 10000);
+
+  test("sync_status derives retriable=false for a stored spawn-failed sentinel (#643)", async () => {
+    // sync_retry re-spawns the same missing binary — retriable: true here
+    // would contradict the write-gate's own remedy message (#636/#642) and
+    // loop an agent that reads sync_status before ever calling sync_retry.
+    const vault = await makeTempSpokeVault();
+    await fs.writeFile(
+      path.join(vault, ".schist", "last-sync-error"),
+      "2026-09-20T12:00:00.000Z push failed [spawn-failed]: spawn schist ENOENT\n",
+    );
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
+    const err = result.last_sync_error as Record<string, unknown>;
+    expect(err.failure_class).toBe("spawn-failed");
+    expect(err.retriable).toBe(false);
+  }, 10000);
+
+  test("sync_status derives retriable=false for a stored stale-git-state sentinel (#643)", async () => {
+    // sync_retry calls runSchistSync without force — a still-live rebase,
+    // merge, or index.lock fails it identically until resolved manually.
+    const vault = await makeTempSpokeVault();
+    await fs.writeFile(
+      path.join(vault, ".schist", "last-sync-error"),
+      "2026-09-20T12:00:00.000Z push failed [stale-git-state]: diverged from hub, but a "
+      + "git operation is already in progress\n",
+    );
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
+    const err = result.last_sync_error as Record<string, unknown>;
+    expect(err.failure_class).toBe("stale-git-state");
+    expect(err.retriable).toBe(false);
+  }, 10000);
 });
 
 describe("diverged spoke auto-recovery against the REAL schist CLI (#500)", () => {
@@ -3040,6 +3070,20 @@ describe("class-aware write gate (#531)", () => {
     const result = await write(vault, "Blocked by missing CLI binary");
     expect(result.error).toBe("SYNC_DIRTY");
     expect(result.message).toContain("SCHIST_BIN");
+    expect(result.message).not.toContain("Run `sync_retry` after checking `sync_status`");
+  }, 15000);
+
+  test("stale-git-state names the manual-resolution remedy, not just sync_retry (#642)", async () => {
+    // sync_retry passes force=false on every caller-driven path — only
+    // triggerSpokePush's own internal retry ever forces — so a still-live
+    // rebase/merge/lock fails it identically. The generic default's
+    // "run sync_retry" would loop an agent with no exit path.
+    const vault = await withSentinel(
+      "push failed [stale-git-state]: diverged from hub, but a git operation " +
+      "is already in progress. Resolve it, then run sync_retry mode=pull-rebase-push");
+    const result = await write(vault, "Blocked by stale git state");
+    expect(result.error).toBe("SYNC_DIRTY");
+    expect(result.message).toContain("rebase --abort");
     expect(result.message).not.toContain("Run `sync_retry` after checking `sync_status`");
   }, 15000);
 

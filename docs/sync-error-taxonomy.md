@@ -20,8 +20,8 @@ Every push/pull failure gets exactly one class, in `PushFailureClass`
 | `non-fast-forward` | Spoke diverged; auto-recovery (#500) couldn't rebase it | No | Yes | `sync_retry mode=pull-rebase-push` after cleaning the working tree |
 | `transport` | Never got an answer — DNS/connect/mid-transfer failure | Yes, within a grace period | Yes | Wait, or check connectivity |
 | `timeout` | The MCP's own subprocess budget expired before an answer | Yes, within a grace period | Yes | Same as transport |
-| `stale-git-state` | Local git left mid-operation (`index.lock`, a stuck rebase) | No | Yes *(see Known gap below)* | Generic (`syncDirtyRemedy` has no explicit case — see Known gaps) |
-| `spawn-failed` | The MCP couldn't even exec the `schist` binary (PATH/ENOENT) | No | Yes *(see Known gap below)* | Pin `SCHIST_BIN`; `schist doctor` diagnoses this |
+| `stale-git-state` | Local git left mid-operation (`index.lock`, a stuck rebase) | No | **Never** | Resolve the git state manually, then run `sync_retry mode=pull-rebase-push` |
+| `spawn-failed` | The MCP couldn't even exec the `schist` binary (PATH/ENOENT) | No | **Never** | Pin `SCHIST_BIN`; `schist doctor` diagnoses this |
 | `other` | Classified nothing more specific matched | No | Yes | Generic: `sync_retry` after checking `sync_status` |
 
 Two axes matter and they are NOT the same axis:
@@ -32,13 +32,12 @@ Two axes matter and they are NOT the same axis:
   excluded even though it *does* clear with time: the hub already answered,
   and letting writes pile up while blocked can turn a short wait into a batch
   too large for `notes_per_sync` to ever accept (#531's PR description).
-- **Retriable** (`isRetriableFailure`, `tools.ts:1543`) — would running
-  `sync_retry` right now plausibly succeed? `cls !== "acl-rejected" &&
-  !(cls === "rate-limited" && no Retry-after window)`. Notably **not** a
-  mirror of the self-clearing set — `non-fast-forward`/`stale-git-state`/
-  `spawn-failed`/`other` are all "retriable" by this formula even though
-  retrying alone won't fix a missing binary or a dirty tree. This formula
-  predates the write-gate and was never revisited against it; see Known gaps.
+- **Retriable** (`isRetriableFailure`, `tools.ts`) — would running
+  `sync_retry` right now plausibly succeed? `acl-rejected`, `spawn-failed`,
+  and `stale-git-state` are never retriable; `rate-limited` is retriable only
+  with a `Retry after:` window. This is deliberately **not** a mirror of the
+  self-clearing set: `non-fast-forward` and `other` can become retriable once
+  their documented manual remediation is complete.
 
 ## The sentinel grammar
 
@@ -159,28 +158,25 @@ the hub echoes filepaths onto its own `remote:` lines, so ordering (ACL/rate
 tested before transport) is the only thing keeping that one from being
 forgeable; see `order-hub-acl-echoes-*` in the parity corpus.
 
-## Known gaps (as of 2026-09-19)
+## Known gaps (as of 2026-09-22)
 
 Filed as follow-ups on the work this doc describes — don't assume these are
 fixed without checking issue state first:
 
-- **#636** — `syncDirtyRemedy` has no `spawn-failed` case, so the write-gate
-  block message tells an agent to run `sync_retry` when the actual fix is
-  pinning `SCHIST_BIN`. The same gap exists for `stale-git-state` (also no
-  explicit case) but is not separately filed as of this writing — note that a
-  `stale-git-state`-classed sentinel only exists at all if `triggerSpokePush`'s
-  own automatic `sync push --force` retry (gated on `hasStaleGitOperation`,
-  `tools.ts:1251`) already ran and failed, so "just force-push" is not
-  actually available as a remedy by the time a human/agent sees this class.
-- **#637** — `sync_status.last_sync_error.retriable` has no test coverage for
-  `acl-rejected` or the other non-rate-limited classes.
-- **#638** — the write gate's `timeout`-is-self-clearing path has no
-  regression test.
-- `isRetriableFailure`'s formula (every class but `acl-rejected`/windowless-
-  `rate-limited` is "retriable") was never revisited against the self-
-  clearing set the write-gate introduced later — `spawn-failed` and
-  `stale-git-state` read as retriable even though retrying alone fixes
-  neither.
+- **#636**, **#637**, **#638** — closed. `syncDirtyRemedy` names the actual
+  remedy for `spawn-failed`; `sync_status.last_sync_error.retriable` has test
+  coverage for `acl-rejected` and the other non-rate-limited classes; the
+  write gate's `timeout`-is-self-clearing path is regression-tested.
+- **#642**, **#643** — addressed by this PR and will close on merge.
+  `syncDirtyRemedy` now has an explicit
+  `stale-git-state` case naming manual git resolution (`git rebase --abort`
+  etc.) instead of falling to the generic "run `sync_retry`" default —
+  note that this sentinel only exists once `triggerSpokePush`'s own
+  automatic `--force` retry (gated on `hasStaleGitOperation`, `tools.ts:1251`)
+  already ran and failed, so "just force-push" was never actually available
+  as a remedy by the time this class surfaces. `isRetriableFailure` now
+  returns `false` for both `spawn-failed` and `stale-git-state`, since
+  `sync_retry` is structurally unable to fix either by itself.
 
 ## File map
 
