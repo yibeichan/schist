@@ -589,6 +589,18 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
             _print_conflict_recovery(
                 vault_path, config, output,
                 tree_restored=git_ops.PULL_ABORT_FAILED_MARKER not in output)
+        elif _SHELL_REFUSAL_RE.search(output):
+            # Same gap as sync_push (#597): a forced-command refusal happens
+            # at the SSH layer before git-upload-pack starts, so it is
+            # equally reachable from a pull as from a push, and the hub
+            # answer here is exactly as unfixable from the spoke side. Tested
+            # before _is_network_error for the same reason non-fast-forward
+            # is tested before it on the push side — "Could not read from
+            # remote repository" alone matches no transport marker, but
+            # ordering the refusal check first keeps it that way even if one
+            # is later added that would.
+            print(f"Hub refused connection — check authorized_keys on the hub:\n{output}",
+                  file=sys.stderr)
         elif _is_network_error(output):
             _unreachable()
         else:
@@ -893,6 +905,19 @@ _NON_FAST_FORWARD_RE = re.compile(
     r"|^\s*hint:.*updates were rejected",
     re.MULTILINE | re.IGNORECASE)
 
+# #511's forced command refuses BEFORE receive-pack starts — wrong repo,
+# wrong verb, interactive shell, unparseable authorized_keys entry — so there
+# is no pre-receive, no hook, and no "declined" wrapper to catch it. The spoke
+# sees only "schist-shell: <reason>" plus git's generic "Could not read from
+# remote repository.", which matches no transport pattern either, so the
+# clearest possible refusal fell through to a local-failure message telling
+# the user to debug their own clone for something only a hub-side
+# authorized_keys fix resolves (#597/#599). Matches mcp-server/src/tools.ts's
+# SHELL_REFUSAL_RE. The negative lookahead excludes "failed to exec": an
+# execvp OSError (hub_shell.py:182) is a hub-side operational fault, not an
+# authorization decision.
+_SHELL_REFUSAL_RE = re.compile(r"^schist-shell: (?!failed to exec )", re.MULTILINE)
+
 
 def _is_acl_rejection(output: str) -> bool:
     """Did the HUB refuse this push (pre-receive declined), as opposed to git
@@ -904,6 +929,7 @@ def _is_acl_rejection(output: str) -> bool:
     """
     return bool(_ACL_REJECTION_RE.search(output)
                 or _REMOTE_DECLINED_RE.search(output)
+                or _SHELL_REFUSAL_RE.search(output)
                 or "pre-receive hook declined" in output.lower())
 
 
