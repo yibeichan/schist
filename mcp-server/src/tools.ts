@@ -838,7 +838,19 @@ function runSchistSync(
   );
 }
 
-const inFlightSpokePushes = new Map<string, Promise<SyncCommandOutcome>>();
+/** The command outcome and the diagnosis eventually committed to the sentinel.
+ *
+ * Recovery can stop after the initial push has failed (for example because a
+ * rebase is already in progress).  Keeping only that initial outcome made an
+ * awaiter report a non-fast-forward while sync_status correctly reported the
+ * later stale-git-state diagnosis (#542).
+ */
+type InFlightSpokePushResult = {
+  outcome: SyncCommandOutcome;
+  failure: string | null;
+};
+
+const inFlightSpokePushes = new Map<string, Promise<InFlightSpokePushResult>>();
 
 async function hasStaleGitOperation(vaultRoot: string): Promise<boolean> {
   const gitDir = path.join(vaultRoot, ".git");
@@ -1147,6 +1159,16 @@ export function formatPushFailure(outcome: SyncCommandOutcome, prefix = "push fa
 }
 
 /**
+ * A pull's failure is useful operator detail, but a PushFailureClass does not
+ * describe which pull recovery action is appropriate.  In particular, do not
+ * persist a push-class marker for it: sync_status would otherwise present a
+ * false push diagnosis for a pull-phase event (#542).
+ */
+function formatPullFailure(outcome: SyncCommandOutcome, prefix: string): string {
+  return `${prefix}: ${tailOutput(outcomeMessage(outcome))}`;
+}
+
+/**
  * Extra sentence for the one failure class whose cause is invisible in the
  * underlying error text. `spawn schist ENOENT` says a name did not resolve; it
  * does not say against WHAT, and the answer — this server process's PATH,
@@ -1203,29 +1225,35 @@ function pushFailureMessage(outcome: SyncCommandOutcome): string | null {
  */
 async function recoverDivergedSpoke(
   vaultRoot: string,
-  onOutcome: (outcome: SyncCommandOutcome) => void,
-): Promise<string | null> {
+  originalOutcome: SyncCommandOutcome,
+): Promise<InFlightSpokePushResult> {
   if (await hasStaleGitOperation(vaultRoot)) {
-    return "push failed [stale-git-state]: diverged from hub, but a git operation " +
-      "is already in progress. Resolve it, then run sync_retry mode=pull-rebase-push";
+    return {
+      outcome: originalOutcome,
+      failure: "push failed [stale-git-state]: diverged from hub, but a git operation " +
+        "is already in progress. Resolve it, then run sync_retry mode=pull-rebase-push",
+    };
   }
   const status = await runGit(vaultRoot, ["status", "--porcelain"]);
   if (!status.ok) {
     // Don't report a probe failure as "dirty" — that names the wrong
     // condition AND the wrong remedy.
-    return formatPushFailure(status, "diverged from hub, but git status failed");
+    return { outcome: status, failure: formatPushFailure(status, "diverged from hub, but git status failed") };
   }
   if ((status.stdout ?? "").trim().length > 0) {
-    return "push failed [non-fast-forward]: working tree dirty, so it was not " +
-      "rebased. Commit or stash, then run sync_retry mode=pull-rebase-push";
+    return {
+      outcome: originalOutcome,
+      failure: "push failed [non-fast-forward]: working tree dirty, so it was not " +
+        "rebased. Commit or stash, then run sync_retry mode=pull-rebase-push",
+    };
   }
 
   console.error("[schist] spoke diverged from hub; attempting one pull-rebase-push");
   const pull = await runSchistSync(vaultRoot, "pull", SYNC_RETRY_TIMEOUT_MS);
   if (!pull.ok) {
-    // Deliberately NOT onOutcome(pull): the tracked promise's outcome is what
-    // sync_retry reports under phase "push", and a pull error there reads as
-    // a push error. The pull's detail goes into the sentinel instead.
+    // The tracked result carries this pull outcome, while its sentinel has no
+    // PushFailureClass marker: a pull error must not be presented as a push
+    // diagnosis to a concurrent sync_retry caller (#542).
     if (isRebaseConflict(pull)) {
       // "tree unchanged" was asserted unconditionally with the abort's
       // outcome discarded — the same unestablished claim #613 fixed in the
@@ -1243,28 +1271,31 @@ async function recoverDivergedSpoke(
       // that is usually wrong.
       const abort = await runGit(vaultRoot, ["rebase", "--abort"], 5_000);
       if (await hasStaleGitOperation(vaultRoot)) {
-        return "push failed [non-fast-forward]: rebase conflict during " +
-          "auto-recovery, and the tree is still mid-operation after " +
+        return {
+          outcome: pull,
+          failure: "rebase conflict during auto-recovery, and the tree is still mid-operation after " +
           "`git rebase --abort`" +
           (abort.timedOut ? " (which timed out after 5s)" : "") +
           " -- local state is NOT known unchanged. Clear it with " +
           "`git rebase --abort` in the vault, then sync_retry " +
-          "mode=pull-rebase-push";
+          "mode=pull-rebase-push",
+        };
       }
-      return "push failed [non-fast-forward]: rebase conflict during auto-recovery " +
-        "(rebase aborted, tree unchanged). Resolve manually, then run " +
-        "sync_retry mode=pull-rebase-push";
+      return {
+        outcome: pull,
+        failure: "rebase conflict during auto-recovery (rebase aborted, tree unchanged). " +
+          "Resolve manually, then run sync_retry mode=pull-rebase-push",
+      };
     }
-    return formatPushFailure(pull, "pull-rebase during auto-recovery failed");
+    return { outcome: pull, failure: formatPullFailure(pull, "pull-rebase during auto-recovery failed") };
   }
 
   const repush = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS);
-  onOutcome(repush);
   if (repush.ok) {
     console.error("[schist] spoke recovered: pull-rebase-push succeeded");
-    return null;
+    return { outcome: repush, failure: null };
   }
-  return formatPushFailure(repush, "push after auto-recovery rebase failed");
+  return { outcome: repush, failure: formatPushFailure(repush, "push after auto-recovery rebase failed") };
 }
 
 /** Fire-and-forget spoke push after a write. No-op for non-spoke vaults. */
@@ -1306,7 +1337,9 @@ export function triggerSpokePush(vaultRoot: string): void {
       // one bounded pull-rebase + one push, never a force-push, and only
       // from a clean tree with no git operation already in progress.
       if (failure !== null && classifyPushFailure(outcome) === "non-fast-forward") {
-        failure = await recoverDivergedSpoke(vaultRoot, (recovered) => { outcome = recovered; });
+        const recovered = await recoverDivergedSpoke(vaultRoot, outcome);
+        outcome = recovered.outcome;
+        failure = recovered.failure;
       }
 
       if (failure === null) {
@@ -1314,7 +1347,7 @@ export function triggerSpokePush(vaultRoot: string): void {
       } else {
         await writeSyncError(vaultRoot, failure);
       }
-      return outcome;
+      return { outcome, failure };
     })().finally(() => {
       inFlightSpokePushes.delete(vaultRoot);
     });
@@ -1854,8 +1887,8 @@ export async function sync_retry(
     const originalMtimeMs = sentinel?.mtimeMs ?? null;
     const inFlight = inFlightSpokePushes.get(vaultRoot);
     if (inFlight) {
-      const outcome = await inFlight;
-      if (outcome.ok) {
+      const tracked = await inFlight;
+      if (tracked.failure === null) {
         return {
           ok: true,
           mode,
@@ -1866,7 +1899,28 @@ export async function sync_retry(
           awaited_in_flight: true,
         };
       }
-      return { ...syncFailureResponse(mode, "push", outcome), awaited_in_flight: true };
+      const failureClass = parseFailureClass(tracked.failure);
+      if (failureClass !== null) {
+        return {
+          ok: false,
+          mode,
+          phase: "await-in-flight",
+          retriable: isRetriableFailure(failureClass, tracked.failure),
+          failure_class: failureClass,
+          reason: failureClass === "acl-rejected"
+            ? "ACL violation"
+            : failureClass === "rate-limited" && !RETRY_WINDOW_RE.test(tracked.failure)
+              ? "Rate limit (no retry window)"
+              : (tracked.outcome.timedOut ? "Timeout" : "Command failed"),
+          message: tracked.failure,
+          code: tracked.outcome.code ?? undefined,
+          signal: tracked.outcome.signal ?? undefined,
+          timed_out: tracked.outcome.timedOut,
+          awaited_in_flight: true,
+        };
+      }
+      // Pull-phase failures deliberately have no PushFailureClass marker.
+      return { ...syncFailureResponse(mode, "await-in-flight", tracked.outcome), awaited_in_flight: true };
     }
 
     if (mode === "pull-rebase-push") {

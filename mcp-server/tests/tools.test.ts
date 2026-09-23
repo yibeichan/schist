@@ -2866,6 +2866,82 @@ exit 1
       await fs.rm(stubDir, { recursive: true, force: true });
     }
   }, 10000);
+
+  test("an in-flight recovery reports its terminal stale-state class, matching sync_status (#542)", async () => {
+    const vault = await makeTempSpokeVault();
+    const started = path.join(vault, ".schist", "initial-push-started");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(path.join(stubDir, "schist"), `#!/bin/sh
+echo " ! [rejected] main -> main (non-fast-forward)" >&2
+echo "hint: Updates were rejected because the tip of your current branch is behind" >&2
+touch "${started}"
+sleep 0.2
+exit 1
+`, { mode: 0o755 });
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      triggerSpokePush(vault);
+      for (let i = 0; i < 40; i++) {
+        if (await fs.access(started).then(() => true).catch(() => false)) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      // The recovery check runs after the initial command exits. Creating the
+      // lock while it is in-flight deterministically selects that terminal
+      // branch without reaching a hub.
+      await fs.writeFile(path.join(vault, ".git", "index.lock"), "held\\n");
+      const retry = await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as unknown as Record<string, unknown>;
+      const status = await sync_status(vault) as unknown as Record<string, unknown>;
+      const sentinel = status.last_sync_error as Record<string, unknown>;
+      expect(retry.awaited_in_flight).toBe(true);
+      expect(retry.phase).toBe("await-in-flight");
+      expect(retry.failure_class).toBe("stale-git-state");
+      expect(sentinel.failure_class).toBe(retry.failure_class);
+      expect(sentinel.retriable).toBe(retry.retriable);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  test("an in-flight pull failure is not persisted as a push failure class (#542)", async () => {
+    const vault = await makeTempSpokeVault();
+    const pullStarted = path.join(vault, ".schist", "pull-started");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(path.join(stubDir, "schist"), `#!/bin/sh
+case "$*" in
+  *"sync pull"*)
+    touch "${pullStarted}"
+    sleep 0.2
+    echo "ssh: connect to host hub.example.ts.net port 22: Connection refused" >&2
+    exit 1 ;;
+  *)
+    echo " ! [rejected] main -> main (non-fast-forward)" >&2
+    echo "hint: Updates were rejected because the tip of your current branch is behind" >&2
+    exit 1 ;;
+esac
+`, { mode: 0o755 });
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      triggerSpokePush(vault);
+      for (let i = 0; i < 40; i++) {
+        if (await fs.access(pullStarted).then(() => true).catch(() => false)) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const retry = await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as unknown as Record<string, unknown>;
+      const status = await sync_status(vault) as unknown as Record<string, unknown>;
+      const sentinel = status.last_sync_error as Record<string, unknown>;
+      expect(retry.awaited_in_flight).toBe(true);
+      expect(retry.failure_class).toBeUndefined();
+      expect(sentinel.failure_class).toBeNull();
+      expect(sentinel.contents).toContain("pull-rebase during auto-recovery failed");
+      expect(sentinel.contents).not.toMatch(/\[(?:transport|non-fast-forward|acl-rejected)\]:/);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
 });
 
 describe("sync error sentinel", () => {
