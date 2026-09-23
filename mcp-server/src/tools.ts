@@ -1018,6 +1018,23 @@ const STALE_STATE_PATTERNS = [
   "you have unmerged paths",
 ];
 
+// #596: `format_rejection` (pre_receive.py) echoes the offending FILEPATH
+// verbatim into the hub's own ACL refusal, and git relays every line of that
+// prefixed `remote: `. A note named `notes/updates were rejected.md` (or
+// `notes/(fetch first).md` / `notes/(non-fast-forward).md`) then puts git's
+// own non-fast-forward wording inside a genuine ACL refusal — reproduced
+// against a real `git push`/pre-receive. Worse than a wrong header: this
+// class gates #500's auto-recovery (`classifyPushFailure(outcome) ===
+// "non-fast-forward"`), so a crafted filename aims a pull-rebase-push loop
+// at a refusal that can never succeed, and the ACL rejection is never
+// reported as one — the "steerable substring that OPENS a gate" shape of
+// #535/#584. Mirrors `_NON_FAST_FORWARD_RE` in cli/schist/sync.py: `! `
+// and `hint:` at line start are git's own local wrapper output, never
+// something the hub's echoed text or a vault filename can forge. The two
+// parenthetical tokens are dropped as free-floating alternatives — they
+// only ever appear ON the `! [rejected]` line, which is already matched.
+const NON_FAST_FORWARD_RE = /^\s*!\s*\[rejected\]|^\s*hint:.*updates were rejected/m;
+
 /**
  * Classify a failed push from its captured output.
  *
@@ -1056,13 +1073,10 @@ export function classifyPushFailure(outcome: SyncCommandOutcome): PushFailureCla
   // Non-fast-forward before ACL: git's own hint block ("Updates were
   // rejected because…") is emitted ONLY for a stale ref, while a hub refusal
   // prints "! [remote rejected] … (pre-receive hook declined)" with no such
-  // hint — so this cannot steal a genuine ACL or rate-limit case, and it
-  // stops a shared word in the surrounding output from doing so.
-  if (
-    text.includes("non-fast-forward") ||
-    text.includes("fetch first") ||
-    text.includes("updates were rejected")
-  ) {
+  // hint — so this cannot steal a genuine ACL or rate-limit case. Anchored
+  // per #596: the hub echoes offending vault filepaths verbatim, so bare
+  // substrings here were steerable the same way RATE_LIMIT_REJECTION_RE was.
+  if (NON_FAST_FORWARD_RE.test(text)) {
     return "non-fast-forward";
   }
   if (isAclRejection(outcome)) return "acl-rejected";

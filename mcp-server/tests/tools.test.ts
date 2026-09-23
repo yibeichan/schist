@@ -1591,9 +1591,10 @@ describe("push failure classification (#501)", () => {
     // match it the ACL header is never printed (#611).
     //
     // Narrowly that, and not "the MCP can never see both": a vault FILENAME
-    // carrying "fetch first" is echoed into a genuine ACL rejection by the
-    // hub, under the ACL header, and this classifier still matches those
-    // tokens as bare substrings. That route is #617's, not this test's.
+    // carrying "fetch first" used to be echoed into a genuine ACL rejection
+    // by the hub, under the ACL header, and this classifier matched those
+    // tokens as bare substrings anyway (#596, fixed below — see "a filename
+    // cannot steer an ACL refusal into non-fast-forward").
     expect(classifyPushFailure(failed(
       "Push rejected — the hub has commits this clone does not.\n" +
       "Run `schist sync pull` to rebase onto them, then push again.\n" +
@@ -1668,6 +1669,30 @@ describe("push failure classification (#501)", () => {
       " ! [rejected]        main -> main (non-fast-forward)\n" +
       "error: failed to push some refs to 'ssh://hub/vault.git'\n",
     ))).toBe("non-fast-forward");
+  });
+
+  test.each([
+    "notes/updates were rejected.md",
+    "notes/(fetch first).md",
+    "notes/(non-fast-forward).md",
+  ])("a filename cannot steer an ACL refusal into non-fast-forward (%s) (#596)", (filename) => {
+    // format_rejection (pre_receive.py) echoes the offending filepath
+    // verbatim into the hub's own ACL refusal, and git relays every line of
+    // that prefixed `remote: `. Before the anchor, a note named after git's
+    // own non-fast-forward wording made a genuine ACL refusal match the
+    // free-floating tokens — and since non-fast-forward is tested FIRST, it
+    // aimed #500's auto-recovery (pull-rebase-push) at a refusal that can
+    // never succeed, and the ACL rejection was never reported as one. Mirrors
+    // the CLI's `test_a_filename_cannot_steer_an_acl_refusal_into_the_pull_branch`.
+    const stderr =
+      "remote: REJECTED: push contains out-of-scope writes\n" +
+      "remote: Identity: cluster-mario\n" +
+      "remote: \n" +
+      "remote: Violations:\n" +
+      `remote:   - ${filename} (scope: research/mario)\n` +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n";
+    expect(stderr).toContain(filename);
+    expect(classifyPushFailure(failed(stderr))).toBe("acl-rejected");
   });
 
   test("a hostname containing the letters a-c-l is not an ACL rejection", () => {
