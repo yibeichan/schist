@@ -1924,7 +1924,16 @@ export async function sync_retry(
         };
       }
       // Pull-phase failures deliberately have no PushFailureClass marker.
-      return { ...syncFailureResponse(mode, "await-in-flight", tracked.outcome), awaited_in_flight: true };
+      const response = syncFailureResponse(mode, "await-in-flight", tracked.outcome);
+      const conflict = isRebaseConflict(tracked.outcome);
+      return {
+        ...response,
+        // Recovery's terminal diagnosis (including whether abort left the
+        // tree mid-operation) is the same text written to the sentinel.
+        message: tracked.failure,
+        ...(conflict ? { retriable: false, reason: tracked.failure } : {}),
+        awaited_in_flight: true,
+      };
     }
 
     if (mode === "pull-rebase-push") {

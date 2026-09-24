@@ -2978,6 +2978,56 @@ esac
       await fs.rm(stubDir, { recursive: true, force: true });
     }
   }, 10000);
+
+  test.each([
+    { stuck: true, expected: "NOT known unchanged" },
+    { stuck: false, expected: "tree unchanged" },
+  ])("background conflict recovery reports the actual rebase state: stuck=$stuck (#633)", async ({ stuck, expected }) => {
+    const vault = await makeTempSpokeVault();
+    const pullStarted = path.join(vault, ".schist", "conflict-pull-started");
+    const commandLog = path.join(vault, ".schist", "conflict-commands");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(path.join(stubDir, "schist"), `#!/bin/sh
+echo "$*" >> "${commandLog}"
+case "$*" in
+  *"sync pull"*)
+    ${stuck ? `mkdir -p "${path.join(vault, ".git", "rebase-merge")}"` : ":"}
+    touch "${pullStarted}"
+    sleep 0.2
+    echo "CONFLICT: could not apply commit" >&2
+    exit 1 ;;
+  *)
+    echo " ! [rejected] main -> main (non-fast-forward)" >&2
+    echo "hint: Updates were rejected because the tip of your current branch is behind" >&2
+    exit 1 ;;
+esac
+`, { mode: 0o755 });
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      triggerSpokePush(vault);
+      for (let i = 0; i < 40; i++) {
+        if (await fs.access(pullStarted).then(() => true).catch(() => false)) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const retry = await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as unknown as Record<string, unknown>;
+      const sentinel = await fs.readFile(path.join(vault, ".schist", "last-sync-error"), "utf-8");
+      expect(retry.awaited_in_flight).toBe(true);
+      expect(retry.message).toContain(expected);
+      expect(sentinel).toContain(expected);
+      if (stuck) {
+        expect(retry.message).toContain("mid-operation");
+        expect(sentinel).not.toContain("tree unchanged");
+      } else {
+        expect(sentinel).not.toContain("NOT known unchanged");
+      }
+      const commands = (await fs.readFile(commandLog, "utf-8")).trim().split("\n");
+      expect(commands).toHaveLength(2); // initial push, then one pull; no repush
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
 });
 
 describe("sync error sentinel", () => {
