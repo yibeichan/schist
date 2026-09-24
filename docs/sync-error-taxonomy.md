@@ -16,7 +16,7 @@ Every push/pull failure gets exactly one class, in `PushFailureClass`
 | Class | Means | Self-clearing? (#531) | Retriable? (#539) | Remedy |
 |---|---|---|---|---|
 | `acl-rejected` | Hub refused the content — out of scope, bad identity, pinning | No | **Never** | Move the note under a directory your identity may write |
-| `rate-limited` | Hub answered, but the push exceeded a limit | No (deliberately — see below) | Only if the hub printed a `Retry after:` window | Wait for the window (or fix the `.gitignore` if it's `notes_per_sync`) |
+| `rate-limited` | Hub answered, but the push exceeded a limit | No (deliberately — see below) | Yes for `git_syncs_per_hour`; no for `notes_per_sync` | Wait for the window, or split a `notes_per_sync` push |
 | `non-fast-forward` | Spoke diverged; auto-recovery (#500) couldn't rebase it | No | Yes | `sync_retry mode=pull-rebase-push` after cleaning the working tree |
 | `transport` | Never got an answer — DNS/connect/mid-transfer failure | Yes, within a grace period | Yes | Wait, or check connectivity |
 | `timeout` | The MCP's own subprocess budget expired before an answer | Yes, within a grace period | Yes | Same as transport |
@@ -34,8 +34,10 @@ Two axes matter and they are NOT the same axis:
   too large for `notes_per_sync` to ever accept (#531's PR description).
 - **Retriable** (`isRetriableFailure`, `tools.ts`) — would running
   `sync_retry` right now plausibly succeed? `acl-rejected`, `spawn-failed`,
-  and `stale-git-state` are never retriable; `rate-limited` is retriable only
-  with a `Retry after:` window. This is deliberately **not** a mirror of the
+  and `stale-git-state` are never retriable; `rate-limited` is retriable when
+  the hub names the sliding `git_syncs_per_hour` limit. A `Retry after:` line
+  is a fallback for older sentinels whose limit name was truncated. This is
+  deliberately **not** a mirror of the
   self-clearing set: `non-fast-forward` and `other` can become retriable once
   their documented manual remediation is complete.
 
@@ -65,18 +67,21 @@ for a later reader (a human, or `sync_status`) to see.
 ### `tailOutput`'s truncation rule (`tools.ts:1082`)
 
 Keeps the **last** 500 characters, on the assumption git's own actionable
-line prints last. Two exceptions, both hub/producer output that prints
+line prints last. Three exceptions, all hub/producer output that prints
 *before* git's trailing wrapper, so a blind tail is exactly wrong for them:
 
-- The hub's `Retry after: N seconds` line (`RETRY_WINDOW_RE`) — the only
-  evidence a rate-limited failure is self-clearing (#539).
+- The hub's `REJECTED: rate limit exceeded (<limit>: ...)` line — the limit
+  name identifies whether a retry can succeed even if `Retry after:` is absent
+  or worded differently (#540).
+- The hub's `Retry after: N seconds` line (`RETRY_WINDOW_RE`) — retained for
+  older sentinels that may lack the limit name (#539).
 - The specific transport producer line `classifyPushFailure` matched
   (`transportEvidenceLine`) — without it a long connect-time failure can
   show `[transport]` with a detail that proves nothing about why (#634).
 
-Both are preserved to **exactly one line each**, never every matching
+Each is preserved to **exactly one line**, never every matching
 producer line — unbounded preservation is what would reopen the sentinel to
-vault-filename steering (see next section). If you add a third "evidence
+vault-filename steering (see next section). If you add another "evidence
 that can print before the wrapper" case, follow this shape: one bounded,
 anchored line, prepended with a leading `\n` (required — `formatPushFailure`
 glues `detail` directly onto `"push failed [<class>]: "` with no separator,

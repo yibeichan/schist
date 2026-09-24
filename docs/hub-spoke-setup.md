@@ -238,9 +238,10 @@ wrapper didn't inherit your `.bashrc` exports — add an explicit
 Two different limits produce this line, and only one of them clears by
 waiting — check which name is in the parentheses:
 
-- **`git_syncs_per_hour`** is a sliding window. The hook prints a
+- **`git_syncs_per_hour`** is a sliding window. The current hook prints a
   `Retry after: N seconds` line with the next available slot. Waiting works;
-  `sync_retry` reports `retriable: true`.
+  `sync_retry` reports `retriable: true` from the limit name even if a hub
+  omits or rewords that separate line.
 - **`notes_per_sync`** is a cap on the whole **push range**, enforced
   statelessly with no retry window and no `Retry after:` line. The identical
   push is rejected identically forever — waiting never helps. `sync_retry`
