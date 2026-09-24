@@ -12,7 +12,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { classifyPushFailure } from "../src/tools.js";
+import { classifyPushFailure, TRANSPORT_PATTERNS } from "../src/tools.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -60,16 +60,18 @@ describe("transport-classification parity (#604)", () => {
     const transportInputs = cases
       .filter((c) => c.mcp_class === "transport")
       .map((c) => c.input.toLowerCase());
-    const unexercised = [
-      "could not resolve", "temporary failure in name resolution",
-      "failed to connect", "couldn't connect", "connection refused",
-      "connection reset", "connection closed", "connection timed out",
-      "operation timed out", "recv failure", "send failure",
-      "empty reply from server", "network is unreachable", "no route to host",
-      "broken pipe", "the remote end hung up", "early eof",
-      "kex_exchange_identification",
-    ].filter((marker) => !transportInputs.some((i) => i.includes(marker)));
+    const unexercised = TRANSPORT_PATTERNS.filter(
+      (marker) => !transportInputs.some((i) => i.includes(marker)));
     expect(unexercised).toEqual([]);
+  });
+
+  test("every live transport marker has a steer-* negative", () => {
+    const steerText = cases
+      .filter((c) => c.name.startsWith("steer-") && !c.network)
+      .map((c) => c.input.toLowerCase())
+      .join("\n");
+    const missing = TRANSPORT_PATTERNS.filter((marker) => !steerText.includes(marker));
+    expect(missing).toEqual([]);
   });
 
   test("an HTTP auth refusal is not transport, and so not retriable (#594)", () => {
@@ -121,15 +123,7 @@ describe("transport-classification parity (#604)", () => {
       .filter((c) => c.name.startsWith("order-hub-acl-echoes-"))
       .map((c) => c.input.toLowerCase())
       .join("\n");
-    const missing = [
-      "could not resolve", "temporary failure in name resolution",
-      "failed to connect", "couldn't connect", "connection refused",
-      "connection reset", "connection closed", "connection timed out",
-      "operation timed out", "recv failure", "send failure",
-      "empty reply from server", "network is unreachable", "no route to host",
-      "broken pipe", "the remote end hung up", "early eof",
-      "kex_exchange_identification",
-    ].filter((marker) => !orderText.includes(marker));
+    const missing = TRANSPORT_PATTERNS.filter((marker) => !orderText.includes(marker));
     expect(missing).toEqual([]);
   });
 
