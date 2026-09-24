@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import re
 import shutil
 import sqlite3
@@ -171,7 +172,8 @@ def check_sqlite(vault_path: Optional[str], db_path: Optional[str]) -> CheckResu
                            f"Run `schist-ingest --vault {vault_path} --db {db}` to rebuild.")
 
 
-def _configured_hooks_path(git_args: list[str]) -> Optional[str]:
+def _configured_hooks_path(git_args: list[str], *,
+                           env: Optional[dict[str, str]] = None) -> Optional[str]:
     """The raw `core.hooksPath`, for MESSAGING only — never for locating the
     directory, which is `_hooks_dir`'s job.
 
@@ -184,14 +186,15 @@ def _configured_hooks_path(git_args: list[str]) -> Optional[str]:
     try:
         r = subprocess.run(
             ["git", *git_args, "config", "--get", "--type=path", "core.hooksPath"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, env=env,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return None
     return r.stdout.strip() if r.returncode == 0 else None
 
 
-def _hooks_dir(git_args: list[str], base: Path) -> tuple[Optional[Path], Optional[str], Optional[str]]:
+def _hooks_dir(git_args: list[str], base: Path, *,
+               env: Optional[dict[str, str]] = None) -> tuple[Optional[Path], Optional[str], Optional[str]]:
     """Where git will ACTUALLY look for hooks: `(dir, configured, error)`.
 
     Exactly one git call — `rev-parse --git-path hooks` — because git already
@@ -218,11 +221,11 @@ def _hooks_dir(git_args: list[str], base: Path) -> tuple[Optional[Path], Optiona
     `error` non-None means unknown — callers must not PASS. `dir` None with no
     error means `core.hooksPath` is set to an empty value: git runs nothing.
     """
-    configured = _configured_hooks_path(git_args)
+    configured = _configured_hooks_path(git_args, env=env)
     try:
         r = subprocess.run(
             ["git", *git_args, "rev-parse", "--git-path", "hooks"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, env=env,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
         return None, configured, f"could not run git: {e}"
@@ -247,6 +250,72 @@ def _hooks_dir(git_args: list[str], base: Path) -> tuple[Optional[Path], Optiona
 def _effective_hooks_dir(vault_path: str) -> tuple[Optional[Path], Optional[str], Optional[str]]:
     """`_hooks_dir` for a spoke vault."""
     return _hooks_dir(["-C", vault_path], Path(vault_path))
+
+
+def _hub_hooks_dir(hub: Path) -> tuple[Optional[Path], Optional[str], Optional[str], bool]:
+    """Resolve hub hooks without mistaking the scanner's global config for
+    receive-pack's.
+
+    A local ``core.hooksPath`` applies to every user and is therefore
+    authoritative.  With no local setting, a different hub owner may have a
+    global redirect which doctor cannot safely inspect; resolve the repository
+    default/local configuration and make the resulting uncertainty explicit.
+    """
+    try:
+        foreign_owner = hub.stat().st_uid != os.geteuid()
+    except OSError:
+        foreign_owner = False
+    if not foreign_owner:
+        hooks_dir, configured, error = _hooks_dir(["--git-dir", str(hub)], hub)
+        return hooks_dir, configured, error, False
+
+    # Do not let an administrator's GIT_CONFIG_GLOBAL change the answer for a
+    # hub owned by someone else.  A local config still remains in effect.
+    clean_env = os.environ.copy()
+    clean_env["GIT_CONFIG_GLOBAL"] = os.devnull
+    clean_env["GIT_CONFIG_NOSYSTEM"] = "1"
+    hooks_dir, configured, error = _hooks_dir(
+        ["--git-dir", str(hub)], hub, env=clean_env,
+    )
+    return hooks_dir, configured, error, configured is None
+
+
+def _executable_by_user(path: Path, uid: int) -> bool:
+    """Whether ``uid`` can reach and execute *path*, independent of doctor's euid."""
+    try:
+        st = path.stat()
+        resolved = path.resolve(strict=True)
+    except OSError:
+        return False
+    try:
+        account = pwd.getpwuid(uid)
+        groups = set(os.getgrouplist(account.pw_name, account.pw_gid))
+    except (KeyError, OSError):
+        groups = set()
+
+    def can_execute(mode: int, owner: int, group: int) -> bool:
+        # POSIX access(2) gives uid 0 execute access when any execute bit is set.
+        if uid == 0:
+            return bool(mode & 0o111)
+        if uid == owner:
+            return bool(mode & 0o100)
+        if group in groups:
+            return bool(mode & 0o010)
+        return bool(mode & 0o001)
+
+    if not can_execute(st.st_mode, st.st_uid, st.st_gid):
+        return False
+    # Git must traverse every directory leading to the hook. Check both the
+    # supplied path and the resolved target so a symlink cannot hide a private
+    # directory from this check when doctor runs with more access than Git.
+    for parent in set(path.absolute().parents) | set(resolved.parents):
+        try:
+            parent_stat = parent.stat()
+        except OSError:
+            return False
+        if not can_execute(parent_stat.st_mode, parent_stat.st_uid, parent_stat.st_gid):
+            return False
+    return True
 
 
 def _hook_fix(vault_path: str, hooks_dir: Optional[Path], name: str,
@@ -281,7 +350,8 @@ def _hook_fix(vault_path: str, hooks_dir: Optional[Path], name: str,
 
 
 def _hook_state(hooks_dir: Optional[Path], name: str, configured: Optional[str],
-                error: Optional[str] = None) -> tuple[str, str]:
+                error: Optional[str] = None, *,
+                execute_as_uid: Optional[int] = None) -> tuple[str, str]:
     """Return (status, message-suffix) for one hook file.
 
     Existence is not enough: git silently SKIPS a hook it cannot execute, so a
@@ -307,7 +377,9 @@ def _hook_state(hooks_dir: Optional[Path], name: str, configured: Optional[str],
         return "FAIL", f"not installed at {hook}{where}"
     if not hook.is_file():
         return "FAIL", f"not a file: {hook}{where}"
-    if not os.access(hook, os.X_OK):
+    executable = (os.access(hook, os.X_OK) if execute_as_uid is None
+                  else _executable_by_user(hook, execute_as_uid))
+    if not executable:
         return "FAIL", f"installed but not executable — git skips it silently: {hook}{where}"
     return "PASS", f"installed{where}"
 
@@ -1227,9 +1299,19 @@ def check_hub_pre_receive_hook(hub_path: Optional[str]) -> CheckResult:
         return CheckResult("SKIP", label, f"not a git repository: {hub_path}")
 
     # Bare repos keep hooks at <repo>/hooks; a non-bare hub would use
-    # <repo>/.git/hooks. Honour core.hooksPath either way.
-    hooks_dir, configured, error = _hooks_dir(["--git-dir", str(hub)], hub)
-    status, msg = _hook_state(hooks_dir, "pre-receive", configured, error)
+    # <repo>/.git/hooks.  More importantly, receive-pack runs as the hub
+    # owner, not necessarily as the administrator running doctor (#546).
+    # os.access() would answer for the latter and can turn a mode-0700 hook
+    # owned by root into a false PASS while the hub account skips it.
+    try:
+        hub_uid = hub.stat().st_uid
+    except OSError as e:
+        return CheckResult("FAIL", label, f"cannot stat hub owner: {e}")
+    hooks_dir, configured, error, config_uncertain = _hub_hooks_dir(hub)
+    status, msg = _hook_state(
+        hooks_dir, "pre-receive", configured, error,
+        execute_as_uid=hub_uid,
+    )
     if status != "PASS":
         return CheckResult(
             "FAIL", label,
@@ -1266,6 +1348,15 @@ def check_hub_pre_receive_hook(hub_path: Optional[str]) -> CheckResult:
             f"executable but does not reference schist.pre_receive: {hook} — "
             f"schist's ACL may not be enforced",
             "Confirm this hook invokes `schist.pre_receive`, or reinstall the hub hook.",
+        )
+    if config_uncertain:
+        return CheckResult(
+            "WARN", label,
+            f"{msg} (evaluated for hub owner uid {hub_uid}; the hub user's "
+            "global Git config was not inspected, so its core.hooksPath could "
+            "select a different hook directory)",
+            "Run `schist doctor --hub-path …` as the hub user to verify that "
+            "user's global core.hooksPath as well.",
         )
     return CheckResult("PASS", label, msg)
 
