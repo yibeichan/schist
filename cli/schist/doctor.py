@@ -281,25 +281,41 @@ def _hub_hooks_dir(hub: Path) -> tuple[Optional[Path], Optional[str], Optional[s
 
 
 def _executable_by_user(path: Path, uid: int) -> bool:
-    """Whether ``uid`` can execute *path*, independent of doctor's euid."""
+    """Whether ``uid`` can reach and execute *path*, independent of doctor's euid."""
     try:
         st = path.stat()
+        resolved = path.resolve(strict=True)
     except OSError:
         return False
-    mode = st.st_mode
-    # POSIX access(2) gives uid 0 execute access when any execute bit is set.
-    if uid == 0:
-        return bool(mode & 0o111)
-    if uid == st.st_uid:
-        return bool(mode & 0o100)
     try:
         account = pwd.getpwuid(uid)
         groups = set(os.getgrouplist(account.pw_name, account.pw_gid))
     except (KeyError, OSError):
         groups = set()
-    if st.st_gid in groups:
-        return bool(mode & 0o010)
-    return bool(mode & 0o001)
+
+    def can_execute(mode: int, owner: int, group: int) -> bool:
+        # POSIX access(2) gives uid 0 execute access when any execute bit is set.
+        if uid == 0:
+            return bool(mode & 0o111)
+        if uid == owner:
+            return bool(mode & 0o100)
+        if group in groups:
+            return bool(mode & 0o010)
+        return bool(mode & 0o001)
+
+    if not can_execute(st.st_mode, st.st_uid, st.st_gid):
+        return False
+    # Git must traverse every directory leading to the hook. Check both the
+    # supplied path and the resolved target so a symlink cannot hide a private
+    # directory from this check when doctor runs with more access than Git.
+    for parent in set(path.absolute().parents) | set(resolved.parents):
+        try:
+            parent_stat = parent.stat()
+        except OSError:
+            return False
+        if not can_execute(parent_stat.st_mode, parent_stat.st_uid, parent_stat.st_gid):
+            return False
+    return True
 
 
 def _hook_fix(vault_path: str, hooks_dir: Optional[Path], name: str,

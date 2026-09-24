@@ -516,6 +516,17 @@ class TestCheckHubPreReceiveHook:
         assert _executable_by_user(hook, owner)
         assert not _executable_by_user(hook, owner + 1)
 
+    def test_exec_permission_requires_hub_user_to_traverse_hook_directory(self, tmp_path):
+        from schist.doctor import _executable_by_user
+        private = tmp_path / "private"
+        private.mkdir(mode=0o700)
+        hook = private / "pre-receive"
+        hook.write_text("#!/bin/sh\n")
+        hook.chmod(0o755)
+
+        assert _executable_by_user(hook, private.stat().st_uid)
+        assert not _executable_by_user(hook, private.stat().st_uid + 1)
+
     def test_executable_but_EMPTY_is_the_worst_case(self, tmp_path):
         """The exec bit is necessary, not sufficient. The threat list for this
         check — archive restore, scp, container COPY, manual redeploy — causes
