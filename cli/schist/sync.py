@@ -468,8 +468,8 @@ def _cleanup_merge_state(vault_path: str) -> None:
     sys.exit(1)
 
 
-def _cleanup_stale_index_lock(vault_path: str) -> None:
-    lock_path = Path(vault_path) / ".git" / "index.lock"
+def _cleanup_stale_index_lock(git_dir: Path) -> None:
+    lock_path = git_dir / "index.lock"
     if not lock_path.exists():
         return
     print("Removing stale git index.lock...", file=sys.stderr)
@@ -477,9 +477,9 @@ def _cleanup_stale_index_lock(vault_path: str) -> None:
         lock_path.unlink()
     except OSError as e:
         print(
-            "Error: could not remove stale .git/index.lock automatically.\n"
+            f"Error: could not remove stale {lock_path} automatically.\n"
             f"  {e}\n"
-            "  Manual fix: ensure no git process is running, then remove .git/index.lock.",
+            f"  Manual fix: ensure no git process is running, then remove {lock_path}.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -497,6 +497,22 @@ def cleanup_stale_git_state(vault_path: str, *, force: bool) -> None:
     unresolved merge content from later status/staging checks.
     """
     git_dir = Path(vault_path) / ".git"
+    if git_dir.is_file():
+        # Linked worktrees and --separate-git-dir vaults store a pointer here.
+        # Ask Git for the private git directory rather than parsing the file.
+        try:
+            resolved = subprocess.run(
+                ["git", "-C", vault_path, "rev-parse", "--absolute-git-dir"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            print(f"Error: cannot locate Git operation state: {e}", file=sys.stderr)
+            sys.exit(1)
+        if resolved.returncode != 0 or not resolved.stdout.strip():
+            detail = (resolved.stderr or resolved.stdout).strip()
+            print(f"Error: cannot locate Git operation state: {detail}", file=sys.stderr)
+            sys.exit(1)
+        git_dir = Path(resolved.stdout.strip())
     rebase_present = any((git_dir / d).exists() for d in ("rebase-merge", "rebase-apply"))
     if rebase_present:
         _cleanup_rebase_state(vault_path)
@@ -511,7 +527,7 @@ def cleanup_stale_git_state(vault_path: str, *, force: bool) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        _cleanup_stale_index_lock(vault_path)
+        _cleanup_stale_index_lock(git_dir)
 
     if merge_present:
         if not force:

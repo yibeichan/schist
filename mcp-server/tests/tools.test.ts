@@ -2043,6 +2043,40 @@ esac
     }
   }, 15000);
 
+  test("gitfile vault stops recovery when its real gitdir has an index lock (#647)", async () => {
+    const vault = await makeTempSpokeVault();
+    const gitDir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-separate-git-"));
+    createdDirs.add(gitDir);
+    await execFile("git", ["init", "--separate-git-dir", gitDir, vault]);
+    expect((await fs.stat(path.join(vault, ".git"))).isFile()).toBe(true);
+    await fs.writeFile(path.join(gitDir, "index.lock"), "held\n");
+
+    const logPath = path.join(vault, ".schist", "push-log");
+    const stubDir = await stubDivergedSpoke(vault, logPath);
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      triggerSpokePush(vault);
+      const sentinelPath = path.join(vault, ".schist", "last-sync-error");
+      let contents = "";
+      for (let i = 0; i < 80; i++) {
+        try {
+          contents = await fs.readFile(sentinelPath, "utf-8");
+          if (contents.includes("stale-git-state")) break;
+        } catch { /* recovery is still running */ }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(contents).toContain("[stale-git-state]");
+      const lines = await waitForLog(logPath, 1);
+      expect(lines).toHaveLength(2);
+      expect(lines.every((line) => line.includes("sync push"))).toBe(true);
+      expect(lines.some((line) => line.includes("sync pull"))).toBe(false);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
   test("a dirty tree is never rebased — it records what the operator must run", async () => {
     const vault = await makeTempSpokeVault();
     await fs.writeFile(path.join(vault, "dirty.md"), "uncommitted\n");

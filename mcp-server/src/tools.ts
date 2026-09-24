@@ -853,7 +853,19 @@ type InFlightSpokePushResult = {
 const inFlightSpokePushes = new Map<string, Promise<InFlightSpokePushResult>>();
 
 async function hasStaleGitOperation(vaultRoot: string): Promise<boolean> {
-  const gitDir = path.join(vaultRoot, ".git");
+  let gitDir = path.join(vaultRoot, ".git");
+  try {
+    if ((await fs.stat(gitDir)).isFile()) {
+      // In a linked worktree or --separate-git-dir vault, .git points to the
+      // real operation state. Let Git resolve it instead of parsing the file.
+      const resolved = await runCommand("git", ["rev-parse", "--absolute-git-dir"],
+        { cwd: vaultRoot, timeoutMs: 5_000, capture: true });
+      if (!resolved.ok || !resolved.stdout?.trim()) return true;
+      gitDir = resolved.stdout.trim();
+    }
+  } catch {
+    return false;
+  }
   const sentinels = [
     path.join(gitDir, "rebase-merge"),
     path.join(gitDir, "rebase-apply"),
