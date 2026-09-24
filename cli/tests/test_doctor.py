@@ -489,6 +489,44 @@ class TestCheckHubPreReceiveHook:
         h.chmod(0o755)
         assert check_hub_pre_receive_hook(str(hub)).status == "PASS"
 
+    def test_foreign_hub_owner_does_not_inherit_scanners_git_config(self, tmp_path,
+                                                                     monkeypatch):
+        """#546: receive-pack uses the hub account, not the account running
+        doctor.  An administrator's global hooksPath is not evidence about
+        which hook the hub account executes, so a healthy local/default hook
+        is WARN rather than silently reported PASS."""
+        hub = _real_bare_hub(tmp_path / "hub.git")
+        h = hub / "hooks" / "pre-receive"
+        h.write_text("#!/bin/sh\nexec python3 -m schist.pre_receive\n")
+        h.chmod(0o700)
+        scanner_uid = hub.stat().st_uid + 1
+        monkeypatch.setattr("schist.doctor.os.geteuid", lambda: scanner_uid)
+        r = check_hub_pre_receive_hook(str(hub))
+        assert r.status == "WARN", r.message
+        assert "hub user's global Git config was not inspected" in r.message
+
+    def test_exec_permission_is_evaluated_for_hub_user_not_scanner(self, tmp_path):
+        """A hook private to one account must not be treated as executable by
+        an arbitrary administrative scanner (the root false-PASS in #546)."""
+        from schist.doctor import _executable_by_user
+        hook = tmp_path / "pre-receive"
+        hook.write_text("#!/bin/sh\n")
+        hook.chmod(0o700)
+        owner = hook.stat().st_uid
+        assert _executable_by_user(hook, owner)
+        assert not _executable_by_user(hook, owner + 1)
+
+    def test_exec_permission_requires_hub_user_to_traverse_hook_directory(self, tmp_path):
+        from schist.doctor import _executable_by_user
+        private = tmp_path / "private"
+        private.mkdir(mode=0o700)
+        hook = private / "pre-receive"
+        hook.write_text("#!/bin/sh\n")
+        hook.chmod(0o755)
+
+        assert _executable_by_user(hook, private.stat().st_uid)
+        assert not _executable_by_user(hook, private.stat().st_uid + 1)
+
     def test_executable_but_EMPTY_is_the_worst_case(self, tmp_path):
         """The exec bit is necessary, not sufficient. The threat list for this
         check — archive restore, scp, container COPY, manual redeploy — causes
