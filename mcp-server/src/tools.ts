@@ -1058,6 +1058,10 @@ const STALE_STATE_PATTERNS = [
 // parenthetical tokens are dropped as free-floating alternatives — they
 // only ever appear ON the `! [rejected]` line, which is already matched.
 const NON_FAST_FORWARD_RE = /^\s*!\s*\[rejected\]|^\s*hint:.*updates were rejected/m;
+// sync.py writes this as the FIRST stderr line only after its own Git
+// classifier has decided the push diverged. Other CLI failure branches have
+// different first lines, so hub output or a vault filename cannot forge it.
+const CLI_DIVERGENCE_HEADER = "push rejected — the hub has commits this clone does not.";
 
 /**
  * Classify a failed push from its captured output.
@@ -1094,13 +1098,13 @@ export function classifyPushFailure(outcome: SyncCommandOutcome): PushFailureCla
   // ("WARNING: RATE_LIMIT_BYPASSED — rate limit DB unavailable", allowing the
   // push), so an unrelated later failure read as rate-limited.
   if (RATE_LIMIT_REJECTION_RE.test(text)) return "rate-limited";
-  // Non-fast-forward before ACL: git's own hint block ("Updates were
-  // rejected because…") is emitted ONLY for a stale ref, while a hub refusal
-  // prints "! [remote rejected] … (pre-receive hook declined)" with no such
-  // hint — so this cannot steal a genuine ACL or rate-limit case. Anchored
-  // per #596: the hub echoes offending vault filepaths verbatim, so bare
-  // substrings here were steerable the same way RATE_LIMIT_REJECTION_RE was.
-  if (NON_FAST_FORWARD_RE.test(text)) {
+  // Non-fast-forward before ACL: the CLI's own header is first in stderr only
+  // after its classifier selected divergence. Git's `! [rejected]` and hint
+  // lines remain as fallback for raw Git output. Both are anchored so a hub
+  // refusal echoing a filename cannot steal the divergence verdict (#596).
+  if (text === CLI_DIVERGENCE_HEADER ||
+      text.startsWith(CLI_DIVERGENCE_HEADER + "\n") ||
+      NON_FAST_FORWARD_RE.test(text)) {
     return "non-fast-forward";
   }
   if (isAclRejection(outcome)) return "acl-rejected";

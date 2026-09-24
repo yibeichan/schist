@@ -497,6 +497,21 @@
       "network": false,
       "mcp_class": "acl-rejected",
       "why": "#655: a filename on a remote-prefixed line cannot impersonate the shell-refusal producer; the pre-receive refusal still classifies as ACL"
+    },
+    {
+      "name": "cli-owned-divergence-header",
+      "input": "Push rejected — the hub has commits this clone does not.\nRun `schist sync pull` to rebase onto them, then push again.",
+      "cli_input": " ! [rejected] main -> main (fetch first)",
+      "network": false,
+      "mcp_class": "non-fast-forward",
+      "why": "#622: MCP sees the CLI's own header even if Git's Detail echo is absent; cli_input is the raw Git failure that causes the CLI to produce this header"
+    },
+    {
+      "name": "steer-cli-divergence-header-filename",
+      "input": "Push rejected by hub:\nremote: REJECTED: notes/Push rejected — the hub has commits this clone does not..md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": false,
+      "mcp_class": "acl-rejected",
+      "why": "#622: a filename echoed inside an ACL refusal cannot impersonate the CLI's first-line divergence header"
     }
   ]
 }

@@ -1613,25 +1613,11 @@ describe("push failure classification (#501)", () => {
     ))).toBe("non-fast-forward");
   });
 
-  test("git's `Detail:` echo is load-bearing: the CLI's own header does not classify", () => {
-    // The coverage gap #611 names, PINNED here rather than fixed. Every token
-    // this classifier reads a divergence from — "non-fast-forward",
-    // "fetch first", "updates were rejected" — comes from git's stderr as
-    // relayed by sync.py's `Detail:` line, never from the header sync.py
-    // authors itself. So the verdict rests entirely on a passthrough, and
-    // "non-fast-forward" is what arms #500 auto-recovery (tools.ts:1077):
-    // trim or drop that echo and recovery silently stops firing, with the
-    // test above still passing because it feeds the detail in.
-    //
-    // Asserting "other" states today's behaviour instead of pretending the
-    // authored header is recognized. Teaching this classifier that header is
-    // a production change to the same transport vocabulary #610/#617 are
-    // about, so it is filed separately rather than smuggled into a
-    // test-fidelity fix.
+  test("the CLI's own divergence header classifies without Git's Detail echo (#622)", () => {
     expect(classifyPushFailure(failed(
       "Push rejected — the hub has commits this clone does not.\n" +
       "Run `schist sync pull` to rebase onto them, then push again.\n",
-    ))).toBe("other");
+    ))).toBe("non-fast-forward");
   });
 
   // Until these two, NO test in this file discriminated any single one of the

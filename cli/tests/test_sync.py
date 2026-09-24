@@ -2529,7 +2529,7 @@ class TestPushRefusalIsNotAllOneThing:
     def test_non_fast_forward_names_pull_not_the_hub(
             self, _changes, _unpushed, tmp_path, capsys):
         """Command level: the header a user actually acts on."""
-        from schist.sync import sync_push
+        from schist.sync import PUSH_DIVERGENCE_HEADER, sync_push
 
         output = _live_push_failure(tmp_path / "repo", hook=None)
         vault = _make_spoke(tmp_path)
@@ -2538,6 +2538,10 @@ class TestPushRefusalIsNotAllOneThing:
                 sync_push(MagicMock(), vault, "db.sqlite")
 
         err = capsys.readouterr().err
+        case = next(c for c in _transport_parity_cases()
+                    if c["name"] == "cli-owned-divergence-header")
+        assert case["input"].splitlines()[0] == PUSH_DIVERGENCE_HEADER
+        assert err.startswith(case["input"])
         assert "rejected by hub" not in err.lower()
         assert "schist sync pull" in err
         assert output in err, "git's own stderr must still be shown"
@@ -2775,7 +2779,7 @@ def test_classify_push_failure_matches_shared_parity_cases(case: dict) -> None:
     """
     from schist.sync import classify_push_failure
 
-    assert classify_push_failure(case["input"]) == _expected_cli_branch(case), (
+    assert classify_push_failure(case.get("cli_input", case["input"])) == _expected_cli_branch(case), (
         case["why"])
 
 
