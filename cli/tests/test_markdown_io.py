@@ -166,6 +166,27 @@ def test_append_connection_preserves_original_on_write_failure(tmp_path, monkeyp
     assert [p.name for p in tmp_path.iterdir()] == ["note.md"]
 
 
+def test_write_note_replacement_preserves_original_on_rename_failure(
+    tmp_path, monkeypatch,
+) -> None:
+    """#438: replacing a note must not truncate it before the rename succeeds."""
+    import schist.markdown_io as mio
+
+    note = tmp_path / "note.md"
+    original = "---\ntitle: Original\n---\nOld body\n"
+    note.write_text(original, encoding="utf-8")
+
+    def boom(_src, _dst):
+        raise OSError("simulated rename failure")
+
+    monkeypatch.setattr(mio.os, "replace", boom)
+    with pytest.raises(OSError, match="simulated rename failure"):
+        mio.write_note(str(note), {"title": "Replacement"}, "New body")
+
+    assert note.read_text(encoding="utf-8") == original
+    assert [p.name for p in tmp_path.iterdir()] == ["note.md"]
+
+
 def test_append_connection_writes_atomically_via_replace(tmp_path, monkeypatch) -> None:
     """The write-back must go through os.replace (atomic rename), not a direct
     truncating open() on the target."""

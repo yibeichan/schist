@@ -125,8 +125,12 @@ def write_note(path: str, fm: dict, body: str, exclusive: bool = False):
     vault if that's where it points.
     """
     post = frontmatter.Post(body, **fm)
-    with open(path, 'x' if exclusive else 'w', encoding='utf-8') as f:
-        f.write(frontmatter.dumps(post) + '\n')
+    content = frontmatter.dumps(post) + '\n'
+    if exclusive:
+        with open(path, 'x', encoding='utf-8') as f:
+            f.write(content)
+    else:
+        _atomic_write(path, content)
 
 
 def insert_connection_line(content: str, line: str) -> str:
