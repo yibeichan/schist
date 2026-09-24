@@ -2082,7 +2082,7 @@ def test_non_dict_schist_yaml_top_level_does_not_crash(tmp_path: Path) -> None:
     assert result.status == "PASS", result.message
 
 
-def test_malformed_yaml_skips_instead_of_exiting(tmp_path: Path) -> None:
+def test_malformed_yaml_skips_without_stderr(tmp_path: Path, capsys) -> None:
     """#632: syntactically invalid YAML must SKIP the check, not take down
     the whole `doctor` run with the SystemExit that
     `commands._resolve_schema_config` raises on a read error."""
@@ -2090,6 +2090,17 @@ def test_malformed_yaml_skips_instead_of_exiting(tmp_path: Path) -> None:
     (vault / "schist.yaml").write_text("key: [unclosed\n")
     result = check_spoke_acl_drift(str(vault))
     assert result.status == "SKIP", result.message
+    assert capsys.readouterr().err == ""
+
+
+def test_non_utf8_schist_yaml_skips_without_stderr(tmp_path: Path, capsys) -> None:
+    """#654: an authored file that cannot be decoded must not crash doctor."""
+    vault = _write_default_layout_vault(tmp_path, _SEED_GRANT)
+    (vault / "schist.yaml").write_bytes(b"directories: \xff\n")
+    result = check_spoke_acl_drift(str(vault))
+    assert result.status == "SKIP", result.message
+    assert "UTF-8" in result.message
+    assert capsys.readouterr().err == ""
 
 
 class TestHubAclDrift:
