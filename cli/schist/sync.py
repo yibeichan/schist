@@ -1010,6 +1010,7 @@ def _is_non_fast_forward(output: str) -> bool:
 # verdict is still ACL", and the ordering the correctness depends on had no
 # test on this side at all.
 _PUSH_FAILURE_BRANCHES = ("non-fast-forward", "acl", "network", "other")
+PUSH_DIVERGENCE_HEADER = "Push rejected — the hub has commits this clone does not."
 
 
 def classify_push_failure(output: str) -> str:
@@ -1181,7 +1182,7 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
         if branch == "non-fast-forward":
             # NOT an ACL problem, and not fixable on the hub: the hub simply
             # has commits we do not. Name the remedy the user can actually run.
-            print("Push rejected — the hub has commits this clone does not.\n"
+            print(f"{PUSH_DIVERGENCE_HEADER}\n"
                   "Run `schist sync pull` to rebase onto them, then push again.",
                   file=sys.stderr)
             print(f"  Detail: {output}", file=sys.stderr)
