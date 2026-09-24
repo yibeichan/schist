@@ -33,6 +33,46 @@ def _make_spoke(tmp_path: Path, scope: str = "research/mario") -> str:
     return str(vault)
 
 
+def test_atomic_hook_write_cleans_temp_on_rename_failure(tmp_path, monkeypatch):
+    """#442: a failed hook install leaves the old executable and no temp."""
+    import schist.sync as sync
+
+    hook = tmp_path / "pre-commit"
+    hook.write_text("old hook\n", encoding="utf-8")
+
+    def boom(_src, _dst):
+        raise OSError("simulated rename failure")
+
+    monkeypatch.setattr(sync.os, "replace", boom)
+    with pytest.raises(OSError, match="simulated rename failure"):
+        sync._atomic_write_hook(hook, "new hook\n")
+
+    assert hook.read_text(encoding="utf-8") == "old hook\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["pre-commit"]
+
+
+def test_atomic_hook_write_uses_unique_executable_temps(tmp_path, monkeypatch):
+    """#442: concurrent installs cannot race over one fixed .tmp path."""
+    import schist.sync as sync
+
+    hook = tmp_path / "post-commit"
+    sources = []
+    real_replace = sync.os.replace
+
+    def record_replace(src, dst):
+        sources.append(Path(src))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(sync.os, "replace", record_replace)
+    sync._atomic_write_hook(hook, "#!/bin/sh\nexit 0\n")
+    sync._atomic_write_hook(hook, "#!/bin/sh\nexit 1\n")
+
+    assert len(set(sources)) == 2
+    assert all(src.parent == tmp_path for src in sources)
+    assert hook.read_text(encoding="utf-8") == "#!/bin/sh\nexit 1\n"
+    assert hook.stat().st_mode & 0o111 == 0o111
+
+
 @pytest.mark.parametrize("sentinel,force", [
     ("rebase-merge", False),
     ("MERGE_HEAD", False),
