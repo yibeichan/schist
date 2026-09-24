@@ -33,6 +33,45 @@ def _make_spoke(tmp_path: Path, scope: str = "research/mario") -> str:
     return str(vault)
 
 
+@pytest.mark.parametrize("sentinel,force", [
+    ("rebase-merge", False),
+    ("MERGE_HEAD", False),
+    ("index.lock", False),
+    ("index.lock", True),
+])
+def test_cleanup_stale_state_in_separate_git_dir(
+    tmp_path, capsys, sentinel, force,
+):
+    """Gitfile vaults must inspect the gitdir that Git actually uses (#649)."""
+    from schist.sync import cleanup_stale_git_state
+
+    vault = tmp_path / "vault"
+    git_dir = tmp_path / "separate-git-dir"
+    subprocess.run(
+        ["git", "init", "--separate-git-dir", str(git_dir), str(vault)],
+        check=True, capture_output=True,
+    )
+    assert (vault / ".git").is_file()
+    marker = git_dir / sentinel
+    if sentinel == "rebase-merge":
+        marker.mkdir()
+    else:
+        marker.write_text("held\n")
+
+    with patch("schist.sync._cleanup_rebase_state") as abort_rebase:
+        if sentinel in ("MERGE_HEAD", "index.lock") and not force:
+            with pytest.raises(SystemExit):
+                cleanup_stale_git_state(str(vault), force=force)
+            expected = "merge in progress" if sentinel == "MERGE_HEAD" else "index.lock"
+            assert expected in capsys.readouterr().err
+        else:
+            cleanup_stale_git_state(str(vault), force=force)
+        if sentinel == "rebase-merge":
+            abort_rebase.assert_called_once_with(str(vault))
+        elif force:
+            assert not marker.exists()
+
+
 # ---------------------------------------------------------------------------
 # init_spoke
 # ---------------------------------------------------------------------------
