@@ -205,9 +205,8 @@ def _hooks_dir(git_args: list[str], base: Path, *,
     - it resolves gitfile shapes. A linked worktree, a submodule or a
       `--separate-git-dir` clone has `.git` as a FILE, so the hardcoded
       `<vault>/.git/hooks` this module used was not a directory at all: doctor
-      FAILed a worktree whose hooks demonstrably run, and the remedy it
-      printed (`hooks reinstall`) then died with NotADirectoryError trying to
-      mkdir under a file;
+      FAILed a worktree whose hooks demonstrably run. `hooks reinstall` now
+      uses this same resolution so the recommended remedy works there too;
     - it works for bare repos, so the hub uses the same code path;
     - and it FAILS LOUDLY where reading the config silently did not. `git
       config --get` exits 1 for "unset" and 128 for "I could not read this
@@ -320,9 +319,8 @@ def _executable_by_user(path: Path, uid: int) -> bool:
 
 def _hook_fix(vault_path: str, hooks_dir: Optional[Path], name: str,
               configured: Optional[str], error: Optional[str] = None) -> str:
-    """The remedy, which differs by cause. `hooks reinstall` writes to
-    .git/hooks, so recommending it under a core.hooksPath redirect would send
-    the user to install a hook in the one place git is not looking."""
+    """The remedy, which differs by cause. `hooks reinstall` follows Git's
+    effective hooks path, including a core.hooksPath redirect."""
     if error:
         return (
             f"Make sure {vault_path} is a git repository readable by this user "
@@ -339,9 +337,8 @@ def _hook_fix(vault_path: str, hooks_dir: Optional[Path], name: str,
     if configured:
         return (
             f"git runs hooks from {hooks_dir} (core.hooksPath = '{configured}'). "
-            f"Either symlink schist's {name} into that directory, or unset the "
-            f"redirect (`git -C {vault_path} config --unset core.hooksPath`) and "
-            f"run `schist --vault {vault_path} hooks reinstall`."
+            f"Run `schist --vault {vault_path} hooks reinstall` to install "
+            "schist's hooks there."
         )
     return (
         f"Run `chmod +x {hook}` if it exists, or "
@@ -557,10 +554,10 @@ def check_hooks_path(vault_path: Optional[str]) -> CheckResult:
         )
     return CheckResult(
         "WARN", "Hooks path",
-        f"core.hooksPath is set to '{configured}' — schist hooks at .git/hooks/ are bypassed",
+        f"core.hooksPath is set to '{configured}' — Git uses that hooks directory",
         fix=(
-            f"Either unset (`git -C {vault_path} config --unset core.hooksPath`) "
-            f"or symlink schist's hooks into {configured}/."
+            f"Run `schist --vault {vault_path} hooks reinstall` to install "
+            f"schist's hooks into {configured}/."
         ),
     )
 

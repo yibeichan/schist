@@ -313,9 +313,7 @@ class TestHooksReinstall:
 
     def _vault(self, tmp_path: Path) -> Path:
         v = tmp_path / "v"
-        v.mkdir()
-        (v / ".git").mkdir()
-        (v / ".git" / "hooks").mkdir()
+        subprocess.run(["git", "init", "-q", str(v)], check=True)
         return v
 
     def _args(self, force: bool = False):
@@ -332,6 +330,46 @@ class TestHooksReinstall:
         # Atomic-rename leaves no stray .tmp siblings.
         leftover = list((v / ".git" / "hooks").glob("*.tmp"))
         assert leftover == [], f"unexpected .tmp leftovers: {leftover}"
+
+    def test_linked_worktree_installs_hooks_and_exclude_at_git_paths(self, tmp_path: Path) -> None:
+        from schist.sync import hooks_reinstall, PRE_COMMIT_HOOK
+
+        base = self._vault(tmp_path)
+        subprocess.run(["git", "-C", str(base), "config", "user.email", "test@example.com"], check=True)
+        subprocess.run(["git", "-C", str(base), "config", "user.name", "Test"], check=True)
+        subprocess.run(["git", "-C", str(base), "commit", "--allow-empty", "-qm", "seed"], check=True)
+        linked = tmp_path / "linked"
+        subprocess.run(["git", "-C", str(base), "worktree", "add", "--detach", str(linked)],
+                       check=True, capture_output=True)
+        assert (linked / ".git").is_file()
+
+        hooks_reinstall(self._args(), str(linked), "")
+        hooks_path = subprocess.check_output(
+            ["git", "-C", str(linked), "rev-parse", "--git-path", "hooks"], text=True,
+        ).strip()
+        exclude_path = subprocess.check_output(
+            ["git", "-C", str(linked), "rev-parse", "--git-path", "info/exclude"], text=True,
+        ).strip()
+        assert (Path(hooks_path) / "pre-commit").read_text() == PRE_COMMIT_HOOK
+        assert ".schist/" in Path(exclude_path).read_text()
+
+    def test_custom_hooks_path_is_where_reinstall_writes(self, tmp_path: Path) -> None:
+        from schist.sync import hooks_reinstall, PRE_COMMIT_HOOK
+
+        v = self._vault(tmp_path)
+        subprocess.run(["git", "-C", str(v), "config", "core.hooksPath", "custom-hooks"], check=True)
+        hooks_reinstall(self._args(), str(v), "")
+        assert (v / "custom-hooks" / "pre-commit").read_text() == PRE_COMMIT_HOOK
+
+    def test_empty_hooks_path_fails_without_writing_into_worktree(self, tmp_path: Path) -> None:
+        from schist.sync import hooks_reinstall
+
+        v = self._vault(tmp_path)
+        subprocess.run(["git", "-C", str(v), "config", "core.hooksPath", ""], check=True)
+        with pytest.raises(SystemExit) as exc:
+            hooks_reinstall(self._args(), str(v), "")
+        assert exc.value.code == 1
+        assert not (v / "pre-commit").exists()
 
     def test_not_a_git_repo_exits(self, tmp_path: Path) -> None:
         from schist.sync import hooks_reinstall
