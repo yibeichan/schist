@@ -1639,8 +1639,7 @@ def test_hooks_reinstall_retrofits_schist_exclude(tmp_path):
     from schist.sync import hooks_reinstall
 
     target = tmp_path / "spoke"
-    (target / ".git" / "info").mkdir(parents=True)
-    (target / ".git" / "hooks").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(target)], check=True)
 
     hooks_reinstall(MagicMock(force=False), str(target), str(tmp_path / "db.sqlite"))
 
@@ -1656,8 +1655,7 @@ def test_hooks_reinstall_exclude_retrofit_idempotent(tmp_path):
     from schist.sync import hooks_reinstall
 
     target = tmp_path / "spoke"
-    (target / ".git" / "info").mkdir(parents=True)
-    (target / ".git" / "hooks").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(target)], check=True)
 
     hooks_reinstall(MagicMock(force=False), str(target), str(tmp_path / "db.sqlite"))
     hooks_reinstall(MagicMock(force=False), str(target), str(tmp_path / "db.sqlite"))

@@ -218,7 +218,13 @@ def hooks_reinstall(args, vault_path: str, db_path: str) -> None:
         print(f"Error: {vault_path} is not a git repository", file=sys.stderr)
         sys.exit(1)
 
-    hooks_dir = target / ".git" / "hooks"
+    from .doctor import _effective_hooks_dir
+
+    hooks_dir, _, error = _effective_hooks_dir(str(target))
+    if error or hooks_dir is None:
+        detail = error or "core.hooksPath is empty; Git runs no hooks"
+        print(f"Error: cannot locate active hooks directory: {detail}", file=sys.stderr)
+        sys.exit(1)
     hooks_dir.mkdir(parents=True, exist_ok=True)
     force = getattr(args, "force", False)
     skipped = []
@@ -234,12 +240,27 @@ def hooks_reinstall(args, vault_path: str, db_path: str) -> None:
     # Retrofit the .schist/ ignore onto spokes initialized before #309. New
     # spokes get this at init (_build_spoke_in_staging); existing spokes only
     # pass through here on upgrade, so this is their catch-up path. Idempotent.
-    if (target / ".git" / "info").exists() or (target / ".git").is_dir():
-        _ensure_ignore_lines(
-            target / ".git" / "info" / "exclude",
-            [".schist/", ".schist/spoke.yaml"],
-            comment="schist runtime state + spoke config (never pushed to hub)",
+    try:
+        exclude_result = subprocess.run(
+            ["git", "-C", str(target), "rev-parse", "--git-path", "info/exclude"],
+            capture_output=True, text=True, timeout=5,
         )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        print(f"Error: cannot locate Git info/exclude: {e}", file=sys.stderr)
+        sys.exit(1)
+    exclude_path = exclude_result.stdout.strip()
+    if exclude_result.returncode != 0 or not exclude_path:
+        detail = (exclude_result.stderr or exclude_result.stdout).strip()
+        print(f"Error: cannot locate Git info/exclude: {detail}", file=sys.stderr)
+        sys.exit(1)
+    exclude = Path(exclude_path)
+    if not exclude.is_absolute():
+        exclude = target / exclude
+    _ensure_ignore_lines(
+        exclude,
+        [".schist/", ".schist/spoke.yaml"],
+        comment="schist runtime state + spoke config (never pushed to hub)",
+    )
 
     if written:
         print(f"Reinstalled hooks: {', '.join(written)} (template v{HOOK_VERSION})")
