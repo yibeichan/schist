@@ -1553,6 +1553,13 @@ describe("push failure classification (#501)", () => {
     ))).toBe("rate-limited");
   });
 
+  test("a non-schist origin's secondary rate limit stays a generic retriable failure (#540)", () => {
+    expect(classifyPushFailure(failed(
+      "remote: You have exceeded a secondary rate limit; please retry your request later\n" +
+      "error: failed to push some refs to 'https://github.com/example/vault.git'\n",
+    ))).toBe("other");
+  });
+
   test("a sleeping VPN is transport, not a hard failure", () => {
     expect(classifyPushFailure(failed(
       "ssh: connect to host hub.example.ts.net port 22: Operation timed out\n" +
@@ -2276,6 +2283,35 @@ exit 1
       // matching what sync_retry said live rather than silently discarding
       // the window evidence and defaulting to non-retriable.
       expect(err.retriable).toBe(true);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test("a windowed limit remains retriable without the hub's Retry after sentence (#540)", async () => {
+    const vault = await makeTempSpokeVault();
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const padding = "remote: old hub diagnostic padding ".repeat(30);
+    await fs.writeFile(path.join(stubDir, "schist"), `#!/bin/sh
+echo "Push rejected by hub:" >&2
+echo "remote: REJECTED: rate limit exceeded (git_syncs_per_hour: 10/10)" >&2
+echo "${padding}" >&2
+echo " ! [remote rejected] main -> main (pre-receive hook declined)" >&2
+exit 1
+`, { mode: 0o755 });
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const retry = await sync_retry(vault, { owner: TEST_AGENT, mode: "push-only" }) as unknown as Record<string, unknown>;
+      expect(retry.failure_class).toBe("rate-limited");
+      expect(retry.retriable).toBe(true);
+      expect(retry.reason).not.toBe("Rate limit (no retry window)");
+
+      const sentinel = await fs.readFile(path.join(vault, ".schist", "last-sync-error"), "utf-8");
+      expect(sentinel).toContain("remote: REJECTED: rate limit exceeded (git_syncs_per_hour");
+      const status = await sync_status(vault) as unknown as Record<string, unknown>;
+      expect((status.last_sync_error as Record<string, unknown>).retriable).toBe(true);
     } finally {
       process.env.PATH = origPath;
       await fs.rm(stubDir, { recursive: true, force: true });

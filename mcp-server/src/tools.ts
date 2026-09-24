@@ -1010,7 +1010,7 @@ const SHELL_REFUSAL_RE =
 // _format_rejection builds: "REJECTED: rate limit exceeded (<limit>: n/m)".
 // Requiring the limit's NAME is what keeps arbitrary text — vault note paths,
 // commit subjects, the fail-open warning — from claiming to be a rate limit.
-const RATE_LIMIT_REJECTION_RE = /rejected: rate limit exceeded \((notes_per_sync|git_syncs_per_hour)\b/;
+const RATE_LIMIT_REJECTION_RE = /^remote:\s*rejected: rate limit exceeded \((notes_per_sync|git_syncs_per_hour)\b/mi;
 
 // The retry window, anchored on _format_rejection's own line
 // (rate_limit.py:216-221). Unanchored, this was the same steerable-substring
@@ -1104,11 +1104,10 @@ export function classifyPushFailure(outcome: SyncCommandOutcome): PushFailureCla
  * git's own trailing wrapper rather than after it, so a blind tail is
  * exactly what drops it:
  *
- * - The hub's `Retry after:` line (#539) — its presence vs. absence is the
- *   ONLY thing that later tells a rate-limited failure apart as
- *   self-clearing or not (see SELF_CLEARING_FAILURE_CLASSES's sibling logic
- *   below); drop it and a later re-read of the truncated sentinel can't
- *   reproduce the `retriable` verdict `sync_retry` gave when it was live.
+ * - The hub's named rate-limit line (#540) — git_syncs_per_hour is a windowed
+ *   limit even if an older hub omits or rewords `Retry after:`. A later read
+ *   of the truncated sentinel needs that name to reproduce retriability.
+ *   Preserve the retry line too for older sentinels that lack the limit name.
  * - The transport producer line `classifyPushFailure` matched to reach the
  *   `transport` class in the first place (#634) — without it, a long
  *   connect-time failure (`ssh: connect to host … Connection refused`,
@@ -1116,7 +1115,7 @@ export function classifyPushFailure(outcome: SyncCommandOutcome): PushFailureCla
  *   `[transport]` while its own displayed detail carries none of the
  *   evidence for it.
  *
- * Both are kept to exactly ONE line each — RETRY_WINDOW_RE structurally can
+ * Each is kept to exactly ONE line — RETRY_WINDOW_RE structurally can
  * only ever match once (the hub prints it once), and `transportEvidenceLine`
  * returns only the FIRST matching producer line rather than every one —
  * rather than preserving every producer line found: unbounded preservation
@@ -1136,7 +1135,11 @@ function tailOutput(s: string, cap = 500): string {
   // "?", so a Unicode ellipsis would reach the operator as noise.
   if (trimmed.length <= cap) return trimmed;
   const tail = "..." + trimmed.slice(-cap);
-  const mustSurvive = [trimmed.match(RETRY_WINDOW_RE)?.[0], transportEvidenceLine(trimmed)]
+  const mustSurvive = [
+    trimmed.match(RATE_LIMIT_REJECTION_RE)?.[0],
+    trimmed.match(RETRY_WINDOW_RE)?.[0],
+    transportEvidenceLine(trimmed),
+  ]
     .filter((line): line is string => line !== undefined && !tail.includes(line));
   return mustSurvive.length > 0 ? `\n${mustSurvive.join("\n")}\n${tail}` : tail;
 }
@@ -1595,16 +1598,12 @@ function isRebaseConflict(outcome: SyncCommandOutcome): boolean {
 
 /**
  * One classifier, one answer (#534) — extended to retriability (#539): a
- * rate limit is only retriable if WAITING can clear it, and the hub
- * enforces two that differ on exactly that. `git_syncs_per_hour` is a
- * sliding window: rate_limit.py computes a positive retry_after and
- * _format_rejection prints "Retry after: N seconds". `notes_per_sync` is
- * stateless with retry_after=0 and prints no such line — the identical push
- * is rejected identically forever, and the fix is to split it, not to wait.
- * Both classify as "rate-limited", so require the POSITIVE evidence of a
- * window rather than matching the limit's name: an unrecognized future
- * stateless limit then reads non-retriable, which stops an agent rather
- * than looping it (fail closed on the claim we can't support).
+ * rate limit is only retriable if WAITING can clear it. The hub names its two
+ * limits in the rejection line: `git_syncs_per_hour` is a sliding window;
+ * `notes_per_sync` is stateless, so repeating the same push cannot help.
+ * Use that producer-owned reason first (#540), independent of whether the
+ * hub emits the separate `Retry after:` sentence. The latter remains a
+ * fallback for older, already-truncated sentinels with no preserved reason.
  *
  * `text` is deliberately whatever the caller has on hand — the full live
  * `outcomeMessage`, or a stored sentinel's (now truncation-preserved, #539)
@@ -1623,8 +1622,13 @@ function isRebaseConflict(outcome: SyncCommandOutcome): boolean {
  */
 function isRetriableFailure(cls: PushFailureClass, text: string): boolean {
   if (cls === "acl-rejected" || cls === "spawn-failed" || cls === "stale-git-state") return false;
-  const rateLimitedWithoutWindow = cls === "rate-limited" && !RETRY_WINDOW_RE.test(text);
-  return !rateLimitedWithoutWindow;
+  if (cls === "rate-limited") {
+    const limit = RATE_LIMIT_REJECTION_RE.exec(text)?.[1]?.toLowerCase();
+    if (limit === "git_syncs_per_hour") return true;
+    if (limit === "notes_per_sync") return false;
+    return RETRY_WINDOW_RE.test(text);
+  }
+  return true;
 }
 
 function syncFailureResponse(
@@ -1641,8 +1645,8 @@ function syncFailureResponse(
   // fact clears itself after the window. One classifier, one answer.
   const failureClass = classifyPushFailure(outcome);
   const acl = failureClass === "acl-rejected";
-  const rateLimitedWithoutWindow =
-    failureClass === "rate-limited" && !RETRY_WINDOW_RE.test(outcomeMessage(outcome));
+  const nonRetriableRateLimit =
+    failureClass === "rate-limited" && !isRetriableFailure(failureClass, outcomeMessage(outcome));
   return {
     ok: false,
     mode,
@@ -1664,7 +1668,7 @@ function syncFailureResponse(
     ...(phase === "push" ? { failure_class: failureClass } : {}),
     reason: acl
       ? "ACL violation"
-      : rateLimitedWithoutWindow
+      : nonRetriableRateLimit
         ? "Rate limit (no retry window)"
         : (outcome.timedOut ? "Timeout" : "Command failed"),
     message: outcomeMessage(outcome),
@@ -1909,7 +1913,7 @@ export async function sync_retry(
           failure_class: failureClass,
           reason: failureClass === "acl-rejected"
             ? "ACL violation"
-            : failureClass === "rate-limited" && !RETRY_WINDOW_RE.test(tracked.failure)
+            : failureClass === "rate-limited" && !isRetriableFailure(failureClass, tracked.failure)
               ? "Rate limit (no retry window)"
               : (tracked.outcome.timedOut ? "Timeout" : "Command failed"),
           message: tracked.failure,
