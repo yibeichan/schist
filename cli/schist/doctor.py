@@ -836,7 +836,11 @@ def check_spoke_acl_drift(vault_path: Optional[str]) -> CheckResult:
         # keys" rather than crash `.get()` — same shape as commands.py's
         # `_resolve_schema_config`, which this falls through to below.
         declared = raw.get("directories") if isinstance(raw, dict) else None
-    except (OSError, yaml.YAMLError):
+    except yaml.YAMLError:
+        return CheckResult("SKIP", label, "schist.yaml is not valid YAML")
+    except UnicodeDecodeError:
+        return CheckResult("SKIP", label, "schist.yaml is not UTF-8")
+    except OSError:
         declared = None
 
     if declared:
