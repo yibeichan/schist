@@ -334,9 +334,8 @@ class TestHookChecksRespectHooksPath:
         r = check_pre_commit_hook(str(repo))
         assert r.status == "FAIL", "must not pass on a hook git never runs"
         assert "team-hooks" in r.message
-        # `hooks reinstall` writes to .git/hooks, so recommending it here would
-        # send the user to install a hook where git is not looking.
-        assert "symlink" in (r.fix or "")
+        # Reinstall now writes to Git's effective hooks directory.
+        assert "team-hooks" in (r.fix or "")
         assert "hooks reinstall" in (r.fix or "")
 
         # Put it where git actually looks.
