@@ -150,10 +150,21 @@ def _atomic_write_hook(hook_path: Path, body: str) -> None:
     `.tmp` file (same directory ⇒ same filesystem ⇒ rename is atomic on POSIX)
     and `os.replace` over the target.
     """
-    tmp = hook_path.with_name(hook_path.name + ".tmp")
-    tmp.write_text(body)
-    tmp.chmod(0o755)
-    os.replace(tmp, hook_path)
+    fd, tmp_str = tempfile.mkstemp(
+        prefix=f".{hook_path.name}.", suffix=".tmp", dir=hook_path.parent,
+    )
+    tmp = Path(tmp_str)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(body)
+        tmp.chmod(0o755)
+        os.replace(tmp, hook_path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _install_local_hooks(vault_path) -> None:
