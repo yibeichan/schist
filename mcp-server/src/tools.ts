@@ -886,7 +886,7 @@ async function hasStaleGitOperation(vaultRoot: string): Promise<boolean> {
 // transport as self-clearing, that would OPEN the write gate for a refusal
 // no wait can fix. Nothing is lost: git always pairs the wrapper with the
 // underlying curl reason, and those reasons are enumerated here.
-const TRANSPORT_PATTERNS = [
+export const TRANSPORT_PATTERNS = [
   "could not resolve",                     // ssh "hostname" and curl "host"
   "temporary failure in name resolution",
   "failed to connect",

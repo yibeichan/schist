@@ -483,6 +483,20 @@
       "network": false,
       "mcp_class": "other",
       "why": "the `Detail:` tolerance added for own-detail-wrapped-connect-refused still requires a producer TOKEN (ssh/curl/fatal/remote/\u2026) to immediately follow it. A vault file literally named `Detail: connection refused.md`, echoed by git's own local conflict-hint block, supplies `Detail:` and the transport PHRASE 'connection refused' but no producer token \u2014 so it does not match, proving the tolerance doesn't reopen filename-steering (#535/#584/#617's risk class, not a new one)."
+    },
+    {
+      "name": "refusal-shell",
+      "input": "schist-shell: key for 'dragonfly' is confined to repository '/home/u/vault.git'; access to '/home/u/other.git' denied.\nfatal: Could not read from remote repository.",
+      "network": false,
+      "mcp_class": "acl-rejected",
+      "why": "#655: schist-shell refuses before receive-pack starts, so no pre-receive hook output exists; both classifiers must use its anchored line"
+    },
+    {
+      "name": "steer-shell-refusal-filename",
+      "input": "remote: REJECTED: notes/schist-shell: draft.md out of scope\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": false,
+      "mcp_class": "acl-rejected",
+      "why": "#655: a filename on a remote-prefixed line cannot impersonate the shell-refusal producer; the pre-receive refusal still classifies as ACL"
     }
   ]
 }

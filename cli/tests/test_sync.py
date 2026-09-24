@@ -2524,6 +2524,31 @@ class TestAbortTimeoutSuffixDoesNotForgeATransportError:
         assert git_ops.PULL_ABORT_FAILED_MARKER in output
 
 
+def test_pull_failure_branch_order_is_pinned_at_classifier_altitude() -> None:
+    """#624: a timed-out pull may carry partial conflict output; timeout wins.
+
+    A genuine conflict also wins over a simultaneous transport diagnostic.
+    sync_pull calls this classifier, so these assertions pin its real branch.
+    """
+    from schist import git_ops
+    from schist.sync import classify_pull_failure
+
+    assert classify_pull_failure(
+        git_ops.PULL_NO_RESPONSE_PREFIX + "\nCONFLICT (content): notes/a.md"
+    ) == "timeout"
+    assert classify_pull_failure(
+        "CONFLICT (content): notes/a.md\nssh: connect to host hub port 22: Connection refused"
+    ) == "conflict"
+    assert classify_pull_failure(
+        "schist-shell: key denied access to this repository\n"
+        "ssh: connect to host hub port 22: Connection refused"
+    ) == "shell-refusal"
+    assert classify_pull_failure(
+        "ssh: connect to host hub port 22: Connection refused"
+    ) == "network"
+    assert classify_pull_failure("fatal: bad object HEAD") == "other"
+
+
 def _transport_parity_cases() -> list[dict]:
     """The corpus shared with mcp-server/tests/transport-classification-parity."""
     fixture = (Path(__file__).resolve().parents[2]
@@ -2622,7 +2647,21 @@ def _expected_cli_branch(case: dict) -> str:
     """
     if case.get("mcp_class") is None:
         return case["cli_branch"]
-    return CLI_BRANCH_FOR_MCP_CLASS[case["mcp_class"]]
+    branch = CLI_BRANCH_FOR_MCP_CLASS.get(case["mcp_class"])
+    assert branch is not None, (
+        f"mcp_class {case['mcp_class']!r} has no CLI branch mapping. "
+        "Add its actual CLI branch, or set mcp_class to null and provide "
+        "cli_branch in the shared corpus case."
+    )
+    return branch
+
+
+@pytest.mark.parametrize("mcp_class", [
+    "timeout", "spawn-failed", "rate-limited", "stale-git-state",
+])
+def test_mcp_only_class_without_cli_mapping_explains_the_gap(mcp_class: str) -> None:
+    with pytest.raises(AssertionError, match="has no CLI branch mapping"):
+        _expected_cli_branch({"mcp_class": mcp_class})
 
 
 def test_every_parity_case_is_asserted_at_classifier_altitude() -> None:

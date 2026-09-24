@@ -507,6 +507,19 @@ def _force_enabled(args) -> bool:
     return getattr(args, "force", False) is True
 
 
+def classify_pull_failure(output: str) -> str:
+    """The recovery branch for a failed pull, in the order sync_pull uses."""
+    if output.startswith(git_ops.PULL_NO_RESPONSE_PREFIX):
+        return "timeout"
+    if "CONFLICT" in output or "conflict" in output.lower():
+        return "conflict"
+    if _SHELL_REFUSAL_RE.search(output):
+        return "shell-refusal"
+    if _is_network_error(output):
+        return "network"
+    return "other"
+
+
 def sync_pull(args, vault_path: str, db_path: str) -> None:
     """Pull updates from hub and rebuild SQLite index."""
     if not is_spoke(vault_path):
@@ -543,7 +556,7 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
                       "first.", file=sys.stderr)
             print(f"  Detail: {output}", file=sys.stderr)
 
-        # ORDER MATTERS, and these three tests are not interchangeable (#571).
+        # ORDER MATTERS, and these tests are not interchangeable (#571/#652).
         #
         # The timeout marker goes FIRST. pull_rebase aborts the rebase before
         # returning, so after a timeout there is no conflict left to resolve —
@@ -568,10 +581,11 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
         # the primary guard — keep it anyway: a conflict and a dead network
         # can co-occur, and the conflict is the one with a recovery procedure
         # the user has to see.
-        if output.startswith(git_ops.PULL_NO_RESPONSE_PREFIX):
+        branch = classify_pull_failure(output)
+        if branch == "timeout":
             _unreachable(
                 tree_certain=git_ops.PULL_ABORT_FAILED_MARKER not in output)
-        elif "CONFLICT" in output or "conflict" in output.lower():
+        elif branch == "conflict":
             # The abort marker has to be read on THIS branch too (#613). #571
             # added that check one branch up, where the pull itself timed out,
             # and left this one asserting the abort succeeded unconditionally
@@ -589,7 +603,7 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
             _print_conflict_recovery(
                 vault_path, config, output,
                 tree_restored=git_ops.PULL_ABORT_FAILED_MARKER not in output)
-        elif _SHELL_REFUSAL_RE.search(output):
+        elif branch == "shell-refusal":
             # Same gap as sync_push (#597): a forced-command refusal happens
             # at the SSH layer before git-upload-pack starts, so it is
             # equally reachable from a pull as from a push, and the hub
@@ -601,7 +615,7 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
             # is later added that would.
             print(f"Hub refused connection — check authorized_keys on the hub:\n{output}",
                   file=sys.stderr)
-        elif _is_network_error(output):
+        elif branch == "network":
             _unreachable()
         else:
             print(f"Error: pull failed — {output}", file=sys.stderr)
