@@ -95,16 +95,29 @@ async function installSlowHook(vault: string): Promise<{ pidFile: string; marker
 }
 
 async function assertHookChainKilled(pidFile: string, marker: string): Promise<void> {
+  // The hook can be scheduled late under parallel Jest load. Observe its PID
+  // before starting either timing window, so ENOENT is not mistaken for a
+  // failure of the detached-group kill.
+  const deadline = Date.now() + 5000;
+  let pid = 0;
+  while (Date.now() < deadline) {
+    try {
+      pid = Number((await fs.readFile(pidFile, "utf-8")).trim());
+      if (Number.isInteger(pid) && pid > 0) break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    }
+    await sleep(50);
+  }
+  expect(pid).toBeGreaterThan(0);
   // Past the 500ms SIGTERM→SIGKILL escalation window.
   await sleep(900);
-  const pid = Number((await fs.readFile(pidFile, "utf-8")).trim());
-  expect(Number.isInteger(pid) && pid > 0).toBe(true);
   // Signal 0 probes liveness; the detached-group kill must have taken the
   // hook's shell down with git.
   expect(() => process.kill(pid, 0)).toThrow();
-  // And once the hook's full sleep window has elapsed, the completion marker
-  // must still be absent — the sleep never finished, it was killed.
-  await sleep(HOOK_SLEEP_S * 1000 + 500 - COMMIT_TIMEOUT_MS - 900);
+  // Once the hook's full sleep window since its PID appeared has elapsed, its
+  // completion marker must still be absent — the sleep was killed.
+  await sleep(HOOK_SLEEP_S * 1000 + 500 - 900);
   await expect(fs.access(marker)).rejects.toThrow();
 }
 
