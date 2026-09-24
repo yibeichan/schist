@@ -44,6 +44,7 @@ describe("schist-memory CLI", () => {
       expect(result.code).toBe(0);
       expect(result.stdout).toContain("Memory entry added");
       expect(result.stdout).toContain("id=1");
+      expect(result.stdout).toContain(`db=${tmpDb}`);
     });
 
     it("rejects missing --agent", () => {

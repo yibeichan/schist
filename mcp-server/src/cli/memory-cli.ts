@@ -130,7 +130,7 @@ async function cmdAddMemory(args: Map<string, string>, positional: string[]): Pr
 
   try {
     const result = sqliteReader.addMemory(entry);
-    console.log(`✅ Memory entry added: id=${result.id} created_at=${result.created_at}`);
+    console.log(`✅ Memory entry added: id=${result.id} created_at=${result.created_at} db=${result.db}`);
   } catch (e: unknown) {
     const err = e as { error?: string; message?: string } | Error;
     console.error(`Error: ${"message" in err ? err.message : String(e)}`);
