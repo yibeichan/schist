@@ -488,6 +488,7 @@ def main(
         acl,
         db_path=db_path,
         log_path=log_path,
+        source=_push_source(),
     )
     if not rl_result.allowed:
         print(rl_result.message, file=sys.stderr)
