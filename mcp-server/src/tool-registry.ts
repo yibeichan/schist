@@ -1,4 +1,5 @@
 import type { VaultConfig } from "./types.js";
+import { OUTPUT_SCHEMAS } from "./output-contract.js";
 
 export function makeReadTools(config: VaultConfig) {
   return [
@@ -375,7 +376,7 @@ export function listAllTools(config: VaultConfig) {
     ...makeMemoryReadTools(config),
     ...makeWriteTools(config),
     ...makeMemoryWriteTools(config),
-  ];
+  ].map((tool) => ({ ...tool, outputSchema: OUTPUT_SCHEMAS[tool.name] }));
 }
 
 /**

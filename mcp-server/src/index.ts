@@ -32,6 +32,7 @@ import {
 import type { VaultConfig } from "./types.js";
 import { listAllTools, REMOVED_TOOLS } from "./tool-registry.js";
 import { SERVER_INSTRUCTIONS } from "./server-instructions.js";
+import { formatToolResult } from "./output-contract.js";
 
 function resolveVaultPath(): string {
   const envVault = process.env.SCHIST_VAULT_PATH;
@@ -178,9 +179,7 @@ async function main() {
       result = { error: "INGEST_ERROR", message: String(e), details: e };
     }
 
-    return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-    };
+    return formatToolResult(name, result);
   });
 
   const shutdown = async () => {
