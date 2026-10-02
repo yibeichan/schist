@@ -2134,6 +2134,28 @@ export async function search_notes(
   return response;
 }
 
+/**
+ * A frontmatter scalar as the string the get_note output schema declares.
+ *
+ * YAML types its scalars: `date: 2026-09-24` parses to a Date and `title: 2026`
+ * to a number. Cast `as string` and passed through, a Date reaches the client
+ * as "2026-09-24T00:00:00.000Z" (not the "2026-09-24" search_notes and the
+ * index return for the same note) and a number stays a number. A date-only
+ * value, which YAML reads as midnight UTC, becomes the date-only string the
+ * write paths already normalise to; a value with a time component keeps its
+ * full ISO timestamp rather than silently losing the time.
+ */
+function frontmatterString(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return "";
+    const iso = value.toISOString();
+    return iso.endsWith("T00:00:00.000Z") ? iso.split("T")[0] : iso;
+  }
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+}
+
 export async function get_note(
   vaultRoot: string,
   args: { id: string },
@@ -2203,8 +2225,8 @@ export async function get_note(
     const fileRef = meta.file_ref;
     return {
       id: args.id,
-      title: (meta.title as string) ?? "",
-      date: (meta.date as string) ?? "",
+      title: frontmatterString(meta.title),
+      date: frontmatterString(meta.date),
       status: (meta.status as string | null) ?? null,
       tags: Array.isArray(meta.tags) ? meta.tags : [],
       concepts: Array.isArray(meta.concepts) ? meta.concepts : [],

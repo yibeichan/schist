@@ -48,6 +48,24 @@ test("missing agent state is structured without changing the legacy null text", 
   expect(ajv.compile(schema)("structuredContent" in response && response.structuredContent)).toBe(true);
 });
 
+test("present agent state is wrapped exactly once and validates against the schema (#678)", () => {
+  // The null case cannot see a double wrap: {state: {state: null}} fails nothing
+  // that {state: null} passes. Only a real entry makes the nesting observable.
+  const entry = {
+    key: "agent1.session", value: { note: "active" },
+    owner: "agent1", updated_at: "2026-09-28T00:00:00.000Z", ttl_hours: null,
+  };
+  const response = formatToolResult("get_agent_state", entry);
+  const schema = tools.find((tool) => tool.name === "get_agent_state")!.outputSchema;
+  const structured = "structuredContent" in response ? response.structuredContent : undefined;
+
+  expect(response.content[0].text).toBe(JSON.stringify(entry, null, 2));
+  expect(structured).toEqual({ state: entry });
+  expect((structured as { state: { key?: string } }).state.key).toBe("agent1.session");
+  const validate = ajv.compile(schema);
+  expect({ ok: validate(structured), errors: validate.errors }).toEqual({ ok: true, errors: null });
+});
+
 test("tool errors retain their payload and are marked as errors", () => {
   const result = { error: "NOT_FOUND", message: "Note not found" };
   const response = formatToolResult("get_note", result);

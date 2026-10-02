@@ -1,7 +1,9 @@
 import * as os from "os";
 import * as path from "path";
 import * as fs from "fs/promises";
+import Ajv from "ajv";
 import Database from "better-sqlite3";
+import { formatToolResult, OUTPUT_SCHEMAS } from "../src/output-contract.js";
 import { addMemory, searchMemory, getAgentState, setAgentState, deleteAgentState, addConceptAlias } from "../src/sqlite-reader.js";
 
 // Use a temp DB for each test suite
@@ -444,6 +446,21 @@ describe("addConceptAlias", () => {
     expect(alias.reason).toBe("abbreviation");
     expect(alias.created_by).toBe("sansan");
     expect(typeof alias.created_at).toBe("string");
+  });
+
+  it("omits reason when none was supplied, so the result satisfies the output schema (#680)", () => {
+    // reason is optional and stored as SQL NULL; better-sqlite3 hands NULL back
+    // as JS null, which `{ type: "string" }` rejects. A client that validates
+    // structuredContent against the advertised outputSchema would fail every
+    // call that left reason out.
+    process.env.SCHIST_AGENT_ID = "sansan";
+    const alias = addConceptAlias(vaultDir, "ml", "machine-learning", undefined, "sansan");
+    expect("reason" in alias).toBe(false);
+
+    const response = formatToolResult("add_concept_alias", alias);
+    const validate = new Ajv().compile(OUTPUT_SCHEMAS.add_concept_alias);
+    const ok = validate("structuredContent" in response ? response.structuredContent : undefined);
+    expect({ ok, errors: validate.errors }).toEqual({ ok: true, errors: null });
   });
 
   it("throws when SCHIST_AGENT_ID is not set", () => {

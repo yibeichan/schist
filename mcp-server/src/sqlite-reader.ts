@@ -1721,10 +1721,13 @@ export function addConceptAlias(
       const out: ConceptAlias = {
         duplicate_slug: row.duplicate_slug as string,
         canonical_slug: row.canonical_slug as string,
-        reason: row.reason as string | undefined,
         created_by: row.created_by as string,
         created_at: row.created_at as string,
       };
+      // reason is stored as SQL NULL when omitted and better-sqlite3 returns
+      // null, which the output schema's `type: "string"` rejects; leave the
+      // key off instead (#680).
+      if (typeof row.reason === "string") out.reason = row.reason;
       if (prior) out.replaced_canonical = prior.canonical_slug;
       if (repointed.length > 0) out.repointed = repointed;
       return out;
