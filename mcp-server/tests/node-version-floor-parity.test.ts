@@ -91,8 +91,10 @@ describe("Node version floor parity (#498 aftermath)", () => {
     test(`${rel} states only the declared floor`, () => {
       const text = readFileSync(path.join(REPO, rel), "utf-8");
       const wrong: string[] = [];
+      let matched = 0;
       for (const { label, re } of SHAPES) {
         for (const m of text.matchAll(new RegExp(re))) {
+          matched += 1;
           if (Number(m[1]) !== major) {
             const line = text.slice(0, m.index).split("\n").length;
             wrong.push(`${rel}:${line} [${label}] says ${m[1]}, engines.node says ${major}: ${m[0]}`);
@@ -100,6 +102,10 @@ describe("Node version floor parity (#498 aftermath)", () => {
         }
       }
       expect(wrong).toEqual([]);
+      // The aggregate corpus guard above can stay satisfied by the other files
+      // while THIS one stops matching (a MIN_NODE refactored to read its value
+      // from elsewhere, say), and an empty match set passes the line above.
+      expect(matched).toBeGreaterThanOrEqual(1);
     });
   }
 });
