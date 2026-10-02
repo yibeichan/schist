@@ -47,6 +47,9 @@ const DOCS = [
   "AGENTS.md",
   "docs/getting-started.md",
   "docs/hub-spoke-pi-orcd-dragonfly.md",
+  // Not prose, but it ENFORCES the floor: `schist doctor` reported PASS on Node
+  // 20 and 21 for a server that requires 22 (#631).
+  "cli/schist/doctor.py",
 ];
 
 // Each shape the number is written in. Kept as named patterns so a failure
@@ -54,6 +57,9 @@ const DOCS = [
 const SHAPES: { label: string; re: RegExp }[] = [
   { label: "prose floor (Node.js >= N / ≥ N)", re: /Node\.js\s*(?:>=|≥)\s*(\d+)/g },
   { label: "prose floor (Node N+)", re: /\bNode\s+(\d+)\+/g },
+  { label: "prose floor (Node.js N+)", re: /\bNode\.js\s+(\d+)\+/g },
+  { label: "version expectation (expect vN+)", re: /expect v(\d+)\+/g },
+  { label: "doctor MIN_NODE", re: /MIN_NODE\s*=\s*\((\d+)/g },
   { label: "requirements table row", re: /\|\s*Node\.js\s*\|\s*>=\s*(\d+)\s*\|/g },
   { label: "NodeSource setup script", re: /setup_(\d+)\.x/g },
   { label: "nvm install", re: /nvm install\s+(\d+)/g },
@@ -85,8 +91,10 @@ describe("Node version floor parity (#498 aftermath)", () => {
     test(`${rel} states only the declared floor`, () => {
       const text = readFileSync(path.join(REPO, rel), "utf-8");
       const wrong: string[] = [];
+      let matched = 0;
       for (const { label, re } of SHAPES) {
         for (const m of text.matchAll(new RegExp(re))) {
+          matched += 1;
           if (Number(m[1]) !== major) {
             const line = text.slice(0, m.index).split("\n").length;
             wrong.push(`${rel}:${line} [${label}] says ${m[1]}, engines.node says ${major}: ${m[0]}`);
@@ -94,6 +102,10 @@ describe("Node version floor parity (#498 aftermath)", () => {
         }
       }
       expect(wrong).toEqual([]);
+      // The aggregate corpus guard above can stay satisfied by the other files
+      // while THIS one stops matching (a MIN_NODE refactored to read its value
+      // from elsewhere, say), and an empty match set passes the line above.
+      expect(matched).toBeGreaterThanOrEqual(1);
     });
   }
 });

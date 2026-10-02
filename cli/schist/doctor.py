@@ -20,7 +20,8 @@ from .index_contract import INDEX_SCHEMA_VERSION
 from .spoke_config import is_spoke, load_spoke_config
 
 MIN_PYTHON = (3, 12)
-MIN_NODE = (20, 0, 0)
+MIN_NODE = (22, 0, 0)
+_NODE_FIX = f"Install Node.js {MIN_NODE[0]}+ from nodejs.org or via nvm."
 MIN_GIT = (2, 30)
 
 
@@ -52,7 +53,7 @@ def check_node() -> CheckResult:
     node = shutil.which("node")
     if not node:
         return CheckResult("FAIL", "Node.js", "not found",
-                           "Install Node.js 20+ from nodejs.org or via nvm.")
+                           _NODE_FIX)
     try:
         raw = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=5)
         ver_str = raw.stdout.strip()
@@ -62,11 +63,11 @@ def check_node() -> CheckResult:
             status="PASS" if ok else "FAIL",
             label="Node.js",
             message=ver_str,
-            fix=None if ok else "Install Node.js 20+ from nodejs.org or via nvm.",
+            fix=None if ok else _NODE_FIX,
         )
     except Exception as e:
         return CheckResult("FAIL", "Node.js", f"error: {e}",
-                           "Install Node.js 20+ from nodejs.org or via nvm.")
+                           _NODE_FIX)
 
 
 def check_uv() -> CheckResult:
