@@ -449,8 +449,13 @@ def _rebase_sentinel_hint(vault_path: str) -> str:
     even that fails, say how to find it rather than name a path that may not
     exist.
     """
-    resolved = _run_git_cleanup(vault_path, ["rev-parse", "--absolute-git-dir"])
-    git_dir = resolved.stdout.strip() if resolved.returncode == 0 else ""
+    try:
+        resolved = _run_git_cleanup(vault_path, ["rev-parse", "--absolute-git-dir"])
+    except OSError:
+        # This runs on the way to sys.exit(1); a hint must never replace the
+        # real error with a traceback.
+        resolved = None
+    git_dir = resolved.stdout.strip() if resolved is not None and resolved.returncode == 0 else ""
     if git_dir:
         return f"rm -rf {shlex.quote(git_dir + '/rebase-merge')} {shlex.quote(git_dir + '/rebase-apply')}"
     return (

@@ -123,11 +123,13 @@ def _separate_git_dir_vault(tmp_path: Path) -> tuple[Path, Path]:
     return vault, git_dir
 
 
-def _rebase_cleanup_always_fails(real, rev_parse_fails: bool = False):
+def _rebase_cleanup_always_fails(real, rev_parse_fails: bool = False, rev_parse_raises: bool = False):
     """Fail `rebase --abort/--quit` so the manual-fix message is reached."""
     def fake(vault_path, args):
         if args and args[0] == "rebase":
             return subprocess.CompletedProcess(args, 1, "", "rebase: boom")
+        if rev_parse_raises and args[:1] == ["rev-parse"]:
+            raise FileNotFoundError("git")
         if rev_parse_fails and args[:1] == ["rev-parse"]:
             return subprocess.CompletedProcess(args, 128, "", "fatal: not a git repo")
         return real(vault_path, args)
@@ -167,6 +169,23 @@ def test_rebase_cleanup_manual_fix_does_not_guess_a_path_when_git_cannot_say(
     err = capsys.readouterr().err
     assert "--absolute-git-dir" in err
     assert ".git/rebase" not in err
+
+
+def test_rebase_cleanup_manual_fix_survives_an_oserror_resolving_the_git_dir(
+    tmp_path, capsys, monkeypatch,
+):
+    """The hint runs on the way to sys.exit(1): an OSError there must not turn
+    the clean exit into a traceback."""
+    import schist.sync as sync
+
+    vault, _ = _separate_git_dir_vault(tmp_path)
+    monkeypatch.setattr(
+        sync, "_run_git_cleanup",
+        _rebase_cleanup_always_fails(sync._run_git_cleanup, rev_parse_raises=True),
+    )
+    with pytest.raises(SystemExit):
+        sync._cleanup_rebase_state(str(vault))
+    assert "--absolute-git-dir" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
