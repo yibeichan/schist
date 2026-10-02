@@ -356,7 +356,7 @@ describe("setAgentState", () => {
 });
 
 // ---------------------------------------------------------------------------
-// deleteAgentState — owner enforcement
+// get_agent_state — tool handler into formatToolResult (#678)
 // ---------------------------------------------------------------------------
 
 describe("get_agent_state through the tool layer (#678)", () => {
@@ -389,6 +389,10 @@ describe("get_agent_state through the tool layer (#678)", () => {
     expect(validate(structured)).toEqual({ ok: true, errors: null });
   });
 });
+
+// ---------------------------------------------------------------------------
+// deleteAgentState — owner enforcement
+// ---------------------------------------------------------------------------
 
 describe("deleteAgentState", () => {
   it("deletes own key and returns deleted=true", () => {

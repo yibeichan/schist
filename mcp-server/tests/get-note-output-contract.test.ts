@@ -72,7 +72,7 @@ describe("get_note output contract", () => {
     expect(undeclared).toEqual([]);
   });
 
-  it("an unquoted YAML date is returned as the same date-only string search_notes and the index use", async () => {
+  it("an unquoted date-only YAML value is returned as the date-only string search_notes and the index use", async () => {
     // YAML reads `date: 2026-09-24` as a Date. Cast `as string` and passed
     // through, it reaches the client as "2026-09-24T00:00:00.000Z" - a
     // different string for the same note than search_notes returns - and is a
@@ -100,6 +100,34 @@ describe("get_note output contract", () => {
     );
     const res = (await get_note(vault, { id: "notes/numeric.md" }, config)) as Record<string, unknown>;
     expect(res.title).toBe("2026");
+  });
+
+  it("non-string status, tags and concepts entries cannot break the schema, as ingest guards them (#278)", async () => {
+    // YAML types its scalars: `status: 42`, `tags: [2026, a]`, `concepts: [42, ml]`
+    // are all valid frontmatter. Passed through, a client validating the
+    // advertised outputSchema rejects the whole get_note call for such a note.
+    await fs.writeFile(
+      path.join(vault, "notes", "typed.md"),
+      "---\ntitle: Typed\ndate: 2026-09-24\nstatus: 42\ntags: [2026, a]\nconcepts: [42, ml]\n---\n\nBody.\n",
+      "utf-8",
+    );
+    const res = await get_note(vault, { id: "notes/typed.md" }, config);
+    const wire = JSON.parse(JSON.stringify(formatToolResult("get_note", res).structuredContent));
+    expect(wire.status).toBeNull();
+    expect(wire.tags).toEqual(["a"]);
+    expect(wire.concepts).toEqual(["ml"]);
+    const validate = new Ajv().compile(OUTPUT_SCHEMAS.get_note);
+    expect({ ok: validate(wire), errors: validate.errors }).toEqual({ ok: true, errors: null });
+  });
+
+  it("a list-valued status is dropped rather than returned", async () => {
+    await fs.writeFile(
+      path.join(vault, "notes", "listy.md"),
+      "---\ntitle: Listy\ndate: 2026-09-24\nstatus: [draft]\n---\n\nBody.\n",
+      "utf-8",
+    );
+    const res = (await get_note(vault, { id: "notes/listy.md" }, config)) as Record<string, unknown>;
+    expect(res.status).toBeNull();
   });
 
   it("the returned note validates against the advertised schema", async () => {
