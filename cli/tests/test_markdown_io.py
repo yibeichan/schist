@@ -267,6 +267,39 @@ def test_atomic_write_temp_lives_in_schist_tmp_when_vault_root_given(tmp_path) -
     assert "- extends: notes/b.md" in note.read_text(encoding="utf-8")
 
 
+def test_write_note_replace_uses_schist_tmp_when_vault_root_given(tmp_path) -> None:
+    """#672: the non-exclusive write_note path forwards vault_root, so its temp
+    lives under .schist/tmp/ like append_connection's, not beside the note in a
+    synced scope dir."""
+    import os
+
+    import schist.markdown_io as mio
+
+    vault = tmp_path
+    (vault / ".schist").mkdir()
+    notes = vault / "notes"
+    notes.mkdir()
+    note = notes / "a.md"
+
+    seen: dict[str, str] = {}
+    real_replace = mio.os.replace
+
+    def capturing_replace(src, dst):
+        seen["src"] = src
+        return real_replace(src, dst)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(mio.os, "replace", capturing_replace)
+    try:
+        mio.write_note(str(note), {"title": "A"}, "Body.", vault_root=str(vault))
+    finally:
+        monkeypatch.undo()
+
+    assert seen["src"].startswith(str(vault / ".schist" / "tmp") + os.sep)
+    assert list(notes.glob("*.tmp")) == []
+    assert "Body." in note.read_text(encoding="utf-8")
+
+
 def test_orphaned_temp_on_hard_kill_is_confined_to_schist_tmp(tmp_path) -> None:
     """Models the exact #433 failure: a hard kill (SIGKILL/OOM/power-loss)
     between the temp write and os.replace runs NO cleanup — the `except`/unlink

@@ -114,8 +114,14 @@ def read_note(path: str) -> dict:
     return {'frontmatter': dict(post.metadata), 'body': post.content}
 
 
-def write_note(path: str, fm: dict, body: str, exclusive: bool = False):
+def write_note(path: str, fm: dict, body: str, exclusive: bool = False,
+               vault_root: str | None = None):
     """Write a markdown note with YAML frontmatter.
+
+    vault_root keeps the non-exclusive path's temp file under
+    `<vault_root>/.schist/tmp/` (see `_atomic_write`) so a hard kill cannot
+    leave an orphan inside a synced scope; `append_connection` takes the same
+    parameter for the same reason.
 
     exclusive=True opens with 'x' (O_CREAT|O_EXCL): the create FAILS with
     FileExistsError if the path exists — the only race-safe collision check
@@ -130,7 +136,7 @@ def write_note(path: str, fm: dict, body: str, exclusive: bool = False):
         with open(path, 'x', encoding='utf-8') as f:
             f.write(content)
     else:
-        _atomic_write(path, content)
+        _atomic_write(path, content, vault_root=vault_root)
 
 
 def insert_connection_line(content: str, line: str) -> str:

@@ -441,6 +441,29 @@ def _run_git_cleanup(vault_path: str, args: list[str]) -> subprocess.CompletedPr
         )
 
 
+def _rebase_sentinel_hint(vault_path: str) -> str:
+    """Where the rebase sentinels live, for the manual-fix message.
+
+    A gitfile-format vault (`--separate-git-dir`, linked worktree) has no
+    `<vault>/.git/rebase-merge`; Git knows the real directory, so ask it. If
+    even that fails, say how to find it rather than name a path that may not
+    exist.
+    """
+    try:
+        resolved = _run_git_cleanup(vault_path, ["rev-parse", "--absolute-git-dir"])
+    except OSError:
+        # This runs on the way to sys.exit(1); a hint must never replace the
+        # real error with a traceback.
+        resolved = None
+    git_dir = resolved.stdout.strip() if resolved is not None and resolved.returncode == 0 else ""
+    if git_dir:
+        return f"rm -rf {shlex.quote(git_dir + '/rebase-merge')} {shlex.quote(git_dir + '/rebase-apply')}"
+    return (
+        "remove rebase-merge and rebase-apply from the vault's git directory "
+        "(`git rev-parse --absolute-git-dir` prints it)"
+    )
+
+
 def _cleanup_rebase_state(vault_path: str) -> None:
     print("Aborting leftover rebase state...", file=sys.stderr)
     abort = _run_git_cleanup(vault_path, ["rebase", "--abort"])
@@ -458,7 +481,7 @@ def _cleanup_rebase_state(vault_path: str) -> None:
         "Error: could not clear rebase state automatically.\n"
         f"  rebase --abort: {abort.stderr.strip()}\n"
         f"  rebase --quit:  {quit_result.stderr.strip()}\n"
-        "  Manual fix: rm -rf .git/rebase-merge .git/rebase-apply",
+        f"  Manual fix: {_rebase_sentinel_hint(vault_path)}",
         file=sys.stderr,
     )
     sys.exit(1)

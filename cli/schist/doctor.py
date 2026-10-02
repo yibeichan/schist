@@ -544,7 +544,12 @@ def check_hooks_path(vault_path: Optional[str]) -> CheckResult:
     # "PASS | uses default .git/hooks/".
     configured = _configured_hooks_path(["-C", vault_path])
     if configured is None:
-        return CheckResult("PASS", "Hooks path", "uses default .git/hooks/")
+        # Name the directory git resolves, not a literal `.git/hooks/`: for a
+        # gitfile-format vault (--separate-git-dir, linked worktree) `.git` is
+        # a pointer FILE and that path does not exist (#675).
+        hooks_dir, _, error = _effective_hooks_dir(vault_path)
+        where = str(hooks_dir) if hooks_dir is not None and not error else "the repository's own hooks directory"
+        return CheckResult("PASS", "Hooks path", f"uses the default hooks directory ({where})")
     if configured == "":
         return CheckResult(
             "FAIL", "Hooks path",
