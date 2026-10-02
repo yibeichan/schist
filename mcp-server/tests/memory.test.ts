@@ -4,6 +4,7 @@ import * as fs from "fs/promises";
 import Ajv from "ajv";
 import Database from "better-sqlite3";
 import { formatToolResult, OUTPUT_SCHEMAS } from "../src/output-contract.js";
+import { get_agent_state } from "../src/tools.js";
 import { addMemory, searchMemory, getAgentState, setAgentState, deleteAgentState, addConceptAlias } from "../src/sqlite-reader.js";
 
 // Use a temp DB for each test suite
@@ -357,6 +358,37 @@ describe("setAgentState", () => {
 // ---------------------------------------------------------------------------
 // deleteAgentState — owner enforcement
 // ---------------------------------------------------------------------------
+
+describe("get_agent_state through the tool layer (#678)", () => {
+  // formatToolResult wraps the handler's result in {state}. Feeding it a
+  // hand-built entry only tests the formatter; if the HANDLER ever started
+  // returning {state: ...} itself the two would double-wrap, so run the real
+  // handler into the real formatter and validate what a client would receive.
+  const validate = (structured: unknown) => {
+    const check = new Ajv().compile(OUTPUT_SCHEMAS.get_agent_state);
+    return { ok: check(structured), errors: check.errors };
+  };
+
+  it("a stored state is wrapped exactly once and satisfies the schema", async () => {
+    setStateAs("sansan", "sansan.tool_layer", { step: 3 });
+    const result = await get_agent_state(tempDir, { key: "sansan.tool_layer" });
+    const response = formatToolResult("get_agent_state", result);
+    const structured = "structuredContent" in response ? response.structuredContent : undefined;
+
+    expect((structured as { state: { key?: string } }).state.key).toBe("sansan.tool_layer");
+    expect((structured as { state: { value?: unknown } }).state.value).toEqual({ step: 3 });
+    expect(validate(structured)).toEqual({ ok: true, errors: null });
+  });
+
+  it("a missing key is {state: null} and satisfies the schema", async () => {
+    const result = await get_agent_state(tempDir, { key: "sansan.absent" });
+    const response = formatToolResult("get_agent_state", result);
+    const structured = "structuredContent" in response ? response.structuredContent : undefined;
+
+    expect(structured).toEqual({ state: null });
+    expect(validate(structured)).toEqual({ ok: true, errors: null });
+  });
+});
 
 describe("deleteAgentState", () => {
   it("deletes own key and returns deleted=true", () => {
