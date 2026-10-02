@@ -1,7 +1,10 @@
 import * as os from "os";
 import * as path from "path";
 import * as fs from "fs/promises";
+import Ajv from "ajv";
 import Database from "better-sqlite3";
+import { formatToolResult, OUTPUT_SCHEMAS } from "../src/output-contract.js";
+import { get_agent_state } from "../src/tools.js";
 import { addMemory, searchMemory, getAgentState, setAgentState, deleteAgentState, addConceptAlias } from "../src/sqlite-reader.js";
 
 // Use a temp DB for each test suite
@@ -353,6 +356,41 @@ describe("setAgentState", () => {
 });
 
 // ---------------------------------------------------------------------------
+// get_agent_state — tool handler into formatToolResult (#678)
+// ---------------------------------------------------------------------------
+
+describe("get_agent_state through the tool layer (#678)", () => {
+  // formatToolResult wraps the handler's result in {state}. Feeding it a
+  // hand-built entry only tests the formatter; if the HANDLER ever started
+  // returning {state: ...} itself the two would double-wrap, so run the real
+  // handler into the real formatter and validate what a client would receive.
+  const validate = (structured: unknown) => {
+    const check = new Ajv().compile(OUTPUT_SCHEMAS.get_agent_state);
+    return { ok: check(structured), errors: check.errors };
+  };
+
+  it("a stored state is wrapped exactly once and satisfies the schema", async () => {
+    setStateAs("sansan", "sansan.tool_layer", { step: 3 });
+    const result = await get_agent_state(tempDir, { key: "sansan.tool_layer" });
+    const response = formatToolResult("get_agent_state", result);
+    const structured = "structuredContent" in response ? response.structuredContent : undefined;
+
+    expect((structured as { state: { key?: string } }).state.key).toBe("sansan.tool_layer");
+    expect((structured as { state: { value?: unknown } }).state.value).toEqual({ step: 3 });
+    expect(validate(structured)).toEqual({ ok: true, errors: null });
+  });
+
+  it("a missing key is {state: null} and satisfies the schema", async () => {
+    const result = await get_agent_state(tempDir, { key: "sansan.absent" });
+    const response = formatToolResult("get_agent_state", result);
+    const structured = "structuredContent" in response ? response.structuredContent : undefined;
+
+    expect(structured).toEqual({ state: null });
+    expect(validate(structured)).toEqual({ ok: true, errors: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // deleteAgentState — owner enforcement
 // ---------------------------------------------------------------------------
 
@@ -444,6 +482,21 @@ describe("addConceptAlias", () => {
     expect(alias.reason).toBe("abbreviation");
     expect(alias.created_by).toBe("sansan");
     expect(typeof alias.created_at).toBe("string");
+  });
+
+  it("omits reason when none was supplied, so the result satisfies the output schema (#680)", () => {
+    // reason is optional and stored as SQL NULL; better-sqlite3 hands NULL back
+    // as JS null, which `{ type: "string" }` rejects. A client that validates
+    // structuredContent against the advertised outputSchema would fail every
+    // call that left reason out.
+    process.env.SCHIST_AGENT_ID = "sansan";
+    const alias = addConceptAlias(vaultDir, "ml", "machine-learning", undefined, "sansan");
+    expect("reason" in alias).toBe(false);
+
+    const response = formatToolResult("add_concept_alias", alias);
+    const validate = new Ajv().compile(OUTPUT_SCHEMAS.add_concept_alias);
+    const ok = validate("structuredContent" in response ? response.structuredContent : undefined);
+    expect({ ok, errors: validate.errors }).toEqual({ ok: true, errors: null });
   });
 
   it("throws when SCHIST_AGENT_ID is not set", () => {

@@ -2134,6 +2134,38 @@ export async function search_notes(
   return response;
 }
 
+/**
+ * A frontmatter scalar as the string the get_note output schema declares.
+ *
+ * YAML types its scalars: `date: 2026-09-24` parses to a Date and `title: 2026`
+ * to a number. Cast `as string` and passed through, a Date is serialised as
+ * "2026-09-24T00:00:00.000Z" (not the "2026-09-24" search_notes and the index
+ * return for the same note) and a number stays a number. A value at exactly
+ * midnight UTC, which is how YAML reads a date-only value, becomes the
+ * date-only string the index and the write paths use; any other Date keeps its
+ * full ISO timestamp rather than silently losing the time.
+ *
+ * Only the date-only case matches the index. The index stores Python `str()`
+ * of the parsed value ("2026-09-24 10:30:00+00:00" for a timestamp) and ingest
+ * skips a non-string title in favour of a fallback; this tool is file-first and
+ * does neither.
+ */
+function frontmatterString(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return "";
+    const iso = value.toISOString();
+    return iso.endsWith("T00:00:00.000Z") ? iso.split("T")[0] : iso;
+  }
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+}
+
+/** The string entries of a frontmatter list; anything else is not a list of strings. */
+function stringEntries(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+}
+
 export async function get_note(
   vaultRoot: string,
   args: { id: string },
@@ -2203,11 +2235,14 @@ export async function get_note(
     const fileRef = meta.file_ref;
     return {
       id: args.id,
-      title: (meta.title as string) ?? "",
-      date: (meta.date as string) ?? "",
-      status: (meta.status as string | null) ?? null,
-      tags: Array.isArray(meta.tags) ? meta.tags : [],
-      concepts: Array.isArray(meta.concepts) ? meta.concepts : [],
+      title: frontmatterString(meta.title),
+      date: frontmatterString(meta.date),
+      // Same type guards ingest applies to these fields (#278): a non-string
+      // status or tag is dropped, not returned, so the result keeps the types
+      // the output schema declares.
+      status: typeof meta.status === "string" ? meta.status : null,
+      tags: stringEntries(meta.tags),
+      concepts: stringEntries(meta.concepts),
       body,
       connections,
       ...(confidence === "low" || confidence === "medium" || confidence === "high"
