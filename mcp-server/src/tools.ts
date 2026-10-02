@@ -583,8 +583,10 @@ function syncDirtyRemedy(cls: PushFailureClass | null, ageClause: string): strin
       return "A git operation was left in progress in the vault (a stuck rebase, merge, " +
         "or a stale `index.lock`) — `sync_retry` cannot resolve this by itself and will " +
         "fail the same way again. Resolve the git state manually first (`git rebase " +
-        "--abort` or `git merge --abort` in the vault, or remove `.git/index.lock` after " +
-        "confirming no git process is running), then run `sync_retry mode=pull-rebase-push`.";
+        "--abort` or `git merge --abort` in the vault, or remove `index.lock` from the " +
+        "vault's git directory — `git rev-parse --absolute-git-dir` prints it, and it is " +
+        "not `.git/` for a gitfile-format vault — after confirming no git process is " +
+        "running), then run `sync_retry mode=pull-rebase-push`.";
     default:
       return "Run `sync_retry` after checking `sync_status`; writes resume after a successful " +
         "push clears the sync error. If recovery keeps failing, remove " +

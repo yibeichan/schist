@@ -112,6 +112,63 @@ def test_cleanup_stale_state_in_separate_git_dir(
             assert not marker.exists()
 
 
+def _separate_git_dir_vault(tmp_path: Path) -> tuple[Path, Path]:
+    vault = tmp_path / "vault"
+    git_dir = tmp_path / "separate-git-dir"
+    subprocess.run(
+        ["git", "init", "-q", "--separate-git-dir", str(git_dir), str(vault)],
+        check=True, capture_output=True,
+    )
+    assert (vault / ".git").is_file()
+    return vault, git_dir
+
+
+def _rebase_cleanup_always_fails(real, rev_parse_fails: bool = False):
+    """Fail `rebase --abort/--quit` so the manual-fix message is reached."""
+    def fake(vault_path, args):
+        if args and args[0] == "rebase":
+            return subprocess.CompletedProcess(args, 1, "", "rebase: boom")
+        if rev_parse_fails and args[:1] == ["rev-parse"]:
+            return subprocess.CompletedProcess(args, 128, "", "fatal: not a git repo")
+        return real(vault_path, args)
+    return fake
+
+
+def test_rebase_cleanup_manual_fix_names_the_real_git_dir(tmp_path, capsys, monkeypatch):
+    """#671: the sentinels live in the resolved git dir of a gitfile vault,
+    not under `<vault>/.git/`, which is a file there."""
+    import schist.sync as sync
+
+    vault, git_dir = _separate_git_dir_vault(tmp_path)
+    monkeypatch.setattr(sync, "_run_git_cleanup", _rebase_cleanup_always_fails(sync._run_git_cleanup))
+    with pytest.raises(SystemExit):
+        sync._cleanup_rebase_state(str(vault))
+    err = capsys.readouterr().err
+    real = git_dir.resolve()
+    assert f"{real}/rebase-merge" in err
+    assert f"{real}/rebase-apply" in err
+    assert ".git/rebase" not in err
+
+
+def test_rebase_cleanup_manual_fix_does_not_guess_a_path_when_git_cannot_say(
+    tmp_path, capsys, monkeypatch,
+):
+    """#671: if the git dir cannot be resolved, say how to find it instead of
+    naming a path that may not exist."""
+    import schist.sync as sync
+
+    vault, _ = _separate_git_dir_vault(tmp_path)
+    monkeypatch.setattr(
+        sync, "_run_git_cleanup",
+        _rebase_cleanup_always_fails(sync._run_git_cleanup, rev_parse_fails=True),
+    )
+    with pytest.raises(SystemExit):
+        sync._cleanup_rebase_state(str(vault))
+    err = capsys.readouterr().err
+    assert "--absolute-git-dir" in err
+    assert ".git/rebase" not in err
+
+
 # ---------------------------------------------------------------------------
 # init_spoke
 # ---------------------------------------------------------------------------

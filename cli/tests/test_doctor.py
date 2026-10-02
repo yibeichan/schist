@@ -732,6 +732,21 @@ class TestCheckHooksPath:
         assert r.status == "PASS"
         assert r.label == "Hooks path"
 
+    def test_pass_names_the_real_hooks_dir_of_a_gitfile_vault(self, tmp_path):
+        """#675: with `.git` a pointer file, `.git/hooks/` does not exist, so
+        the PASS message must name the directory git actually resolves."""
+        vault = tmp_path / "vault"
+        git_dir = tmp_path / "separate.git"
+        subprocess.run(
+            ["git", "init", "-q", "--separate-git-dir", str(git_dir), str(vault)],
+            check=True, capture_output=True,
+        )
+        assert (vault / ".git").is_file()
+        r = check_hooks_path(str(vault))
+        assert r.status == "PASS"
+        assert str(git_dir.resolve() / "hooks") in r.message
+        assert str(vault / ".git" / "hooks") not in r.message
+
     def test_set_returns_warn(self, tmp_path):
         """When core.hooksPath is set to a non-default value, the schist
         hooks at .git/hooks/ are bypassed — warn loudly."""

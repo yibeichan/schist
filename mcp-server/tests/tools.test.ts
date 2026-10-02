@@ -3292,6 +3292,10 @@ describe("class-aware write gate (#531)", () => {
     expect(result.error).toBe("SYNC_DIRTY");
     expect(result.message).toContain("rebase --abort");
     expect(result.message).not.toContain("Run `sync_retry` after checking `sync_status`");
+    // #673: a gitfile-format vault keeps index.lock in its resolved git dir,
+    // so the remedy must say how to find it rather than name `.git/index.lock`.
+    expect(result.message).toContain("--absolute-git-dir");
+    expect(result.message).not.toContain(".git/index.lock");
   }, 15000);
 
   test("rate-limited blocks even though it clears with time (notes_per_sync)", async () => {

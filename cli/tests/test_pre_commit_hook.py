@@ -353,6 +353,28 @@ class TestHooksReinstall:
         assert (Path(hooks_path) / "pre-commit").read_text() == PRE_COMMIT_HOOK
         assert ".schist/" in Path(exclude_path).read_text()
 
+    def test_separate_git_dir_installs_hooks_and_exclude_at_git_paths(self, tmp_path: Path) -> None:
+        """#670: a --separate-git-dir vault has `.git` as a pointer FILE, so a
+        hardcoded `<vault>/.git/hooks` is not a directory. The hooks must land
+        in the real git dir, which is a different shape from a linked worktree."""
+        from schist.sync import hooks_reinstall, PRE_COMMIT_HOOK, POST_COMMIT_HOOK
+
+        vault = tmp_path / "vault"
+        git_dir = tmp_path / "separate.git"
+        subprocess.run(
+            ["git", "init", "-q", "--separate-git-dir", str(git_dir), str(vault)],
+            check=True, capture_output=True,
+        )
+        assert (vault / ".git").is_file()
+
+        hooks_reinstall(self._args(), str(vault), "")
+
+        assert (git_dir / "hooks" / "pre-commit").read_text() == PRE_COMMIT_HOOK
+        assert (git_dir / "hooks" / "post-commit").read_text() == POST_COMMIT_HOOK
+        assert ".schist/" in (git_dir / "info" / "exclude").read_text()
+        assert (vault / ".git").is_file(), "the gitfile pointer must survive"
+        assert list((git_dir / "hooks").glob("*.tmp")) == []
+
     def test_custom_hooks_path_is_where_reinstall_writes(self, tmp_path: Path) -> None:
         from schist.sync import hooks_reinstall, PRE_COMMIT_HOOK
 
