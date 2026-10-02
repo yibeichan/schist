@@ -21,7 +21,7 @@ Linear setup guide. Each stage ends with `schist doctor` verification.
 sudo apt update
 sudo apt install -y python3 python3-pip git sqlite3
 
-# Node.js 20+ via NodeSource
+# Node.js 22+ via NodeSource
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
 ```
@@ -72,7 +72,7 @@ If neither Python 3.12+ nor Node 22+ is available, use the Singularity fallback 
 
 ```bash
 python3 --version   # expect 3.12+
-node --version      # expect v20+
+node --version      # expect v22+
 git --version       # expect 2.30+
 sqlite3 --version   # expect 3.39+
 ```
@@ -232,7 +232,7 @@ Verify: `which schist-ingest`. If installed but not found, check that pip's bin 
 ### 3. `Node.js not found`
 
 ```bash
-which node || echo "install Node.js 20+"
+which node || echo "install Node.js 22+"
 ```
 
 If installed via nvm, make sure `nvm use default` runs in your shell profile.

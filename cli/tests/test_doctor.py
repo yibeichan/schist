@@ -81,6 +81,30 @@ class TestCheckNode:
                 r = check_node()
                 assert r.status == "FAIL"
 
+    @pytest.mark.parametrize("version,status", [
+        ("v20.19.0", "FAIL"),  # PASSed while MIN_NODE said 20 (#631)
+        ("v21.7.3", "FAIL"),
+        ("v22.0.0", "PASS"),
+        ("v24.1.0", "PASS"),
+    ])
+    def test_floor_matches_the_mcp_server_engines(self, version, status):
+        """mcp-server requires node >=22 (better-sqlite3 v13); doctor must not
+        green-light a Node the server cannot run on."""
+        with patch("shutil.which", return_value="/usr/bin/node"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout=f"{version}\n"
+                )
+                r = check_node()
+        assert r.status == status
+        if status == "FAIL":
+            assert "22+" in (r.fix or "")
+
+    def test_not_found_remedy_names_the_same_floor(self):
+        with patch("shutil.which", return_value=None):
+            r = check_node()
+        assert "22+" in (r.fix or "")
+
 
 class TestCheckUv:
     def test_pass_when_installed(self):

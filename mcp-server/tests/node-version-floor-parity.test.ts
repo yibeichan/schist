@@ -47,6 +47,9 @@ const DOCS = [
   "AGENTS.md",
   "docs/getting-started.md",
   "docs/hub-spoke-pi-orcd-dragonfly.md",
+  // Not prose, but it ENFORCES the floor: `schist doctor` reported PASS on Node
+  // 20 and 21 for a server that requires 22 (#631).
+  "cli/schist/doctor.py",
 ];
 
 // Each shape the number is written in. Kept as named patterns so a failure
@@ -54,6 +57,9 @@ const DOCS = [
 const SHAPES: { label: string; re: RegExp }[] = [
   { label: "prose floor (Node.js >= N / ≥ N)", re: /Node\.js\s*(?:>=|≥)\s*(\d+)/g },
   { label: "prose floor (Node N+)", re: /\bNode\s+(\d+)\+/g },
+  { label: "prose floor (Node.js N+)", re: /\bNode\.js\s+(\d+)\+/g },
+  { label: "version expectation (expect vN+)", re: /expect v(\d+)\+/g },
+  { label: "doctor MIN_NODE", re: /MIN_NODE\s*=\s*\((\d+)/g },
   { label: "requirements table row", re: /\|\s*Node\.js\s*\|\s*>=\s*(\d+)\s*\|/g },
   { label: "NodeSource setup script", re: /setup_(\d+)\.x/g },
   { label: "nvm install", re: /nvm install\s+(\d+)/g },
