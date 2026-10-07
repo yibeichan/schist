@@ -71,6 +71,28 @@ def check_node() -> CheckResult:
                            _NODE_FIX)
 
 
+def check_node_for_host(vault_path: Optional[str],
+                        hub_path: Optional[str]) -> CheckResult:
+    """check_node, unless this is a hub-only host.
+
+    The Node floor exists because the MCP server needs it (better-sqlite3
+    requires >=22). A hub runs only git, the pre-receive hook, and
+    schist-shell — all Python — so holding a hub-only host to the floor FAILs
+    doctor for a runtime it never uses. "Hub-only" is deliberately narrow:
+    --hub-path given, no vault, AND no schist MCP entry in any client config.
+    A host that is also a spoke (vault given) or has the server registered
+    still runs Node and is still checked.
+    """
+    if (hub_path and not vault_path
+            and not _discover_mcp_schist_entries(None, include_malformed=True)):
+        return CheckResult(
+            "SKIP", "Node.js",
+            "hub-only host (no vault, no schist MCP entry) does not run the "
+            "MCP server",
+        )
+    return check_node()
+
+
 def check_uv() -> CheckResult:
     """Check for `uv` — schist's recommended Python package manager.
 
@@ -2538,7 +2560,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
                authorized_keys: Optional[str] = None) -> list[CheckResult]:
     checks = [
         check_python(),
-        check_node(),
+        check_node_for_host(vault_path, hub_path),
         check_uv(),
         check_git(),
         check_vault_exists(vault_path),

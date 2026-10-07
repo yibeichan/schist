@@ -410,6 +410,9 @@ update `identity:` in its local `.schist/spoke.yaml`, or its pushes will be
 rejected. Notes already written under the old name keep their `source_agent:`
 value (history is append-only).
 
+On a hub-only host (no `--vault`, no schist MCP entry) doctor reports the Node.js
+check as SKIP: the hub runs only git and Python, so it does not need Node.
+
 **Spotting drift.** Run `schist doctor --hub-path /srv/vault.git` on the hub to
 flag directories in the schema that no participant can write, or directories
 some participants can write but others cannot. Spokes get the matching

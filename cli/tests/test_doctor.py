@@ -2296,6 +2296,49 @@ class TestDoctorHubWiring:
         pr = next(r for r in results if r.label == "Hub pre-receive hook")
         assert pr.status == "PASS", pr.message
 
+    @staticmethod
+    def _node_result(monkeypatch, tmp_path, vault_path, hub_path, mcp_entry=False):
+        """Run doctor on a host with NO node, return the Node.js result."""
+        import shutil as _shutil
+        from schist.doctor import run_doctor
+        home = tmp_path / "home"
+        home.mkdir()
+        if mcp_entry:
+            (home / ".claude.json").write_text(json.dumps({"mcpServers": {
+                "schist": {"command": "node",
+                           "args": ["/opt/schist/mcp-server/dist/index.js"]}}}))
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        real_which = _shutil.which
+        monkeypatch.setattr(
+            "schist.doctor.shutil.which",
+            lambda name, *a, **k: None if name == "node" else real_which(name, *a, **k))
+        results = run_doctor(vault_path, None, as_json=False, hub_path=hub_path)
+        return next(r for r in results if r.label == "Node.js")
+
+    def test_hub_only_host_skips_node(self, monkeypatch, tmp_path):
+        # A dedicated hub host: --hub-path, no vault, no MCP server.
+        # Node is not needed there, so a missing node must not FAIL doctor.
+        r = self._node_result(monkeypatch, tmp_path, None, str(tmp_path / "hub.git"))
+        assert r.status == "SKIP", r.message
+        assert "hub-only" in r.message
+
+    def test_hub_plus_vault_still_checks_node(self, monkeypatch, tmp_path):
+        # A host that is hub AND spoke runs the MCP server: held to the floor.
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        r = self._node_result(monkeypatch, tmp_path, str(vault), str(tmp_path / "hub.git"))
+        assert r.status == "FAIL"
+
+    def test_hub_with_mcp_entry_still_checks_node(self, monkeypatch, tmp_path):
+        # No vault passed, but the server is registered: it runs Node here.
+        r = self._node_result(monkeypatch, tmp_path, None, str(tmp_path / "hub.git"),
+                              mcp_entry=True)
+        assert r.status == "FAIL"
+
+    def test_no_hub_no_vault_still_checks_node(self, monkeypatch, tmp_path):
+        r = self._node_result(monkeypatch, tmp_path, None, None)
+        assert r.status == "FAIL"
+
     def test_run_doctor_omits_hub_check_without_path(self):
         from schist.doctor import run_doctor
         results = run_doctor(None, None, as_json=False)
