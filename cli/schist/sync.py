@@ -216,6 +216,20 @@ def _hook_pinned(hook_path: Path) -> bool:
     return bool(m and m.group(1) == "pinned")
 
 
+def _run_git_for_path(argv: list[str], timeout: float = 5) -> subprocess.CompletedProcess[str]:
+    """Run a git command whose stdout is a filesystem path.
+
+    Bytes, then `os.fsdecode`: the string goes into `Path()`, and a strict
+    decode raised on a vault whose path is not valid UTF-8 while
+    `errors="replace"` would have silently pointed at a different directory
+    (#692). stderr is only displayed, so it takes the same decode.
+    """
+    raw = subprocess.run(argv, capture_output=True, timeout=timeout)
+    return subprocess.CompletedProcess(
+        argv, raw.returncode, os.fsdecode(raw.stdout), os.fsdecode(raw.stderr)
+    )
+
+
 def hooks_reinstall(args, vault_path: str, db_path: str) -> None:
     """Re-write pre-commit and post-commit hooks from the canonical templates.
 
@@ -252,9 +266,8 @@ def hooks_reinstall(args, vault_path: str, db_path: str) -> None:
     # spokes get this at init (_build_spoke_in_staging); existing spokes only
     # pass through here on upgrade, so this is their catch-up path. Idempotent.
     try:
-        exclude_result = subprocess.run(
-            ["git", "-C", str(target), "rev-parse", "--git-path", "info/exclude"],
-            capture_output=True, text=True, timeout=5,
+        exclude_result = _run_git_for_path(
+            ["git", "-C", str(target), "rev-parse", "--git-path", "info/exclude"]
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
         print(f"Error: cannot locate Git info/exclude: {e}", file=sys.stderr)
@@ -542,9 +555,8 @@ def cleanup_stale_git_state(vault_path: str, *, force: bool) -> None:
         # Linked worktrees and --separate-git-dir vaults store a pointer here.
         # Ask Git for the private git directory rather than parsing the file.
         try:
-            resolved = subprocess.run(
-                ["git", "-C", vault_path, "rev-parse", "--absolute-git-dir"],
-                capture_output=True, text=True, timeout=5,
+            resolved = _run_git_for_path(
+                ["git", "-C", vault_path, "rev-parse", "--absolute-git-dir"]
             )
         except (subprocess.TimeoutExpired, OSError) as e:
             print(f"Error: cannot locate Git operation state: {e}", file=sys.stderr)

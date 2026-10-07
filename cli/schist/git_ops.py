@@ -327,11 +327,15 @@ def current_branch(vault_path: str) -> str:
     try:
         result = subprocess.run(
             ['git', 'branch', '--show-current'],
-            cwd=vault_path, capture_output=True, text=True, timeout=30,
+            cwd=vault_path, capture_output=True, timeout=30,
         )
     except subprocess.TimeoutExpired:
         return ''
-    return result.stdout.strip()
+    # The name goes straight back into `git pull origin <branch>`, so it must
+    # round-trip byte for byte: fsdecode (surrogateescape) keeps a branch that
+    # is not valid UTF-8 intact, where a strict decode raised and `replace`
+    # would have named a branch that does not exist (#692).
+    return os.fsdecode(result.stdout).strip()
 
 
 def clone_shallow(hub_url: str, dest: str, depth: int = 1) -> tuple[bool, str]:
