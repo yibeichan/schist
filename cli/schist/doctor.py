@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 import yaml
 
+from . import git_ops
 from .index_contract import INDEX_SCHEMA_VERSION
 from .spoke_config import is_spoke, load_spoke_config
 
@@ -185,9 +186,9 @@ def _configured_hooks_path(git_args: list[str], *,
     also the one git honours for a single-valued key.
     """
     try:
-        r = subprocess.run(
+        r = git_ops.run_git_for_path(
             ["git", *git_args, "config", "--get", "--type=path", "core.hooksPath"],
-            capture_output=True, text=True, timeout=5, env=env,
+            env=env,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return None
@@ -223,9 +224,8 @@ def _hooks_dir(git_args: list[str], base: Path, *,
     """
     configured = _configured_hooks_path(git_args, env=env)
     try:
-        r = subprocess.run(
-            ["git", *git_args, "rev-parse", "--git-path", "hooks"],
-            capture_output=True, text=True, timeout=5, env=env,
+        r = git_ops.run_git_for_path(
+            ["git", *git_args, "rev-parse", "--git-path", "hooks"], env=env,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
         return None, configured, f"could not run git: {e}"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1966,7 +1967,7 @@ class TestPullTransportClassification:
             if cmd[:2] == ["git", "pull"]:
                 raise subprocess.TimeoutExpired(
                     cmd, 60, output="",
-                    stderr="ssh: connect to host 100.91.250.124 port 22: Operation timed out\n")
+                    stderr="ssh: connect to host 192.0.2.1 port 22: Operation timed out\n")
             return MagicMock(returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr(git_ops, "current_branch", lambda _p: "main")
@@ -1974,7 +1975,7 @@ class TestPullTransportClassification:
         ok, output = git_ops.pull_rebase(str(tmp_path))
         assert ok is False
         assert output.startswith(git_ops.PULL_NO_RESPONSE_PREFIX)
-        assert "connect to host 100.91.250.124 port 22" in output
+        assert "connect to host 192.0.2.1 port 22" in output
 
     def test_partial_output_handles_bytes_and_none(self):
         from schist.git_ops import _partial_output
@@ -3121,3 +3122,85 @@ def test_sync_push_treats_an_ignored_junk_file_as_junk_whatever_its_name(tmp_pat
     assert b"research/real.md" in tree
     assert f"research/{junk_name}".encode() not in tree
     assert "excluded by .gitignore" not in capsys.readouterr().err
+
+
+def test_git_path_output_is_a_filesystem_path_not_replaced_text(tmp_path, monkeypatch):
+    """#692: `rev-parse --absolute-git-dir` / `--git-path` output goes into
+    Path(). A strict decode raised; `errors="replace"` would silently point at
+    a different directory. It must be the exact bytes, as a filesystem path."""
+    import schist.sync as sync
+
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    git = bindir / "git"
+    git.write_text("#!/bin/sh\nprintf '/vault/caf\\351/.git\\n'\nprintf 'warn \\351\\n' >&2\n")
+    git.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+
+    result = sync._run_git_for_path(["git", "rev-parse", "--absolute-git-dir"])
+
+    assert result.returncode == 0
+    assert os.fsencode(result.stdout.strip()) == b"/vault/caf\xe9/.git"
+    assert os.fsencode(result.stderr) == b"warn \xe9\n"
+
+
+def test_both_git_path_sites_go_through_the_bytes_helper(tmp_path, monkeypatch):
+    """The helper is only worth having if hooks_reinstall (info/exclude) and
+    cleanup_stale_git_state (absolute-git-dir) actually use it."""
+    import schist.doctor as doctor
+    import schist.sync as sync
+
+    seen: list[list[str]] = []
+
+    def helper(argv, timeout=5):
+        seen.append(argv)
+        out = (str(tmp_path / "git" / "info" / "exclude") if "--git-path" in argv
+               else str(tmp_path / "gitdir"))
+        return subprocess.CompletedProcess(argv, 0, out + "\n", "")
+
+    monkeypatch.setattr(sync, "_run_git_for_path", helper)
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / ".git").write_text("gitdir: ../gitdir\n")      # a pointer file: takes the rev-parse branch
+    (tmp_path / "gitdir").mkdir()
+    sync.cleanup_stale_git_state(str(vault), force=False)
+
+    hooks = tmp_path / "hooks"
+    monkeypatch.setattr(doctor, "_effective_hooks_dir", lambda p: (hooks, None, None))
+    sync.hooks_reinstall(types.SimpleNamespace(force=False), str(vault), "db")
+
+    assert any("--absolute-git-dir" in a for a in seen)
+    assert any("--git-path" in a for a in seen)
+
+
+def test_hooks_reinstall_survives_non_utf8_git_output_end_to_end(tmp_path, monkeypatch):
+    """#692 review: hooks_reinstall asks doctor._hooks_dir where hooks live BEFORE
+    it reaches the info/exclude lookup, and that call used to decode strictly,
+    so the fixed site was unreachable. A fake git that answers every query with
+    valid paths but writes undecodable bytes on stderr drives the real flow."""
+    import schist.sync as sync
+
+    hooks = tmp_path / "hooks"
+    exclude = tmp_path / "info" / "exclude"
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    git = bindir / "git"
+    git.write_text(
+        "#!/bin/sh\n"
+        "printf 'warning: caf\\351\\n' >&2\n"
+        'case "$*" in\n'
+        f'  *"--git-path hooks"*) echo "{hooks}";;\n'
+        f'  *"--git-path info/exclude"*) echo "{exclude}";;\n'
+        "  *) exit 1;;\n"
+        "esac\n"
+    )
+    git.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    vault = tmp_path / "vault"
+    (vault / ".git").mkdir(parents=True)
+
+    sync.hooks_reinstall(types.SimpleNamespace(force=True), str(vault), "db")
+
+    assert (hooks / "pre-commit").exists() and (hooks / "post-commit").exists()
+    assert ".schist/" in exclude.read_text()

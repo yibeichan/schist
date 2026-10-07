@@ -216,6 +216,11 @@ def _hook_pinned(hook_path: Path) -> bool:
     return bool(m and m.group(1) == "pinned")
 
 
+def _run_git_for_path(argv: list[str], timeout: float = 5) -> subprocess.CompletedProcess[str]:
+    """See `git_ops.run_git_for_path` (#692)."""
+    return git_ops.run_git_for_path(argv, timeout)
+
+
 def hooks_reinstall(args, vault_path: str, db_path: str) -> None:
     """Re-write pre-commit and post-commit hooks from the canonical templates.
 
@@ -252,9 +257,8 @@ def hooks_reinstall(args, vault_path: str, db_path: str) -> None:
     # spokes get this at init (_build_spoke_in_staging); existing spokes only
     # pass through here on upgrade, so this is their catch-up path. Idempotent.
     try:
-        exclude_result = subprocess.run(
-            ["git", "-C", str(target), "rev-parse", "--git-path", "info/exclude"],
-            capture_output=True, text=True, timeout=5,
+        exclude_result = _run_git_for_path(
+            ["git", "-C", str(target), "rev-parse", "--git-path", "info/exclude"]
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
         print(f"Error: cannot locate Git info/exclude: {e}", file=sys.stderr)
@@ -542,9 +546,8 @@ def cleanup_stale_git_state(vault_path: str, *, force: bool) -> None:
         # Linked worktrees and --separate-git-dir vaults store a pointer here.
         # Ask Git for the private git directory rather than parsing the file.
         try:
-            resolved = subprocess.run(
-                ["git", "-C", vault_path, "rev-parse", "--absolute-git-dir"],
-                capture_output=True, text=True, timeout=5,
+            resolved = _run_git_for_path(
+                ["git", "-C", vault_path, "rev-parse", "--absolute-git-dir"]
             )
         except (subprocess.TimeoutExpired, OSError) as e:
             print(f"Error: cannot locate Git operation state: {e}", file=sys.stderr)
@@ -1361,7 +1364,7 @@ def _build_hub_in_staging(
     try:
         result = subprocess.run(
             ["git", "init", "--bare", "--initial-branch=main", str(staging)],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, encoding="utf-8", errors="replace", timeout=60,
         )
     except subprocess.TimeoutExpired:
         raise _InitError("git init --bare timed out after 60s (NFS stall?)")
@@ -1383,7 +1386,7 @@ def _build_hub_in_staging(
     try:
         check = subprocess.run(
             ["python3", "-c", "import schist.pre_receive"],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, encoding="utf-8", errors="replace", timeout=60,
         )
         check_failed = check.returncode != 0
     except subprocess.TimeoutExpired:
@@ -1590,7 +1593,7 @@ def _build_standalone_in_staging(
     try:
         result = subprocess.run(
             ["git", "init", "--initial-branch=main", str(staging)],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, encoding="utf-8", errors="replace", timeout=60,
         )
     except subprocess.TimeoutExpired:
         raise _InitError("git init timed out after 60s (NFS stall?)")
@@ -1621,7 +1624,7 @@ def _build_standalone_in_staging(
         # TimeoutExpired → _InitError so init_standalone's cleanup runs (#371).
         try:
             return subprocess.run(
-                cmd, cwd=staging, env=env, capture_output=True, text=True,
+                cmd, cwd=staging, env=env, capture_output=True, encoding="utf-8", errors="replace",
                 timeout=60,
             )
         except subprocess.TimeoutExpired:

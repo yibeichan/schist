@@ -318,6 +318,23 @@ def commit(vault_path: str, message: str, files: list[str] | None = None,
         return False, (e.stdout or '') + (e.stderr or '')
 
 
+def run_git_for_path(argv: list[str], timeout: float = 5,
+                     env: dict | None = None) -> subprocess.CompletedProcess:
+    """Run a git command whose stdout is a filesystem path.
+
+    Bytes, then `os.fsdecode`: the string goes into `Path()`, and a strict
+    decode raised on a vault whose path is not valid UTF-8 while
+    `errors="replace"` would have silently pointed at a different directory
+    (#692). stderr is only displayed, so it takes the same decode. Shared by
+    sync.py and doctor.py so the two cannot drift: doctor's `_hooks_dir` runs
+    BEFORE sync's `rev-parse` and used to raise first.
+    """
+    raw = subprocess.run(argv, capture_output=True, timeout=timeout, env=env)
+    return subprocess.CompletedProcess(
+        argv, raw.returncode, os.fsdecode(raw.stdout), os.fsdecode(raw.stderr)
+    )
+
+
 def current_branch(vault_path: str) -> str:
     """Return current git branch name.
 
@@ -327,11 +344,15 @@ def current_branch(vault_path: str) -> str:
     try:
         result = subprocess.run(
             ['git', 'branch', '--show-current'],
-            cwd=vault_path, capture_output=True, text=True, timeout=30,
+            cwd=vault_path, capture_output=True, timeout=30,
         )
     except subprocess.TimeoutExpired:
         return ''
-    return result.stdout.strip()
+    # The name goes straight back into `git pull origin <branch>`, so it must
+    # round-trip byte for byte: fsdecode (surrogateescape) keeps a branch that
+    # is not valid UTF-8 intact, where a strict decode raised and `replace`
+    # would have named a branch that does not exist (#692).
+    return os.fsdecode(result.stdout).strip()
 
 
 def clone_shallow(hub_url: str, dest: str, depth: int = 1) -> tuple[bool, str]:

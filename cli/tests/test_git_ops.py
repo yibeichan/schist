@@ -1003,3 +1003,23 @@ def test_a_blocking_name_with_a_newline_or_escape_is_one_printable_line(tmp_path
     assert "\x1b" not in msg
     assert "a\\x0asecret\\x1b[31m.md" in msg
     assert "research/a\nsecret" not in msg
+
+
+# ── #692: ref and path names that are not valid UTF-8 ────────────────────
+
+def _fake_git_printing(tmp_path, monkeypatch, body: str):
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir(exist_ok=True)
+    git = bindir / "git"
+    git.write_text("#!/bin/sh\n" + body + "\n")
+    git.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+
+
+def test_current_branch_keeps_a_non_utf8_name_so_it_can_go_back_to_git(tmp_path, monkeypatch):
+    """The name is handed straight back to `git pull origin <branch>`, so it must
+    survive the round trip byte for byte (surrogateescape), not raise and not
+    be replaced."""
+    _fake_git_printing(tmp_path, monkeypatch, "printf 'caf\\351\\n'")
+    name = git_ops.current_branch(str(tmp_path))
+    assert os.fsencode(name) == b"caf\xe9"
