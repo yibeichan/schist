@@ -429,9 +429,11 @@ def _run_git_cleanup(vault_path: str, args: list[str]) -> subprocess.CompletedPr
             argv,
             cwd=vault_path,
             capture_output=True,
-            text=True,
-            # Cleanup runs on the way to sys.exit(1); a non-UTF-8 path in git's
-            # output must not raise UnicodeDecodeError over the real error (#689).
+            # Explicit UTF-8, not the locale's: git emits UTF-8 paths, and a
+            # latin-1 locale would decode them to mojibake with no U+FFFD for
+            # the hint's guard to see. Cleanup runs on the way to sys.exit(1),
+            # so undecodable bytes must not raise over the real error (#689).
+            encoding="utf-8",
             errors="replace",
             timeout=30,
         )
