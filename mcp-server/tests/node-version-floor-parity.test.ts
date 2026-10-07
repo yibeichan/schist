@@ -46,7 +46,7 @@ const DOCS = [
   "CONTRIBUTING.md",
   "AGENTS.md",
   "docs/getting-started.md",
-  "docs/hub-spoke-pi-orcd-dragonfly.md",
+  "docs/hub-spoke-pi-hpc-laptop.md",
   // Not prose, but it ENFORCES the floor: `schist doctor` reported PASS on Node
   // 20 and 21 for a server that requires 22 (#631).
   "cli/schist/doctor.py",
