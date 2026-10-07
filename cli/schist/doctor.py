@@ -82,15 +82,63 @@ def check_node_for_host(vault_path: Optional[str],
     --hub-path given, no vault, AND no schist MCP entry in any client config.
     A host that is also a spoke (vault given) or has the server registered
     still runs Node and is still checked.
+
+    The SKIP fails closed: a --hub-path that is not a bare repo, or any MCP
+    config that exists but cannot be read cleanly, means "can't tell", and
+    can't-tell runs check_node.
     """
-    if (hub_path and not vault_path
-            and not _discover_mcp_schist_entries(None, include_malformed=True)):
-        return CheckResult(
-            "SKIP", "Node.js",
-            "hub-only host (no vault, no schist MCP entry) does not run the "
-            "MCP server",
-        )
-    return check_node()
+    if not hub_path or vault_path or not (Path(hub_path) / "objects").is_dir():
+        return check_node()
+    no_server, checked = _no_schist_mcp_server_registered()
+    if not no_server:
+        return check_node()
+    where = ", ".join(checked) if checked else "none present"
+    return CheckResult(
+        "SKIP", "Node.js",
+        "hub-only host (no vault, no schist MCP entry) does not run the MCP "
+        f"server; MCP configs checked: {where}",
+    )
+
+
+def _no_schist_mcp_server_registered() -> tuple[bool, list[str]]:
+    """(True, checked) only when every MCP config present parsed cleanly and
+    none registers schist. Used to decide the hub-only Node SKIP, so anything
+    unreadable or unrecognised answers False (fail closed).
+
+    Beyond _discover_mcp_schist_entries, also looks at Claude Code's
+    project-scope `projects.<path>.mcpServers` in ~/.claude.json and at a
+    Codex `~/.codex/config.toml` that mentions schist. Those stay out of the
+    shared parser because its other callers read `cfg["env"]` from what it
+    returns; here only presence matters.
+    """
+    checked: list[str] = []
+    try:
+        for c in _mcp_config_candidates(None):
+            if not c.exists():
+                continue
+            checked.append(str(c))
+            data = json.loads(c.read_text())
+            if not isinstance(data, dict):
+                return False, checked
+            projects = data.get("projects")
+            if isinstance(projects, dict):
+                for proj in projects.values():
+                    servers = proj.get("mcpServers") if isinstance(proj, dict) else None
+                    if isinstance(servers, dict) and any(
+                            name == "schist"
+                            or (isinstance(cfg, dict) and _looks_like_schist_entry(cfg))
+                            for name, cfg in servers.items()):
+                        return False, checked
+        codex = Path.home() / ".codex" / "config.toml"
+        if codex.exists():
+            checked.append(str(codex))
+            if "schist" in codex.read_text():
+                return False, checked
+    except Exception:
+        return False, checked
+    if _discover_mcp_schist_entries(None, include_malformed=True):
+        return False, checked
+    return True, checked
 
 
 def check_uv() -> CheckResult:
