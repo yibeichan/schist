@@ -17,7 +17,6 @@ import yaml
 _GIT_TEXT = {"encoding": "utf-8", "errors": "replace"}
 
 
-
 @contextmanager
 def vault_write_lock(vault_path: str):
     """Serialize CLI vault writes across processes (#412, #419).
@@ -203,7 +202,7 @@ def run_group_killable(
     timeout: float,
     env: dict | None = None,
 ) -> subprocess.CompletedProcess:
-    """subprocess.run(capture_output=True, text=True) whose timeout kills the
+    """subprocess.run(capture_output=True, **_GIT_TEXT) whose timeout kills the
     child's WHOLE process group.
 
     Plain run(timeout=) SIGKILLs only the direct child. For multi-process git
@@ -721,7 +720,7 @@ def _global_scope_targets(vault_path: str) -> list[str]:
         try:
             tracked = subprocess.run(
                 ['git', 'ls-files', '--', target],
-                cwd=vault_path, capture_output=True, text=True, timeout=30,
+                cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=30,
             )
         except subprocess.TimeoutExpired:
             # Skip the stalled directory (#314): a partial target list stages
