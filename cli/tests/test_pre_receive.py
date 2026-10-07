@@ -1069,9 +1069,12 @@ def test_check_push_accepts_a_valid_non_ascii_path_in_scope(acl):
 def test_check_push_reports_a_bad_path_once_and_still_checks_the_others(acl):
     """Dropping the `continue` would run the bad path through derive_scope as
     well and report it twice."""
-    bad = b"research/mario/caf\xe9.md".decode("utf-8", "surrogateescape")
+    # Out of the identity's scope too, so without the `continue` it would be
+    # reported a second time by the ordinary ACL check.
+    bad = b"security/caf\xe9.md".decode("utf-8", "surrogateescape")
     violations = check_push("cluster-mario", [bad, "security/bad.md"], acl, "refs/heads/main")
-    assert [v.filepath for v in violations] == [bad, "security/bad.md"]
+    assert [(v.filepath, v.scope) for v in violations] == [
+        (bad, "(path is not valid UTF-8)"), ("security/bad.md", "security")]
 
 
 def test_rejection_for_a_bad_path_says_rename_not_edit_vault_yaml():
