@@ -5,7 +5,7 @@
 **Audit script:** `scripts/audit_mcp_response_sizes.ts`
 **Reproduce:**
 ```bash
-cd /Users/yibeichen/github/schist && \
+cd /path/to/schist && \
   SCHIST_MEMORY_DB="$HOME/.openclaw/memory/agent-state.db" \
   npm run audit --prefix mcp-server -- \
     --vault "$HOME/schist-vault" \
