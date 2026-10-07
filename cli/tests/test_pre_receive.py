@@ -1085,3 +1085,16 @@ def test_rejection_for_a_bad_path_says_rename_not_edit_vault_yaml():
         Violation("admin", "security/x.md", "security", "refs/heads/main"),
     ])
     assert "rename the file" in mixed and "Check vault.yaml" in mixed
+
+
+def test_get_changed_files_decodes_as_utf8_whatever_the_locale(tmp_path, monkeypatch):
+    """sshd forwards the client's LANG/LC_*. os.fsdecode follows the locale, so
+    under latin-1 a bad byte would become mojibake that check_push cannot see.
+    Simulate that locale and require the surrogate anyway."""
+    from schist.pre_receive import get_changed_files
+
+    repo, old, new = _repo_with_non_utf8_path(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(os, "fsdecode", lambda b: b.decode("latin-1") if isinstance(b, bytes) else b)
+    (name,) = get_changed_files(old, new)
+    assert name == "research/caf\udce9.md"
