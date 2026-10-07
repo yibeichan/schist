@@ -1,9 +1,9 @@
-# Hub & Spoke: Pi + ORCD + Dragonfly Topology
+# Hub & Spoke: Pi + HPC cluster + laptop
 
 Opinionated setup guide for a three-node schist hub-spoke deployment:
 - **Pi** as the hub (bare git repo with pre-receive hook ACL enforcement)
-- **ORCD** (MIT HPC cluster) as a spoke (uv + venv, or Singularity as fallback)
-- **Dragonfly** (Apple Silicon Mac) as a spoke
+- **An HPC cluster** as a spoke (uv + venv, or Singularity as fallback)
+- **A laptop** (Apple Silicon Mac) as a spoke
 - **GitHub** as an optional backup mirror
 
 For the general hub-spoke concepts and troubleshooting, see [hub-spoke-setup.md](./hub-spoke-setup.md).
@@ -20,7 +20,7 @@ For the general hub-spoke concepts and troubleshooting, see [hub-spoke-setup.md]
               ┌─────────┼─────────┐
               │                   │
       ┌──────────────────┐   ┌──────────────────┐
-      │ Dragonfly (Spoke)│   │   ORCD (Spoke)   │
+      │  Laptop (Spoke)  │   │   HPC (Spoke)    │
       │ scope: flat      │   │ scope: flat      │
       │ writes: research/│   │ writes: research/│
       │ notes/, ...      │   │ notes/, ...      │
@@ -42,14 +42,14 @@ Two options:
 ```bash
 # On Pi, create the bare hub
 schist init --hub \
-  --hub-path ~/git/schist-vault.git \
+  --hub-path ~/git/vault.git \
   --name research \
   --participant pi \
-  --participant dragonfly \
-  --participant orcd
+  --participant laptop \
+  --participant hpc
 ```
 
-This creates `~/git/schist-vault.git` as a bare repo, installs `hooks/pre-receive`, and seeds an initial commit with `vault.yaml`. Each participant gets `scope_convention: flat` and write access to the declared content-axis directories, plus read access to everything.
+This creates `~/git/vault.git` as a bare repo, installs `hooks/pre-receive`, and seeds an initial commit with `vault.yaml`. Each participant gets `scope_convention: flat` and write access to the declared content-axis directories, plus read access to everything.
 
 ### SSH setup
 
@@ -60,7 +60,7 @@ ssh-keygen -t ed25519 -f ~/.ssh/schist_spoke
 # On Pi, pin each public key to its spoke identity (preferred — the key,
 # not a client-sent env var, then determines the push identity; see
 # "Pinning identities to SSH keys" in hub-spoke-setup.md)
-schist hub key add orcd --key-file schist_spoke.pub --hub-path ~/git/schist-vault.git
+schist hub key add hpc --key-file schist_spoke.pub --hub-path ~/git/vault.git
 # (legacy alternative: cat ~/.ssh/schist_spoke.pub >> ~/.ssh/authorized_keys)
 
 # On each spoke, add to ~/.ssh/config:
@@ -70,12 +70,12 @@ Host schist-hub
     IdentityFile ~/.ssh/schist_spoke
 ```
 
-Replace `<pi-ip-or-hostname>` and `<pi-username>` with your Pi's actual values. For example, if your Pi is at `192.168.1.42` with user `yibei`:
+Replace `<pi-ip-or-hostname>` and `<pi-username>` with your Pi's actual values. For example, if your Pi is at `192.0.2.10` with user `<pi-user>`:
 
 ```
 Host schist-hub
-    HostName 192.168.1.42
-    User yibei
+    HostName 192.0.2.10
+    User <pi-user>
     IdentityFile ~/.ssh/schist_spoke
 ```
 
@@ -97,7 +97,7 @@ The hub's pre-receive hook reads `SCHIST_IDENTITY` (or `GL_USER`) from the *serv
 
 1. **On each spoke**, export the identity in `~/.bashrc` (or wherever your shell sources from on non-interactive SSH invocations):
    ```bash
-   export SCHIST_IDENTITY=<spoke-name>   # e.g. orcd, dragonfly
+   export SCHIST_IDENTITY=<spoke-name>   # e.g. hpc, laptop
    ```
 2. **On each spoke**, ask SSH to forward the var. Add to the `Host schist-hub` block in `~/.ssh/config`:
    ```
@@ -115,12 +115,12 @@ Without all three, pushes are rejected with `REJECTED: cannot determine push ide
 
 ```bash
 # On Pi, add GitHub as a push mirror
-cd ~/git/schist-vault.git
-git remote add github https://github.com/yibeichan/schist-vault.git
+cd ~/git/vault.git
+git remote add github https://github.com/<you>/<vault-repo>.git
 
 # Push to mirror periodically via cron
 # Add to crontab (every 15 minutes):
-# */15 * * * * cd ~/git/schist-vault.git && git push github --mirror
+# */15 * * * * cd ~/git/vault.git && git push github --mirror
 ```
 
 The mirror is read-only from the spokes' perspective. It exists as a backup and for browsing. Spokes never push to or pull from GitHub directly -- the Pi hub is the single source of truth.
@@ -163,16 +163,16 @@ Spokes pick up the tracked `.gitignore` on their next `schist sync pull`.
 Skip the Pi hub entirely. Spokes clone directly from:
 
 ```
-https://github.com/yibeichan/schist-vault.git
+https://github.com/<you>/<vault-repo>.git
 # or
-git@github.com:yibeichan/schist-vault.git
+git@github.com:<you>/<vault-repo>.git
 ```
 
 No `schist init --hub` needed. No ACL enforcement. Scope isolation is trust-based -- each spoke's `spoke.yaml` declares its scope, but nothing prevents a rogue push outside it. This is acceptable for a single-user setup where you control all spokes.
 
 To upgrade to Option A later, set up the Pi hub and change each spoke's remote URL. No data migration needed.
 
-## 4. Dragonfly Spoke Setup
+## 4. Laptop Spoke Setup
 
 ### Prerequisites (Apple Silicon)
 
@@ -193,24 +193,24 @@ For Option A (Pi hub):
 
 ```bash
 schist init --spoke \
-  --hub schist-hub:~/git/schist-vault.git \
+  --hub schist-hub:~/git/vault.git \
   --scope research \
-  --identity dragonfly
+  --identity laptop
 ```
 
 For Option B (GitHub hub):
 
 ```bash
 schist init --spoke \
-  --hub git@github.com:yibeichan/schist-vault.git \
+  --hub git@github.com:<you>/<vault-repo>.git \
   --scope research \
-  --identity dragonfly
+  --identity laptop
 ```
 
 ### Configure MCP for Claude Code
 
 ```bash
-schist --vault ~/schist-vault init --print-mcp-config --format claude --identity dragonfly
+schist --vault ~/vault init --print-mcp-config --format claude --identity laptop
 ```
 
 Run the printed `claude mcp add` line — Claude Code stores user-scope MCP
@@ -226,9 +226,9 @@ form errors with `unknown command: mcp`. The fallback shape is:
       "command": "node",
       "args": ["/path/to/schist/mcp-server/dist/index.js"],
       "env": {
-        "SCHIST_VAULT_PATH": "/Users/yibei/schist-vault",
-        "SCHIST_AGENT_ID": "dragonfly",
-        "SCHIST_IDENTITY": "dragonfly"
+        "SCHIST_VAULT_PATH": "/Users/<you>/vault",
+        "SCHIST_AGENT_ID": "laptop",
+        "SCHIST_IDENTITY": "laptop"
       }
     }
   }
@@ -238,19 +238,19 @@ form errors with `unknown command: mcp`. The fallback shape is:
 ### Verify
 
 ```bash
-schist doctor --vault ~/schist-vault
+schist doctor --vault ~/vault
 ```
 
 All checks should pass (green). If `schist doctor` is not yet implemented, verify manually:
 
 ```bash
 # Can we reach the hub?
-git -C ~/schist-vault push --dry-run
+git -C ~/vault push --dry-run
 # Is SQLite being built?
-ls -la ~/schist-vault/.schist/schist.db
+ls -la ~/vault/.schist/schist.db
 ```
 
-## 5. ORCD Spoke Setup
+## 5. HPC Spoke Setup
 
 > **⚠️ Network filesystems: set `SCHIST_NO_WAL=1`.** Since #254, ingest puts
 > `schist.db` in WAL journal mode for concurrent-read performance. SQLite's
@@ -303,15 +303,15 @@ nvm install 22
 
 ```bash
 schist init --spoke \
-  --hub schist-hub:~/git/schist-vault.git \
+  --hub schist-hub:~/git/vault.git \
   --scope research \
-  --identity orcd
+  --identity hpc
 ```
 
 #### Verify
 
 ```bash
-schist doctor --vault ~/schist-vault
+schist doctor --vault ~/vault
 ```
 
 ### Option B: Singularity/Apptainer (fallback)
@@ -333,7 +333,7 @@ From: node:22-bookworm-slim
 
 %environment
     export SCHIST_VAULT_PATH=/data/vault
-    export SCHIST_IDENTITY=orcd
+    export SCHIST_IDENTITY=hpc
 
 %runscript
     exec "$@"
@@ -343,13 +343,13 @@ Build on the login node (Apptainer needs root to build; use `--remote` or build 
 
 ```bash
 # On Pi or local machine with root:
-apptainer build schist-orcd.sif schist.def
+apptainer build schist-hpc.sif schist.def
 
-# Copy to ORCD (the HPC cluster):
-scp schist-orcd.sif login-node:/scratch/$USER/
+# Copy to the HPC cluster:
+scp schist-hpc.sif login-node:/scratch/$USER/
 ```
 
-### SSH key handling for ORCD
+### SSH key handling on the HPC cluster
 
 Applies to both uv and Singularity setups.
 
@@ -383,9 +383,9 @@ Applies to both uv and Singularity setups.
 #SBATCH --output=schist-note-%j.log
 
 source ~/schist-venv/bin/activate
-export SCHIST_IDENTITY=orcd
+export SCHIST_IDENTITY=hpc
 
-schist add --vault ~/schist-vault \
+schist add --vault ~/vault \
   --title "Training results $(date +%F)" \
   --body "Loss: $TRAIN_LOSS, Accuracy: $TRAIN_ACC" \
   --dir research
@@ -399,11 +399,11 @@ schist add --vault ~/schist-vault \
 #SBATCH --time=00:05:00
 #SBATCH --output=schist-note-%j.log
 
-export SCHIST_IDENTITY=orcd
+export SCHIST_IDENTITY=hpc
 
 apptainer run --bind /scratch/$USER/vault:/data/vault \
               --bind $HOME/.ssh:/root/.ssh:ro \
-              schist-orcd.sif \
+              schist-hpc.sif \
               schist add --vault /data/vault \
                 --title "Training results $(date +%F)" \
                 --body "Loss: $TRAIN_LOSS, Accuracy: $TRAIN_ACC" \
@@ -420,16 +420,16 @@ For a multi-note batch job, write several notes then push once at the end:
 #SBATCH --time=00:10:00
 
 source ~/schist-venv/bin/activate  # for uv; remove if using Singularity
-export SCHIST_IDENTITY=orcd
+export SCHIST_IDENTITY=hpc
 
 for run in /scratch/$USER/runs/*.log; do
-    schist add --vault ~/schist-vault \
+    schist add --vault ~/vault \
       --title "Run $(basename $run .log)" \
       --body "$(tail -5 "$run")" \
       --dir research
 done
 
-schist sync push --vault ~/schist-vault
+schist sync push --vault ~/vault
 ```
 
 ### Verify (Option B)
@@ -437,7 +437,7 @@ schist sync push --vault ~/schist-vault
 ```bash
 apptainer run --bind /scratch/$USER/vault:/data/vault \
               --bind $HOME/.ssh:/root/.ssh:ro \
-              schist-orcd.sif \
+              schist-hpc.sif \
               schist doctor --vault /data/vault
 ```
 
@@ -445,31 +445,31 @@ apptainer run --bind /scratch/$USER/vault:/data/vault \
 
 Under the flat `scope_convention`, notes from all spokes land in the same content-axis directories (e.g. `research/`). **Write isolation is enforced by the hub ACL; authorship is recorded in the `source_agent` frontmatter field** automatically set to `SCHIST_IDENTITY` at write time.
 
-- ORCD writes to `research/` (flat; authorship via `source_agent: orcd`)
-- Dragonfly writes to `research/` (flat; authorship via `source_agent: dragonfly`)
+- The HPC spoke writes to `research/` (flat; authorship via `source_agent: hpc`)
+- The laptop writes to `research/` (flat; authorship via `source_agent: laptop`)
 - Both can read the full graph via `search_notes` and `get_context`
 - ACL enforcement (Option A): the pre-receive hook on the Pi rejects any push that writes outside the spoke's declared scope
 
 ### Example cross-machine workflow
 
-On ORCD (the HPC cluster), write training results:
+On the HPC cluster, write training results:
 
 ```bash
 schist add --vault /data/vault --title "Training run 42" \
   --body "Loss: 0.03, Acc: 97.2%" --dir research
 ```
 
-On Dragonfly (the Mac), pull and connect:
+On the laptop, pull and connect:
 
 ```bash
-# Pull ORCD's latest notes
+# Pull the HPC spoke's latest notes
 schist sync pull
 
 # Write your analysis in the shared scope
-schist add --vault ~/schist-vault --title "Analysis of training 42" \
+schist add --vault ~/vault --title "Analysis of training 42" \
   --body "Convergence looks good" --dir research
 
-# Link your analysis to the ORCD training note
+# Link your analysis to the HPC training note
 schist link --source research/2026-04-24-analysis.md \
   --target research/2026-04-24-training-42.md --type extends
 
@@ -483,11 +483,11 @@ Neither side can modify the other's files. Both see the full graph.
 
 Run these in order after initial setup. All five should pass before declaring the topology operational.
 
-- [ ] **Pi hub reachable**: `git ls-remote schist-hub:~/git/schist-vault.git` returns refs
-- [ ] **Dragonfly spoke healthy**: `schist doctor --vault ~/schist-vault` all green
-- [ ] **ORCD spoke healthy**: `schist doctor --vault /data/vault` all green (inside container)
-- [ ] **Dragonfly writes, ORCD reads**: `schist add` on Dragonfly, then `schist sync pull` on ORCD -- the note appears
-- [ ] **ORCD writes, Dragonfly reads**: `schist add` on ORCD, then `schist sync pull` on Dragonfly -- the note appears
+- [ ] **Pi hub reachable**: `git ls-remote schist-hub:~/git/vault.git` returns refs
+- [ ] **Laptop spoke healthy**: `schist doctor --vault ~/vault` all green
+- [ ] **HPC spoke healthy**: `schist doctor --vault /data/vault` all green (inside container)
+- [ ] **Laptop writes, HPC reads**: `schist add` on the laptop, then `schist sync pull` on the HPC spoke -- the note appears
+- [ ] **HPC writes, laptop reads**: `schist add` on the HPC spoke, then `schist sync pull` on the laptop -- the note appears
 
 If the cross-write tests fail, check SSH connectivity first (`ssh schist-hub echo ok` from each spoke), then check that `SCHIST_IDENTITY` is set correctly in each environment.
 
@@ -594,7 +594,7 @@ Replace the `Host schist-hub` block in `~/.ssh/config` with:
 
 ```
 Host schist-hub
-    HostName <pi-tailnet-name>      # e.g. eleven-party (MagicDNS) or the 100.x.y.z IP
+    HostName <pi-tailnet-name>      # MagicDNS name or the node's tailnet IP
     User <pi-username>
     IdentityFile ~/.ssh/schist_spoke
     ProxyCommand /home/<you>/.local/bin/schist-tailscale-nc %h %p
@@ -618,4 +618,4 @@ schist sync push              # should land a commit on the Pi
 
 ### Checking with your HPC operator
 
-User-run VPN tunnels on shared HPC infrastructure can violate AUPs. Before installing on a managed cluster (MIT ORCD, etc.), confirm the practice is permitted — even though userspace mode requires no root and runs only when invoked. Outbound-only sync (which this setup is) is lower-profile than persistent inbound services.
+User-run VPN tunnels on shared HPC infrastructure can violate AUPs. Before installing on a managed cluster, confirm the practice is permitted — even though userspace mode requires no root and runs only when invoked. Outbound-only sync (which this setup is) is lower-profile than persistent inbound services.

@@ -4,7 +4,7 @@ Walk-through for wiring up a schist hub and one or more spokes so that agents
 on different machines (laptop, HPC cluster, Raspberry Pi, etc.) share a single
 knowledge graph.
 
-> **Setting up Pi + ORCD + Dragonfly?** See the [Pi/ORCD/Dragonfly topology guide](hub-spoke-pi-orcd-dragonfly.md)
+> **Setting up a Pi hub with an HPC cluster and a laptop?** See the [Pi/HPC/laptop topology guide](hub-spoke-pi-hpc-laptop.md)
 > for an opinionated, copy-paste-ready walkthrough for that specific setup.
 
 ## Topology

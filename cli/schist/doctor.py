@@ -600,7 +600,7 @@ def check_root_gitignore(vault_path: Optional[str]) -> CheckResult:
         "Add a `.schist/` line to the vault root .gitignore and commit it. "
         "The root file is hub-owned on hub/spoke deployments: per the vault "
         "ACL, commit and push it with the hub operator's machine identity "
-        "(e.g. SCHIST_IDENTITY=pi; see docs/hub-spoke-pi-orcd-dragonfly.md)."
+        "(e.g. SCHIST_IDENTITY=pi; see docs/hub-spoke-pi-hpc-laptop.md)."
     )
     gitignore = Path(vault_path) / ".gitignore"
     try:

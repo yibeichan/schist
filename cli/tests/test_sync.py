@@ -1821,6 +1821,35 @@ def test_hooks_reinstall_exclude_retrofit_idempotent(tmp_path):
     assert lines.count(".schist/") == 1
 
 
+def _spoke_with_pre_commit(tmp_path, body: str):
+    target = tmp_path / "spoke"
+    subprocess.run(["git", "init", "-q", str(target)], check=True)
+    hooks = target / ".git" / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "pre-commit").write_text(body)
+    return target, hooks
+
+
+# The skip/force paths themselves are covered by TestHooksReinstall in
+# test_pre_commit_hook.py (test_pinned_hook_is_skipped, test_force_overwrites_pinned).
+# What those leave open is WHICH text counts as the marker: a regex that is too
+# loose silently protects a hook nobody pinned, one that is too strict ignores a
+# pin the user wrote.
+@pytest.mark.parametrize("marker", [
+    "# schist-hook-version: 2",                    # a real version, not the opt-out
+    "  # schist-hook-version: pinned",            # indented: the marker is line-anchored
+    "echo # schist-hook-version: pinned",         # mid-line, not a marker line
+], ids=["other-version", "indented", "inside-a-command"])
+def test_hooks_reinstall_only_a_real_pinned_marker_protects_a_hook(tmp_path, marker):
+    from schist.sync import PRE_COMMIT_HOOK, hooks_reinstall
+
+    target, hooks = _spoke_with_pre_commit(tmp_path, f"#!/bin/sh\n{marker}\necho custom\n")
+
+    hooks_reinstall(MagicMock(force=False), str(target), str(tmp_path / "db.sqlite"))
+
+    assert (hooks / "pre-commit").read_text() == PRE_COMMIT_HOOK
+
+
 # ---------------------------------------------------------------------------
 # sync-error sentinel recovery (#560)
 # ---------------------------------------------------------------------------

@@ -1967,7 +1967,26 @@ describe("diverged spoke auto-recovery (#500)", () => {
    * rejection, a pull succeeds, and the push after the pull succeeds — the
    * exact shape of a spoke that is merely behind the hub.
    */
-  async function stubDivergedSpoke(vault: string, logPath: string): Promise<string> {
+  async function stubDivergedSpoke(
+    vault: string,
+    logPath: string,
+    detail: "git-lines" | "no-git-lines" = "git-lines",
+  ): Promise<string> {
+    // Post-#667 sync.py prints PUSH_DIVERGENCE_HEADER, the remedy, then
+    // "  Detail: <git output>" — only the FIRST git line carries the Detail
+    // prefix; the rest follow as git printed them (verified against a real
+    // diverged push). "git-lines" reproduces that shape. "no-git-lines" is NOT
+    // something the real CLI can print (it only emits the header after the same
+    // regex matched git's output); it is defense in depth: with nothing for
+    // NON_FAST_FORWARD_RE to match, ONLY the CLI_DIVERGENCE_HEADER fast-path in
+    // classifyPushFailure can call this divergence (#674).
+    const detailLines = detail === "git-lines"
+      ? `echo "  Detail: To /srv/git/hub.git" >&2
+    echo " ! [rejected]        main -> main (fetch first)" >&2
+    echo "error: failed to push some refs to '/srv/git/hub.git'" >&2
+    echo "hint: Updates were rejected because the remote contains work that you do not" >&2
+    echo "hint: have locally." >&2`
+      : `echo "  Detail: the hub refused the update" >&2`;
     const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
     await fs.writeFile(
       path.join(stubDir, "schist"),
@@ -1977,11 +1996,10 @@ case "$*" in
   *"sync pull"*) exit 0 ;;
   *"sync push"*)
     if grep -q "sync pull" "${logPath}"; then exit 0; fi
-    # Faithful to the real CLI: sync.py prints this wrapper for ANY push
-    # output containing "rejected", which git's non-ff output always does.
-    echo "Push rejected by hub:" >&2
-    echo " ! [rejected]  main -> main (non-fast-forward)" >&2
-    echo "hint: Updates were rejected because the tip of your current branch is behind" >&2
+    # Faithful to the real CLI after #667 (sync.py PUSH_DIVERGENCE_HEADER).
+    echo "Push rejected — the hub has commits this clone does not." >&2
+    echo 'Run \`schist sync pull\` to rebase onto them, then push again.' >&2
+    ${detailLines}
     exit 1 ;;
   *) exit 0 ;;
 esac
@@ -2023,6 +2041,29 @@ esac
       await expect(
         fs.access(path.join(vault, ".schist", "last-sync-error")),
       ).rejects.toThrow();
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test("recovers from the CLI's own divergence header even when the Detail has no git text (#674)", async () => {
+    // Pins the CLI_DIVERGENCE_HEADER fast-path through the real recovery loop.
+    // Nothing else in this stderr matches NON_FAST_FORWARD_RE, so a regression
+    // in the fast-path classifies it "other" and no pull is attempted. The
+    // input is defense in depth, not a state the CLI can produce (see the stub).
+    const vault = await makeTempSpokeVault();
+    const logPath = path.join(vault, ".schist", "push-log");
+    const stubDir = await stubDivergedSpoke(vault, logPath, "no-git-lines");
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      triggerSpokePush(vault);
+      const lines = await waitForLog(logPath, 3);
+      expect(lines.length).toBeGreaterThanOrEqual(3);
+      expect(lines[0]).toContain("sync push");
+      expect(lines[1]).toContain("sync pull");
+      expect(lines[2]).toContain("sync push");
     } finally {
       process.env.PATH = origPath;
       await fs.rm(stubDir, { recursive: true, force: true });
@@ -5635,6 +5676,27 @@ describe("zero-hit diagnosis distinguishes narrow terms from an empty store (#56
     expect(msg).not.toContain("different wording");
     expect(msg).toContain("1 term(s) were not checked");
     expect(msg).toContain("retry with fewer terms");
+  });
+
+  // #586: the fourth cell. anyTermMatches is checked BEFORE truncatedTerms, and
+  // that order is load-bearing: when a COUNTED term matched, "NOT empty" is a
+  // true statement whatever was left uncounted. Swapping the two conditions
+  // would answer "None of the 12 term(s) checked matched" here — false.
+  test("a matching counted term wins over truncation: still says the store is NOT empty", async () => {
+    await seed(["a note mentioning alpha", "filler one", "filler two"]);
+    // alpha (present) + 11 absent terms fill the 12-term cap; the 13th is uncounted.
+    const absent = Array.from({ length: 12 }, (_v, i) => `zz${i}`);
+    const res = await search_memory("/tmp/zerohit-vault-match-and-truncated", {
+      query: ["alpha", ...absent].join(" "),
+    });
+    const ok = res as { entries: unknown[]; zeroHitDiagnostic?: string };
+    expect(ok.entries).toHaveLength(0);
+    const msg = ok.zeroHitDiagnostic!;
+    expect(msg).toContain("(+1 more term(s) not counted)");
+    expect(msg).toContain("\"alpha\"=1");
+    expect(msg).toContain("So the store is NOT empty");
+    expect(msg).not.toContain("None of the");
+    expect(msg).not.toContain("were not checked");
   });
 
   test("with NO terms left uncounted, the reword advice is still given", async () => {

@@ -2185,7 +2185,7 @@ class TestHubAclDrift:
     def test_wildcard_writer_not_reported_as_lacking(self, tmp_path):
         """#512: an admin identity with write:['*'] is never a 'holder'.
 
-        Seen live on the eleven-party hub: pi holds ['*'] but signal (b) built
+        Seen live on a real hub: pi holds ['*'] but signal (b) built
         `holders` from concrete strings only, so pi was reported as lacking
         every dir any other participant held — nine false-positive lines.
         """
