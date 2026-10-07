@@ -2651,6 +2651,10 @@ describe("sync_status + sync_retry (#135)", () => {
   test("ignoredPathsFromPorcelainZ keeps odd names and skips rename sources (#698)", () => {
     const raw = "!! notes/my notes.md~\0R  notes/new.md\0!! decoy\0!! notes/a\"b~\0";
     expect(ignoredPathsFromPorcelainZ(raw)).toEqual(["notes/my notes.md~", 'notes/a"b~']);
+    // R/C can sit in either column (` R` is an intent-to-add rename); the source follows the destination.
+    for (const prefix of ["R  ", " R ", "C  "]) {
+      expect(ignoredPathsFromPorcelainZ(`${prefix}notes/new.md\0!! decoy\0!! notes/a~\0`)).toEqual(["notes/a~"]);
+    }
   });
 
   test("sync_status treats a tilde backup excluded by the *~ rule as junk (#388 review)", async () => {

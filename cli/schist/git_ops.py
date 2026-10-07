@@ -574,6 +574,27 @@ def has_unpushed_commits(vault_path: str) -> bool:
         return True
 
 
+def _display_path(path: str) -> str:
+    """A path made safe to put in a one-line error or warning.
+
+    `status --porcelain -z` hands names over unquoted, which also drops the
+    escaping git's quoting used to give: a newline would split the message and
+    an ESC would reach the terminal and the last-sync-error text agents read.
+    Control characters, and the surrogates standing for bytes that are not
+    UTF-8, are shown as \\xNN.
+    """
+    out = []
+    for c in path:
+        o = ord(c)
+        if 0xDC80 <= o <= 0xDCFF:
+            out.append("\\x%02x" % (o - 0xDC00))
+        elif o < 0x20 or o == 0x7F or 0x80 <= o <= 0x9F:
+            out.append("\\x%02x" % o)
+        else:
+            out.append(c)
+    return "".join(out)
+
+
 def stage_scope_files(vault_path: str, scope: str) -> tuple[bool, str]:
     """Stage all files within the scope directory.
 
@@ -605,7 +626,7 @@ def stage_scope_files(vault_path: str, scope: str) -> tuple[bool, str]:
         # IGNORE_GUARD_JUNK_BASENAMES.
         blocking, junk = ignored_scope_files(vault_path, scope)
         if blocking:
-            shown = ', '.join(blocking[:10])
+            shown = ', '.join(_display_path(p) for p in blocking[:10])
             if len(blocking) > 10:
                 shown += f", … and {len(blocking) - 10} more"
             return False, (
@@ -615,7 +636,7 @@ def stage_scope_files(vault_path: str, scope: str) -> tuple[bool, str]:
                 f"root) or move the files out of the scope."
             )
         if junk:
-            shown = ', '.join(junk[:10])
+            shown = ', '.join(_display_path(p) for p in junk[:10])
             if len(junk) > 10:
                 shown += f", … and {len(junk) - 10} more"
             return True, (

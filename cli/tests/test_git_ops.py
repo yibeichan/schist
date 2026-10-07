@@ -978,3 +978,28 @@ def test_confirmed_junk_sends_and_reads_undecodable_names_as_bytes(tmp_path, mon
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
     name = "research/caf\udce9~"
     assert git_ops._confirmed_junk(str(tmp_path), [name]) == {name}
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (b"R  research/new.md\0!! decoy\0!! research/a~\0", ["research/a~"]),   # index rename, column X
+    (b" R research/new.md\0!! decoy\0!! research/a~\0", ["research/a~"]),   # intent-to-add rename, column Y
+    (b"C  research/new.md\0!! decoy\0!! research/a~\0", ["research/a~"]),   # copy
+], ids=["rename-X", "rename-Y", "copy"])
+def test_porcelain_z_skips_the_source_token_of_every_rename_and_copy_shape(raw, expected):
+    assert git_ops._ignored_paths_from_porcelain_z(raw) == expected
+
+
+def test_a_blocking_name_with_a_newline_or_escape_is_one_printable_line(tmp_path):
+    """-z drops the escaping git's quoting used to give; the message must not
+    be split by a newline or carry a raw ESC."""
+    vault = tmp_path / "v"
+    vault.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=vault, check=True)
+    (vault / "research").mkdir()
+    (vault / ".gitignore").write_text("*secret*\n")
+    (vault / "research" / "a\nsecret\x1b[31m.md").write_text("x\n")
+    ok, msg = git_ops.stage_scope_files(str(vault), "research")
+    assert ok is False
+    assert "\x1b" not in msg
+    assert "a\\x0asecret\\x1b[31m.md" in msg
+    assert "research/a\nsecret" not in msg
