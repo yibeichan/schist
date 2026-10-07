@@ -854,11 +854,12 @@ class TestSyncPush:
         assert not lock.exists()
         assert "Removing stale git index.lock" in capsys.readouterr().err
 
+    @patch("schist.sync.git_ops.ignored_scope_files", return_value=([], []))
     @patch("schist.sync.git_ops.has_unpushed_commits", return_value=False)
     @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
     @patch("subprocess.run")
     def test_push_force_aborts_merge_state(
-        self, mock_run, mock_changes, mock_unpushed, tmp_path, capsys
+        self, mock_run, mock_changes, mock_unpushed, mock_ignored, tmp_path, capsys
     ):
         from schist.sync import sync_push
 
@@ -3092,3 +3093,31 @@ def test_paths_outside_scope_uses_configured_dirs_for_global(tmp_path):
     assert git_ops.paths_outside_scope(str(vault), "global", [f"{d}/last.md"]) == []
     assert git_ops.paths_outside_scope(str(vault), "global", ["vault.yaml"]) == ["vault.yaml"]
     assert git_ops.paths_outside_scope(str(vault), "research", ["research/a.md", "x.md"]) == ["x.md"]
+
+
+@pytest.mark.parametrize("junk_name", ["plain~", "café~", "my notes.md~", 'a"b~', "a\nb~"])
+def test_sync_push_treats_an_ignored_junk_file_as_junk_whatever_its_name(tmp_path, junk_name, capsys):
+    """#698: `git status --porcelain` v1 double-quotes a name containing a space,
+    newline or `"` even with core.quotePath=off, so `line[3:]` kept the quotes,
+    `_is_junk_basename` no longer saw `*~`, and an editor backup was reported as
+    a blocking ignored note while the real note stayed staged."""
+    import types
+
+    import schist.sync as sync
+
+    vault = _real_spoke_with_origin(tmp_path)
+    (Path(vault) / ".gitignore").write_text("*~\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=vault, check=True)
+    subprocess.run(["git", "commit", "-qm", "ignore"], cwd=vault, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "main"], cwd=vault,
+                   check=True, capture_output=True)
+    (Path(vault) / "research" / junk_name).write_text("backup\n")
+    (Path(vault) / "research" / "real.md").write_text("real\n")
+
+    sync.sync_push(types.SimpleNamespace(force=False), vault, vault + "/.schist/schist.db")
+
+    tree = subprocess.run(["git", "ls-tree", "-r", "--name-only", "-z", "HEAD"],
+                          cwd=vault, capture_output=True, check=True).stdout.split(b"\0")
+    assert b"research/real.md" in tree
+    assert f"research/{junk_name}".encode() not in tree
+    assert "excluded by .gitignore" not in capsys.readouterr().err
