@@ -26,6 +26,9 @@ logger = logging.getLogger("schist.pre_receive")
 # SHA representing a zero ref (new branch or deleted branch)
 ZERO_SHA = "0" * 40
 
+# Violation.scope for a path that is not valid UTF-8 (#697)
+NON_UTF8_SCOPE = "(path is not valid UTF-8)"
+
 
 @dataclass
 class Violation:
@@ -64,7 +67,7 @@ def _sanitize_log_field(value: str) -> str:
 def _escape_char(c: str) -> str:
     """One character, with control bytes and undecodable bytes made visible.
 
-    A filename that is not valid UTF-8 reaches us as `os.fsdecode` surrogate
+    A filename that is not valid UTF-8 reaches us as surrogate
     escapes (U+DC80..U+DCFF, one per raw byte). Those cannot be encoded to the
     audit log or a terminal, so show them as the `\\xNN` byte they stand for.
     """
@@ -214,10 +217,12 @@ def get_changed_files(oldrev: str, newrev: str) -> list[str]:
         )
 
     # Bytes, not text: a filename git stores need not be UTF-8, and a strict
-    # decode here raised UnicodeDecodeError out of the hook (#697). fsdecode
-    # keeps distinct bad bytes distinct (surrogateescape), so check_push can
-    # reject the path by name instead of the hook crashing.
-    changed_files = [os.fsdecode(f) for f in result.stdout.strip(b"\0").split(b"\0") if f]
+    # decode here raised UnicodeDecodeError out of the hook (#697). Explicit
+    # UTF-8 with surrogateescape, NOT os.fsdecode: that follows the locale, and
+    # sshd forwards the client's LANG/LC_*, so under a latin-1 locale a bad
+    # byte would decode to mojibake and slip past check_push. Distinct bad bytes
+    # stay distinct, so check_push can reject the path by name.
+    changed_files = [f.decode("utf-8", "surrogateescape") for f in result.stdout.strip(b"\0").split(b"\0") if f]
     return list(dict.fromkeys(changed_files))
 
 
@@ -241,7 +246,7 @@ def check_push(
             violations.append(Violation(
                 identity=identity,
                 filepath=filepath,
-                scope="(path is not valid UTF-8)",
+                scope=NON_UTF8_SCOPE,
                 refname=refname,
             ))
             continue
@@ -280,7 +285,14 @@ def format_rejection(violations: list[Violation]) -> str:
     for v in violations:
         lines.append(f"  - {_sanitize_log_field(v.filepath)} (scope: {v.scope})")
     lines.append("")
-    lines.append("Check vault.yaml access rules for your identity.")
+    if any(v.scope == NON_UTF8_SCOPE for v in violations):
+        lines.append(
+            "A path that is not valid UTF-8 is refused for every identity, so no "
+            "vault.yaml change helps: rename the file (bytes are shown as \\xNN), "
+            "then `git reset --soft` the unpushed commit and recommit."
+        )
+    if any(v.scope != NON_UTF8_SCOPE for v in violations):
+        lines.append("Check vault.yaml access rules for your identity.")
     return "\n".join(lines)
 
 

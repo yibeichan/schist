@@ -1020,11 +1020,11 @@ def test_get_changed_files_returns_a_non_utf8_name_instead_of_raising(tmp_path, 
     repo, old, new = _repo_with_non_utf8_path(tmp_path)
     monkeypatch.chdir(repo)
     files = get_changed_files(old, new)
-    assert [os.fsencode(f) for f in files] == [b"research/caf\xe9.md"]
+    assert [f.encode("utf-8", "surrogateescape") for f in files] == [b"research/caf\xe9.md"]
 
 
 def test_check_push_rejects_a_non_utf8_path_even_for_a_wildcard_writer(acl):
-    name = os.fsdecode(b"research/mario/caf\xe9.md")
+    name = b"research/mario/caf\xe9.md".decode("utf-8", "surrogateescape")
     for identity in ("cluster-mario", "admin"):
         violations = check_push(identity, [name], acl, "refs/heads/main")
         assert [v.scope for v in violations] == ["(path is not valid UTF-8)"], identity
@@ -1035,7 +1035,7 @@ def test_rejection_message_and_audit_log_show_undecodable_bytes_as_escapes(tmp_p
     surrogate would raise UnicodeEncodeError out of the hook."""
     from schist.pre_receive import Violation, format_rejection, log_rejection
 
-    v = Violation("mario", os.fsdecode(b"research/caf\xe9.md"),
+    v = Violation("mario", b"research/caf\xe9.md".decode("utf-8", "surrogateescape"),
                   "(path is not valid UTF-8)", "refs/heads/main")
     assert "research/caf\\xe9.md" in format_rejection([v])
     log = tmp_path / "rejected.log"
@@ -1058,3 +1058,30 @@ def test_main_rejects_a_pushed_non_utf8_path_with_a_message_not_a_traceback(
     err = capsys.readouterr().err
     assert "research/caf\\xe9.md" in err and "not valid UTF-8" in err
     assert "research/caf\\xe9.md" in log.read_text()
+
+
+def test_check_push_accepts_a_valid_non_ascii_path_in_scope(acl):
+    """The guard is about bytes that are not UTF-8, not about non-ASCII."""
+    assert check_push("cluster-mario", ["research/mario/café.md", "research/mario/笔记.md"],
+                      acl, "refs/heads/main") == []
+
+
+def test_check_push_reports_a_bad_path_once_and_still_checks_the_others(acl):
+    """Dropping the `continue` would run the bad path through derive_scope as
+    well and report it twice."""
+    bad = b"research/mario/caf\xe9.md".decode("utf-8", "surrogateescape")
+    violations = check_push("cluster-mario", [bad, "security/bad.md"], acl, "refs/heads/main")
+    assert [v.filepath for v in violations] == [bad, "security/bad.md"]
+
+
+def test_rejection_for_a_bad_path_says_rename_not_edit_vault_yaml():
+    from schist.pre_receive import NON_UTF8_SCOPE
+
+    bad = b"research/caf\xe9.md".decode("utf-8", "surrogateescape")
+    only_bad = format_rejection([Violation("admin", bad, NON_UTF8_SCOPE, "refs/heads/main")])
+    assert "rename the file" in only_bad and "Check vault.yaml" not in only_bad
+    mixed = format_rejection([
+        Violation("admin", bad, NON_UTF8_SCOPE, "refs/heads/main"),
+        Violation("admin", "security/x.md", "security", "refs/heads/main"),
+    ])
+    assert "rename the file" in mixed and "Check vault.yaml" in mixed
