@@ -40,7 +40,9 @@ def vault_write_lock(vault_path: str):
     deployment (Mac/Linux spokes, Pi hub). NOTE: this serializes CLI↔CLI
     only; the MCP server serializes its own writes in-process and does not
     take this lock — the cross-writer CLI↔MCP window is the remaining gap
-    noted in #412.
+    noted in #412. Its commit-race half (one writer's commit sweeping the
+    other's staged paths) is recovered by landed_via_concurrent_commit
+    (#715); the read-modify-write half is not.
     """
     import fcntl
     import sys
@@ -250,6 +252,70 @@ def _head_sha(vault_path: str) -> str:
     except subprocess.TimeoutExpired:
         return ''
     return result.stdout.strip() if result.returncode == 0 else ''
+
+
+def _tree_entries(argv: list[str], vault_path: str, mode_sha_fields) -> dict | None:
+    """Run a NUL-terminated ls-files/ls-tree listing → {path: (mode, sha)}.
+
+    None on any failure, so callers cannot mistake a failed listing for an
+    empty one. Paths are decoded with fsdecode to round-trip non-UTF-8 names
+    exactly as `sync push` lists them (#694).
+    """
+    try:
+        result = subprocess.run(argv, cwd=vault_path, capture_output=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return None
+    if result.returncode != 0:
+        return None
+    entries = {}
+    for rec in result.stdout.split(b"\0"):
+        if not rec:
+            continue
+        meta, tab, path = rec.partition(b"\t")
+        fields = meta.split()
+        if not tab or len(fields) < 3:
+            return None  # not the listing we asked for: unknown, never "landed"
+        entries[os.fsdecode(path)] = mode_sha_fields(fields)
+    return entries
+
+
+def index_entries(vault_path: str, paths: list[str]) -> dict | None:
+    """(mode, blob) of each path as currently STAGED; absent = not in the index."""
+    return _tree_entries(
+        ['git', '--literal-pathspecs', 'ls-files', '-s', '-z', '--'] + paths,
+        vault_path, lambda f: (f[0].decode(), f[1].decode()),
+    )
+
+
+def landed_via_concurrent_commit(vault_path: str, head_before: str,
+                                 staged: dict) -> bool:
+    """Did another writer already commit exactly what we staged?
+
+    Two writers share one git index: the MCP server serializes its own writes
+    in-process and does not take vault_write_lock (#412), and both sides end
+    in a plain `git commit`, which commits EVERYTHING staged. So a commit can
+    sweep the other writer's staged paths, and the loser's own commit then
+    fails with nothing left to commit, although its content is on the branch.
+
+    Decided by repo state, never by git's (localized) message: HEAD must have
+    moved since `head_before` (taken before staging), and every path must sit
+    in HEAD with the exact (mode, blob) we staged — or be absent from HEAD if
+    we staged its deletion (absent from `staged`). HEAD moving alone is not
+    enough: a concurrent pull that autostashed our change also moves HEAD and
+    leaves the index equal to HEAD, with our content in a stash, not a commit.
+    """
+    head_now = _head_sha(vault_path)
+    if not head_now or head_now == head_before:
+        return False
+    paths = list(staged)
+    in_head = _tree_entries(
+        ['git', '--literal-pathspecs', 'ls-tree', '-z', 'HEAD', '--'] + paths,
+        vault_path, lambda f: (f[0].decode(), f[2].decode()),
+    )
+    if in_head is None:
+        return False
+    # staged[p] is None for a staged deletion: then HEAD must not have it.
+    return all(in_head.get(p) == staged[p] for p in paths)
 
 
 def commit(vault_path: str, message: str, files: list[str] | None = None,
