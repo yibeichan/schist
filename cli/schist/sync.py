@@ -1186,6 +1186,19 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
             staged = [os.fsdecode(f) for f in result.stdout.split(b"\0") if f]
             n = len(staged)
 
+            stray = git_ops.paths_outside_scope(vault_path, config.scope, staged)
+            if stray:
+                # commit() no longer re-adds by name (#696), so nothing else
+                # would stop these reaching a local commit the hub rejects on
+                # every later push. They stay staged: `git restore --staged`.
+                shown = ", ".join(stray[:10]) + (f" (+{len(stray) - 10} more)" if len(stray) > 10 else "")
+                print(
+                    f"Error: staged path(s) outside scope '{config.scope}': {shown}. "
+                    f"Unstage them (`git restore --staged -- <path>`) and rerun sync.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
             if n > 0:
                 msg = f"sync({config.identity}): {n} file{'s' if n != 1 else ''}"
                 # Already staged by stage_scope_files above: re-adding by name fails for a

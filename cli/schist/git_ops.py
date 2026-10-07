@@ -27,8 +27,8 @@ def vault_write_lock(vault_path: str):
       rewrite, so two unserialized `schist link` calls on the same source
       both read the same base content and the loser's edge silently
       vanishes (#412);
-    - the git INDEX: commit() below is `git add <files>` then a plain
-      `git commit -m`, which commits EVERYTHING staged — an unserialized
+    - the git INDEX: commit() below is `git add <files>` (skipped with
+      stage=False) then a plain `git commit -m`, which commits EVERYTHING staged — an unserialized
       concurrent stage+commit pair sweeps the other caller's staged file
       into the wrong commit and leaves the loser's own commit empty
       (#419). Every CLI stage+commit (add, link, sync push) must run
@@ -261,12 +261,12 @@ def commit(vault_path: str, message: str, files: list[str] | None = None,
     do not emulate it with `files=[]`, which means `git add .`.
     """
     try:
-        add_args = files if files else ['.']
         if stage:
+            add_args = files if files else ['.']
             subprocess.run(
                 # `--` end-of-options: a note path beginning with `-` (e.g. a
-                # vault-root `-inbox.md` reached via `schist link --source=-inbox.md`,
-                # or such a path re-staged by sync) would otherwise be parsed as a git
+                # vault-root `-inbox.md` reached via `schist link --source=-inbox.md`)
+                # would otherwise be parsed as a git
                 # option — silently mis-staging or erroring, leaving the edge written
                 # to disk but uncommitted. Mirrors stage_scope_files and both TS
                 # `git add` call sites (#428).
@@ -634,6 +634,27 @@ def _scope_targets(vault_path: str, scope: str) -> list[str]:
     if scope == "global":
         return _global_scope_targets(vault_path)
     return [scope.rstrip('/') + '/']
+
+
+def paths_outside_scope(vault_path: str, scope: str, paths: list[str]) -> list[str]:
+    """The `paths` that do not live under the scope's directories.
+
+    sync push commits whatever is staged, with no second `git add`. That
+    re-add used to be an accidental tripwire: a stray staged path outside the
+    sparse cone (or a staged deletion of a root file such as vault.yaml) made it
+    fail, so nothing was committed and the stray stayed staged where it could be
+    unstaged. Without it the stray lands in a LOCAL commit the hub then rejects
+    on every later push (#696), so refuse before committing instead.
+
+    Uses the configured directories, not `_scope_targets`: that drops a global
+    dir that is empty on disk and untracked, which would misreport a staged
+    deletion of its last file as out of scope.
+    """
+    if scope == "global":
+        dirs = [d.rstrip('/') + '/' for d in _global_scope_dirs()]
+    else:
+        dirs = [scope.rstrip('/') + '/']
+    return [p for p in paths if not any(p.startswith(d) for d in dirs)]
 
 
 def ignored_scope_files(vault_path: str, scope: str) -> tuple[list[str], list[str]]:

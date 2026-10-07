@@ -3030,15 +3030,65 @@ def test_sync_push_commits_a_deleted_tracked_note(tmp_path, also_add):
     gone.unlink()
     if also_add:
         (Path(vault) / "research" / "new.md").write_text("n\n")
+    # Untracked and out of scope: a commit that re-adds with `git add .`
+    # (what files=[] or files=None means) would sweep this in.
+    (Path(vault) / "scratch.md").write_text("not for the hub\n")
 
     sync.sync_push(types.SimpleNamespace(force=False), vault, vault + "/.schist/schist.db")
 
     tree = subprocess.run(["git", "ls-tree", "-r", "--name-only", "HEAD"],
                           cwd=vault, capture_output=True, text=True, check=True).stdout.split()
     assert "research/gone.md" not in tree
+    assert "scratch.md" not in tree
     assert ("research/new.md" in tree) is also_add
     local = subprocess.run(["git", "rev-parse", "HEAD"], cwd=vault,
                            capture_output=True, text=True, check=True).stdout
     hub = subprocess.run(["git", "--git-dir", str(tmp_path / "hub.git"), "rev-parse", "main"],
                          capture_output=True, text=True, check=True).stdout
     assert local == hub
+
+
+def test_sync_push_refuses_a_staged_path_outside_scope_and_leaves_it_staged(tmp_path, capsys):
+    """#696 review: with no re-add in commit(), a stray staged root deletion
+    (vault.yaml) would land in a local commit the hub rejects on every later
+    push. Refuse before committing, name the path, leave it staged."""
+    import types
+
+    import schist.sync as sync
+
+    vault = _real_spoke_with_origin(tmp_path)
+    root = Path(vault) / "vault.yaml"
+    root.write_text("name: x\n")
+    subprocess.run(["git", "add", "."], cwd=vault, check=True)
+    subprocess.run(["git", "commit", "-qm", "root"], cwd=vault, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "main"], cwd=vault,
+                   check=True, capture_output=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=vault, capture_output=True,
+                          text=True, check=True).stdout
+    subprocess.run(["git", "rm", "-q", "vault.yaml"], cwd=vault, check=True)
+    (Path(vault) / "research" / "real.md").write_text("r\n")
+
+    with pytest.raises(SystemExit) as exc:
+        sync.sync_push(types.SimpleNamespace(force=False), vault, vault + "/.schist/schist.db")
+
+    assert exc.value.code == 1
+    assert "vault.yaml" in capsys.readouterr().err
+    assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=vault, capture_output=True,
+                          text=True, check=True).stdout == head
+    staged = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=vault,
+                            capture_output=True, text=True, check=True).stdout.split()
+    assert "vault.yaml" in staged
+
+
+def test_paths_outside_scope_uses_configured_dirs_for_global(tmp_path):
+    """The dynamic scope targets drop a global dir that is empty and untracked,
+    which would misreport a staged deletion of its last file as a stray."""
+    from schist import git_ops
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=vault, check=True)
+    d = git_ops._global_scope_dirs()[0]
+    assert git_ops.paths_outside_scope(str(vault), "global", [f"{d}/last.md"]) == []
+    assert git_ops.paths_outside_scope(str(vault), "global", ["vault.yaml"]) == ["vault.yaml"]
+    assert git_ops.paths_outside_scope(str(vault), "research", ["research/a.md", "x.md"]) == ["x.md"]
