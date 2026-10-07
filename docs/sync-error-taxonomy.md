@@ -163,6 +163,56 @@ the hub echoes filepaths onto its own `remote:` lines, so ordering (ACL/rate
 tested before transport) is the only thing keeping that one from being
 forgeable; see `order-hub-acl-echoes-*` in the parity corpus.
 
+## Pull-side: autostash (explicit pulls only)
+
+Autostash is **opt-in**. `git_ops.pull_rebase(autostash=True)` runs
+`git pull --rebase --autostash`; only two callers ask for it:
+`schist sync pull --autostash` and the MCP's `sync_retry
+mode=pull-rebase-push` (`runSchistSync(..., autostash=true)`). Every implicit
+pull runs `--no-autostash` and keeps refusing on a dirty tree, so neither a
+user's `rebase.autoStash` config nor a background job can stash edits nobody
+will hear about: `maybeSpokePull` (the `get_context` pre-read pull) skips
+entirely while `git status --porcelain --untracked-files=no` is non-empty,
+and `triggerSpokePush`'s recovery pull already refuses a dirty tree before
+pulling.
+
+After an exit-0 autostash pull, **a moved `refs/stash` is the failure
+signal**: on success git applies the autostash without ever storing it, so a
+new stash entry means the edits were not handed back -- whether re-applying
+them conflicted or failed outright (a hook or another writer changed a
+stashed path during the pull leaves no unmerged entries at all). The result
+is the producer-owned `PULL_AUTOSTASH_CONFLICT_PREFIX`, naming the stash SHA.
+Unmerged entries decide only whether to `reset --hard HEAD` so conflict
+markers cannot be pushed, and the reset happens only when every path that
+differs from HEAD is one the stash holds; otherwise the tree is left alone.
+A writer that changes a stashed path between that check and the reset still
+loses the change -- git cannot make the two atomic. `sync push` refuses to
+stage while unmerged entries exist (`stage_scope_files`), and `sync_pull`
+does not rebuild the index from such a tree.
+
+The prefix is tested **before** any conflict matcher on both sides -- its
+text says "conflicts", so `classify_pull_failure`'s `conflict` branch and the
+MCP's `isRebaseConflict` would otherwise describe a completed rebase as an
+aborted one. The MCP mirrors the string in `tools.ts`, pinned by a parity
+test.
+
+Interrupted explicit pulls: `sync_retry`'s 30s cap kills the process group,
+so a slow autostash pull can die mid-rebase with the edits held in the rebase
+state. The next sync's `cleanup_stale_git_state` hands them back: `rebase
+--abort` re-applies them. When `--abort` cannot run (e.g. a stale
+`index.lock`), its `rebase --quit` fallback stores them in the stash list
+instead and leaves HEAD detached where the rebase stopped; the cleanup then
+**fails the sync with a message naming the stash SHA**, the `git stash apply
+<sha>` to run and the detached HEAD, printed last so it is what the push
+sentinel and `sync_status` record. Note that git re-applies an autostash
+without `--index`, so edits that were *staged* come back unstaged.
+
+A successful `sync_retry mode=pull-rebase-push` on a dirty tree does not just
+restore the edits: its push step runs `schist sync push`, which commits
+everything pending in the spoke's scope -- so in-progress, in-scope edits are
+**committed and pushed to the hub**. Commit or stash anything that is not
+ready before calling it.
+
 ## Known gaps (as of 2026-09-22)
 
 Filed as follow-ups on the work this doc describes — don't assume these are

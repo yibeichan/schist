@@ -298,6 +298,34 @@ repeatedly, run `schist sync pull` in a shell to get the real error (SSH
 auth failure, hub down, DNS). The MCP server will keep serving the stale
 local view until the hub comes back.
 
+### "cannot pull with rebase: You have unstaged changes"
+
+A pull refuses while tracked files have uncommitted edits. Either commit
+them, or pull with `schist sync pull --autostash`: git sets the edits aside,
+rebases, and puts them back. Autostash is opt-in on purpose -- the MCP
+server's automatic pre-read pull skips a dirty tree rather than stashing
+anything, and `sync_retry mode=pull-rebase-push` is the only MCP call that
+autostashes. Edits that were staged come back unstaged.
+
+### "Pulled, but your uncommitted edits conflict with the incoming changes"
+
+An autostash pull rebased, but could not put your edits back -- because the
+hub changed the same lines, or because something changed those files while
+the pull ran. The edits are saved in the git stash; the message names it.
+When the tree was left with conflict markers and nothing else had touched
+it, it is reset to the pulled commit so no markers can be pushed (and `sync
+push` refuses while any conflicted file remains). To finish:
+
+```bash
+cd <vault>
+git stash list          # the entry named "autostash"
+git stash pop           # re-apply; resolve anything it reports
+```
+
+then sync again. Untracked files are never stashed: one that collides with
+a file arriving from the hub still fails the pull, and git restores your
+stashed edits before it stops.
+
 ### "pre-receive: ModuleNotFoundError: schist.pre_receive"
 
 The schist package isn't installed for the `python3` the hook uses. On the

@@ -496,11 +496,15 @@ class TestSyncPull:
         vault = _make_spoke(tmp_path)
         (Path(vault) / ".git" / "rebase-apply").mkdir(parents=True)
 
-        # First subprocess.run (rebase --abort) fails; second (rebase --quit) succeeds.
-        mock_run.side_effect = [
-            MagicMock(returncode=128, stdout="", stderr="fatal: no rebase in progress"),
-            MagicMock(returncode=0, stdout="", stderr=""),
-        ]
+        # rebase --abort fails; rebase --quit succeeds. The refs/stash probes
+        # around --quit (autostash recovery) answer "no stash".
+        def _run(argv, *a, **kw):
+            if argv[1:3] == ["rebase", "--abort"]:
+                return MagicMock(returncode=128, stdout="", stderr="fatal: no rebase in progress")
+            if argv[1] == "rev-parse":
+                return MagicMock(returncode=1, stdout="", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = _run
 
         args = MagicMock()
         sync_pull(args, vault, "db.sqlite")  # should not sys.exit

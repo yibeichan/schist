@@ -497,6 +497,152 @@ PULL_ABORT_FAILED_MARKER = "rebase --abort also timed out"
 # which a vault FILE NAME can also satisfy (#584).
 PUSH_NO_RESPONSE_PREFIX = "Push timed out after"
 
+# pull_rebase's banner for an autostash pull (`sync pull --autostash`) that
+# did not hand the user's uncommitted edits back. `git pull --autostash`
+# reports that with exit 0 -- whether the stash conflicted with the incoming
+# changes or could not be applied at all -- so without this the pull read as
+# a clean success while the edits sat unannounced in the stash (or the tree
+# held conflict markers the next `sync push` would stage). Producer-owned and
+# line-anchored, like the prefixes above: the stash output itself says
+# "conflicts", which every loose conflict matcher (CLI and MCP) would
+# otherwise read as a REBASE conflict.
+PULL_AUTOSTASH_CONFLICT_PREFIX = (
+    "Pulled, but your uncommitted edits conflict with the incoming changes"
+)
+
+
+def _stash_ref(vault_path: str) -> tuple[bool, str | None]:
+    """(probe_ok, refs/stash commit or None when there is no stash).
+
+    A missing ref (exit 1, no output) is a real answer -- "no stash" -- and is
+    distinct from a failed probe, which must never be mistaken for one: the
+    autostash check compares this value before and after the pull.
+    """
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', '-q', '--verify', 'refs/stash'],
+            cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return False, None
+    if result.returncode == 0 and result.stdout.strip():
+        return True, result.stdout.strip()
+    if result.returncode == 1 and not result.stdout.strip():
+        return True, None
+    return False, None
+
+
+def _git_names(vault_path: str, args: list[str]) -> set[str] | None:
+    """NUL-separated path list from a git command, or None if it failed.
+
+    Read as bytes and decoded with surrogateescape, like every other `-z`
+    read here (#698), so a non-UTF-8 name compares exactly.
+    """
+    try:
+        result = subprocess.run(
+            ['git', *args, '-z'],
+            cwd=vault_path, capture_output=True, timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if result.returncode != 0:
+        return None
+    text = result.stdout.decode('utf-8', 'surrogateescape')
+    return {name for name in text.split('\0') if name}
+
+
+def has_unmerged_entries(vault_path: str) -> bool | None:
+    """True if the index has unmerged (conflicted) entries; None if unknown."""
+    names = _git_names(vault_path, ['ls-files', '--unmerged'])
+    return None if names is None else bool(names)
+
+
+def _check_autostash(vault_path: str, stash_before: str | None,
+                     output: str) -> tuple[bool, str] | None:
+    """After an exit-0 autostash pull: were the user's edits handed back?
+
+    On success git applies the autostash and never stores it, so refs/stash
+    is unchanged. If refs/stash MOVED, the edits were not (fully) re-applied
+    and git stored them -- whether the re-apply conflicted or failed outright
+    (e.g. a hook or another writer changed a stashed path during the pull).
+    That is always a failure, reported with the stash's SHA. Unmerged entries
+    decide only whether the tree needs resetting so conflict markers cannot
+    be pushed -- and the reset happens only if every path that now differs
+    from HEAD is one the stash holds. Anything else changed the tree after
+    git stopped, and is not ours to discard.
+
+    Residual window: a writer that changes one of the stashed paths between
+    that check and the reset still loses that change. Git offers no way to
+    make the comparison and the reset atomic.
+
+    Returns None when the edits were handed back.
+    """
+    probe_ok, stash_after = _stash_ref(vault_path)
+    if not probe_ok:
+        return False, (
+            f"{PULL_AUTOSTASH_CONFLICT_PREFIX}, or may: whether they were "
+            "re-applied could not be checked. Look at `git stash list` in the "
+            "vault for an entry named \"autostash\" before the next sync.\n"
+            + output
+        )
+    if stash_after == stash_before:
+        return None
+    sha = stash_after[:12]
+    unmerged = has_unmerged_entries(vault_path)
+    if unmerged is False:
+        return False, (
+            f"{PULL_AUTOSTASH_CONFLICT_PREFIX}: they were NOT re-applied and "
+            f"are saved in the git stash ({sha}). The working tree was not "
+            "changed. To restore them: `git stash pop` in the vault, resolve "
+            "anything it reports, then sync again.\n" + output
+        )
+    if unmerged is None:
+        return False, (
+            f"{PULL_AUTOSTASH_CONFLICT_PREFIX}: they are saved in the git "
+            f"stash ({sha}), but the tree's conflict state could not be read, "
+            "so it was left as-is. Check `git status` for conflict markers "
+            "before the next sync.\n" + output
+        )
+    stashed: set[str] | None = set()
+    for spec in ([f'{stash_after}^1', stash_after],
+                 [f'{stash_after}^1', f'{stash_after}^2']):
+        names = _git_names(vault_path, ['diff', '--name-only', *spec])
+        if names is None:
+            stashed = None
+            break
+        stashed |= names
+    dirty = _git_names(vault_path, ['diff', '--name-only', 'HEAD'])
+    if stashed is None or dirty is None or not dirty <= stashed:
+        extra = (sorted(dirty - stashed)
+                 if stashed is not None and dirty is not None else [])
+        detail = (f" Paths changed by something else: {', '.join(extra)}."
+                  if extra else "")
+        return False, (
+            f"{PULL_AUTOSTASH_CONFLICT_PREFIX}: they are saved in the git "
+            f"stash ({sha}). The tree holds conflict markers, but it also "
+            "differs from what git left in ways the stash does not account "
+            f"for, so it was NOT reset.{detail} Resolve the conflicts by hand "
+            "(`git status`) before the next sync.\n" + output
+        )
+    try:
+        reset = subprocess.run(
+            ['git', 'reset', '-q', '--hard', 'HEAD'],
+            cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=30,
+        )
+        reset_ok = reset.returncode == 0
+    except subprocess.TimeoutExpired:
+        reset_ok = False
+    tree = ("The working tree was reset to the pulled commit."
+            if reset_ok else
+            "Resetting the working tree to the pulled commit FAILED, so it "
+            "still holds conflict markers: run `git reset --hard HEAD` in the "
+            "vault (your edits are in the stash) before the next sync.")
+    return False, (
+        f"{PULL_AUTOSTASH_CONFLICT_PREFIX}. They are saved in the git stash "
+        f"({sha}); {tree} To restore them: `git stash pop` in the vault, "
+        "resolve the conflicts, then sync again.\n" + output
+    )
+
 
 def _partial_output(exc: subprocess.TimeoutExpired) -> str:
     """Whatever a timed-out child had written before it was killed.
@@ -516,8 +662,16 @@ def _partial_output(exc: subprocess.TimeoutExpired) -> str:
     return "\n".join(p for p in parts if p).strip()
 
 
-def pull_rebase(vault_path: str) -> tuple[bool, str]:
-    """Pull with rebase from origin. Aborts rebase on conflict."""
+def pull_rebase(vault_path: str, autostash: bool = False) -> tuple[bool, str]:
+    """Pull with rebase from origin. Aborts rebase on conflict.
+
+    `autostash` is opt-in and only for pulls a person or agent explicitly
+    asked for (`schist sync pull --autostash`, MCP `sync_retry
+    mode=pull-rebase-push`). Implicit pulls -- the MCP's pre-read pull, the
+    push path's recovery, scheduled jobs -- keep refusing on a dirty tree:
+    `--no-autostash` is passed explicitly so a user's `rebase.autoStash`
+    config cannot turn one into a silent stash.
+    """
     try:
         branch = current_branch(vault_path)
         if not branch:
@@ -530,11 +684,31 @@ def pull_rebase(vault_path: str) -> tuple[bool, str]:
                 "if a previous sync --force left HEAD detached, reattach with "
                 "'git checkout <branch>' in the vault"
             )
+        # With --autostash, an uncommitted edit to a tracked file no longer
+        # fails the pull ("cannot pull with rebase: You have unstaged
+        # changes"): git stashes the edits, rebases, and re-applies them. A
+        # rebase conflict's `rebase --abort` below re-applies the stash too.
+        stash_before = None
+        if autostash:
+            probe_ok, stash_before = _stash_ref(vault_path)
+            if not probe_ok:
+                return False, (
+                    "Could not read the git stash state, so an autostash pull "
+                    "could not verify it would hand your edits back; nothing "
+                    "was pulled. Check `git stash list` in the vault, or "
+                    "commit the edits and pull without --autostash."
+                )
         result = subprocess.run(
-            ['git', 'pull', '--rebase', 'origin', branch],
+            ['git', 'pull', '--rebase',
+             '--autostash' if autostash else '--no-autostash', 'origin', branch],
             cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=60,
         )
         output = result.stdout + result.stderr
+        if result.returncode == 0 and autostash:
+            stash_result = _check_autostash(
+                vault_path, stash_before, output.strip())
+            if stash_result is not None:
+                return stash_result
         if result.returncode != 0:
             # Abort the failed rebase to restore clean state. Best-effort and
             # bounded (#321): if the abort itself stalls (NFS, stale lock),
@@ -688,6 +862,14 @@ def stage_scope_files(vault_path: str, scope: str) -> tuple[bool, str]:
     Only stages files under the scope path. Root-level files (vault.yaml,
     schist.yaml) are NOT staged — spokes should not modify those.
     """
+    # `git add` on an unmerged path marks it resolved WITH its conflict
+    # markers, and the push would then publish them. Refuse instead; the tree
+    # can be left this way by a stash that would not re-apply.
+    if has_unmerged_entries(vault_path):
+        return False, (
+            "the working tree has unmerged (conflicted) files; resolve them "
+            "(`git status`) before syncing, so conflict markers are not pushed"
+        )
     try:
         targets = _scope_targets(vault_path, scope)
         if not targets:

@@ -386,6 +386,9 @@ def test_pull_rebase_abort_bounded_and_abort_timeout_keeps_pull_error():
         argv = args[0]
         if argv[1] == "branch":
             return subprocess.CompletedProcess(argv, 0, stdout="main\n", stderr="")
+        if argv[1] == "rev-parse":
+            # pull_rebase's pre-pull refs/stash probe (autostash): no stash.
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
         if argv[1] == "pull":
             return subprocess.CompletedProcess(
                 argv, 1, stdout="", stderr="CONFLICT (content): Merge conflict in a.md"
