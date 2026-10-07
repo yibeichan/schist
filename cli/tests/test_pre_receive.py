@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -445,7 +446,7 @@ class TestGetChangedFiles:
     def test_existing_branch_uses_commit_history_not_net_diff(self):
         from schist.pre_receive import get_changed_files
 
-        mock_result = type("Result", (), {"stdout": "a.md\0b.md\0a.md\0", "returncode": 0})()
+        mock_result = type("Result", (), {"stdout": b"a.md\0b.md\0a.md\0", "returncode": 0})()
         with patch("subprocess.run", return_value=mock_result) as mock_run:
             result = get_changed_files("aaa", "bbb")
         assert result == ["a.md", "b.md"]
@@ -455,7 +456,7 @@ class TestGetChangedFiles:
     def test_new_branch_uses_commit_history_not_tip_diff(self):
         from schist.pre_receive import ZERO_SHA, get_changed_files
 
-        mock_result = type("Result", (), {"stdout": "new-file.md\0", "returncode": 0})()
+        mock_result = type("Result", (), {"stdout": b"new-file.md\0", "returncode": 0})()
         with patch("subprocess.run", return_value=mock_result) as mock_run:
             result = get_changed_files(ZERO_SHA, "abc123")
         assert result == ["new-file.md"]
@@ -468,7 +469,7 @@ class TestGetChangedFiles:
     def test_empty_diff_returns_empty(self):
         from schist.pre_receive import get_changed_files
 
-        mock_result = type("Result", (), {"stdout": "", "returncode": 0})()
+        mock_result = type("Result", (), {"stdout": b"", "returncode": 0})()
         with patch("subprocess.run", return_value=mock_result):
             result = get_changed_files("aaa", "bbb")
         assert result == []
@@ -983,3 +984,120 @@ class TestLogSanitization:
         lines = [ln for ln in log.read_text().splitlines() if ln.strip()]
         assert len(lines) == 1
         assert "\\x0a" in lines[0]
+
+
+# ── #697: a filename that is not valid UTF-8 ───────────────────────────────
+
+def _repo_with_non_utf8_path(tmp_path):
+    """A real repo whose second commit adds `research/caf\\xe9.md` (latin-1).
+
+    Built with `git fast-import`: APFS refuses to create such a name on disk,
+    but git itself stores arbitrary bytes, and a Linux checkout can commit one.
+    """
+    import subprocess
+
+    repo = tmp_path / "hub.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(repo)], check=True)
+    stream = (
+        b"commit refs/heads/main\n"
+        b"committer t <t@example.com> 1700000000 +0000\n"
+        b"data 4\nseed\n"
+        b"M 100644 inline research/seed.md\ndata 2\nx\n\n"
+        b"commit refs/heads/main\n"
+        b"committer t <t@example.com> 1700000001 +0000\n"
+        b"data 4\nbad\n"
+        b"M 100644 inline research/caf\xe9.md\ndata 2\ny\n\n"
+    )
+    subprocess.run(["git", "fast-import", "--quiet"], cwd=repo, input=stream, check=True)
+    shas = subprocess.run(["git", "rev-parse", "main~1", "main"], cwd=repo,
+                          capture_output=True, text=True, check=True).stdout.split()
+    return repo, shas[0], shas[1]
+
+
+def test_get_changed_files_returns_a_non_utf8_name_instead_of_raising(tmp_path, monkeypatch):
+    from schist.pre_receive import get_changed_files
+
+    repo, old, new = _repo_with_non_utf8_path(tmp_path)
+    monkeypatch.chdir(repo)
+    files = get_changed_files(old, new)
+    assert [f.encode("utf-8", "surrogateescape") for f in files] == [b"research/caf\xe9.md"]
+
+
+def test_check_push_rejects_a_non_utf8_path_even_for_a_wildcard_writer(acl):
+    name = b"research/mario/caf\xe9.md".decode("utf-8", "surrogateescape")
+    for identity in ("cluster-mario", "admin"):
+        violations = check_push(identity, [name], acl, "refs/heads/main")
+        assert [v.scope for v in violations] == ["(path is not valid UTF-8)"], identity
+
+
+def test_rejection_message_and_audit_log_show_undecodable_bytes_as_escapes(tmp_path):
+    """The audit log is opened as UTF-8 and only OSError is caught, so a raw
+    surrogate would raise UnicodeEncodeError out of the hook."""
+    from schist.pre_receive import Violation, format_rejection, log_rejection
+
+    v = Violation("mario", b"research/caf\xe9.md".decode("utf-8", "surrogateescape"),
+                  "(path is not valid UTF-8)", "refs/heads/main")
+    assert "research/caf\\xe9.md" in format_rejection([v])
+    log = tmp_path / "rejected.log"
+    log_rejection([v], log_path=log)
+    assert "research/caf\\xe9.md" in log.read_text()
+
+
+def test_main_rejects_a_pushed_non_utf8_path_with_a_message_not_a_traceback(
+        acl, tmp_path, monkeypatch, capsys):
+    """End to end through main() against a real repo: the hook returns 1, the
+    rejection names the path with escaped bytes, and the audit log is written."""
+    repo, old, new = _repo_with_non_utf8_path(tmp_path)
+    monkeypatch.chdir(repo)
+    log = tmp_path / "rejected.log"
+
+    rc = main(stdin=[f"{old} {new} refs/heads/main"], acl=acl,
+              identity="admin", log_path=log)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "research/caf\\xe9.md" in err and "not valid UTF-8" in err
+    assert "research/caf\\xe9.md" in log.read_text()
+
+
+def test_check_push_accepts_a_valid_non_ascii_path_in_scope(acl):
+    """The guard is about bytes that are not UTF-8, not about non-ASCII."""
+    assert check_push("cluster-mario", ["research/mario/café.md", "research/mario/笔记.md"],
+                      acl, "refs/heads/main") == []
+
+
+def test_check_push_reports_a_bad_path_once_and_still_checks_the_others(acl):
+    """Dropping the `continue` would run the bad path through derive_scope as
+    well and report it twice."""
+    # Out of the identity's scope too, so without the `continue` it would be
+    # reported a second time by the ordinary ACL check.
+    bad = b"security/caf\xe9.md".decode("utf-8", "surrogateescape")
+    violations = check_push("cluster-mario", [bad, "security/bad.md"], acl, "refs/heads/main")
+    assert [(v.filepath, v.scope) for v in violations] == [
+        (bad, "(path is not valid UTF-8)"), ("security/bad.md", "security")]
+
+
+def test_rejection_for_a_bad_path_says_rename_not_edit_vault_yaml():
+    from schist.pre_receive import NON_UTF8_SCOPE
+
+    bad = b"research/caf\xe9.md".decode("utf-8", "surrogateescape")
+    only_bad = format_rejection([Violation("admin", bad, NON_UTF8_SCOPE, "refs/heads/main")])
+    assert "rename the file" in only_bad and "Check vault.yaml" not in only_bad
+    mixed = format_rejection([
+        Violation("admin", bad, NON_UTF8_SCOPE, "refs/heads/main"),
+        Violation("admin", "security/x.md", "security", "refs/heads/main"),
+    ])
+    assert "rename the file" in mixed and "Check vault.yaml" in mixed
+
+
+def test_get_changed_files_decodes_as_utf8_whatever_the_locale(tmp_path, monkeypatch):
+    """sshd forwards the client's LANG/LC_*. os.fsdecode follows the locale, so
+    under latin-1 a bad byte would become mojibake that check_push cannot see.
+    Simulate that locale and require the surrogate anyway."""
+    from schist.pre_receive import get_changed_files
+
+    repo, old, new = _repo_with_non_utf8_path(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(os, "fsdecode", lambda b: b.decode("latin-1") if isinstance(b, bytes) else b)
+    (name,) = get_changed_files(old, new)
+    assert name == "research/caf\udce9.md"
