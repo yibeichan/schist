@@ -2364,7 +2364,7 @@ def check_memory_db_path(vault_path: Optional[str]) -> CheckResult:
             f"reads resolve to {canonical}"
             + (f" ({canonical_n} entries)" if canonical_n is not None else "")
             + f", but a legacy {legacy_desc} is still on disk — entries only in the "
-              "legacy file are now unreachable",
+              "legacy file are now unreachable." + pin_msg,
             fix=f"Compare the counts; once {canonical} has everything, remove "
                 f"{legacy.parent.parent}. If the legacy file is AHEAD, re-run the "
                 f"migration: {_memory_migration_fix(legacy, canonical)}" + pin_fix,
