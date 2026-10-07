@@ -2980,7 +2980,11 @@ def _real_spoke_with_origin(tmp_path: Path) -> str:
     return str(vault)
 
 
-@pytest.mark.parametrize("name", ["café.md", "笔记.md", "a b.md"])
+# "a\nb.md", 'a"b.md', "a\\b.md" and a tab name are quoted by git even with
+# core.quotePath=off, so they also pin the -z/NUL parse: a newline-split
+# listing mangles them.
+@pytest.mark.parametrize("name", ["café.md", "笔记.md", "a b.md", "a\nb.md",
+                                  'a"b.md', "a\\b.md", "a\tb.md"])
 def test_sync_push_commits_a_note_with_a_non_ascii_or_spaced_name(tmp_path, name):
     """#694: `git diff --cached --name-only` quotes a non-ASCII path
     (`"research/caf\\303\\251.md"`), and handing that string back to
