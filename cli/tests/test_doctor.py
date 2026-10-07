@@ -2296,6 +2296,100 @@ class TestDoctorHubWiring:
         pr = next(r for r in results if r.label == "Hub pre-receive hook")
         assert pr.status == "PASS", pr.message
 
+    _SCHIST_ENTRY ={"command": "node", "args": ["/opt/schist/mcp-server/dist/index.js"]}
+
+    @staticmethod
+    def _node_result(monkeypatch, tmp_path, vault_path, hub="bare", files=None):
+        """Run doctor on a host with NO node, return the Node.js result.
+
+        hub: "bare" -> a dir with objects/ (what check_hub_* accept), "plain"
+        -> an existing dir that is not a repo, None -> no --hub-path.
+        files: {path relative to home: text} MCP configs to write.
+        """
+        import shutil as _shutil
+        from schist.doctor import run_doctor
+        home = tmp_path / "home"
+        home.mkdir()
+        for rel, text in (files or {}).items():
+            p = home / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
+        hub_path = None
+        if hub is not None:
+            hub_dir = tmp_path / "hub.git"
+            hub_dir.mkdir()
+            if hub == "bare":
+                (hub_dir / "objects").mkdir()
+            hub_path = str(hub_dir)
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        real_which = _shutil.which
+        monkeypatch.setattr(
+            "schist.doctor.shutil.which",
+            lambda name, *a, **k: None if name == "node" else real_which(name, *a, **k))
+        results = run_doctor(vault_path, None, as_json=False, hub_path=hub_path)
+        return next(r for r in results if r.label == "Node.js")
+
+    def test_hub_only_host_skips_node(self, monkeypatch, tmp_path):
+        # A dedicated hub host: --hub-path, no vault, no MCP server.
+        # Node is not needed there, so a missing node must not FAIL doctor.
+        r = self._node_result(monkeypatch, tmp_path, None)
+        assert r.status == "SKIP", r.message
+        assert "hub-only" in r.message
+        assert "none present" in r.message
+
+    def test_skip_names_the_configs_it_checked(self, monkeypatch, tmp_path):
+        # A clean config with no schist entry still allows the SKIP, and the
+        # message says which file was looked at.
+        r = self._node_result(monkeypatch, tmp_path, None, files={
+            ".claude.json": json.dumps({"mcpServers": {"other": {"args": ["x"]}}})})
+        assert r.status == "SKIP", r.message
+        assert ".claude.json" in r.message
+
+    def test_hub_plus_vault_still_checks_node(self, monkeypatch, tmp_path):
+        # A host that is hub AND spoke runs the MCP server: held to the floor.
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        r = self._node_result(monkeypatch, tmp_path, str(vault))
+        assert r.status == "FAIL"
+
+    def test_hub_path_that_is_not_a_repo_still_checks_node(self, monkeypatch, tmp_path):
+        # A mistyped --hub-path must not switch the check off.
+        r = self._node_result(monkeypatch, tmp_path, None, hub="plain")
+        assert r.status == "FAIL"
+
+    def test_hub_with_mcp_entry_still_checks_node(self, monkeypatch, tmp_path):
+        # No vault passed, but the server is registered: it runs Node here.
+        r = self._node_result(monkeypatch, tmp_path, None, files={
+            ".claude.json": json.dumps({"mcpServers": {"schist": self._SCHIST_ENTRY}})})
+        assert r.status == "FAIL"
+
+    def test_hub_with_malformed_schist_entry_still_checks_node(self, monkeypatch, tmp_path):
+        # A present-but-null schist entry is still a registration (#441).
+        r = self._node_result(monkeypatch, tmp_path, None, files={
+            ".claude.json": json.dumps({"mcpServers": {"schist": None}})})
+        assert r.status == "FAIL"
+
+    def test_hub_with_unparseable_config_still_checks_node(self, monkeypatch, tmp_path):
+        # Fail closed: a config we cannot read might register the server.
+        r = self._node_result(monkeypatch, tmp_path, None, files={
+            ".claude.json": '{"mcpServers": {"schist": '})
+        assert r.status == "FAIL"
+
+    def test_hub_with_project_scope_entry_still_checks_node(self, monkeypatch, tmp_path):
+        r = self._node_result(monkeypatch, tmp_path, None, files={
+            ".claude.json": json.dumps({"projects": {"/srv/x": {
+                "mcpServers": {"schist": self._SCHIST_ENTRY}}}})})
+        assert r.status == "FAIL"
+
+    def test_hub_with_codex_entry_still_checks_node(self, monkeypatch, tmp_path):
+        r = self._node_result(monkeypatch, tmp_path, None, files={
+            ".codex/config.toml": '[mcp_servers.schist]\ncommand = "node"\n'})
+        assert r.status == "FAIL"
+
+    def test_no_hub_no_vault_still_checks_node(self, monkeypatch, tmp_path):
+        r = self._node_result(monkeypatch, tmp_path, None, hub=None)
+        assert r.status == "FAIL"
+
     def test_run_doctor_omits_hub_check_without_path(self):
         from schist.doctor import run_doctor
         results = run_doctor(None, None, as_json=False)
