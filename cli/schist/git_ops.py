@@ -318,6 +318,23 @@ def commit(vault_path: str, message: str, files: list[str] | None = None,
         return False, (e.stdout or '') + (e.stderr or '')
 
 
+def run_git_for_path(argv: list[str], timeout: float = 5,
+                     env: dict | None = None) -> subprocess.CompletedProcess:
+    """Run a git command whose stdout is a filesystem path.
+
+    Bytes, then `os.fsdecode`: the string goes into `Path()`, and a strict
+    decode raised on a vault whose path is not valid UTF-8 while
+    `errors="replace"` would have silently pointed at a different directory
+    (#692). stderr is only displayed, so it takes the same decode. Shared by
+    sync.py and doctor.py so the two cannot drift: doctor's `_hooks_dir` runs
+    BEFORE sync's `rev-parse` and used to raise first.
+    """
+    raw = subprocess.run(argv, capture_output=True, timeout=timeout, env=env)
+    return subprocess.CompletedProcess(
+        argv, raw.returncode, os.fsdecode(raw.stdout), os.fsdecode(raw.stderr)
+    )
+
+
 def current_branch(vault_path: str) -> str:
     """Return current git branch name.
 

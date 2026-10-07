@@ -3172,3 +3172,35 @@ def test_both_git_path_sites_go_through_the_bytes_helper(tmp_path, monkeypatch):
 
     assert any("--absolute-git-dir" in a for a in seen)
     assert any("--git-path" in a for a in seen)
+
+
+def test_hooks_reinstall_survives_non_utf8_git_output_end_to_end(tmp_path, monkeypatch):
+    """#692 review: hooks_reinstall asks doctor._hooks_dir where hooks live BEFORE
+    it reaches the info/exclude lookup, and that call used to decode strictly,
+    so the fixed site was unreachable. A fake git that answers every query with
+    valid paths but writes undecodable bytes on stderr drives the real flow."""
+    import schist.sync as sync
+
+    hooks = tmp_path / "hooks"
+    exclude = tmp_path / "info" / "exclude"
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    git = bindir / "git"
+    git.write_text(
+        "#!/bin/sh\n"
+        "printf 'warning: caf\\351\\n' >&2\n"
+        'case "$*" in\n'
+        f'  *"--git-path hooks"*) echo "{hooks}";;\n'
+        f'  *"--git-path info/exclude"*) echo "{exclude}";;\n'
+        "  *) exit 1;;\n"
+        "esac\n"
+    )
+    git.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    vault = tmp_path / "vault"
+    (vault / ".git").mkdir(parents=True)
+
+    sync.hooks_reinstall(types.SimpleNamespace(force=True), str(vault), "db")
+
+    assert (hooks / "pre-commit").exists() and (hooks / "post-commit").exists()
+    assert ".schist/" in exclude.read_text()

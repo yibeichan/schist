@@ -217,17 +217,8 @@ def _hook_pinned(hook_path: Path) -> bool:
 
 
 def _run_git_for_path(argv: list[str], timeout: float = 5) -> subprocess.CompletedProcess[str]:
-    """Run a git command whose stdout is a filesystem path.
-
-    Bytes, then `os.fsdecode`: the string goes into `Path()`, and a strict
-    decode raised on a vault whose path is not valid UTF-8 while
-    `errors="replace"` would have silently pointed at a different directory
-    (#692). stderr is only displayed, so it takes the same decode.
-    """
-    raw = subprocess.run(argv, capture_output=True, timeout=timeout)
-    return subprocess.CompletedProcess(
-        argv, raw.returncode, os.fsdecode(raw.stdout), os.fsdecode(raw.stderr)
-    )
+    """See `git_ops.run_git_for_path` (#692)."""
+    return git_ops.run_git_for_path(argv, timeout)
 
 
 def hooks_reinstall(args, vault_path: str, db_path: str) -> None:
@@ -1373,7 +1364,7 @@ def _build_hub_in_staging(
     try:
         result = subprocess.run(
             ["git", "init", "--bare", "--initial-branch=main", str(staging)],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, encoding="utf-8", errors="replace", timeout=60,
         )
     except subprocess.TimeoutExpired:
         raise _InitError("git init --bare timed out after 60s (NFS stall?)")
@@ -1395,7 +1386,7 @@ def _build_hub_in_staging(
     try:
         check = subprocess.run(
             ["python3", "-c", "import schist.pre_receive"],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, encoding="utf-8", errors="replace", timeout=60,
         )
         check_failed = check.returncode != 0
     except subprocess.TimeoutExpired:
@@ -1602,7 +1593,7 @@ def _build_standalone_in_staging(
     try:
         result = subprocess.run(
             ["git", "init", "--initial-branch=main", str(staging)],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, encoding="utf-8", errors="replace", timeout=60,
         )
     except subprocess.TimeoutExpired:
         raise _InitError("git init timed out after 60s (NFS stall?)")
@@ -1633,7 +1624,7 @@ def _build_standalone_in_staging(
         # TimeoutExpired → _InitError so init_standalone's cleanup runs (#371).
         try:
             return subprocess.run(
-                cmd, cwd=staging, env=env, capture_output=True, text=True,
+                cmd, cwd=staging, env=env, capture_output=True, encoding="utf-8", errors="replace",
                 timeout=60,
             )
         except subprocess.TimeoutExpired:
