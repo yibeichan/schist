@@ -1973,12 +1973,19 @@ describe("diverged spoke auto-recovery (#500)", () => {
     detail: "git-lines" | "no-git-lines" = "git-lines",
   ): Promise<string> {
     // Post-#667 sync.py prints PUSH_DIVERGENCE_HEADER, the remedy, then
-    // "  Detail: <git output>". With "no-git-lines" the Detail carries nothing
-    // NON_FAST_FORWARD_RE recognises, so ONLY the CLI_DIVERGENCE_HEADER
-    // fast-path in classifyPushFailure can call this divergence (#674).
+    // "  Detail: <git output>" — only the FIRST git line carries the Detail
+    // prefix; the rest follow as git printed them (verified against a real
+    // diverged push). "git-lines" reproduces that shape. "no-git-lines" is NOT
+    // something the real CLI can print (it only emits the header after the same
+    // regex matched git's output); it is defense in depth: with nothing for
+    // NON_FAST_FORWARD_RE to match, ONLY the CLI_DIVERGENCE_HEADER fast-path in
+    // classifyPushFailure can call this divergence (#674).
     const detailLines = detail === "git-lines"
-      ? `echo "  Detail: ! [rejected]  main -> main (non-fast-forward)" >&2
-    echo "hint: Updates were rejected because the tip of your current branch is behind" >&2`
+      ? `echo "  Detail: To /srv/git/hub.git" >&2
+    echo " ! [rejected]        main -> main (fetch first)" >&2
+    echo "error: failed to push some refs to '/srv/git/hub.git'" >&2
+    echo "hint: Updates were rejected because the remote contains work that you do not" >&2
+    echo "hint: have locally." >&2`
       : `echo "  Detail: the hub refused the update" >&2`;
     const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
     await fs.writeFile(
@@ -2041,9 +2048,10 @@ esac
   }, 15000);
 
   test("recovers from the CLI's own divergence header even when the Detail has no git text (#674)", async () => {
-    // Pins the CLI_DIVERGENCE_HEADER fast-path end to end: nothing else in
-    // this stderr matches NON_FAST_FORWARD_RE, so a regression in the
-    // fast-path would classify it "other" and no pull would be attempted.
+    // Pins the CLI_DIVERGENCE_HEADER fast-path through the real recovery loop.
+    // Nothing else in this stderr matches NON_FAST_FORWARD_RE, so a regression
+    // in the fast-path classifies it "other" and no pull is attempted. The
+    // input is defense in depth, not a state the CLI can produce (see the stub).
     const vault = await makeTempSpokeVault();
     const logPath = path.join(vault, ".schist", "push-log");
     const stubDir = await stubDivergedSpoke(vault, logPath, "no-git-lines");

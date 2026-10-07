@@ -1821,47 +1821,20 @@ def test_hooks_reinstall_exclude_retrofit_idempotent(tmp_path):
     assert lines.count(".schist/") == 1
 
 
-def _spoke_with_hooks(tmp_path, pre: str | None = None, post: str | None = None):
+def _spoke_with_pre_commit(tmp_path, body: str):
     target = tmp_path / "spoke"
     subprocess.run(["git", "init", "-q", str(target)], check=True)
     hooks = target / ".git" / "hooks"
     hooks.mkdir(exist_ok=True)
-    if pre is not None:
-        (hooks / "pre-commit").write_text(pre)
-    if post is not None:
-        (hooks / "post-commit").write_text(post)
+    (hooks / "pre-commit").write_text(body)
     return target, hooks
 
 
-PINNED_HOOK = "#!/bin/sh\n# schist-hook-version: pinned\necho my own policy gate\n"
-
-
-def test_hooks_reinstall_leaves_a_pinned_hook_alone_without_force(tmp_path, capsys):
-    """#590: the pinned marker is the documented opt-out for a hook the user has
-    customised. Overwriting it on upgrade is destructive and silent, so the skip
-    branch needs a test, not just the regex behind it."""
-    from schist.sync import POST_COMMIT_HOOK, hooks_reinstall
-
-    target, hooks = _spoke_with_hooks(tmp_path, pre=PINNED_HOOK)
-
-    hooks_reinstall(MagicMock(force=False), str(target), str(tmp_path / "db.sqlite"))
-
-    assert (hooks / "pre-commit").read_text() == PINNED_HOOK            # untouched
-    assert (hooks / "post-commit").read_text() == POST_COMMIT_HOOK      # the unpinned one is installed
-    err = capsys.readouterr().err                                       # and the skip is reported, with the way out
-    assert "Skipped pre-commit" in err and "--force" in err
-
-
-def test_hooks_reinstall_force_overwrites_a_pinned_hook(tmp_path):
-    from schist.sync import PRE_COMMIT_HOOK, hooks_reinstall
-
-    target, hooks = _spoke_with_hooks(tmp_path, pre=PINNED_HOOK)
-
-    hooks_reinstall(MagicMock(force=True), str(target), str(tmp_path / "db.sqlite"))
-
-    assert (hooks / "pre-commit").read_text() == PRE_COMMIT_HOOK
-
-
+# The skip/force paths themselves are covered by TestHooksReinstall in
+# test_pre_commit_hook.py (test_pinned_hook_is_skipped, test_force_overwrites_pinned).
+# What those leave open is WHICH text counts as the marker: a regex that is too
+# loose silently protects a hook nobody pinned, one that is too strict ignores a
+# pin the user wrote.
 @pytest.mark.parametrize("marker", [
     "# schist-hook-version: 2",                    # a real version, not the opt-out
     "  # schist-hook-version: pinned",            # indented: the marker is line-anchored
@@ -1870,7 +1843,7 @@ def test_hooks_reinstall_force_overwrites_a_pinned_hook(tmp_path):
 def test_hooks_reinstall_only_a_real_pinned_marker_protects_a_hook(tmp_path, marker):
     from schist.sync import PRE_COMMIT_HOOK, hooks_reinstall
 
-    target, hooks = _spoke_with_hooks(tmp_path, pre=f"#!/bin/sh\n{marker}\necho custom\n")
+    target, hooks = _spoke_with_pre_commit(tmp_path, f"#!/bin/sh\n{marker}\necho custom\n")
 
     hooks_reinstall(MagicMock(force=False), str(target), str(tmp_path / "db.sqlite"))
 
