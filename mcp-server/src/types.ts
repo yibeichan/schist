@@ -145,11 +145,25 @@ export interface SyncStatusResponse {
 export interface SyncRetryResponse {
   ok: boolean;
   mode: "push-only" | "pull-rebase-push";
+  /** Where a failure happened; a success is always `push`. `await-in-flight`
+   *  means the retry joined a push that was already running and reports ITS
+   *  failure (`awaited_in_flight` is true); `pull-rebase` and `push` are steps
+   *  this call ran itself. An awaited push that SUCCEEDED is reported as
+   *  `push` with `awaited_in_flight: true`, so that flag, not `phase`, says
+   *  whether the push was this call's. */
   phase: "await-in-flight" | "pull-rebase" | "push";
   retriable: boolean;
   /** The same classification `sync_status` reads back off the sentinel (#534),
    *  returned inline so a caller can pick the next retry MODE without a second
-   *  round-trip and without parsing `message`. Absent on success. */
+   *  round-trip and without parsing `message`.
+   *
+   *  Present ONLY for a failed PUSH: a `push`-phase failure, or an awaited
+   *  in-flight push that failed with a classified outcome. Absent on success
+   *  and on every PULL failure (`pull-rebase`, and an awaited in-flight pull) —
+   *  a push class does not name a pull's next move, so absence here means "not
+   *  a push failure", not "class unknown". That differs from `sync_status`,
+   *  whose `last_sync_error.failure_class` is an explicit `null` for a sentinel
+   *  that predates classification (#501). */
   failure_class?: PushFailureClass;
   reason?: string;
   message: string;

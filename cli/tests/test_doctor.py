@@ -3116,6 +3116,40 @@ class TestCheckMemoryDbPath:
         assert r.status == "WARN"
         assert "unreachable" in r.message
 
+    def test_both_present_also_names_the_clients_that_do_not_pin(self, tmp_path, monkeypatch):
+        """#577: the pin diagnosis was in the fix text of the both-exist WARN but
+        not in its message, so the user who migrated halfway saw the remedy
+        without being told why it matters. Parity with the legacy-only WARN."""
+        monkeypatch.setattr("schist.doctor._unpinned_memory_db_clients",
+                            lambda vault_path: ["Claude Desktop"])
+        self._seed_db(tmp_path / ".openclaw" / "memory" / "agent-state.db", rows=5)
+        self._seed_db(tmp_path / ".schist" / "memory" / "agent-state.db", rows=5)
+        r = self._run(monkeypatch, tmp_path)
+        assert r.status == "WARN"
+        assert "Claude Desktop" in r.message
+        assert "do not pin SCHIST_MEMORY_DB" in r.message
+        assert "Pin \"SCHIST_MEMORY_DB\"" in r.fix
+
+    def test_legacy_only_and_both_present_carry_the_same_pin_note(self, tmp_path, monkeypatch):
+        """The two WARN branches must not drift again."""
+        monkeypatch.setattr("schist.doctor._unpinned_memory_db_clients",
+                            lambda vault_path: ["Claude Desktop", "Cursor"])
+        self._seed_db(tmp_path / ".openclaw" / "memory" / "agent-state.db", rows=1)
+        legacy_only = self._run(monkeypatch, tmp_path)
+        self._seed_db(tmp_path / ".schist" / "memory" / "agent-state.db", rows=1)
+        both = self._run(monkeypatch, tmp_path)
+        from schist.doctor import _memory_pin_clause
+        pin_msg, _ = _memory_pin_clause(None)
+        assert pin_msg and pin_msg in legacy_only.message and pin_msg in both.message
+
+    def test_both_present_without_unpinned_clients_has_no_pin_note(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("schist.doctor._unpinned_memory_db_clients",
+                            lambda vault_path: [])
+        self._seed_db(tmp_path / ".openclaw" / "memory" / "agent-state.db", rows=1)
+        self._seed_db(tmp_path / ".schist" / "memory" / "agent-state.db", rows=1)
+        r = self._run(monkeypatch, tmp_path)
+        assert "do not pin" not in r.message and "Pin " not in (r.fix or "")
+
     def test_unreadable_legacy_db_does_not_raise(self, tmp_path, monkeypatch):
         """run_doctor has no per-check exception shield (#437, #441). A file at
         the legacy path that is not a SQLite DB at all must still WARN."""
