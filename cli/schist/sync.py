@@ -1160,9 +1160,13 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
             import subprocess
 
             try:
+                # -z: without it git quotes and octal-escapes a non-ASCII path
+                # (`"research/caf\303\251.md"`, quotes included), and that
+                # string handed back to `git add --` matches nothing (#694).
+                # Bytes, so a name that is not valid UTF-8 round-trips too.
                 result = subprocess.run(
-                    ["git", "diff", "--cached", "--name-only"],
-                    cwd=vault_path, capture_output=True, text=True, timeout=30,
+                    ["git", "diff", "--cached", "--name-only", "-z"],
+                    cwd=vault_path, capture_output=True, timeout=30,
                 )
             except subprocess.TimeoutExpired:
                 # #314 review: the sixth unbounded git call in this hot path.
@@ -1176,10 +1180,10 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
                 # the commit branch was skipped — a hard git failure reported
                 # as "Nothing to push" with exit 0. Fail loudly instead; the
                 # files stay staged for the next attempt.
-                err = (result.stderr or "").strip() or f"exit {result.returncode}"
+                err = (result.stderr or b"").decode("utf-8", "replace").strip() or f"exit {result.returncode}"
                 print(f"Error: git diff --cached failed: {err}", file=sys.stderr)
                 sys.exit(1)
-            staged = [f for f in result.stdout.strip().split("\n") if f]
+            staged = [os.fsdecode(f) for f in result.stdout.split(b"\0") if f]
             n = len(staged)
 
             if n > 0:
