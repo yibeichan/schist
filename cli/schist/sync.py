@@ -1188,7 +1188,9 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
 
             if n > 0:
                 msg = f"sync({config.identity}): {n} file{'s' if n != 1 else ''}"
-                ok, output = git_ops.commit(vault_path, msg, files=staged)
+                # Already staged by stage_scope_files above: re-adding by name fails for a
+                # staged deletion ("pathspec did not match", #696).
+                ok, output = git_ops.commit(vault_path, msg, stage=False)
                 if not ok:
                     print(f"Error: commit failed: {output}", file=sys.stderr)
                     sys.exit(1)

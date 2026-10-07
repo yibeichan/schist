@@ -250,21 +250,30 @@ def _head_sha(vault_path: str) -> str:
     return result.stdout.strip() if result.returncode == 0 else ''
 
 
-def commit(vault_path: str, message: str, files: list[str] | None = None) -> tuple[bool, str]:
-    """Stage and commit in the vault repo."""
+def commit(vault_path: str, message: str, files: list[str] | None = None,
+           *, stage: bool = True) -> tuple[bool, str]:
+    """Stage and commit in the vault repo.
+
+    `stage=False` commits what is ALREADY staged and runs no `git add`. A caller
+    that has staged and listed its own changes (sync push) must use it: a staged
+    deletion is gone from both the index and the working tree, so re-adding it
+    by name fails with "pathspec did not match" (#696). `files` is ignored then;
+    do not emulate it with `files=[]`, which means `git add .`.
+    """
     try:
         add_args = files if files else ['.']
-        subprocess.run(
-            # `--` end-of-options: a note path beginning with `-` (e.g. a
-            # vault-root `-inbox.md` reached via `schist link --source=-inbox.md`,
-            # or such a path re-staged by sync) would otherwise be parsed as a git
-            # option — silently mis-staging or erroring, leaving the edge written
-            # to disk but uncommitted. Mirrors stage_scope_files and both TS
-            # `git add` call sites (#428).
-            ['git', 'add', '--'] + add_args,
-            cwd=vault_path, check=True, capture_output=True, **_GIT_TEXT,
-            timeout=60,
-        )
+        if stage:
+            subprocess.run(
+                # `--` end-of-options: a note path beginning with `-` (e.g. a
+                # vault-root `-inbox.md` reached via `schist link --source=-inbox.md`,
+                # or such a path re-staged by sync) would otherwise be parsed as a git
+                # option — silently mis-staging or erroring, leaving the edge written
+                # to disk but uncommitted. Mirrors stage_scope_files and both TS
+                # `git add` call sites (#428).
+                ['git', 'add', '--'] + add_args,
+                cwd=vault_path, check=True, capture_output=True, **_GIT_TEXT,
+                timeout=60,
+            )
         # HEAD before the commit: git updates the branch ref BEFORE running
         # the post-commit hook, so a hook stall fires the timeout on a commit
         # that already landed. Comparing HEAD afterwards separates "commit

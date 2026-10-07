@@ -3008,3 +3008,37 @@ def test_sync_push_commits_a_note_with_a_non_ascii_or_spaced_name(tmp_path, name
                                "rev-parse", "main"], capture_output=True,
                               text=True, check=True).stdout
     assert hub_head == hub_main
+
+
+@pytest.mark.parametrize("also_add", [True, False], ids=["delete+add", "delete-only"])
+def test_sync_push_commits_a_deleted_tracked_note(tmp_path, also_add):
+    """#696: a staged deletion is no longer in the index or the working tree,
+    so re-running `git add -- research/gone.md` fails with "pathspec did not
+    match" and nothing is pushed. Everything is already staged by
+    stage_scope_files; commit() must not stage it a second time."""
+    import types
+
+    import schist.sync as sync
+
+    vault = _real_spoke_with_origin(tmp_path)
+    gone = Path(vault) / "research" / "gone.md"
+    gone.write_text("x\n")
+    subprocess.run(["git", "add", "."], cwd=vault, check=True)
+    subprocess.run(["git", "commit", "-qm", "add gone"], cwd=vault, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "main"], cwd=vault,
+                   check=True, capture_output=True)
+    gone.unlink()
+    if also_add:
+        (Path(vault) / "research" / "new.md").write_text("n\n")
+
+    sync.sync_push(types.SimpleNamespace(force=False), vault, vault + "/.schist/schist.db")
+
+    tree = subprocess.run(["git", "ls-tree", "-r", "--name-only", "HEAD"],
+                          cwd=vault, capture_output=True, text=True, check=True).stdout.split()
+    assert "research/gone.md" not in tree
+    assert ("research/new.md" in tree) is also_add
+    local = subprocess.run(["git", "rev-parse", "HEAD"], cwd=vault,
+                           capture_output=True, text=True, check=True).stdout
+    hub = subprocess.run(["git", "--git-dir", str(tmp_path / "hub.git"), "rev-parse", "main"],
+                         capture_output=True, text=True, check=True).stdout
+    assert local == hub
