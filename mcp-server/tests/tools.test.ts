@@ -8,7 +8,7 @@ import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { load as yamlLoadSync } from "js-yaml";
 import { jest } from "@jest/globals";
-import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, formatPushFailure, search_memory, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES } from "../src/tools.js";
+import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, formatPushFailure, search_memory, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, ignoredPathsFromPorcelainZ, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES } from "../src/tools.js";
 import Database from "better-sqlite3";
 import { INDEX_SCHEMA_VERSION, memoryDbPath } from "../src/sqlite-reader.js";
 import { parseConnections, parseNote } from "../src/markdown-parser.js";
@@ -2621,6 +2621,37 @@ describe("sync_status + sync_retry (#135)", () => {
     expect(result.blocked_by_ignored).toBe(true);
     expect(result.blocking_ignored_paths).toEqual(["notes/secret-plan~"]);
   }, 10000);
+
+  test("sync_status treats a spaced tilde backup as junk, not as a quoted blocking path (#698)", async () => {
+    // porcelain v1 double-quotes a name with a space even under
+    // core.quotePath=off; the kept quotes hid `*~` from the junk check.
+    const vault = await makeTempSpokeVault(); // scope: notes
+    await fs.appendFile(path.join(vault, ".gitignore"), "*~\n");
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, "notes", "my notes.md~"), "backup\n");
+
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
+
+    expect(result.blocked_by_ignored).toBe(false);
+    expect(result.blocking_ignored_paths).toEqual([]);
+  }, 10000);
+
+  test("sync_status reports a spaced blocking path without porcelain quotes (#698)", async () => {
+    const vault = await makeTempSpokeVault(); // scope: notes
+    await fs.appendFile(path.join(vault, ".gitignore"), "*secret*\n");
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, "notes", "my secret plan.md"), "a real note\n");
+
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
+
+    expect(result.blocked_by_ignored).toBe(true);
+    expect(result.blocking_ignored_paths).toEqual(["notes/my secret plan.md"]);
+  }, 10000);
+
+  test("ignoredPathsFromPorcelainZ keeps odd names and skips rename sources (#698)", () => {
+    const raw = "!! notes/my notes.md~\0R  notes/new.md\0!! decoy\0!! notes/a\"b~\0";
+    expect(ignoredPathsFromPorcelainZ(raw)).toEqual(["notes/my notes.md~", 'notes/a"b~']);
+  });
 
   test("sync_status treats a tilde backup excluded by the *~ rule as junk (#388 review)", async () => {
     // Companion positive case: same basename shape, but the exclusion is

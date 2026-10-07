@@ -1793,6 +1793,22 @@ async function spokeScopeTargets(vaultRoot: string): Promise<string[]> {
   }
 }
 
+/** The `!! <path>` entries of `git status --porcelain -z` output — twin of
+ *  cli/schist/git_ops.py _ignored_paths_from_porcelain_z. Entries are
+ *  NUL-terminated `XY <path>`; a rename/copy (`R`/`C` in either column) is
+ *  followed by one more token, the original path, which must be skipped. */
+export function ignoredPathsFromPorcelainZ(raw: string): string[] {
+  const tokens = raw.split("\0");
+  const ignored: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (tok.length < 4) continue;
+    if (tok.startsWith("!! ")) ignored.push(tok.slice(3));
+    else if ("RC".includes(tok[0]) || "RC".includes(tok[1])) i++;
+  }
+  return ignored;
+}
+
 /**
  * #388: the same ignored-files probe the CLI ignore guard runs
  * (cli/schist/git_ops.py ignored_scope_files), minus confirmed junk.
@@ -1804,18 +1820,16 @@ async function spokeScopeTargets(vaultRoot: string): Promise<string[]> {
 async function blockingIgnoredScopeFiles(vaultRoot: string): Promise<string[]> {
   const targets = await spokeScopeTargets(vaultRoot);
   if (targets.length === 0) return [];
-  // quotePath=off matches the CLI probe: porcelain v1 would C-quote
-  // non-ASCII paths, garbling them in the reported list.
+  // -z, as in the CLI probe (#698): porcelain v1 double-quotes a name with a
+  // space, newline or `"` even under core.quotePath=off, and keeping those
+  // quotes hid `*~` from isJunkBasename.
   const probe = await runGit(
     vaultRoot,
-    ["-c", "core.quotePath=off", "status", "--porcelain", "--ignored=matching", "--", ...targets],
+    ["status", "--porcelain", "-z", "--ignored=matching", "--", ...targets],
     SYNC_STATUS_TIMEOUT_MS,
   );
   if (!probe.ok) return [];
-  const ignored = (probe.stdout ?? "")
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith("!! "))
-    .map((line) => line.slice(3));
+  const ignored = ignoredPathsFromPorcelainZ(probe.stdout ?? "");
   // Two-step junk classification, same as the CLI guard: basename shape
   // only nominates a candidate; the exclusion must also be attributed to a
   // junk-shaped pattern. Common path (no junk-looking files) pays nothing.
