@@ -1150,6 +1150,8 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
         # add/link commit fire between this staging and this commit and
         # sweep the staged scope files into the wrong commit.
         with git_ops.vault_write_lock(vault_path):
+            # Before staging, for landed_via_concurrent_commit below.
+            head_before_stage = git_ops._head_sha(vault_path)
             ok, output = git_ops.stage_scope_files(vault_path, config.scope)
             if not ok:
                 print(f"Error: failed to stage scope '{config.scope}': {output}", file=sys.stderr)
@@ -1204,18 +1206,31 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
 
             if n > 0:
                 msg = f"sync({config.identity}): {n} file{'s' if n != 1 else ''}"
+                # What we are about to commit, path by path; a staged deletion
+                # is absent from the index and recorded as None.
+                idx = git_ops.index_entries(vault_path, staged)
+                staged_entries = None if idx is None else {p: idx.get(p) for p in staged}
                 # Already staged by stage_scope_files above: re-adding by name fails for a
                 # staged deletion ("pathspec did not match", #696).
                 ok, output = git_ops.commit(vault_path, msg, stage=False)
-                if not ok:
+                if not ok and staged_entries is not None and git_ops.landed_via_concurrent_commit(
+                    vault_path, head_before_stage, staged_entries
+                ):
+                    # The MCP server committed while we held only the CLI lock,
+                    # and its commit swept our staged paths. Nothing is lost:
+                    # push what is on the branch instead of failing (and
+                    # writing a sentinel that blocks every later MCP write).
+                    print("Staged files were already committed by a concurrent write; pushing.")
+                elif not ok:
                     print(f"Error: commit failed: {output}", file=sys.stderr)
                     sys.exit(1)
-                if output.startswith(git_ops.HOOK_STALL_WARNING_PREFIX):
-                    # The commit landed despite the stalled hook (#364) — warn
-                    # and continue to the push; exiting here (the old False path)
-                    # stranded an already-landed commit unpushed.
-                    print(f"Warning: {output}", file=sys.stderr)
-                print(f"Committed {n} file{'s' if n != 1 else ''}")
+                else:
+                    if output.startswith(git_ops.HOOK_STALL_WARNING_PREFIX):
+                        # The commit landed despite the stalled hook (#364) — warn
+                        # and continue to the push; exiting here (the old False path)
+                        # stranded an already-landed commit unpushed.
+                        print(f"Warning: {output}", file=sys.stderr)
+                    print(f"Committed {n} file{'s' if n != 1 else ''}")
 
     # Push
     if not git_ops.has_unpushed_commits(vault_path):

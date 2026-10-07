@@ -471,6 +471,8 @@ async function withWriteLock(
     await assertResolvesInside(vaultRoot, relPath);
     await fn(absPath);
 
+    // Before staging, for landedViaConcurrentCommit below.
+    const headBeforeStage = await headOrNull(vaultRoot);
     await git(vaultRoot, ["add", "--", relPath]);
 
     // Dedup: skip commit if staged content matches HEAD. `git diff --cached
@@ -511,11 +513,17 @@ async function withWriteLock(
     } catch {
       // Unborn branch — any resolvable post-timeout HEAD means the commit landed.
     }
+    const staged = await stagedEntries(vaultRoot, [relPath]);
     let commitWarning: string | undefined;
     try {
       await git(vaultRoot, ["commit", "-m", commitMessage], GIT_COMMIT_TIMEOUT_MS);
     } catch (e) {
-      if (!isGitTimeout(e)) throw e;
+      if (!isGitTimeout(e)) {
+        if (!(await landedViaConcurrentCommit(vaultRoot, headBeforeStage, staged))) throw e;
+        commitWarning = CONCURRENT_COMMIT_WARNING;
+        const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
+        return { path: relPath, commitSha: sha, committed: true, commitWarning };
+      }
       let headNow: string | null = null;
       try {
         headNow = await git(vaultRoot, ["rev-parse", "HEAD"]);
@@ -543,6 +551,80 @@ async function withWriteLock(
     release();
   }
 }
+
+/** HEAD sha, or null for an unborn branch / unreadable HEAD. */
+async function headOrNull(vaultRoot: string): Promise<string | null> {
+  try {
+    return await git(vaultRoot, ["rev-parse", "HEAD"]);
+  } catch {
+    return null;
+  }
+}
+
+/** `mode sha` per path from a NUL-terminated ls-files -s / ls-tree listing. */
+async function entriesFrom(vaultRoot: string, args: string[], shaField: number): Promise<Map<string, string>> {
+  const out = await git(vaultRoot, ["--literal-pathspecs", ...args]);
+  const entries = new Map<string, string>();
+  for (const rec of out.split("\0")) {
+    if (!rec) continue;
+    const tab = rec.indexOf("\t");
+    const fields = tab < 0 ? [] : rec.slice(0, tab).split(" ");
+    // Not the listing we asked for: unknown, never "landed".
+    if (fields.length < 3) throw new Error(`unexpected git listing record: ${rec}`);
+    entries.set(rec.slice(tab + 1), `${fields[0]} ${fields[shaField]}`);
+  }
+  return entries;
+}
+
+/**
+ * What each path is staged as; a path absent from the index is a staged
+ * deletion. null when the index can't be listed — then a failed commit is
+ * simply reported as failed, as before; this snapshot never fails a write.
+ */
+async function stagedEntries(vaultRoot: string, paths: string[]): Promise<Map<string, string | null> | null> {
+  try {
+    const idx = await entriesFrom(vaultRoot, ["ls-files", "-s", "-z", "--", ...paths], 1);
+    return new Map(paths.map((p) => [p, idx.get(p) ?? null]));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Did another writer already commit exactly what we staged? Mirrors
+ * `landed_via_concurrent_commit` in cli/schist/git_ops.py — keep the rule in
+ * step. This server serializes its own writes but does not take the CLI's
+ * vault write lock (#412), and both sides end in a plain `git commit` that
+ * commits everything staged, so a background `schist sync push` can sweep our
+ * staged note into its commit and leave ours with nothing to commit — on a
+ * write that is already on the branch. Decided by repo state, not git's
+ * localized message: HEAD moved since `headBeforeStage`, and every path sits
+ * in HEAD with the exact mode+blob we staged (absent, for a staged deletion).
+ * HEAD moving alone is not enough — a concurrent autostashing pull moves HEAD
+ * too, with our content in a stash rather than a commit.
+ */
+async function landedViaConcurrentCommit(
+  vaultRoot: string,
+  headBeforeStage: string | null,
+  staged: Map<string, string | null> | null,
+): Promise<boolean> {
+  if (staged === null) return false;
+  const headNow = await headOrNull(vaultRoot);
+  if (headNow === null || headNow === headBeforeStage) return false;
+  let inHead: Map<string, string>;
+  try {
+    inHead = await entriesFrom(vaultRoot, ["ls-tree", "-z", "HEAD", "--", ...staged.keys()], 2);
+  } catch {
+    return false;
+  }
+  for (const [p, expected] of staged) {
+    if ((inHead.get(p) ?? null) !== expected) return false;
+  }
+  return true;
+}
+
+const CONCURRENT_COMMIT_WARNING =
+  "committed by a concurrent sync commit — the content is on the branch, under that commit's message";
 
 /**
  * Commit-message attribution: `— by {owner}` when `owner` is provided (the
@@ -790,6 +872,8 @@ export async function deleteNote(
     await assertAttachedToWriteBranch(vaultRoot, branch);
 
     try {
+      // Before staging, for landedViaConcurrentCommit below.
+      const headBeforeStage = await headOrNull(vaultRoot);
       await git(vaultRoot, ["rm", "--quiet", "--", relPath]);
 
       for (const r of repairs) {
@@ -816,6 +900,7 @@ export async function deleteNote(
       // only runs when the commit genuinely did not land, which is exactly
       // when `--source=HEAD` is correct.
       const preCommitHead = await git(vaultRoot, ["rev-parse", "HEAD"]);
+      const staged = await stagedEntries(vaultRoot, [relPath, ...repairs.map((r) => r.relPath)]);
       let commitWarning: string | undefined;
       try {
         await git(
@@ -824,7 +909,12 @@ export async function deleteNote(
           GIT_COMMIT_TIMEOUT_MS,
         );
       } catch (e) {
-        if (!isGitTimeout(e)) throw e;
+        if (!isGitTimeout(e)) {
+          // Already on the branch via a concurrent commit: no rollback.
+          if (!(await landedViaConcurrentCommit(vaultRoot, headBeforeStage, staged))) throw e;
+          const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
+          return { path: relPath, commitSha: sha, committed: true, commitWarning: CONCURRENT_COMMIT_WARNING };
+        }
         let headNow: string | null = null;
         try {
           headNow = await git(vaultRoot, ["rev-parse", "HEAD"]);
