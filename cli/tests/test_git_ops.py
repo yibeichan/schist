@@ -921,3 +921,31 @@ def test_non_utf8_probes_answer_instead_of_raising(tmp_path, monkeypatch):
     assert git_ops.has_uncommitted_changes(vault) is True
     # the stub's ls-files lists a file, so every global dir counts as tracked
     assert git_ops._global_scope_targets(vault) == [f"{d}/" for d in git_ops._global_scope_dirs()]
+
+
+def test_commit_stage_false_commits_only_what_is_already_staged(tmp_path):
+    """#696: `stage=False` must run no `git add` at all — in particular not the
+    `git add .` that an empty file list means — or an unstaged note rides into
+    the commit."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (["init", "-q"], ["config", "user.email", "t@example.com"],
+                 ["config", "user.name", "t"]):
+        subprocess.run(["git", *args], cwd=repo, check=True)
+    (repo / "seed.md").write_text("seed\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=repo, check=True)
+
+    (repo / "staged.md").write_text("s\n")
+    subprocess.run(["git", "add", "staged.md"], cwd=repo, check=True)
+    (repo / "unstaged.md").write_text("u\n")
+    (repo / "seed.md").unlink()
+    subprocess.run(["git", "add", "-u"], cwd=repo, check=True)  # staged deletion
+
+    ok, output = git_ops.commit(str(repo), "m", stage=False)
+
+    assert ok, output
+    tree = subprocess.run(["git", "ls-tree", "-r", "--name-only", "HEAD"], cwd=repo,
+                          capture_output=True, text=True, check=True).stdout.split()
+    assert tree == ["staged.md"]
+    assert (repo / "unstaged.md").exists()
