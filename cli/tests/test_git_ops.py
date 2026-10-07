@@ -844,3 +844,53 @@ class TestGlobalScopeDirsFallback:
         (vault / "notes").mkdir(parents=True)
         (vault / "notes" / "a.md").write_text("x", encoding="utf-8")
         assert git_ops._scope_targets(str(vault), "global") == ["notes/"]
+
+
+# ── #692: non-UTF-8 git output must not raise on the error paths ──────────
+
+def _fake_git_non_utf8(tmp_path, monkeypatch):
+    """A `git` that reports the branch normally but fails every other
+    subcommand with bytes that are not valid UTF-8 on both streams — the
+    shape of a hub rejection echoing a latin-1 filename on a `remote:` line."""
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    git = bindir / "git"
+    git.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "branch" ]; then echo main; exit 0; fi\n'
+        "printf 'remote: rejected caf\\351.md\\n'\n"
+        "printf 'remote: rejected caf\\351.md\\n' >&2\n"
+        "exit 1\n"
+    )
+    git.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    vault = tmp_path / "vault"
+    (vault / "research").mkdir(parents=True)
+    return str(vault)
+
+
+@pytest.mark.parametrize("call", [
+    lambda v: git_ops.push(v),
+    lambda v: git_ops.pull_rebase(v),
+    lambda v: git_ops.commit(v, "msg"),
+    lambda v: git_ops.stage_scope_files(v, "research"),
+    lambda v: git_ops.setup_sparse_checkout(v, "research"),
+    lambda v: git_ops.clone_shallow("git@hub:v.git", v + "-clone"),
+], ids=["push", "pull_rebase", "commit", "stage_scope_files",
+        "setup_sparse_checkout", "clone_shallow"])
+def test_non_utf8_git_output_returns_a_tuple_not_a_traceback(call, tmp_path, monkeypatch):
+    vault = _fake_git_non_utf8(tmp_path, monkeypatch)
+    ok, output = call(vault)
+    assert ok is False
+    assert "rejected caf" in output
+
+
+def test_non_utf8_git_status_is_still_reported_as_changes(tmp_path, monkeypatch):
+    """has_uncommitted_changes must answer, not raise, on undecodable status."""
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    git = bindir / "git"
+    git.write_text("#!/bin/sh\nprintf ' M caf\\351.md\\n'\nexit 0\n")
+    git.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    assert git_ops.has_uncommitted_changes(str(tmp_path)) is True

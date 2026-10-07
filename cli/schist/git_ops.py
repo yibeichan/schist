@@ -9,6 +9,14 @@ import subprocess
 
 import yaml
 
+# Decode git's output as UTF-8 and never raise on bytes that are not. These
+# calls sit on error paths whose output is only displayed or classified (a hub
+# `remote:` line echoing a latin-1 filename); a UnicodeDecodeError there
+# replaces the real rejection with a traceback (#692). Do NOT use this where the
+# decoded string is fed back to git or to Path(): `replace` would corrupt it.
+_GIT_TEXT = {"encoding": "utf-8", "errors": "replace"}
+
+
 
 @contextmanager
 def vault_write_lock(vault_path: str):
@@ -212,7 +220,7 @@ def run_group_killable(
     """
     proc = subprocess.Popen(
         cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, start_new_session=True,
+        **_GIT_TEXT, start_new_session=True,
     )
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
@@ -236,7 +244,7 @@ def _head_sha(vault_path: str) -> str:
     try:
         result = subprocess.run(
             ['git', 'rev-parse', 'HEAD'],
-            cwd=vault_path, capture_output=True, text=True, timeout=30,
+            cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=30,
         )
     except subprocess.TimeoutExpired:
         return ''
@@ -255,7 +263,7 @@ def commit(vault_path: str, message: str, files: list[str] | None = None) -> tup
             # to disk but uncommitted. Mirrors stage_scope_files and both TS
             # `git add` call sites (#428).
             ['git', 'add', '--'] + add_args,
-            cwd=vault_path, check=True, capture_output=True, text=True,
+            cwd=vault_path, check=True, capture_output=True, **_GIT_TEXT,
             timeout=60,
         )
         # HEAD before the commit: git updates the branch ref BEFORE running
@@ -321,7 +329,7 @@ def clone_shallow(hub_url: str, dest: str, depth: int = 1) -> tuple[bool, str]:
     try:
         result = subprocess.run(
             ['git', 'clone', f'--depth={depth}', '--no-checkout', hub_url, dest],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, **_GIT_TEXT, timeout=120,
         )
         output = result.stdout + result.stderr
         return result.returncode == 0, output.strip()
@@ -344,12 +352,12 @@ def setup_sparse_checkout(vault_path: str, scope: str) -> tuple[bool, str]:
         # every other git call in this module.
         subprocess.run(
             ['git', 'sparse-checkout', 'init', '--cone'],
-            cwd=vault_path, check=True, capture_output=True, text=True,
+            cwd=vault_path, check=True, capture_output=True, **_GIT_TEXT,
             timeout=30,
         )
         subprocess.run(
             ['git', 'sparse-checkout', 'set', scope],
-            cwd=vault_path, check=True, capture_output=True, text=True,
+            cwd=vault_path, check=True, capture_output=True, **_GIT_TEXT,
             timeout=30,
         )
         # This checkout materializes the entire scope worktree — bulk I/O, not
@@ -358,7 +366,7 @@ def setup_sparse_checkout(vault_path: str, scope: str) -> tuple[bool, str]:
         # a deterministic hard failure of the documented re-clone recovery.
         result = subprocess.run(
             ['git', 'checkout'],
-            cwd=vault_path, capture_output=True, text=True,
+            cwd=vault_path, capture_output=True, **_GIT_TEXT,
             timeout=120,
         )
         output = result.stdout + result.stderr
@@ -427,7 +435,7 @@ def pull_rebase(vault_path: str) -> tuple[bool, str]:
             )
         result = subprocess.run(
             ['git', 'pull', '--rebase', 'origin', branch],
-            cwd=vault_path, capture_output=True, text=True, timeout=60,
+            cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=60,
         )
         output = result.stdout + result.stderr
         if result.returncode != 0:
@@ -438,7 +446,7 @@ def pull_rebase(vault_path: str) -> tuple[bool, str]:
             try:
                 subprocess.run(
                     ['git', 'rebase', '--abort'],
-                    cwd=vault_path, capture_output=True, text=True, timeout=30,
+                    cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=30,
                 )
             except subprocess.TimeoutExpired:
                 output += "\n(rebase --abort also timed out after 30s; rerun sync to clean up)"
@@ -449,7 +457,7 @@ def pull_rebase(vault_path: str) -> tuple[bool, str]:
         try:
             subprocess.run(
                 ['git', 'rebase', '--abort'],
-                cwd=vault_path, capture_output=True, text=True, timeout=30,
+                cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=30,
             )
         except subprocess.TimeoutExpired:
             return False, (f"{PULL_NO_RESPONSE_PREFIX} "
@@ -516,7 +524,7 @@ def has_uncommitted_changes(vault_path: str) -> bool:
     try:
         result = subprocess.run(
             ['git', 'status', '--porcelain'],
-            cwd=vault_path, capture_output=True, text=True, timeout=30,
+            cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=30,
         )
     except subprocess.TimeoutExpired:
         return True
@@ -544,7 +552,7 @@ def has_unpushed_commits(vault_path: str) -> bool:
     try:
         result = subprocess.run(
             ['git', 'rev-list', f'origin/{branch}..HEAD', '--count'],
-            cwd=vault_path, capture_output=True, text=True, timeout=30,
+            cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=30,
         )
     except subprocess.TimeoutExpired:
         return True  # Can't determine (#314) — assume yes so push is attempted
@@ -571,7 +579,7 @@ def stage_scope_files(vault_path: str, scope: str) -> tuple[bool, str]:
         # index-write operation and stalls the same way on NFS lock contention.
         result = subprocess.run(
             ['git', 'add', '--'] + targets,
-            cwd=vault_path, capture_output=True, text=True, timeout=60,
+            cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=60,
         )
         output = result.stdout + result.stderr
         if result.returncode != 0:
