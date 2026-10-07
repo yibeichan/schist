@@ -5,7 +5,7 @@
 **Audit script:** `scripts/audit_mcp_response_sizes.ts`
 **Reproduce:**
 ```bash
-cd /Users/yibeichen/github/schist && \
+cd /path/to/schist && \
   npm run audit --prefix mcp-server -- \
     --vault "$HOME/schist-vault" \
     --search-query "schist"
