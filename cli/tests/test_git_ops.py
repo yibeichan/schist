@@ -844,3 +844,80 @@ class TestGlobalScopeDirsFallback:
         (vault / "notes").mkdir(parents=True)
         (vault / "notes" / "a.md").write_text("x", encoding="utf-8")
         assert git_ops._scope_targets(str(vault), "global") == ["notes/"]
+
+
+# ── #692: non-UTF-8 git output must not raise on the error paths ──────────
+
+def _fake_git(tmp_path, monkeypatch, fail: str = ""):
+    """A `git` whose every subcommand writes bytes that are not valid UTF-8 to
+    both streams, succeeds, and — for the one named in `fail` — exits 1. The
+    shape of a hub rejection echoing a latin-1 filename on a `remote:` line.
+    Because the rest succeed, each call reaches every git invocation it makes,
+    so every converted decode site is exercised, not just the first."""
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    git = bindir / "git"
+    git.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "  branch) echo main; exit 0;;\n"
+        "  rev-list) echo 1; printf 'remote: caf\\351.md\\n' >&2; exit 0;;\n"
+        "  rev-parse) echo 0123456789abcdef0123456789abcdef01234567;"
+        " printf 'remote: caf\\351.md\\n' >&2; exit 0;;\n"
+        "esac\n"
+        "printf 'remote: caf\\351.md\\n'\n"
+        "printf 'remote: caf\\351.md\\n' >&2\n"
+        f'[ "$1" = "{fail}" ] && exit 1\n'
+        "exit 0\n"
+    )
+    git.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    vault = tmp_path / "vault"
+    (vault / "research").mkdir(parents=True)
+    return str(vault)
+
+
+# (id, call, subcommand that fails, expected ok)
+_NON_UTF8_CASES = [
+    ("push", lambda v: git_ops.push(v), "push", False),
+    ("pull_rebase", lambda v: git_ops.pull_rebase(v), "pull", False),
+    ("commit_fails", lambda v: git_ops.commit(v, "m"), "commit", False),
+    ("commit_ok_reads_head_sha", lambda v: git_ops.commit(v, "m"), "", True),
+    ("stage_scope_files", lambda v: git_ops.stage_scope_files(v, "research"), "add", False),
+    ("sparse_checkout_ok", lambda v: git_ops.setup_sparse_checkout(v, "research"), "", True),
+    ("sparse_init_fails", lambda v: git_ops.setup_sparse_checkout(v, "research"), "sparse-checkout", False),
+    ("sparse_checkout_fails", lambda v: git_ops.setup_sparse_checkout(v, "research"), "checkout", False),
+    ("clone_shallow", lambda v: git_ops.clone_shallow("git@hub:v.git", v + "-c"), "clone", False),
+]
+
+
+@pytest.mark.parametrize("call,fail,expected", [c[1:] for c in _NON_UTF8_CASES],
+                         ids=[c[0] for c in _NON_UTF8_CASES])
+def test_non_utf8_git_output_returns_a_tuple_not_a_traceback(
+        call, fail, expected, tmp_path, monkeypatch):
+    vault = _fake_git(tmp_path, monkeypatch, fail)
+    ok, _output = call(vault)
+    assert ok is expected
+
+
+def test_non_utf8_pull_abort_after_timeout_does_not_raise(tmp_path, monkeypatch):
+    """The `rebase --abort` in pull_rebase's TimeoutExpired branch decodes too."""
+    vault = _fake_git(tmp_path, monkeypatch, "rebase")
+    real_run = subprocess.run
+
+    def run(cmd, *a, **kw):
+        if cmd[:2] == ["git", "pull"]:
+            raise subprocess.TimeoutExpired(cmd, 60)
+        return real_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(git_ops.subprocess, "run", run)
+    ok, _output = git_ops.pull_rebase(vault)
+    assert ok is False
+
+
+def test_non_utf8_probes_answer_instead_of_raising(tmp_path, monkeypatch):
+    vault = _fake_git(tmp_path, monkeypatch)
+    assert git_ops.has_unpushed_commits(vault) is True
+    assert git_ops.has_uncommitted_changes(vault) is True
+    # the stub's ls-files lists a file, so every global dir counts as tracked
+    assert git_ops._global_scope_targets(vault) == [f"{d}/" for d in git_ops._global_scope_dirs()]
