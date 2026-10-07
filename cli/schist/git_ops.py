@@ -155,10 +155,12 @@ def _confirmed_junk(vault_path: str, candidates: list[str]) -> set:
         # nothing is C-quoted, so no un-escaping needed for odd filenames.
         # git only accepts -z together with --stdin, so candidates go on
         # stdin (NUL-terminated) rather than argv.
+        # Bytes both ways (surrogateescape) so a name that is not valid UTF-8
+        # reaches git unchanged instead of failing to encode (#692).
         result = subprocess.run(
             ['git', 'check-ignore', '--verbose', '--stdin', '-z'],
-            cwd=vault_path, capture_output=True, text=True, timeout=30,
-            input='\0'.join(candidates) + '\0',
+            cwd=vault_path, capture_output=True, timeout=30,
+            input=('\0'.join(candidates) + '\0').encode('utf-8', 'surrogateescape'),
         )
     except subprocess.TimeoutExpired:
         return set()
@@ -167,7 +169,7 @@ def _confirmed_junk(vault_path: str, candidates: list[str]) -> set:
     # error. Anything but 0 confirms nothing.
     if result.returncode != 0:
         return set()
-    fields = result.stdout.split('\0')
+    fields = result.stdout.decode('utf-8', 'surrogateescape').split('\0')
     confirmed = set()
     # The trailing NUL leaves a final '' element; walk whole 4-field records.
     for i in range(0, len(fields) - 3, 4):
@@ -657,6 +659,30 @@ def paths_outside_scope(vault_path: str, scope: str, paths: list[str]) -> list[s
     return [p for p in paths if not any(p.startswith(d) for d in dirs)]
 
 
+def _ignored_paths_from_porcelain_z(raw: bytes) -> list[str]:
+    """The `!! <path>` entries of `git status --porcelain -z` output.
+
+    Entries are NUL-terminated `XY <path>`; a rename or copy (`R`/`C` in either
+    column) is followed by one more NUL-terminated token, the original path,
+    which must be skipped or it would be read as an entry of its own. Paths are
+    decoded as UTF-8 with surrogateescape so undecodable bytes survive (they
+    are re-encoded the same way for `check-ignore`).
+    """
+    tokens = raw.split(b'\0')
+    ignored: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        i += 1
+        if len(tok) < 4:
+            continue
+        if tok[:3] == b'!! ':
+            ignored.append(tok[3:].decode('utf-8', 'surrogateescape'))
+        elif tok[0:1] in (b'R', b'C') or tok[1:2] in (b'R', b'C'):
+            i += 1  # the rename/copy's original path
+    return ignored
+
+
 def ignored_scope_files(vault_path: str, scope: str) -> tuple[list[str], list[str]]:
     """On-disk files under the scope that .gitignore rules exclude (#361),
     partitioned into ``(blocking, junk)``.
@@ -683,20 +709,20 @@ def ignored_scope_files(vault_path: str, scope: str) -> tuple[list[str], list[st
     if not targets:
         return [], []
     try:
-        # quotePath=off: porcelain v1 C-quotes non-ASCII paths ("s\303\251…"),
-        # which would land garbled in the user-facing error message.
+        # -z: porcelain v1 double-quotes a name containing a space, newline or
+        # `"` even with core.quotePath=off, and `line[3:]` then kept the quotes,
+        # so `_is_junk_basename` no longer saw `*~` and an editor backup was
+        # reported as a blocking ignored note (#698). With -z nothing is quoted.
+        # Bytes, so a name that is not valid UTF-8 round-trips (#692).
         result = subprocess.run(
-            ['git', '-c', 'core.quotePath=off', 'status', '--porcelain',
-             '--ignored=matching', '--'] + targets,
-            cwd=vault_path, capture_output=True, text=True, timeout=30,
+            ['git', 'status', '--porcelain', '-z', '--ignored=matching', '--'] + targets,
+            cwd=vault_path, capture_output=True, timeout=30,
         )
     except subprocess.TimeoutExpired:
         return [], []
     if result.returncode != 0:
         return [], []
-    ignored = [
-        line[3:] for line in result.stdout.splitlines() if line.startswith('!! ')
-    ]
+    ignored = _ignored_paths_from_porcelain_z(result.stdout)
     # Two-step junk classification: basename shape is only a candidate
     # filter; the exclusion must also be ATTRIBUTED to a junk-shaped
     # .gitignore pattern. Common path (no junk-looking files) never pays

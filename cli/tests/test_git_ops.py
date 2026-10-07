@@ -197,7 +197,9 @@ def test_sync_path_git_calls_all_carry_timeouts(tmp_path):
 
     def _record(*args, **kwargs):
         calls.append((args[0], kwargs.get("timeout")))
-        return subprocess.CompletedProcess(args[0], 0, stdout="main\n", stderr="")
+        # `status --porcelain -z` is read as bytes (#698); every other call as text.
+        out = b"" if "-z" in args[0] else "main\n"
+        return subprocess.CompletedProcess(args[0], 0, stdout=out, stderr="")
 
     with patch("schist.git_ops.subprocess.run", side_effect=_record):
         git_ops.current_branch(str(tmp_path))
@@ -949,3 +951,30 @@ def test_commit_stage_false_commits_only_what_is_already_staged(tmp_path):
                           capture_output=True, text=True, check=True).stdout.split()
     assert tree == ["staged.md"]
     assert (repo / "unstaged.md").exists()
+
+
+# ── #698 / #692: status --porcelain -z and the check-ignore round trip ────
+
+def test_ignored_paths_from_porcelain_z_keeps_odd_names_and_skips_rename_sources():
+    raw = (b"!! research/my notes.md~\0"
+           b"R  research/new.md\0!! decoy\0"      # rename: the source token must be skipped
+           b"!! research/caf\xe9~\0"
+           b'!! research/a"b~\0')
+    assert git_ops._ignored_paths_from_porcelain_z(raw) == [
+        "research/my notes.md~",
+        "research/caf\udce9~",
+        'research/a"b~',
+    ]
+
+
+def test_confirmed_junk_sends_and_reads_undecodable_names_as_bytes(tmp_path, monkeypatch):
+    """check-ignore gets the name as the bytes it came from; a text-mode stdin
+    would raise UnicodeEncodeError on the surrogate."""
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    git = bindir / "git"
+    git.write_text("#!/bin/sh\ncat >/dev/null\nprintf 'ig\\0 1\\0*~\\0research/caf\\351~\\0'\n")
+    git.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    name = "research/caf\udce9~"
+    assert git_ops._confirmed_junk(str(tmp_path), [name]) == {name}
