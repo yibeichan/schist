@@ -482,10 +482,30 @@ def _cleanup_rebase_state(vault_path: str) -> None:
         return
 
     # --abort can fail if the rebase is in a weird state (e.g. git is
-    # still running, or an orphan rebase-merge without a HEAD ref). Try
-    # --quit, which drops rebase state without restoring HEAD.
+    # still running, a stale index.lock, or an orphan rebase-merge without a
+    # HEAD ref). Try --quit, which drops rebase state without restoring HEAD.
+    stash_probe_ok, stash_before = git_ops._stash_ref(vault_path)
     quit_result = _run_git_cleanup(vault_path, ["rebase", "--quit"])
     if quit_result.returncode == 0:
+        # A rebase interrupted during an autostash pull holds the user's
+        # edits; --quit does not re-apply them but stores them in the stash
+        # list. Say so and stop, so this is the last thing on stderr (where
+        # the push sentinel and sync_status read the failure) rather than a
+        # later, unrelated error with the edits never mentioned.
+        stash_after_ok, stash_after = git_ops._stash_ref(vault_path)
+        if stash_probe_ok and stash_after_ok and stash_after and stash_after != stash_before:
+            print(
+                "Error: an interrupted autostash pull left rebase state that "
+                "`rebase --abort` could not clear, so it was dropped with "
+                "`rebase --quit`. Your uncommitted edits were NOT re-applied: "
+                f"they are saved in the git stash ({stash_after[:12]}). HEAD is "
+                "detached where the rebase stopped. To recover: `git checkout "
+                "<your branch>` (it still points where the pull started), then "
+                f"`git stash apply {stash_after[:12]}`, and sync again.\n"
+                f"  rebase --abort: {abort.stderr.strip()}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         return
 
     print(
@@ -590,6 +610,12 @@ def _force_enabled(args) -> bool:
 
 def classify_pull_failure(output: str) -> str:
     """The recovery branch for a failed pull, in the order sync_pull uses."""
+    # First: the pull succeeded and only re-applying the user's autostashed
+    # edits conflicted. That output says "conflicts", so the loose conflict
+    # test below would print the REBASE-conflict recovery guide for a rebase
+    # that completed. Producer-owned prefix, so file content cannot spoof it.
+    if output.startswith(git_ops.PULL_AUTOSTASH_CONFLICT_PREFIX):
+        return "autostash-conflict"
     if output.startswith(git_ops.PULL_NO_RESPONSE_PREFIX):
         return "timeout"
     if "CONFLICT" in output or "conflict" in output.lower():
@@ -612,7 +638,13 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
 
     print(f"Pulling from hub as {config.identity}...")
 
-    ok, output = git_ops.pull_rebase(vault_path)
+    # Opt-in only: `getattr(...) is True` so a caller that never set the flag
+    # (or a MagicMock args) cannot turn an implicit pull into a stash. The
+    # implicit call keeps its original one-argument shape.
+    if getattr(args, "autostash", False) is True:
+        ok, output = git_ops.pull_rebase(vault_path, autostash=True)
+    else:
+        ok, output = git_ops.pull_rebase(vault_path)
     if not ok:
         def _unreachable(*, tree_certain: bool = True) -> None:
             # Parity with sync_push (#567): pull had no network branch at all,
@@ -663,6 +695,18 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
         # can co-occur, and the conflict is the one with a recovery procedure
         # the user has to see.
         branch = classify_pull_failure(output)
+        if branch == "autostash-conflict":
+            # HEAD did move, so the index should follow it before we report —
+            # but the run still fails: the user's edits now live only in the
+            # stash, and a zero exit would let the caller (`sync pull
+            # --autostash`, sync_retry) carry on without anyone being told
+            # where they went. Not rebuilt while the tree still has unmerged
+            # entries (a reset that was refused or failed): that would index
+            # conflict-marked files.
+            if git_ops.has_unmerged_entries(vault_path) is False:
+                _rebuild_index(vault_path, db_path)
+            print(f"Error: {output}", file=sys.stderr)
+            sys.exit(1)
         if branch == "timeout":
             _unreachable(
                 tree_certain=git_ops.PULL_ABORT_FAILED_MARKER not in output)

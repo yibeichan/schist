@@ -125,6 +125,12 @@ def main():
         '--force', action='store_true', default=argparse.SUPPRESS,
         help='Clear stale git rebase/merge/index-lock state before pulling',
     )
+    p_sync_pull.add_argument(
+        '--autostash', action='store_true', default=False,
+        help='Set uncommitted edits to tracked files aside, pull, and put them '
+             'back (git pull --rebase --autostash). Without it a dirty tree '
+             'refuses to pull.',
+    )
     p_sync_push = sync_sub.add_parser('push', help='Push local changes to hub')
     p_sync_push.add_argument(
         '--force', action='store_true', default=argparse.SUPPRESS,

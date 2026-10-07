@@ -830,9 +830,14 @@ function runSchistSync(
   action: "pull" | "push",
   timeoutMs = SYNC_RETRY_TIMEOUT_MS,
   force = false,
+  autostash = false,
 ): Promise<SyncCommandOutcome> {
   const args = ["--vault", vaultRoot, "sync", action];
   if (force) args.push("--force");
+  // Opt-in, for the explicit sync_retry pull only. Implicit pulls (the
+  // pre-read pull, triggerSpokePush's recovery) must never stash a user's
+  // uncommitted edits behind their back.
+  if (autostash && action === "pull") args.push("--autostash");
   return runCommand(
     schistCliBin("schist"),
     args,
@@ -1394,6 +1399,14 @@ export async function maybeSpokePull(vaultRoot: string, timeoutMs = 5000): Promi
   } catch {
     return; // Not a spoke
   }
+  // Implicit pull: skip it entirely while tracked files are dirty. It must
+  // never stash the user's edits (its output is discarded and it is SIGKILLed
+  // at 5s, so nobody would hear where they went), and a plain rebase would
+  // only refuse anyway. A probe that fails also skips: the read falls through
+  // to the local index, which is this function's documented failure mode.
+  const dirty = await runGit(
+    vaultRoot, ["status", "--porcelain", "--untracked-files=no"], Math.min(2_000, timeoutMs));
+  if (!dirty.ok || (dirty.stdout ?? "").trim().length > 0) return;
   await new Promise<void>((resolve) => {
     const child = spawn(
       schistCliBin("schist"),
@@ -1607,6 +1620,24 @@ function isAclRejection(outcome: SyncCommandOutcome): boolean {
     SHELL_REFUSAL_RE.test(text) ||
     text.includes("pre-receive hook declined")
   );
+}
+
+/**
+ * Mirrors `PULL_AUTOSTASH_CONFLICT_PREFIX` in `cli/schist/git_ops.py` (pinned
+ * by a parity test). `schist sync pull` uses `git pull --rebase --autostash`;
+ * when the rebase succeeds but the user's stashed edits will not re-apply,
+ * the CLI saves them in the git stash, resets the tree, and fails with this
+ * line. Its text says "conflict", so isRebaseConflict would misreport a
+ * COMPLETED rebase as a rebase conflict — test this first.
+ */
+export const PULL_AUTOSTASH_CONFLICT_PREFIX =
+  "Pulled, but your uncommitted edits conflict with the incoming changes";
+
+function isAutostashConflict(outcome: SyncCommandOutcome): boolean {
+  // Line-anchored on the producer's token (the CLI prints it after "Error: "),
+  // so a vault file NAME carrying the phrase cannot reach this branch.
+  return outcomeMessage(outcome).split("\n").some((line) =>
+    line.replace(/^Error: /, "").startsWith(PULL_AUTOSTASH_CONFLICT_PREFIX));
 }
 
 function isRebaseConflict(outcome: SyncCommandOutcome): boolean {
@@ -1969,8 +2000,33 @@ export async function sync_retry(
     }
 
     if (mode === "pull-rebase-push") {
-      const pull = await runSchistSync(vaultRoot, "pull", SYNC_RETRY_TIMEOUT_MS);
+      // The one MCP pull an agent explicitly asks for, so the one that may
+      // autostash. Its 30s cap can still SIGKILL a slow pull mid-rebase; the
+      // stashed edits then sit in the rebase state, and the next sync's
+      // cleanup (`rebase --abort`, or `--quit` which keeps them in the stash
+      // list) hands them back.
+      const pull = await runSchistSync(vaultRoot, "pull", SYNC_RETRY_TIMEOUT_MS, false, true);
       if (!pull.ok) {
+        if (isAutostashConflict(pull)) {
+          // The rebase completed; only the user's uncommitted edits did not
+          // re-apply, and the CLI saved them in the git stash. No push here:
+          // the caller must learn where the edits went before anything else
+          // moves. Retriable only when the CLI's reset actually left the tree
+          // clean — read from the tree, not the message, as #613 does.
+          const unmerged = await runGit(vaultRoot, ["ls-files", "--unmerged"], 5_000);
+          const clean = unmerged.ok && (unmerged.stdout ?? "").trim().length === 0;
+          return {
+            ...syncFailureResponse(mode, "pull-rebase", pull),
+            retriable: clean,
+            reason: clean
+              ? "Pulled, but uncommitted edits conflicted with the incoming changes; " +
+                "they are saved in the git stash (`git stash pop` in the vault to " +
+                "restore and resolve). Run sync_retry again to push."
+              : "Pulled, but uncommitted edits conflicted with the incoming changes " +
+                "and the working tree still has unmerged files; resolve them by hand " +
+                "(see `git stash list`) before syncing again.",
+          };
+        }
         if (isRebaseConflict(pull)) {
           // Same discarded outcome as the background path above (#613), and
           // the same state check rather than the abort's exit code. `reason`

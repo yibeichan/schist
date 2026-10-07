@@ -286,7 +286,7 @@ export function makeWriteTools(config: VaultConfig) {
     },
     {
       name: "sync_retry",
-      description: "Retry spoke-to-hub sync. owner is identity-gated. mode='push-only' retries push without pulling or rebasing; mode='pull-rebase-push' pulls with rebase then pushes. Never force-pushes.",
+      description: "Retry spoke-to-hub sync. owner is identity-gated. mode='push-only' retries push without pulling or rebasing; mode='pull-rebase-push' pulls with rebase (setting uncommitted edits aside and back) then pushes, which commits and pushes in-progress edits in the spoke's scope. Never force-pushes.",
       inputSchema: {
         type: "object" as const,
         properties: {

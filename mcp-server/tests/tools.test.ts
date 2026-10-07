@@ -8,7 +8,7 @@ import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { load as yamlLoadSync } from "js-yaml";
 import { jest } from "@jest/globals";
-import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, formatPushFailure, search_memory, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, ignoredPathsFromPorcelainZ, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES } from "../src/tools.js";
+import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, formatPushFailure, search_memory, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, ignoredPathsFromPorcelainZ, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES, PULL_AUTOSTASH_CONFLICT_PREFIX } from "../src/tools.js";
 import Database from "better-sqlite3";
 import { INDEX_SCHEMA_VERSION, memoryDbPath } from "../src/sqlite-reader.js";
 import { parseConnections, parseNote } from "../src/markdown-parser.js";
@@ -1494,6 +1494,40 @@ describe("maybeSpokePull", () => {
     expect(Date.now() - t0).toBeLessThan(200);
   });
 
+  test("skips the pull while a tracked file is dirty: no spawn, no stash, edit untouched", async () => {
+    // The pre-read pull discards its output and is SIGKILLed at its cap, so
+    // it must never be the pull that stashes a user's edits.
+    const vault = await makeTempSpokeVault();
+    const tracked = path.join(vault, "tracked.md");
+    await fs.writeFile(tracked, "committed\n");
+    await execFile("git", ["add", "tracked.md"], { cwd: vault });
+    await execFile("git", ["commit", "-qm", "tracked"], { cwd: vault });
+    await fs.writeFile(tracked, "half-finished edit\n");
+
+    const logPath = path.join(vault, ".schist", "pull-log");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(path.join(stubDir, "schist"),
+      `#!/bin/sh\necho "$@" >> "${logPath}"\nexit 0\n`, { mode: 0o755 });
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      await maybeSpokePull(vault, 5000);
+      await expect(fs.access(logPath)).rejects.toThrow();
+      const stash = await execFile("git", ["stash", "list"], { cwd: vault });
+      expect(stash.stdout).toBe("");
+      expect(await fs.readFile(tracked, "utf-8")).toBe("half-finished edit\n");
+
+      // Control: once the tree is clean the pull does run, and without
+      // --autostash.
+      await execFile("git", ["checkout", "--", "tracked.md"], { cwd: vault });
+      await maybeSpokePull(vault, 5000);
+      expect((await fs.readFile(logPath, "utf-8")).trim()).toBe(`--vault ${vault} sync pull`);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
   test("honors timeout when pull hangs", async () => {
     const vault = await makeTempVault();
     await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
@@ -2790,7 +2824,7 @@ describe("sync_status + sync_retry (#135)", () => {
       expect(result.ok).toBe(true);
       const lines = (await fs.readFile(logPath, "utf-8")).trim().split("\n");
       expect(lines).toEqual([
-        `--vault ${vault} sync pull`,
+        `--vault ${vault} sync pull --autostash`,
         `--vault ${vault} sync push`,
       ]);
     } finally {
@@ -2860,12 +2894,56 @@ describe("sync_status + sync_retry (#135)", () => {
       // `retriable: false` carry the real signal for this phase.
       expect(result.failure_class).toBeUndefined();
       const log = await fs.readFile(logPath, "utf-8");
-      expect(log.trim()).toBe(`--vault ${vault} sync pull`);
+      expect(log.trim()).toBe(`--vault ${vault} sync pull --autostash`);
     } finally {
       process.env.PATH = origPath;
       await fs.rm(stubDir, { recursive: true, force: true });
     }
   }, 10000);
+
+  test("an autostash conflict is reported as saved edits, not a rebase conflict, and does not push", async () => {
+    // `schist sync pull` rebased fine; only the user's uncommitted edits would
+    // not re-apply, so the CLI saved them in the git stash and reset the tree.
+    // Its message says "conflict", which isRebaseConflict alone would read as
+    // a rebase conflict (retriable: false, "Rebase conflict").
+    const vault = await makeTempSpokeVault();
+    const logPath = path.join(vault, ".schist", "retry-log");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const stub = path.join(stubDir, "schist");
+    await fs.writeFile(
+      stub,
+      `#!/bin/sh\necho "$@" >> "${logPath}"\n` +
+      `echo "Error: ${PULL_AUTOSTASH_CONFLICT_PREFIX}. They are saved in the git stash (abc123)." >&2\n` +
+      `echo 'Applying autostash resulted in conflicts.' >&2\nexit 1\n`,
+      { mode: 0o755 },
+    );
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as unknown as Record<string, unknown>;
+      expect(result.ok).toBe(false);
+      expect(result.reason).not.toBe("Rebase conflict");
+      expect(String(result.reason)).toContain("saved in the git stash");
+      // The temp spoke has no unmerged files, so a second retry can push.
+      expect(result.retriable).toBe(true);
+      const log = await fs.readFile(logPath, "utf-8");
+      expect(log.trim()).toBe(`--vault ${vault} sync pull --autostash`);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  test("the autostash-conflict prefix stays textually identical to cli/schist/git_ops.py", () => {
+    const pySource = readFileSync(
+      path.resolve(__dirname, "..", "..", "cli", "schist", "git_ops.py"),
+      "utf-8",
+    );
+    const match = pySource.match(/^PULL_AUTOSTASH_CONFLICT_PREFIX = \(\s*"([^"]*)"\s*\)/m);
+    expect(match).not.toBeNull();
+    expect(match![1]).toBe(PULL_AUTOSTASH_CONFLICT_PREFIX);
+  });
 
   test("a rebase conflict whose tree stays mid-operation does not claim unchanged", async () => {
     // The MCP half of #613. `reason` was "Rebase conflict" with the abort's
