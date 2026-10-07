@@ -693,7 +693,7 @@ class TestSyncPush:
         from schist.sync import sync_push
 
         mock_run.return_value = MagicMock(
-            stdout="", stderr="fatal: not a git repository\n", returncode=128)
+            stdout=b"", stderr=b"fatal: not a git repository\n", returncode=128)
 
         vault = _make_spoke(tmp_path)
         with pytest.raises(SystemExit) as exc:
@@ -717,7 +717,7 @@ class TestSyncPush:
         from schist.sync import sync_push
 
         # Mock git diff --cached --name-only
-        mock_run.return_value = MagicMock(stdout="research/mario/note.md\n", returncode=0)
+        mock_run.return_value = MagicMock(stdout=b"research/mario/note.md\0", returncode=0)
 
         vault = _make_spoke(tmp_path)
         args = MagicMock()
@@ -745,7 +745,7 @@ class TestSyncPush:
 
         from schist.sync import sync_push
 
-        mock_run.return_value = MagicMock(stdout="research/mario/note.md\n", returncode=0)
+        mock_run.return_value = MagicMock(stdout=b"research/mario/note.md\0", returncode=0)
         vault = _make_spoke(tmp_path)
 
         def assert_locked(vault_path, *_a, **_k):
@@ -915,7 +915,7 @@ class TestSyncPush:
         from schist.sync import sync_push
 
         vault = _make_spoke(tmp_path)
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
         mock_stage.return_value = (True, (
             f"{git_ops.JUNK_SKIP_WARNING_PREFIX} under scope 'research/mario' "
             f"(OS/editor litter, never syncs to the hub): "
@@ -2957,3 +2957,50 @@ def test_rebase_sentinel_hint_never_prints_rm_for_undecodable_path(tmp_path, mon
     hint = sync._rebase_sentinel_hint(str(tmp_path))
     assert "rm -rf" not in hint
     assert "git rev-parse --absolute-git-dir" in hint
+
+
+def _real_spoke_with_origin(tmp_path: Path) -> str:
+    """A real git vault with a bare origin and a spoke config — no stubs."""
+    hub = tmp_path / "hub.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(hub)], check=True)
+    vault = tmp_path / "vault"
+    subprocess.run(["git", "clone", "-q", str(hub), str(vault)], check=True,
+                   capture_output=True)
+    for k, v in (("user.email", "t@example.com"), ("user.name", "t")):
+        subprocess.run(["git", "config", k, v], cwd=vault, check=True)
+    (vault / "research").mkdir()
+    (vault / "research" / "seed.md").write_text("seed\n")
+    subprocess.run(["git", "add", "."], cwd=vault, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=vault, check=True)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=vault, check=True)
+    subprocess.run(["git", "push", "-q", "-u", "origin", "main"], cwd=vault,
+                   check=True, capture_output=True)
+    save_spoke_config(str(vault), SpokeConfig(
+        hub=str(hub), identity="t", scope="research"))
+    return str(vault)
+
+
+@pytest.mark.parametrize("name", ["café.md", "笔记.md", "a b.md"])
+def test_sync_push_commits_a_note_with_a_non_ascii_or_spaced_name(tmp_path, name):
+    """#694: `git diff --cached --name-only` quotes a non-ASCII path
+    (`"research/caf\\303\\251.md"`), and handing that string back to
+    `git add --` fails with "pathspec did not match", leaving the note staged
+    and never pushed."""
+    import types
+
+    import schist.sync as sync
+
+    vault = _real_spoke_with_origin(tmp_path)
+    (Path(vault) / "research" / name).write_text("hello\n")
+
+    sync.sync_push(types.SimpleNamespace(force=False), vault, vault + "/.schist/schist.db")
+
+    tracked = subprocess.run(["git", "ls-tree", "-r", "--name-only", "-z", "HEAD"],
+                             cwd=vault, capture_output=True, check=True).stdout
+    assert f"research/{name}".encode() in tracked.split(b"\0")
+    hub_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=vault,
+                              capture_output=True, text=True, check=True).stdout
+    hub_main = subprocess.run(["git", "--git-dir", str(tmp_path / "hub.git"),
+                               "rev-parse", "main"], capture_output=True,
+                              text=True, check=True).stdout
+    assert hub_head == hub_main
