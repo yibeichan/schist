@@ -429,7 +429,12 @@ def _run_git_cleanup(vault_path: str, args: list[str]) -> subprocess.CompletedPr
             argv,
             cwd=vault_path,
             capture_output=True,
-            text=True,
+            # Explicit UTF-8, not the locale's: git emits UTF-8 paths, and a
+            # latin-1 locale would decode them to mojibake with no U+FFFD for
+            # the hint's guard to see. Cleanup runs on the way to sys.exit(1),
+            # so undecodable bytes must not raise over the real error (#689).
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
     except subprocess.TimeoutExpired:
@@ -456,7 +461,9 @@ def _rebase_sentinel_hint(vault_path: str) -> str:
         # real error with a traceback.
         resolved = None
     git_dir = resolved.stdout.strip() if resolved is not None and resolved.returncode == 0 else ""
-    if git_dir:
+    # U+FFFD means git's output was not UTF-8, so the decoded path is not the
+    # real one: never print an `rm -rf` for a path we could not read faithfully.
+    if git_dir and "\ufffd" not in git_dir:
         return f"rm -rf {shlex.quote(git_dir + '/rebase-merge')} {shlex.quote(git_dir + '/rebase-apply')}"
     return (
         "remove rebase-merge and rebase-apply from the vault's git directory "

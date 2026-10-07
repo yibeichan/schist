@@ -2905,3 +2905,55 @@ def test_hub_acl_echoing_a_transport_marker_still_names_the_hub(
     assert "Push rejected by hub" in err
     assert "unreachable" not in err.lower()
     assert "saved locally" not in err.lower()
+
+
+def _fake_git_emitting_non_utf8(tmp_path: Path, monkeypatch) -> None:
+    """Put a `git` on PATH that fails and writes bytes that are not UTF-8."""
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    git = bindir / "git"
+    git.write_text(
+        "#!/bin/sh\n"
+        "printf '/vault/\\377\\376/.git\\n'\n"
+        "printf 'fatal: bad path \\377\\376\\n' >&2\n"
+        "exit 1\n"
+    )
+    git.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+
+
+def test_run_git_cleanup_tolerates_non_utf8_output(tmp_path, monkeypatch):
+    """#689: git output that is not valid UTF-8 must not raise out of the
+    cleanup helper — it runs on the way to sys.exit(1) and a decode
+    traceback would replace the real sync error."""
+    import schist.sync as sync
+
+    _fake_git_emitting_non_utf8(tmp_path, monkeypatch)
+    result = sync._run_git_cleanup(str(tmp_path), ["rebase", "--abort"])
+    assert result.returncode == 1
+    assert "bad path" in result.stderr
+
+
+def test_rebase_sentinel_hint_survives_non_utf8_git_output(tmp_path, monkeypatch):
+    """#689: the hint falls back to the generic message, not a traceback."""
+    import schist.sync as sync
+
+    _fake_git_emitting_non_utf8(tmp_path, monkeypatch)
+    hint = sync._rebase_sentinel_hint(str(tmp_path))
+    assert "git rev-parse --absolute-git-dir" in hint
+
+
+def test_rebase_sentinel_hint_never_prints_rm_for_undecodable_path(tmp_path, monkeypatch):
+    """#689: a rev-parse that succeeds with non-UTF-8 output must not yield an
+    `rm -rf` of a lossily decoded (wrong) path."""
+    import schist.sync as sync
+
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    git = bindir / "git"
+    git.write_text("#!/bin/sh\nprintf '/vault/\\377/.git\\n'\nexit 0\n")
+    git.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    hint = sync._rebase_sentinel_hint(str(tmp_path))
+    assert "rm -rf" not in hint
+    assert "git rev-parse --absolute-git-dir" in hint
