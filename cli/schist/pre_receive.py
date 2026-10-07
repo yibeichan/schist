@@ -58,10 +58,26 @@ def _sanitize_log_field(value: str) -> str:
     existing). Replace CR/LF/other control bytes with a visible marker rather
     than dropping them, so the forgery attempt is evident in the log.
     """
-    return "".join(
-        c if (ord(c) >= 0x20 and ord(c) != 0x7f) else "\\x%02x" % ord(c)
-        for c in value
-    )
+    return "".join(_escape_char(c) for c in value)
+
+
+def _escape_char(c: str) -> str:
+    """One character, with control bytes and undecodable bytes made visible.
+
+    A filename that is not valid UTF-8 reaches us as `os.fsdecode` surrogate
+    escapes (U+DC80..U+DCFF, one per raw byte). Those cannot be encoded to the
+    audit log or a terminal, so show them as the `\\xNN` byte they stand for.
+    """
+    o = ord(c)
+    if 0xDC80 <= o <= 0xDCFF:
+        return "\\x%02x" % (o - 0xDC00)
+    if o < 0x20 or o == 0x7F:
+        return "\\x%02x" % o
+    return c
+
+
+def _has_undecodable_bytes(value: str) -> bool:
+    return any(0xDC80 <= ord(c) <= 0xDCFF for c in value)
 
 
 def _push_source(environ: dict[str, str] | None = None) -> str:
@@ -186,7 +202,6 @@ def get_changed_files(oldrev: str, newrev: str) -> list[str]:
         result = subprocess.run(
             ["git", "log", "--name-only", "--format=", "-z", newrev, "--not", "--all"],
             capture_output=True,
-            text=True,
             check=True,
             timeout=30,
         )
@@ -194,12 +209,15 @@ def get_changed_files(oldrev: str, newrev: str) -> list[str]:
         result = subprocess.run(
             ["git", "log", "--name-only", "--format=", "-z", f"{oldrev}..{newrev}"],
             capture_output=True,
-            text=True,
             check=True,
             timeout=30,
         )
 
-    changed_files = [f for f in result.stdout.strip("\0").split("\0") if f]
+    # Bytes, not text: a filename git stores need not be UTF-8, and a strict
+    # decode here raised UnicodeDecodeError out of the hook (#697). fsdecode
+    # keeps distinct bad bytes distinct (surrogateescape), so check_push can
+    # reject the path by name instead of the hook crashing.
+    changed_files = [os.fsdecode(f) for f in result.stdout.strip(b"\0").split(b"\0") if f]
     return list(dict.fromkeys(changed_files))
 
 
@@ -216,6 +234,17 @@ def check_push(
     violations: list[Violation] = []
 
     for filepath in changed_files:
+        if _has_undecodable_bytes(filepath):
+            # Not a path the rest of the system can hold: a macOS spoke cannot
+            # check it out and ingest is UTF-8. Rejected before the ACL, for
+            # every identity including wildcard writers.
+            violations.append(Violation(
+                identity=identity,
+                filepath=filepath,
+                scope="(path is not valid UTF-8)",
+                refname=refname,
+            ))
+            continue
         scope = derive_scope(filepath)
 
         if scope == "":
@@ -249,7 +278,7 @@ def format_rejection(violations: list[Violation]) -> str:
         "Violations:",
     ]
     for v in violations:
-        lines.append(f"  - {v.filepath} (scope: {v.scope})")
+        lines.append(f"  - {_sanitize_log_field(v.filepath)} (scope: {v.scope})")
     lines.append("")
     lines.append("Check vault.yaml access rules for your identity.")
     return "\n".join(lines)
