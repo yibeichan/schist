@@ -1,7 +1,8 @@
 # Hub & Spoke: Pi + ORCD + Dragonfly Topology
 
 Opinionated setup guide for a three-node schist hub-spoke deployment:
-- **Pi** as the hub (bare git repo with pre-receive hook ACL enforcement)
+- **Pi** as the hub (bare git repo with pre-receive hook ACL enforcement), or a
+  small cloud VM in the same role (see [§3a](#3a-hub-on-a-cloud-vm))
 - **ORCD** (MIT HPC cluster) as a spoke (uv + venv, or Singularity as fallback)
 - **Dragonfly** (Apple Silicon Mac) as a spoke
 - **GitHub** as an optional backup mirror
@@ -171,6 +172,126 @@ git@github.com:yibeichan/schist-vault.git
 No `schist init --hub` needed. No ACL enforcement. Scope isolation is trust-based -- each spoke's `spoke.yaml` declares its scope, but nothing prevents a rogue push outside it. This is acceptable for a single-user setup where you control all spokes.
 
 To upgrade to Option A later, set up the Pi hub and change each spoke's remote URL. No data migration needed.
+
+## 3a. Hub on a cloud VM
+
+A home Pi is a single point of failure that nobody watches: a hub that is down
+looks, from every spoke, like a slow network, and spokes keep committing
+locally. A 1 vCPU / 1 GB VM (any provider with backups) runs the same Option A
+hub. The hub only runs `git` and the `pre-receive` hook — no MCP server, no
+SQLite — so it needs no Node.js.
+
+### Base system
+
+```bash
+# As root on a fresh Ubuntu 24.04 VM
+apt-get update && apt-get -y upgrade
+apt-get -y install unattended-upgrades fail2ban ufw python3-venv git
+fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab        # 1 GB RAM needs swap
+adduser --disabled-password --gecos "schist hub" git   # spokes SSH in as this user
+```
+
+### Install schist where the hook and sshd can find it
+
+The hook runs `#!/usr/bin/env python3` under sshd's default PATH, and pinned keys
+exec `schist-shell` from that same PATH. Install into a **root-owned** venv, so the
+`git` account cannot edit the code that enforces its own ACL:
+
+```bash
+git clone https://github.com/yibeichan/schist.git /opt/schist/src
+python3 -m venv /opt/schist/venv
+/opt/schist/venv/bin/pip install /opt/schist/src/cli
+for b in schist schist-shell schist-ingest; do
+  ln -sf /opt/schist/venv/bin/$b /usr/local/bin/$b
+done
+# python3 must be a wrapper, NOT a symlink: Python detects a venv from the path
+# it was invoked as, so a symlinked venv python runs as plain system Python and
+# `import schist` fails inside the hook.
+printf '#!/bin/sh\nexec /opt/schist/venv/bin/python3 "$@"\n' > /usr/local/bin/python3
+chmod 755 /usr/local/bin/python3
+# Check as the hook will see it:
+sudo -u git env -i PATH=/usr/local/bin:/usr/bin:/bin \
+  /usr/bin/env python3 -c 'import schist.pre_receive'
+```
+
+Upgrade later with `git -C /opt/schist/src pull && /opt/schist/venv/bin/pip install /opt/schist/src/cli`.
+
+### Network: Tailscale only
+
+Join the VM to the tailnet (`tailscale up`) and close the public SSH port. Keep a
+rollback armed while you do it, in case the tailnet path is wrong:
+
+```bash
+systemd-run --on-active=300 --unit=ufw-rollback /usr/sbin/ufw disable
+ufw default deny incoming && ufw default allow outgoing
+ufw allow in on tailscale0
+ufw allow 41641/udp            # Tailscale direct connections
+ufw --force enable
+# From a NEW connection over the tailnet, then:
+systemctl stop ufw-rollback.timer
+```
+
+Your provider's web console is the recovery path once port 22 is closed. In the
+Tailscale admin console, **disable key expiry** for the hub: node keys expire after
+180 days by default, and an expired hub silently drops off the tailnet.
+
+### Hub repo
+
+Create it with `schist init --hub` for a new vault, or seed it from an existing
+one (see §3b). Either way, set:
+
+```bash
+sudo -u git git -C /home/git/schist-vault.git config receive.denyNonFastForwards true
+sudo -u git git -C /home/git/schist-vault.git config receive.denyDeletes true
+```
+
+Then pin every spoke's key (`schist hub key add`) and check with
+`schist doctor --hub-path /home/git/schist-vault.git`.
+
+## 3b. Moving an existing hub
+
+The old hub is the source of truth for `vault.yaml` and history. If it is still
+reachable, copy its bare repo across (`rsync -a`, then re-check the hook). If it
+is down, seed from the spoke with the most complete history:
+
+1. **Check what the spoke really has.** `git rev-parse --is-shallow-repository` —
+   a `true` means a bundle will be rejected (`did not send all necessary
+   objects`). Push a shallow spoke straight into the empty bare repo with
+   `receive.shallowUpdate` set, then unset it:
+
+   ```bash
+   sudo -u git git init --bare --initial-branch=main /home/git/schist-vault.git
+   sudo -u git git -C /home/git/schist-vault.git config receive.shallowUpdate true
+   # from the spoke, before the hook is installed:
+   git push --receive-pack="sudo -u git git-receive-pack" \
+     root@<new-hub>:/home/git/schist-vault.git main:main
+   # then install hooks/pre-receive (PRE_RECEIVE_HOOK in cli/schist/sync.py)
+   # and unset receive.shallowUpdate
+   ```
+
+   Seeding before the hook exists skips ACL checks for that import, including
+   any commits that touch root-level files. Review `git log` of what you seed. A
+   shallow hub can be deepened later from a full clone with
+   `git fetch --unshallow`.
+
+2. **Repoint each spoke** — both places name the hub:
+
+   ```bash
+   git -C ~/schist-vault remote set-url origin <new-alias>:/home/git/schist-vault.git
+   # and the `hub:` line in ~/schist-vault/.schist/spoke.yaml
+   ```
+
+   Background jobs that push to `origin` follow automatically. A spoke whose
+   tracked files have uncommitted edits cannot `sync pull` (rebase refuses), so
+   commit or stash those first, then `schist sync pull && schist sync push`.
+
+3. **Clear stale sentinels** with `sync_retry` once the spoke syncs; a
+   `.schist/last-sync-error` left over from the outage keeps MCP writes blocked.
+
+4. **Prove enforcement end to end**: push a root-level file to a throwaway branch
+   from a pinned spoke. It must be rejected with `out-of-scope writes` and the
+   right `Identity:` line, and the branch must not appear in `git ls-remote`.
 
 ## 4. Dragonfly Spoke Setup
 
