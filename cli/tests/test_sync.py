@@ -756,7 +756,7 @@ class TestSyncPush:
         def assert_locked(vault_path, *_a, **_k):
             # A nonblocking flock on a fresh fd must fail while the exclusive
             # lock is held (flock is per open-file-description).
-            fd = _os.open(_os.path.join(vault_path, ".schist", "cli-write.lock"), _os.O_RDWR)
+            fd = _os.open(_os.path.join(vault_path, ".schist", "write.lock"), _os.O_RDWR)
             try:
                 with pytest.raises(BlockingIOError):
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

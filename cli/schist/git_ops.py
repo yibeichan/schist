@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import signal
 import subprocess
+import threading
 
 import yaml
 
@@ -17,11 +18,35 @@ import yaml
 _GIT_TEXT = {"encoding": "utf-8", "errors": "replace"}
 
 
-@contextmanager
-def vault_write_lock(vault_path: str):
-    """Serialize CLI vault writes across processes (#412, #419).
+LOCK_FILENAME = "write.lock"
+_held: dict = {}  # realpath -> re-entrancy depth, per process
+_held_guard = threading.Lock()
 
-    Exclusive advisory flock on <vault>/.schist/cli-write.lock. Two things
+
+class VaultLockTimeout(Exception):
+    def __init__(self, holder: str):
+        super().__init__(f"vault write lock busy (held by {holder})")
+        self.holder = holder
+
+
+def _lock_path(vault_path: str) -> str:
+    return os.path.join(vault_path, '.schist', LOCK_FILENAME)
+
+
+def read_holder(vault_path: str) -> str:
+    """The "host:pid" note in the lock file, or "unknown"."""
+    try:
+        with open(_lock_path(vault_path), encoding='utf-8', errors='replace') as f:
+            return f.read().strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
+@contextmanager
+def vault_write_lock(vault_path: str, timeout: "float | None" = None):
+    """Serialize vault writes across processes (#412, #419).
+
+    Exclusive advisory flock on <vault>/.schist/write.lock. Two things
     need this serialization:
     - read-modify-writes: append_connection is read → insert → whole-file
       rewrite, so two unserialized `schist link` calls on the same source
@@ -31,47 +56,97 @@ def vault_write_lock(vault_path: str):
       stage=False) then a plain `git commit -m`, which commits EVERYTHING staged — an unserialized
       concurrent stage+commit pair sweeps the other caller's staged file
       into the wrong commit and leaves the loser's own commit empty
-      (#419). Every CLI stage+commit (add, link, sync push) must run
-      inside this lock.
+      (#419). Every stage+commit (add, link, sync push, MCP writes)
+      must run inside this lock.
     Lives here (not commands.py) because sync.py stages+commits too. The
     lock file sits under .schist/ (gitignored runtime state, like
     schist.db) and is never deleted — unlinking a flock'd path is a classic
     unlock-bypass race. flock is POSIX-only, like the rest of the
-    deployment (Mac/Linux spokes, Pi hub). NOTE: this serializes CLI↔CLI
-    only; the MCP server serializes its own writes in-process and does not
-    take this lock — the cross-writer CLI↔MCP window is the remaining gap
-    noted in #412. Its commit-race half (one writer's commit sweeping the
-    other's staged paths) is recovered by landed_via_concurrent_commit
-    (#715); the read-modify-write half is not.
+    deployment (Mac/Linux spokes, Pi hub).
+
+    Every writer takes this lock, the MCP server included (#724), so the
+    CLI and MCP no longer race on read-modify-writes or on the git index.
+    The lock is re-entrant within a process (a per-process depth count keyed
+    by the vault's realpath), because flock on a second fd of the same file
+    would deadlock against ourselves. With `timeout` (seconds) it raises
+    VaultLockTimeout, carrying the holder note, instead of waiting forever.
+    The holder ("host:pid") is written into the lock file for diagnostics.
     """
     import fcntl
+    import socket
     import sys
+    import time
 
-    lock_dir = os.path.join(vault_path, '.schist')
-    os.makedirs(lock_dir, exist_ok=True)
-    lock_path = os.path.join(lock_dir, 'cli-write.lock')
+    key = os.path.realpath(vault_path)
+    with _held_guard:
+        reentered = _held.get(key, 0) > 0
+        if reentered:
+            _held[key] += 1
+    if reentered:
+        try:
+            yield
+        finally:
+            with _held_guard:
+                _held[key] -= 1
+        return
+
+    os.makedirs(os.path.join(vault_path, '.schist'), exist_ok=True)
+    lock_path = _lock_path(vault_path)
+    writable = True
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     except PermissionError:
         # A second unix user on a shared vault can't O_RDWR a 0o644 lock
         # file owned by the first (/review finding). flock(2) grants LOCK_EX
         # on ANY fd regardless of open mode, so read-only is just as
-        # exclusive — fall back before failing.
+        # exclusive; fall back before failing.
+        writable = False
         try:
             fd = os.open(lock_path, os.O_RDONLY)
         except OSError as e:
             print(
                 f'Error: cannot open the vault write lock {lock_path}: {e} — '
                 f'fix its permissions (any mode readable by every vault '
-                f'writer works; the lock carries no data)',
+                f'writer works)',
                 file=sys.stderr,
             )
             sys.exit(1)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        start = time.monotonic()
+        delay = 0.05
+        warned = False
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                waited = time.monotonic() - start
+                if timeout is not None and waited >= timeout:
+                    raise VaultLockTimeout(read_holder(vault_path))
+                if timeout is None and not warned and waited >= 2:
+                    print(
+                        f'waiting for vault write lock '
+                        f'(held by {read_holder(vault_path)})…',
+                        file=sys.stderr,
+                    )
+                    warned = True
+                time.sleep(delay)
+                delay = min(delay * 2, 0.5)
+        if writable:
+            try:
+                os.ftruncate(fd, 0)
+                os.pwrite(fd, f'{socket.gethostname()}:{os.getpid()}\n'.encode(), 0)
+            except OSError:
+                pass  # diagnostics only
+        with _held_guard:
+            _held[key] = 1
+        try:
+            yield
+        finally:
+            with _held_guard:
+                _held.pop(key, None)
+            fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
 
@@ -291,9 +366,9 @@ def landed_via_concurrent_commit(vault_path: str, head_before: str,
                                  staged: dict) -> bool:
     """Did another writer already commit exactly what we staged?
 
-    Two writers share one git index: the MCP server serializes its own writes
-    in-process and does not take vault_write_lock (#412), and both sides end
-    in a plain `git commit`, which commits EVERYTHING staged. So a commit can
+    Two writers share one git index: the CLI and the MCP server both take
+    vault_write_lock (#724), yet a writer that bypasses it (a manual `git`
+    in the vault) still ends in a plain `git commit`, which commits EVERYTHING staged. So a commit can
     sweep the other writer's staged paths, and the loser's own commit then
     fails with nothing left to commit, although its content is on the branch.
 

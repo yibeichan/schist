@@ -904,7 +904,7 @@ def _assert_commit_runs_locked(vault_path, *_args, **_kwargs):
     import fcntl
     import os as _os
 
-    fd = _os.open(_os.path.join(vault_path, ".schist", "cli-write.lock"), _os.O_RDWR)
+    fd = _os.open(_os.path.join(vault_path, ".schist", "write.lock"), _os.O_RDWR)
     try:
         with pytest.raises(BlockingIOError):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -947,7 +947,7 @@ class TestReviewLockHardening:
             # Same nonblocking-flock probe as _assert_commit_runs_locked.
             import fcntl
             import os as _os
-            fd = _os.open(_os.path.join(str(tmp_path), ".schist", "cli-write.lock"), _os.O_RDONLY)
+            fd = _os.open(_os.path.join(str(tmp_path), ".schist", "write.lock"), _os.O_RDONLY)
             try:
                 with pytest.raises(BlockingIOError):
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -986,7 +986,7 @@ class TestReviewLockHardening:
 
         lock_dir = tmp_path / ".schist"
         lock_dir.mkdir()
-        lock = lock_dir / "cli-write.lock"
+        lock = lock_dir / "write.lock"
         lock.touch(mode=0o400)
         try:
             with git_ops.vault_write_lock(str(tmp_path)):
