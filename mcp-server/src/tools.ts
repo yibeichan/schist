@@ -1627,7 +1627,8 @@ function briefNoteFromNote(note: Note, reason: string): BriefNote {
   };
 }
 
-async function recentAddedPaths(
+/** @internal — exported for tests. */
+export async function recentAddedPaths(
   vaultRoot: string,
   scope: string[]
 ): Promise<{ ok: boolean; rows: Array<{ path: string; commit: string }> }> {
@@ -1637,6 +1638,11 @@ async function recentAddedPaths(
     "--diff-filter=A",
     "--name-only",
     "--pretty=format:commit:%h",
+    // -z (#699): without it git C-quotes any name with non-ASCII bytes,
+    // quotes, tabs or backslashes (`"research/caf\303\251.md"`), which then
+    // failed the scope match or showed as octal. With -z names are raw and
+    // NUL-terminated; `core.quotePath=off` alone still quotes `"`, `\`, tab.
+    "-z",
   ], 2_000);
   // Distinguish "git failed/timed out" from "no files added" (#238): the
   // 2s timeout fires exactly on the slow-git deployments where an agent
@@ -1650,16 +1656,20 @@ async function recentAddedPaths(
   }
   if (!outcome.stdout) return { ok: true, rows: [] };
 
+  // Shape with -z: `commit:<sha>\n<path>\0<path>\0`, then an extra \0
+  // before the next commit's header. A header is recognized by the hex sha
+  // and newline, so a file named `commit:…` is still a path. Names are not
+  // trimmed: leading and trailing spaces are part of them.
   const rows: Array<{ path: string; commit: string }> = [];
   let commit = "";
-  for (const raw of outcome.stdout.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line) continue;
-    if (line.startsWith("commit:")) {
-      commit = line.slice("commit:".length);
-      continue;
+  for (let token of outcome.stdout.split("\0")) {
+    const header = /^commit:([0-9a-f]+)\n/.exec(token);
+    if (header) {
+      commit = header[1];
+      token = token.slice(header[0].length);
     }
-    if (matchesScopePath(line, scope)) rows.push({ path: line, commit });
+    if (!token) continue;
+    if (matchesScopePath(token, scope)) rows.push({ path: token, commit });
     if (rows.length >= 8) break;
   }
   return { ok: true, rows };
