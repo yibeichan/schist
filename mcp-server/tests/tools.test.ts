@@ -9,6 +9,7 @@ import { promisify } from "util";
 import { load as yamlLoadSync } from "js-yaml";
 import { jest } from "@jest/globals";
 import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, formatPushFailure, search_memory, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, ignoredPathsFromPorcelainZ, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES, PULL_AUTOSTASH_CONFLICT_PREFIX } from "../src/tools.js";
+import { writeMutex } from "../src/git-writer.js";
 import Database from "better-sqlite3";
 import { INDEX_SCHEMA_VERSION, memoryDbPath } from "../src/sqlite-reader.js";
 import { parseConnections, parseNote } from "../src/markdown-parser.js";
@@ -1239,7 +1240,100 @@ describe("triggerSpokePush", () => {
       // Assert the exact argv shape (subagent flagged toContain "sync push"
       // as too loose — would accept `--vault X sync push extra-garbage`).
       // The stub's `echo "$@"` adds a trailing newline.
-      expect(argv.trim()).toBe(`--vault ${vault} sync push`);
+      expect(argv.trim()).toBe(`--vault ${vault} sync push --no-commit`);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  test("commits stray vault files under the write lock, then pushes with --no-commit (#724)", async () => {
+    // A hand edit (Obsidian, an editor) is uncommitted. The background push
+    // commits it in a separate --commit-only step while holding this server's
+    // write lock, so it cannot race the server's own writes, and pushes after.
+    const vault = await makeTempVault();
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, ".schist", "spoke.yaml"),
+      "hub: file:///nonexistent\nidentity: test\nscope: notes\n"
+    );
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, "notes", "hand-edit.md"), "edited by hand\n");
+    const logPath = path.join(vault, ".schist", "push-log");
+    const lockSeen = path.join(vault, ".schist", "lock-seen");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(
+      path.join(stubDir, "schist"),
+      `#!/bin/sh\necho "$@" >> "${logPath}"\n` +
+      `case "$*" in *--commit-only*) : > "${lockSeen}"; sleep 0.5;; esac\nexit 0\n`,
+      { mode: 0o755 },
+    );
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      triggerSpokePush(vault);
+      let heldDuringCommit = false;
+      for (let i = 0; i < 60; i++) {
+        await new Promise((r) => setTimeout(r, 25));
+        if (await fs.access(lockSeen).then(() => true, () => false)) {
+          heldDuringCommit = writeMutex.isLocked();
+          break;
+        }
+      }
+      let lines: string[] = [];
+      for (let i = 0; i < 80 && lines.length < 2; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+        lines = (await fs.readFile(logPath, "utf-8").catch(() => "")).trim().split("\n").filter(Boolean);
+      }
+      expect(lines).toEqual([
+        `--vault ${vault} sync push --commit-only`,
+        `--vault ${vault} sync push --no-commit`,
+      ]);
+      expect(heldDuringCommit).toBe(true);
+      expect(writeMutex.isLocked()).toBe(false);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  test("falls back to a plain push when the CLI predates --no-commit (#724)", async () => {
+    // A non-editable CLI install can lag the server. argparse rejects the
+    // unknown flag; without the fallback every background push would fail and
+    // write a sentinel that blocks later writes.
+    const vault = await makeTempVault();
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, ".schist", "spoke.yaml"),
+      "hub: file:///nonexistent\nidentity: test\nscope: notes\n"
+    );
+    const logPath = path.join(vault, ".schist", "push-log");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(
+      path.join(stubDir, "schist"),
+      `#!/bin/sh\necho "$@" >> "${logPath}"\n` +
+      `case "$*" in *--no-commit*) echo "schist: error: unrecognized arguments: --no-commit" >&2; exit 2;; esac\n` +
+      `exit 0\n`,
+      { mode: 0o755 },
+    );
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      triggerSpokePush(vault);
+      let lines: string[] = [];
+      for (let i = 0; i < 60 && lines.length < 2; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+        lines = (await fs.readFile(logPath, "utf-8").catch(() => "")).trim().split("\n").filter(Boolean);
+      }
+      expect(lines).toEqual([
+        `--vault ${vault} sync push --no-commit`,
+        `--vault ${vault} sync push`,
+      ]);
+      // The plain push succeeded, so no failure sentinel was recorded.
+      await new Promise((r) => setTimeout(r, 200));
+      expect((await sync_status(vault) as unknown as Record<string, unknown>).last_sync_error).toBeNull();
     } finally {
       process.env.PATH = origPath;
       await fs.rm(stubDir, { recursive: true, force: true });
@@ -1435,8 +1529,8 @@ esac
       }
 
       expect(lines).toEqual([
-        `--vault ${vault} sync push`,
-        `--vault ${vault} sync push --force`,
+        `--vault ${vault} sync push --no-commit`,
+        `--vault ${vault} sync push --force --no-commit`,
       ]);
       await expect(fs.access(sentinelPath)).rejects.toBeDefined();
     } finally {
@@ -2028,6 +2122,10 @@ describe("diverged spoke auto-recovery (#500)", () => {
 echo "$@" >> "${logPath}"
 case "$*" in
   *"sync pull"*) exit 0 ;;
+  # The commit step (#724) never touches the network, so it cannot diverge.
+  # Exiting 0 without committing models files it does not commit (out of
+  # scope), which must still keep recovery from rebasing.
+  *"--commit-only"*) exit 0 ;;
   *"sync push"*)
     if grep -q "sync pull" "${logPath}"; then exit 0; fi
     # Faithful to the real CLI after #667 (sync.py PUSH_DIVERGENCE_HEADER).

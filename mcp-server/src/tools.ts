@@ -5,7 +5,7 @@ import { fileURLToPath } from "url";
 import { spawn } from "child_process";
 import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
-import { writeNote, updateNote, deleteNote } from "./git-writer.js";
+import { writeNote, updateNote, deleteNote, writeMutex } from "./git-writer.js";
 import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython, containsLineBoundary, isRoundTrippableTarget } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
@@ -401,6 +401,10 @@ export function triggerIngestion(vaultRoot: string): void {
 
 const SYNC_ERROR_SENTINEL = ".schist/last-sync-error";
 const SYNC_RETRY_TIMEOUT_MS = 30_000;
+// The --commit-only step runs while writeMutex is held, so queued writes wait
+// on it. It is local (stage, commit, post-commit ingest), so a tighter cap
+// than the network operations.
+const SYNC_COMMIT_ONLY_TIMEOUT_MS = 20_000;
 const SYNC_STATUS_TIMEOUT_MS = 10_000;
 
 /**
@@ -825,12 +829,20 @@ async function runCommand(
   });
 }
 
-function runSchistSync(
+type SchistSyncOptions = {
+  force?: boolean;
+  autostash?: boolean;
+  /** push: send existing commits only (the background push, #724). */
+  noCommit?: boolean;
+  /** push: stage and commit in-scope changes, then stop (#724). */
+  commitOnly?: boolean;
+};
+
+async function runSchistSync(
   vaultRoot: string,
   action: "pull" | "push",
   timeoutMs = SYNC_RETRY_TIMEOUT_MS,
-  force = false,
-  autostash = false,
+  { force = false, autostash = false, noCommit = false, commitOnly = false }: SchistSyncOptions = {},
 ): Promise<SyncCommandOutcome> {
   const args = ["--vault", vaultRoot, "sync", action];
   if (force) args.push("--force");
@@ -838,11 +850,60 @@ function runSchistSync(
   // pre-read pull, triggerSpokePush's recovery) must never stash a user's
   // uncommitted edits behind their back.
   if (autostash && action === "pull") args.push("--autostash");
-  return runCommand(
-    schistCliBin("schist"),
-    args,
-    { cwd: vaultRoot, timeoutMs, env: process.env, capture: true },
-  );
+  // The background push only (#724): this server commits every write itself,
+  // so the push it spawns must not stage or commit. When it did, its index
+  // lock collided with the next write's commit (#719) and its commit swept
+  // that write's staged note in under `sync(<id>)`. Explicit sync_retry
+  // pushes still commit stray files.
+  if (noCommit && action === "push") args.push("--no-commit");
+  if (commitOnly && action === "push") args.push("--commit-only");
+  const run = (argv: string[]) =>
+    runCommand(schistCliBin("schist"), argv, { cwd: vaultRoot, timeoutMs, env: process.env, capture: true });
+  const outcome = await run(args);
+  // A CLI older than this server (a non-editable install on a spoke) rejects
+  // the flag. Falling back keeps every background push from failing, and from
+  // writing a sentinel that blocks writes, until the CLI is upgraded.
+  if (noCommit && !outcome.ok && rejectsFlag(outcome, "--no-commit")) {
+    console.error("[schist] the schist CLI does not support `sync push --no-commit`; pushing without it (upgrade the CLI)");
+    return run(args.filter((a) => a !== "--no-commit"));
+  }
+  return outcome;
+}
+
+/** argparse's refusal of an unknown flag, from a CLI that predates #724. */
+function rejectsFlag(outcome: SyncCommandOutcome, flag: "--no-commit" | "--commit-only"): boolean {
+  const line = (outcome.stderr ?? "").split("\n").find((l) => l.includes("unrecognized arguments:"));
+  return line !== undefined && line.split(/\s+/).includes(flag);
+}
+
+/**
+ * The commit half of the background push (#724). Stray in-scope files (a hand
+ * edit in an editor, say) used to be committed by the background push itself,
+ * racing this server's writes for the index (#719). They are now committed by
+ * `sync push --commit-only` while this server holds writeMutex, so no write of
+ * ours can be between `git add` and `git commit` meanwhile; the push follows
+ * outside the lock. Returns null when there was nothing to do or the step was
+ * skipped (busy lock, probe failure, a CLI without the flag): the push still
+ * runs, and a later push picks the files up. `.schist/` is runtime state,
+ * never vault content, so it does not count as a stray.
+ */
+async function commitStraysUnderWriteLock(vaultRoot: string): Promise<SyncCommandOutcome | null> {
+  const status = await runGit(
+    vaultRoot, ["--no-optional-locks", "status", "--porcelain", "--", ".", ":(exclude).schist"]);
+  if (!status.ok || (status.stdout ?? "").trim().length === 0) return null;
+  let release: () => void;
+  try {
+    release = await writeMutex.acquire();
+  } catch {
+    return null; // writes kept the lock busy past its timeout: next push
+  }
+  try {
+    const outcome = await runSchistSync(vaultRoot, "push", SYNC_COMMIT_ONLY_TIMEOUT_MS, { commitOnly: true });
+    if (!outcome.ok && rejectsFlag(outcome, "--commit-only")) return null; // old CLI: its plain push commits
+    return outcome;
+  } finally {
+    release();
+  }
 }
 
 /** The command outcome and the diagnosis eventually committed to the sentinel.
@@ -1260,7 +1321,10 @@ async function recoverDivergedSpoke(
         "is already in progress. Resolve it, then run sync_retry mode=pull-rebase-push",
     };
   }
-  const status = await runGit(vaultRoot, ["status", "--porcelain"]);
+  // --no-optional-locks: this runs in the background beside this server's
+  // writes, and a plain status may take index.lock to write back a refreshed
+  // index while a write is between `git add` and `git commit` (#719, #724).
+  const status = await runGit(vaultRoot, ["--no-optional-locks", "status", "--porcelain"]);
   if (!status.ok) {
     // Don't report a probe failure as "dirty" — that names the wrong
     // condition AND the wrong remedy.
@@ -1316,7 +1380,8 @@ async function recoverDivergedSpoke(
     return { outcome: pull, failure: formatPullFailure(pull, "pull-rebase during auto-recovery failed") };
   }
 
-  const repush = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS);
+  // Only triggerSpokePush reaches this recovery, so it pushes like it does.
+  const repush = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS, { noCommit: true });
   if (repush.ok) {
     console.error("[schist] spoke recovered: pull-rebase-push succeeded");
     return { outcome: repush, failure: null };
@@ -1341,12 +1406,22 @@ export function triggerSpokePush(vaultRoot: string): void {
       // capture: true (#501). Discarding stderr here made every failure
       // class read as "push exited with code 1" in the sentinel, which is
       // both useless to an operator and unusable as a recovery signal.
-      let outcome = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS);
+      //
+      // Two steps (#724): commit stray files under writeMutex, then push
+      // existing commits outside it. A failed commit step is recorded like a
+      // failed push used to be, and nothing is pushed this round.
+      const commitStep = await commitStraysUnderWriteLock(vaultRoot);
+      if (commitStep !== null && !commitStep.ok) {
+        const failure = formatPushFailure(commitStep, "committing uncommitted vault files failed");
+        await writeSyncError(vaultRoot, failure);
+        return { outcome: commitStep, failure };
+      }
+      let outcome = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS, { noCommit: true });
 
       let failure = pushFailureMessage(outcome) === null ? null : formatPushFailure(outcome);
       if (failure !== null && await hasStaleGitOperation(vaultRoot)) {
         console.error("[schist] spoke push failed with stale git state; retrying with sync push --force");
-        const retry = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS, true);
+        const retry = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS, { force: true, noCommit: true });
         if (retry.ok) {
           outcome = retry;
           failure = null;
@@ -1405,7 +1480,7 @@ export async function maybeSpokePull(vaultRoot: string, timeoutMs = 5000): Promi
   // only refuse anyway. A probe that fails also skips: the read falls through
   // to the local index, which is this function's documented failure mode.
   const dirty = await runGit(
-    vaultRoot, ["status", "--porcelain", "--untracked-files=no"], Math.min(2_000, timeoutMs));
+    vaultRoot, ["--no-optional-locks", "status", "--porcelain", "--untracked-files=no"], Math.min(2_000, timeoutMs));
   if (!dirty.ok || (dirty.stdout ?? "").trim().length > 0) return;
   await new Promise<void>((resolve) => {
     const child = spawn(
@@ -2005,7 +2080,7 @@ export async function sync_retry(
       // stashed edits then sit in the rebase state, and the next sync's
       // cleanup (`rebase --abort`, or `--quit` which keeps them in the stash
       // list) hands them back.
-      const pull = await runSchistSync(vaultRoot, "pull", SYNC_RETRY_TIMEOUT_MS, false, true);
+      const pull = await runSchistSync(vaultRoot, "pull", SYNC_RETRY_TIMEOUT_MS, { autostash: true });
       if (!pull.ok) {
         if (isAutostashConflict(pull)) {
           // The rebase completed; only the user's uncommitted edits did not
