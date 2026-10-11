@@ -212,6 +212,62 @@ work from a clone instead of an installed wheel, use `uv pip install --system -e
 
 The hook file lives in `.git/hooks/` and is never committed to any repository.
 
+## Vault write lock
+
+Every process that touches the vault's git index or rewrites a note holds one
+exclusive lock, `<vault>/.schist/write.lock`, for exactly its own work: the
+CLI's `add`, `link` and `sync` commands and each MCP server's writes. Without
+it, two writers' `git add` and `git commit` interleave, one commit sweeps the
+other's staged file in under the wrong message, and a read-modify-write such as
+`add_connection` loses the other writer's edge. A holder never keeps the lock
+while it spawns a child that takes it (that would deadlock); `schist sync pull`,
+for example, fetches outside the lock and takes it only for cleanup and rebase.
+The lock is re-entrant within a process.
+
+Node has no portable `flock`, so the server holds the lock through a helper,
+`schist lock hold`, for the span of one write. Closing the helper's stdin
+releases the lock; so does either process dying.
+
+| Helper output | Exit code | Meaning |
+|---|---|---|
+| `LOCKED` | 0 once stdin reaches EOF | Lock acquired; held until EOF |
+| `TIMEOUT holder=<host:pid>` | 75 | Not acquired within `--timeout` |
+| `EXPIRED` | 76 | Held past `--max-hold`; the helper released it |
+| (usage error) | 2 | A CLI too old to have `lock hold` |
+
+Inside the server the order is always the in-process `writeMutex` first, then
+the vault lock. The write is checked as still held before it touches the
+file and again before the commit. When the helper cannot be run (an old CLI,
+a missing binary), the server logs once
+`cross-process vault lock unavailable: <reason>` and serializes within its own
+process only; upgrade the CLI to restore cross-process safety.
+
+Timing to expect:
+
+- A write waiting on the cross-process lock can take up to
+  `SCHIST_VAULT_LOCK_WAIT_MS` plus about 5 s. Writes queued behind it in the
+  same server fail fast at the 10 s `writeMutex` timeout (`WRITE_TIMEOUT`);
+  retry them.
+- `sync_retry` holds the in-process write mutex around its CLI children for up
+  to about 60 s, so concurrent MCP writes may return `WRITE_TIMEOUT` meanwhile
+  and should be retried.
+- The helper's `--max-hold` is `ceil(SCHIST_GIT_COMMIT_TIMEOUT_MS / 1000) + 60`
+  seconds, enough for a slow post-commit ingest.
+
+On NFS, `flock` works across hosts under NFSv4. If a node crashes while
+holding the lock, the server reclaims it when the lease expires, about 90 s
+later. There is one lock file per vault path; a symlinked or dual-mounted
+path resolves to the same file, so that is fine.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `SCHIST_LOCK_BIN` | `SCHIST_BIN`, then `schist` | Binary that provides `lock hold` |
+| `SCHIST_VAULT_LOCK_WAIT_MS` | `10000` | How long a write waits for the lock; read on each call |
+
+The acceptance test `mcp-server/tests/vault-lock-acceptance.test.ts` runs two
+server instances and a CLI writer against one vault and checks that every
+commit holds exactly its own file.
+
 ## Path validation
 
 The MCP server enforces that all file writes stay within `SCHIST_VAULT_PATH`.
