@@ -89,6 +89,18 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: uv pip install --system -e ./cli
 
+      # The tests' local `schist` wrapper (tests/local-schist-bin.ts) runs the
+      # repo CLI from cli/.venv when it is complete, and otherwise falls back
+      # to `uv run`, whose first sync can outlast a lock-helper wait. Create
+      # the venv up front so no test depends on that.
+      - name: Create cli/.venv for the test-local schist wrapper
+        working-directory: ${{ github.workspace }}/cli
+        env:
+          UV_SYSTEM_PYTHON: "false"
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python -e .
+
       - name: Configure git identity for fixture vault commits
         run: |
           git config --global user.email "ci@schist.test"
