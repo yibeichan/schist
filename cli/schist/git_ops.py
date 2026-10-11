@@ -791,10 +791,14 @@ def has_uncommitted_changes(vault_path: str) -> bool:
     Returns True on timeout (conservative: the sync path then attempts the
     stage/commit — whose own timeouts surface a real error message — rather
     than silently skipping a push). #314.
+
+    --no-optional-locks: plain `git status` may take index.lock to write back
+    a refreshed index, and a concurrent MCP commit then fails on the lock
+    (#719, #724). The refresh is only a cache; the answer is the same.
     """
     try:
         result = subprocess.run(
-            ['git', 'status', '--porcelain'],
+            ['git', '--no-optional-locks', 'status', '--porcelain'],
             cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=30,
         )
     except subprocess.TimeoutExpired:

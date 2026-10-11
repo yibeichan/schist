@@ -550,7 +550,7 @@ def _cleanup_stale_index_lock(git_dir: Path) -> None:
         sys.exit(1)
 
 
-def cleanup_stale_git_state(vault_path: str, *, force: bool) -> None:
+def cleanup_stale_git_state(vault_path: str, *, force: bool, uses_index: bool = True) -> None:
     """Clear stale git operation sentinels before sync.
 
     Rebase state is always cleaned because a killed `sync pull` leaves the
@@ -560,6 +560,10 @@ def cleanup_stale_git_state(vault_path: str, *, force: bool) -> None:
     index.lock before aborting a merge so Git gets a fair chance to restore the
     worktree. Never drop MERGE_* sentinels after abort failure; that can hide
     unresolved merge content from later status/staging checks.
+
+    uses_index=False (`sync push --no-commit`) skips the index.lock gate: a
+    push that never stages or commits does not need the index, and the lock
+    is then usually a live MCP commit that must be neither refused nor removed.
     """
     git_dir = Path(vault_path) / ".git"
     if git_dir.is_file():
@@ -582,7 +586,7 @@ def cleanup_stale_git_state(vault_path: str, *, force: bool) -> None:
         _cleanup_rebase_state(vault_path)
 
     merge_present = (git_dir / "MERGE_HEAD").exists()
-    index_lock_present = (git_dir / "index.lock").exists()
+    index_lock_present = uses_index and (git_dir / "index.lock").exists()
     if index_lock_present:
         if not force:
             print(
@@ -606,6 +610,10 @@ def cleanup_stale_git_state(vault_path: str, *, force: bool) -> None:
 
 def _force_enabled(args) -> bool:
     return getattr(args, "force", False) is True
+
+
+def _no_commit_enabled(args) -> bool:
+    return getattr(args, "no_commit", False) is True
 
 
 def classify_pull_failure(output: str) -> str:
@@ -1168,7 +1176,8 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
         sys.exit(1)
 
     config = load_spoke_config(vault_path)
-    cleanup_stale_git_state(vault_path, force=_force_enabled(args))
+    no_commit = _no_commit_enabled(args)
+    cleanup_stale_git_state(vault_path, force=_force_enabled(args), uses_index=not no_commit)
 
     # Snapshot the sentinel BEFORE doing any work, so a failure another process
     # records while this push runs is never mistaken for the one we recovered
@@ -1183,7 +1192,17 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
     # ignored files (#388) don't trigger the block — [0] is the blocking
     # (non-junk) partition; junk never syncs by design, so there is nothing
     # to commit for it.
-    if git_ops.has_uncommitted_changes(vault_path) or git_ops.ignored_scope_files(
+    #
+    # --no-commit (#724): the MCP server's background push. The server commits
+    # every write itself, so there is nothing of its own to stage, and staging
+    # here took the index lock out from under the server's next write (#719).
+    # Uncommitted files wait for an explicit `schist sync push` or sync_retry;
+    # sync_status reports them (clean_working_tree).
+    if no_commit:
+        if git_ops.has_uncommitted_changes(vault_path):
+            print("Left uncommitted changes in place (--no-commit); "
+                  "`schist sync push` commits them.")
+    elif git_ops.has_uncommitted_changes(vault_path) or git_ops.ignored_scope_files(
         vault_path, config.scope
     )[0]:
         # #419: the whole stage → count → commit sequence runs under the

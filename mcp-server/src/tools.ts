@@ -825,12 +825,13 @@ async function runCommand(
   });
 }
 
-function runSchistSync(
+async function runSchistSync(
   vaultRoot: string,
   action: "pull" | "push",
   timeoutMs = SYNC_RETRY_TIMEOUT_MS,
   force = false,
   autostash = false,
+  noCommit = false,
 ): Promise<SyncCommandOutcome> {
   const args = ["--vault", vaultRoot, "sync", action];
   if (force) args.push("--force");
@@ -838,11 +839,29 @@ function runSchistSync(
   // pre-read pull, triggerSpokePush's recovery) must never stash a user's
   // uncommitted edits behind their back.
   if (autostash && action === "pull") args.push("--autostash");
-  return runCommand(
-    schistCliBin("schist"),
-    args,
-    { cwd: vaultRoot, timeoutMs, env: process.env, capture: true },
-  );
+  // The background push only (#724): this server commits every write itself,
+  // so the push it spawns must not stage or commit. When it did, its index
+  // lock collided with the next write's commit (#719) and its commit swept
+  // that write's staged note in under `sync(<id>)`. Explicit sync_retry
+  // pushes still commit stray files.
+  if (noCommit && action === "push") args.push("--no-commit");
+  const run = (argv: string[]) =>
+    runCommand(schistCliBin("schist"), argv, { cwd: vaultRoot, timeoutMs, env: process.env, capture: true });
+  const outcome = await run(args);
+  // A CLI older than this server (a non-editable install on a spoke) rejects
+  // the flag. Falling back keeps every background push from failing, and from
+  // writing a sentinel that blocks writes, until the CLI is upgraded.
+  if (noCommit && !outcome.ok && rejectsNoCommitFlag(outcome)) {
+    console.error("[schist] the schist CLI does not support `sync push --no-commit`; pushing without it (upgrade the CLI)");
+    return run(args.filter((a) => a !== "--no-commit"));
+  }
+  return outcome;
+}
+
+/** argparse's refusal of an unknown `--no-commit`, from a CLI that predates #724. */
+function rejectsNoCommitFlag(outcome: SyncCommandOutcome): boolean {
+  const stderr = outcome.stderr ?? "";
+  return /unrecognized arguments:.*--no-commit/.test(stderr);
 }
 
 /** The command outcome and the diagnosis eventually committed to the sentinel.
@@ -1316,7 +1335,8 @@ async function recoverDivergedSpoke(
     return { outcome: pull, failure: formatPullFailure(pull, "pull-rebase during auto-recovery failed") };
   }
 
-  const repush = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS);
+  // Only triggerSpokePush reaches this recovery, so it pushes like it does.
+  const repush = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS, false, false, true);
   if (repush.ok) {
     console.error("[schist] spoke recovered: pull-rebase-push succeeded");
     return { outcome: repush, failure: null };
@@ -1341,12 +1361,12 @@ export function triggerSpokePush(vaultRoot: string): void {
       // capture: true (#501). Discarding stderr here made every failure
       // class read as "push exited with code 1" in the sentinel, which is
       // both useless to an operator and unusable as a recovery signal.
-      let outcome = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS);
+      let outcome = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS, false, false, true);
 
       let failure = pushFailureMessage(outcome) === null ? null : formatPushFailure(outcome);
       if (failure !== null && await hasStaleGitOperation(vaultRoot)) {
         console.error("[schist] spoke push failed with stale git state; retrying with sync push --force");
-        const retry = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS, true);
+        const retry = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS, true, false, true);
         if (retry.ok) {
           outcome = retry;
           failure = null;

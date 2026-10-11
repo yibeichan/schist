@@ -1239,7 +1239,49 @@ describe("triggerSpokePush", () => {
       // Assert the exact argv shape (subagent flagged toContain "sync push"
       // as too loose — would accept `--vault X sync push extra-garbage`).
       // The stub's `echo "$@"` adds a trailing newline.
-      expect(argv.trim()).toBe(`--vault ${vault} sync push`);
+      expect(argv.trim()).toBe(`--vault ${vault} sync push --no-commit`);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  test("falls back to a plain push when the CLI predates --no-commit (#724)", async () => {
+    // A non-editable CLI install can lag the server. argparse rejects the
+    // unknown flag; without the fallback every background push would fail and
+    // write a sentinel that blocks later writes.
+    const vault = await makeTempVault();
+    await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, ".schist", "spoke.yaml"),
+      "hub: file:///nonexistent\nidentity: test\nscope: notes\n"
+    );
+    const logPath = path.join(vault, ".schist", "push-log");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(
+      path.join(stubDir, "schist"),
+      `#!/bin/sh\necho "$@" >> "${logPath}"\n` +
+      `case "$*" in *--no-commit*) echo "schist: error: unrecognized arguments: --no-commit" >&2; exit 2;; esac\n` +
+      `exit 0\n`,
+      { mode: 0o755 },
+    );
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      triggerSpokePush(vault);
+      let lines: string[] = [];
+      for (let i = 0; i < 60 && lines.length < 2; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+        lines = (await fs.readFile(logPath, "utf-8").catch(() => "")).trim().split("\n").filter(Boolean);
+      }
+      expect(lines).toEqual([
+        `--vault ${vault} sync push --no-commit`,
+        `--vault ${vault} sync push`,
+      ]);
+      // The plain push succeeded, so no failure sentinel was recorded.
+      await new Promise((r) => setTimeout(r, 200));
+      expect((await sync_status(vault) as unknown as Record<string, unknown>).last_sync_error).toBeNull();
     } finally {
       process.env.PATH = origPath;
       await fs.rm(stubDir, { recursive: true, force: true });
@@ -1435,8 +1477,8 @@ esac
       }
 
       expect(lines).toEqual([
-        `--vault ${vault} sync push`,
-        `--vault ${vault} sync push --force`,
+        `--vault ${vault} sync push --no-commit`,
+        `--vault ${vault} sync push --force --no-commit`,
       ]);
       await expect(fs.access(sentinelPath)).rejects.toBeDefined();
     } finally {

@@ -136,6 +136,12 @@ def main():
         '--force', action='store_true', default=argparse.SUPPRESS,
         help='Clear stale git rebase/merge/index-lock state before pushing',
     )
+    p_sync_push.add_argument(
+        '--no-commit', dest='no_commit', action='store_true', default=argparse.SUPPRESS,
+        help='Push existing commits only: never stage or commit uncommitted '
+             'files, and do not refuse on a live index.lock. The MCP server '
+             'commits each write itself and pushes with this.',
+    )
 
     # hooks
     p_hooks = sub.add_parser('hooks', help='Manage installed git hooks')
