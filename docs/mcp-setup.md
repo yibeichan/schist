@@ -216,7 +216,7 @@ The hook file lives in `.git/hooks/` and is never committed to any repository.
 
 Every process that touches the vault's git index or rewrites a note holds one
 exclusive lock, `<vault>/.schist/write.lock`, for exactly its own work: the
-CLI's `add`, `link` and `sync` commands and each MCP server's writes. Without
+CLI's `add`, `add-concept`, `link`, `sync push` and `sync pull` commands and each MCP server's writes. Without
 it, two writers' `git add` and `git commit` interleave, one commit sweeps the
 other's staged file in under the wrong message, and a read-modify-write such as
 `add_connection` loses the other writer's edge. A holder never keeps the lock
