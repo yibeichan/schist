@@ -3109,6 +3109,21 @@ class TestCheckMemoryDbPath:
         assert ".agent-state.db.new" in r.fix
         assert "mv " in r.fix
 
+    def test_cleanup_removes_only_the_legacy_db_files_not_the_directory(self, tmp_path, monkeypatch):
+        """`~/.openclaw` is OpenClaw's own directory on hosts that run it
+        (agents/, identity/, workspace/, openclaw.json). The cleanup step must
+        name the memory DB and its -wal/-shm, never the directory around it."""
+        legacy = tmp_path / ".openclaw" / "memory" / "agent-state.db"
+        self._seed_db(legacy, rows=2)
+        legacy_only = self._run(monkeypatch, tmp_path)
+        self._seed_db(tmp_path / ".schist" / "memory" / "agent-state.db", rows=2)
+        both = self._run(monkeypatch, tmp_path)
+        openclaw_dir = str(tmp_path / ".openclaw")
+        for r in (legacy_only, both):
+            assert f"{legacy}-wal" in r.fix and f"{legacy}-shm" in r.fix, r.fix
+            for token in r.fix.split():
+                assert token.rstrip(".,;") not in (openclaw_dir, openclaw_dir + "/"), r.fix
+
     def test_both_present_warns_that_legacy_entries_are_unreachable(self, tmp_path, monkeypatch):
         self._seed_db(tmp_path / ".openclaw" / "memory" / "agent-state.db", rows=5)
         self._seed_db(tmp_path / ".schist" / "memory" / "agent-state.db", rows=5)

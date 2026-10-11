@@ -2355,8 +2355,15 @@ def _memory_migration_fix(legacy: Path, canonical: Path) -> str:
         f"mkdir -p {canonical.parent} && "
         f"sqlite3 {legacy} \".backup '{canonical.parent}/.agent-state.db.new'\" && "
         f"mv {canonical.parent}/.agent-state.db.new {canonical} "
-        f"# then confirm the counts match and remove {legacy.parent.parent}"
+        f"# then confirm the counts match and {_legacy_cleanup(legacy)}"
     )
+
+
+def _legacy_cleanup(legacy: Path) -> str:
+    """Remove the legacy memory DB and its WAL siblings, and nothing else.
+    `~/.openclaw` is OpenClaw's own directory on hosts that run it (agents/,
+    identity/, workspace/, openclaw.json), so the cleanup must never name it."""
+    return f"rm -f {legacy} {legacy}-wal {legacy}-shm"
 
 
 def _unpinned_memory_db_clients(vault_path: Optional[str]) -> list[str]:
@@ -2435,8 +2442,8 @@ def check_memory_db_path(vault_path: Optional[str]) -> CheckResult:
             + (f" ({canonical_n} entries)" if canonical_n is not None else "")
             + f", but a legacy {legacy_desc} is still on disk — entries only in the "
               "legacy file are now unreachable." + pin_msg,
-            fix=f"Compare the counts; once {canonical} has everything, remove "
-                f"{legacy.parent.parent}. If the legacy file is AHEAD, re-run the "
+            fix=f"Compare the counts; once {canonical} has everything, "
+                f"{_legacy_cleanup(legacy)}. If the legacy file is AHEAD, re-run the "
                 f"migration: {_memory_migration_fix(legacy, canonical)}" + pin_fix,
         )
 
