@@ -56,8 +56,11 @@ function acquire(vaultRoot: string, timeoutMs: number): Promise<Acquired | { una
     let deadWhy = "";
     const exited = (): string | null => {
       if (spawnError !== null) return spawnError;
+      // The helper prints EXPIRED as it gives the flock up, so the lock is
+      // gone from that line on, even while the process is still exiting.
+      if (expired) return "max-hold expired";
       if (!dead) return null;
-      return expired ? "max-hold expired" : deadWhy;
+      return deadWhy;
     };
     // Backstop: a helper that wedges before LOCKED or exit (slow `uv run`
     // resolution, an NFS stall) must not block the caller forever.

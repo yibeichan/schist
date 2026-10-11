@@ -135,3 +135,18 @@ test("EXPIRED is detected even when split across chunks", async () => {
     });
   } finally { process.env.SCHIST_LOCK_BIN = prev; }
 }, 30000);
+
+test("EXPIRED counts as lost at once, before the helper exits", async () => {
+  // The helper prints EXPIRED as it releases the flock; it may still be alive
+  // (exiting, or stuck) when the write checks, and the lock is already gone.
+  const lingering = writeScript("lingering", "#!/bin/sh\necho LOCKED\necho EXPIRED\nexec cat >/dev/null\n");
+  const prev = process.env.SCHIST_LOCK_BIN;
+  process.env.SCHIST_LOCK_BIN = lingering;
+  try {
+    await withVaultLock(vault, 1000, async (h) => {
+      await new Promise((r) => setTimeout(r, 300));
+      expect((h as any)._child.exitCode).toBeNull();
+      expect(() => h.assertStillHeld()).toThrow(/max-hold expired/);
+    });
+  } finally { process.env.SCHIST_LOCK_BIN = prev; }
+}, 30000);
