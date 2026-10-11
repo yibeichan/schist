@@ -2935,6 +2935,47 @@ describe("sync_status + sync_retry (#135)", () => {
     }
   }, 10000);
 
+  test("an autostash conflict that leaves unmerged files is not retriable (#717)", async () => {
+    // Same CLI message as above, but the tree still has unmerged entries, so
+    // another sync_retry would run into the same conflict: retriable must be
+    // false and the reason must send the caller to resolve by hand.
+    const vault = await makeTempSpokeVault();
+    const blob = (await execFile("sh", ["-c", "printf 'x\\n' | git hash-object -w --stdin"], { cwd: vault })).stdout.trim();
+    const unmerged = [1, 2, 3].map((stage) => `100644 ${blob} ${stage}\tnotes/conflict.md`).join("\n") + "\n";
+    const updateIndex = execFileCb("git", ["update-index", "--index-info"], { cwd: vault });
+    updateIndex.stdin!.end(unmerged);
+    await new Promise<void>((resolve, reject) =>
+      updateIndex.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`update-index exited ${code}`)))),
+    );
+    expect((await execFile("git", ["ls-files", "--unmerged"], { cwd: vault })).stdout).toContain("notes/conflict.md");
+
+    const logPath = path.join(vault, ".schist", "retry-log");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    const stub = path.join(stubDir, "schist");
+    await fs.writeFile(
+      stub,
+      `#!/bin/sh\necho "$@" >> "${logPath}"\n` +
+      `echo "Error: ${PULL_AUTOSTASH_CONFLICT_PREFIX}. They are saved in the git stash (abc123)." >&2\n` +
+      `echo 'Applying autostash resulted in conflicts.' >&2\nexit 1\n`,
+      { mode: 0o755 },
+    );
+
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      const result = await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as unknown as Record<string, unknown>;
+      expect(result.ok).toBe(false);
+      expect(result.retriable).toBe(false);
+      expect(String(result.reason)).toContain("unmerged files");
+      expect(String(result.reason)).not.toContain("Run sync_retry again");
+      const log = await fs.readFile(logPath, "utf-8");
+      expect(log.trim()).toBe(`--vault ${vault} sync pull --autostash`);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
   test("the autostash-conflict prefix stays textually identical to cli/schist/git_ops.py", () => {
     const pySource = readFileSync(
       path.resolve(__dirname, "..", "..", "cli", "schist", "git_ops.py"),
