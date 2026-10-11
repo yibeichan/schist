@@ -39,16 +39,39 @@ function isGitTimeout(e: unknown): boolean {
 }
 
 /**
- * Waits between attempts when another process holds `.git/index.lock` (#719).
- * writeMutex only serializes this process's writes; the `schist sync push`
- * that triggerSpokePush spawns after every write is a separate process, and
- * its `git add`/`git commit` take the index lock while our next write is
- * staging or committing. git holds that lock for one command at a time (the
- * commit's window is its pre-commit hook plus the index write), so a short
- * wait clears it. The total (~3s) stays well inside writeMutex's 10s acquire
- * timeout, which a queued sibling write is spending while we wait.
+ * How long one write may wait in total for another process's
+ * `.git/index.lock` (#719). writeMutex only serializes this process's writes;
+ * the `schist sync push` that triggerSpokePush spawns after every write is a
+ * separate process, and its `git add`/`git commit` take the index lock while
+ * our next write is staging or committing. git holds that lock for one
+ * command at a time (the commit's window is its pre-commit hook plus the
+ * index write), so a short wait clears it. The allowance is per write, shared
+ * by all of its git calls, so a write never sleeps more than this while a
+ * queued sibling spends writeMutex's 10s acquire timeout waiting on it. A
+ * stale lock from a crashed git costs one write this much, then fails.
  */
-const INDEX_LOCK_RETRY_DELAYS_MS = [100, 200, 400, 800, 1600];
+const INDEX_LOCK_WAIT_BUDGET_MS = 3100;
+const INDEX_LOCK_FIRST_DELAY_MS = 100;
+
+/** One write's allowance for waiting on the index lock. */
+class IndexLockWait {
+  private sleptMs = 0;
+
+  constructor(private readonly budgetMs: number = INDEX_LOCK_WAIT_BUDGET_MS) {}
+
+  /**
+   * Sleeps before retry number `attempt` (0-based, per git call: the delay
+   * doubles from 100ms) and returns true, or returns false at once when the
+   * allowance is spent.
+   */
+  async beforeRetry(attempt: number): Promise<boolean> {
+    const delay = Math.min(INDEX_LOCK_FIRST_DELAY_MS * 2 ** attempt, this.budgetMs - this.sleptMs);
+    if (delay <= 0) return false;
+    this.sleptMs += delay;
+    await sleep(delay);
+    return true;
+  }
+}
 
 /**
  * A git failure caused by a live `index.lock`. git's sentence is localized,
@@ -62,13 +85,12 @@ function isIndexLockContention(e: unknown): boolean {
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** git(), retried while another process holds the index lock. */
-async function gitWaitingForIndexLock(vaultRoot: string, args: string[]): Promise<string> {
+async function gitWaitingForIndexLock(vaultRoot: string, args: string[], wait: IndexLockWait): Promise<string> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await git(vaultRoot, args);
     } catch (e) {
-      if (attempt >= INDEX_LOCK_RETRY_DELAYS_MS.length || !isIndexLockContention(e)) throw e;
-      await sleep(INDEX_LOCK_RETRY_DELAYS_MS[attempt]);
+      if (!isIndexLockContention(e) || !(await wait.beforeRetry(attempt))) throw e;
     }
   }
 }
@@ -474,6 +496,7 @@ async function withWriteLock(
 ): Promise<WriteResult> {
   const release = await writeMutex.acquire();
   try {
+    const lockWait = new IndexLockWait();
     const branch = await getWriteBranch(vaultRoot);
     await ensureBranch(vaultRoot, branch);
     // Trailing "--": force the branch reading even if a file shares the name
@@ -486,7 +509,7 @@ async function withWriteLock(
     // 2.43.x is in that window). The real option-injection defense is
     // assertValidWriteBranch (full check-ref-format + leading-dash reject),
     // unconditional and version-independent, so the flag is safe to drop here.
-    await gitWaitingForIndexLock(vaultRoot, ["checkout", branch, "--"]);
+    await gitWaitingForIndexLock(vaultRoot, ["checkout", branch, "--"], lockWait);
     await assertAttachedToWriteBranch(vaultRoot, branch);
 
     const absPath = path.resolve(vaultRoot, relPath);
@@ -509,7 +532,7 @@ async function withWriteLock(
     // Before staging, for landedViaConcurrentCommit below.
     const headBeforeStage = await headOrNull(vaultRoot);
     try {
-      await gitWaitingForIndexLock(vaultRoot, ["add", "--", relPath]);
+      await gitWaitingForIndexLock(vaultRoot, ["add", "--", relPath], lockWait);
     } catch (e) {
       throw writtenButUncommitted(relPath, e);
     }
@@ -545,17 +568,12 @@ async function withWriteLock(
     // git updates the ref BEFORE running post-commit, so a timeout that fires
     // during a slow hook kills a commit that already LANDED; reporting that
     // as GIT_TIMEOUT tells the caller the write failed when it's on the
-    // branch (#336). Capture HEAD first and re-check it on timeout.
-    let preCommitHead: string | null = null;
-    try {
-      preCommitHead = await git(vaultRoot, ["rev-parse", "HEAD"]);
-    } catch {
-      // Unborn branch — any resolvable post-timeout HEAD means the commit landed.
-    }
+    // branch (#336). commitWaitingForIndexLock records HEAD before the
+    // attempt that timed out; re-check it.
     const staged = await stagedEntries(vaultRoot, [relPath]);
     let commitWarning: string | undefined;
     try {
-      const outcome = await commitWaitingForIndexLock(vaultRoot, commitMessage, headBeforeStage, staged);
+      const outcome = await commitWaitingForIndexLock(vaultRoot, commitMessage, headBeforeStage, staged, lockWait);
       if (outcome === "landed") {
         const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
         return { path: relPath, commitSha: sha, committed: true, commitWarning: CONCURRENT_COMMIT_WARNING };
@@ -574,7 +592,9 @@ async function withWriteLock(
       // actually landed but HEAD was momentarily unreadable) is harmless for
       // writeNote: a retry re-stages identical content and withWriteLock's
       // dedup path returns committed:false without churning history.
-      if (headNow === null || headNow === preCommitHead) throw e;
+      // An unborn branch before the attempt (null): any resolvable HEAD now
+      // means the commit landed.
+      if (headNow === null || headNow === headBeforeTimedOutAttempt(e)) throw e;
       commitWarning =
         "committed; post-commit ingest still running or timed out — the index may lag this write until the next ingest";
     }
@@ -669,26 +689,54 @@ const CONCURRENT_COMMIT_WARNING =
  * (#719). "landed" when a concurrent commit already carries what we staged —
  * checked after every failure, because the lock holder is usually a
  * `schist sync push` whose commit sweeps our staged paths while we wait.
- * Throws the last failure otherwise; a GIT_TIMEOUT is thrown at once for the
- * caller's landed-before-the-hook check.
+ * Throws the last failure otherwise. A GIT_TIMEOUT is thrown at once,
+ * carrying the HEAD read just before that attempt (headBeforeTimedOutAttempt)
+ * for the caller's landed-before-the-hook check: HEAD can move between
+ * attempts without our content, so a value read before the first attempt
+ * would misreport a timed-out retry as committed.
  */
 async function commitWaitingForIndexLock(
   vaultRoot: string,
   message: string,
   headBeforeStage: string | null,
   staged: Map<string, string | null> | null,
+  wait: IndexLockWait,
 ): Promise<"committed" | "landed"> {
   for (let attempt = 0; ; attempt++) {
+    const headBeforeAttempt = await headOrNull(vaultRoot);
     try {
       await git(vaultRoot, ["commit", "-m", message], GIT_COMMIT_TIMEOUT_MS);
       return "committed";
     } catch (e) {
-      if (isGitTimeout(e)) throw e;
+      if (isGitTimeout(e)) throw Object.assign(e as object, { headBeforeAttempt });
       if (await landedViaConcurrentCommit(vaultRoot, headBeforeStage, staged)) return "landed";
-      if (attempt >= INDEX_LOCK_RETRY_DELAYS_MS.length || !isIndexLockContention(e)) throw e;
-      await sleep(INDEX_LOCK_RETRY_DELAYS_MS[attempt]);
+      if (!isIndexLockContention(e) || !(await wait.beforeRetry(attempt))) throw e;
     }
   }
+}
+
+/** HEAD before the commit attempt that timed out; null for an unborn branch. */
+function headBeforeTimedOutAttempt(e: unknown): string | null {
+  const head = e !== null && typeof e === "object" ? (e as { headBeforeAttempt?: unknown }).headBeforeAttempt : null;
+  return typeof head === "string" ? head : null;
+}
+
+/**
+ * A delete that failed and could not be rolled back: the deletion (and any
+ * connection repairs) may still be staged, and a later commit or sync would
+ * land them. Distinct from a plain failure so the caller checks the vault
+ * instead of assuming nothing changed.
+ */
+function deleteLeftStaged(paths: string[], cause: unknown, restoreErr: unknown): Error {
+  const msg = (x: unknown): string => (x instanceof Error ? x.message : String(x)).trim();
+  return Object.assign(
+    new Error(
+      `delete of ${paths[0]} failed (${msg(cause)}), and rolling it back also failed (${msg(restoreErr)}).\n` +
+        "The deletion may still be staged, and a later commit or sync may include it. Check the vault " +
+        "(`git status`) before retrying.",
+    ),
+    { error: "GIT_DELETE_LEFT_STAGED", details: { paths } },
+  );
 }
 
 /**
@@ -950,6 +998,7 @@ export async function deleteNote(
   const title = sanitizeCommitTitle(noteTitle && noteTitle.trim().length > 0 ? noteTitle : relPath);
   const release = await writeMutex.acquire();
   try {
+    const lockWait = new IndexLockWait();
     const branch = await getWriteBranch(vaultRoot);
     await ensureBranch(vaultRoot, branch);
     // Same option-injection hardening as withWriteLock: trailing "--" is
@@ -957,13 +1006,13 @@ export async function deleteNote(
     // after 2.43 (fails on ≤2.43), so with endOfOptionsArgs()'s ≥2.24 gate it
     // broke every delete on the common HPC git 2.43.x (#444).
     // assertValidWriteBranch is the real, version-independent defense.
-    await gitWaitingForIndexLock(vaultRoot, ["checkout", branch, "--"]);
+    await gitWaitingForIndexLock(vaultRoot, ["checkout", branch, "--"], lockWait);
     await assertAttachedToWriteBranch(vaultRoot, branch);
 
     try {
       // Before staging, for landedViaConcurrentCommit below.
       const headBeforeStage = await headOrNull(vaultRoot);
-      await gitWaitingForIndexLock(vaultRoot, ["rm", "--quiet", "--", relPath]);
+      await gitWaitingForIndexLock(vaultRoot, ["rm", "--quiet", "--", relPath], lockWait);
 
       for (const r of repairs) {
         // Post-checkout symlink/containment guard before writing through the
@@ -973,7 +1022,7 @@ export async function deleteNote(
         await assertResolvesInside(vaultRoot, r.relPath);
         const absPath = path.resolve(vaultRoot, r.relPath);
         await atomicWriteFile(absPath, r.content, vaultRoot);
-        await gitWaitingForIndexLock(vaultRoot, ["add", "--", r.relPath]);
+        await gitWaitingForIndexLock(vaultRoot, ["add", "--", r.relPath], lockWait);
       }
 
       // NEVER --no-verify — hard coded out (mirrors withWriteLock). Commit
@@ -988,7 +1037,6 @@ export async function deleteNote(
       // while the caller was told the delete failed (#336). Now the rollback
       // only runs when the commit genuinely did not land, which is exactly
       // when `--source=HEAD` is correct.
-      const preCommitHead = await git(vaultRoot, ["rev-parse", "HEAD"]);
       const staged = await stagedEntries(vaultRoot, [relPath, ...repairs.map((r) => r.relPath)]);
       let commitWarning: string | undefined;
       try {
@@ -997,6 +1045,7 @@ export async function deleteNote(
           `feat(schist): delete ${title} — ${attribution(owner)}`,
           headBeforeStage,
           staged,
+          lockWait,
         );
         // Already on the branch via a concurrent commit: no rollback.
         if (outcome === "landed") {
@@ -1018,7 +1067,7 @@ export async function deleteNote(
         // momentarily unreadable) self-corrects: a retried deleteNote hits
         // `git rm` on a now-untracked path and fails fast rather than
         // double-deleting.
-        if (headNow === null || headNow === preCommitHead) throw e;
+        if (headNow === null || headNow === headBeforeTimedOutAttempt(e)) throw e;
         commitWarning =
           "committed; post-commit ingest still running or timed out — the index may lag this delete until the next ingest";
       }
@@ -1035,13 +1084,20 @@ export async function deleteNote(
       // would also discard unrelated uncommitted edits elsewhere in the vault
       // (human edits, pre-existing staged work) on any delete failure. `git
       // restore --source=HEAD --staged --worktree` un-deletes / un-modifies
-      // exactly these paths. Best-effort — the original error is what the
-      // caller needs to see.
+      // exactly these paths. The restore gets its own index-lock allowance:
+      // a commit that ran out of waiting usually failed on a lock that is
+      // still held, and a swallowed restore failure left the deletion staged
+      // for the next commit or sync to land under its own message, while the
+      // caller was told the delete failed (#719).
+      const touched = [relPath, ...repairs.map((r) => r.relPath)];
       try {
-        const touched = [relPath, ...repairs.map((r) => r.relPath)];
-        await git(vaultRoot, ["restore", "--staged", "--worktree", "--source=HEAD", "--", ...touched]);
-      } catch {
-        /* nothing more we can do */
+        await gitWaitingForIndexLock(
+          vaultRoot,
+          ["restore", "--staged", "--worktree", "--source=HEAD", "--", ...touched],
+          new IndexLockWait(),
+        );
+      } catch (restoreErr) {
+        throw deleteLeftStaged(touched, e, restoreErr);
       }
       throw e;
     }

@@ -75,12 +75,22 @@ describe("git-writer: another process holds .git/index.lock (#719)", () => {
     await writeNote(vault, "notes/seed.md", "---\ntitle: Seed\n---\nseed");
     const lock = path.join(await gitDir(vault), "index.lock");
     await fs.writeFile(lock, "");
+    let lockReleased = false;
     const released = new Promise<void>((resolve) =>
-      setTimeout(() => void fs.rm(lock, { force: true }).then(() => resolve()), 400),
+      setTimeout(
+        () =>
+          void fs.rm(lock, { force: true }).then(() => {
+            lockReleased = true;
+            resolve();
+          }),
+        400,
+      ),
     );
 
     const content = "---\ntitle: Queued\n---\nbody";
     const result = await writeNote(vault, "notes/queued.md", content, "Queued", "orcd");
+    // It waited for the lock rather than slipping in before it was taken.
+    expect(lockReleased).toBe(true);
     await released;
 
     expect(result.committed).toBe(true);
@@ -133,7 +143,10 @@ describe("git-writer: another process holds .git/index.lock (#719)", () => {
     expect(err!.error).toBe("GIT_COMMIT_FAILED_FILE_WRITTEN");
     expect(err!.details?.path).toBe("notes/stuck.md");
     expect(err!.message).toContain("index.lock");
-    expect(await commitAttempts(vault)).toBeGreaterThan(1);
+    // Retried, but within one write's allowance (100+200+400+800+1600ms → 6 attempts).
+    const attempts = await commitAttempts(vault);
+    expect(attempts).toBeGreaterThan(1);
+    expect(attempts).toBeLessThanOrEqual(6);
     // Truthful: the file is on disk, staged, and not in HEAD.
     await expect(fs.access(path.join(vault, "notes/stuck.md"))).resolves.toBeUndefined();
     expect(await blobInHead(vault, "notes/stuck.md")).toBeNull();
@@ -165,5 +178,30 @@ describe("git-writer: another process holds .git/index.lock (#719)", () => {
     expect(result.committed).toBe(true);
     expect(await blobInHead(vault, "notes/doomed.md")).toBeNull();
     expect(await headSubject(vault)).toContain("delete Doomed — by orcd");
+  }, 30000);
+
+  test("deleteNote whose rollback also hits a held lock says the deletion may still be staged", async () => {
+    // The first commit attempt fails on the lock and leaves a real lock that
+    // outlives it: later attempts and the rollback's restore all hit it.
+    const vault = await makeTempVault();
+    await writeNote(vault, "notes/doomed.md", "---\ntitle: Doomed\n---\nbye");
+    const lock = path.join(await gitDir(vault), "index.lock");
+    await preCommitHook(vault, `if [ "$n" -eq 1 ]; then (sleep 0.05; : > "${lock}") & fi; ${LOCK_HELD}`);
+
+    try {
+      const err = await deleteNote(vault, "notes/doomed.md", "Doomed", "orcd").then(
+        () => null,
+        (e: unknown) => e as { error?: string; message?: string; details?: { paths?: string[] } },
+      );
+
+      expect(err).not.toBeNull();
+      expect(err!.error).toBe("GIT_DELETE_LEFT_STAGED");
+      expect(err!.details?.paths).toEqual(["notes/doomed.md"]);
+      expect(err!.message).toContain("may still be staged");
+      // Truthful: the note is still in HEAD; only the index/worktree changed.
+      expect(await blobInHead(vault, "notes/doomed.md")).not.toBeNull();
+    } finally {
+      await fs.rm(lock, { force: true });
+    }
   }, 30000);
 });
