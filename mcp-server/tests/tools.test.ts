@@ -2795,6 +2795,59 @@ describe("sync_status + sync_retry (#135)", () => {
     expect(result.blocking_ignored_paths).toEqual(["notes/secret-plan~"]);
   }, 10000);
 
+  test("sync_status stays unblocked with more junk than the 12,000-char output cap (#705)", async () => {
+    // Truncating the probe output fused two half-paths into one token and
+    // desynced check-ignore's 4-field records, so junk read as blocking.
+    const vault = await makeTempSpokeVault(); // scope: notes
+    await fs.appendFile(path.join(vault, ".gitignore"), "*~\n");
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    for (let i = 0; i < 400; i++) {
+      await fs.writeFile(path.join(vault, "notes", `editor-backup-of-a-long-note-name-${i}.md~`), "x");
+    }
+
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
+
+    expect(result.blocked_by_ignored).toBe(false);
+    expect(result.blocking_ignored_paths).toEqual([]);
+  }, 20000);
+
+  test("sync_status finds a content-ignored note among more junk than the output cap (#705)", async () => {
+    const vault = await makeTempSpokeVault(); // scope: notes
+    await fs.appendFile(path.join(vault, ".gitignore"), "*~\nnotes/m-secret*.md\n");
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    for (let i = 0; i < 400; i++) {
+      await fs.writeFile(path.join(vault, "notes", `editor-backup-of-a-long-note-name-${i}.md~`), "x");
+    }
+    // Sorts into the middle of the listing, the part truncation dropped.
+    await fs.writeFile(path.join(vault, "notes", "m-secret-plan.md"), "a real note\n");
+
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
+
+    expect(result.blocked_by_ignored).toBe(true);
+    expect(result.blocking_ignored_paths).toEqual(["notes/m-secret-plan.md"]);
+  }, 20000);
+
+  test("sync_status attributes a name that is not UTF-8 by its exact bytes (#705)", async () => {
+    // A lossy decode turned `caf\xe9~` into `caf�~`, which check-ignore
+    // matched only against the junk `*~` rule; the real file is excluded by
+    // the later content rule, which wins, so the push would hard-fail.
+    const vault = await makeTempSpokeVault(); // scope: notes
+    await fs.appendFile(path.join(vault, ".gitignore"), Buffer.from("*~\nnotes/caf\xe9*\n", "latin1"));
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    const name = Buffer.concat([Buffer.from(path.join(vault, "notes") + "/"), Buffer.from("caf\xe9~", "latin1")]);
+    try {
+      fsSync.writeFileSync(name, "a real note\n");
+    } catch {
+      return; // filesystem rejects names that are not UTF-8 (APFS)
+    }
+
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
+
+    expect(result.blocked_by_ignored).toBe(true);
+    // Shown decoded for display; the bad byte becomes U+FFFD there only.
+    expect(result.blocking_ignored_paths).toEqual(["notes/caf�~"]);
+  }, 10000);
+
   test("sync_status treats a spaced tilde backup as junk, not as a quoted blocking path (#698)", async () => {
     // porcelain v1 double-quotes a name with a space even under
     // core.quotePath=off; the kept quotes hid `*~` from the junk check.
