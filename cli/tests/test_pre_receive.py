@@ -548,6 +548,60 @@ class TestGetChangedFilesRealGit:
         assert set(get_changed_files(hub, tip)) - {"theirs/other.md"} == {"mine/w.md", "theirs/evil.md"}
         assert hub2
 
+    def test_merge_whose_tree_is_an_old_hub_commit_lists_what_it_reverts(self, repo):
+        """A merge lists only paths that differ from EVERY parent, and the
+        pusher chooses the parents: with an old hub commit as one parent and
+        its tree as the result, every later change to another scope is rolled
+        back while the combined diff lists nothing. The net diff from the
+        branch's current tip sees it."""
+        from schist.pre_receive import get_changed_files
+
+        old = self._git("rev-parse", "HEAD")
+        self._write("theirs/b.md", "their later edit\n")
+        self._write("theirs/new.md", "theirs\n")
+        hub = self._commit("other participant, already on the hub")
+        old_tree = self._git("rev-parse", f"{old}^{{tree}}")
+        rollback = self._git("commit-tree", "-p", hub, "-p", old, "-m", "merge", old_tree)
+
+        assert {"theirs/b.md", "theirs/new.md"} <= set(get_changed_files(hub, rollback))
+
+    def test_ordinary_merge_that_reverts_and_drops_hub_side_files_lists_them(self, repo):
+        from schist.pre_receive import get_changed_files
+
+        base = self._git("rev-parse", "HEAD")
+        self._write("theirs/b.md", "their later edit\n")
+        self._write("theirs/new.md", "theirs\n")
+        hub = self._commit("other participant, already on the hub")
+        self._git("switch", "-q", "-c", "side", base)
+        self._write("mine/w.md", "w\n")
+        self._commit("mine")
+        self._git("switch", "-q", "main")
+        self._git("merge", "-q", "--no-ff", "--no-commit", "side")
+        self._git("checkout", base, "--", "theirs/b.md")
+        self._git("rm", "-q", "theirs/new.md")
+        tip = self._commit("merge")
+
+        assert {"mine/w.md", "theirs/b.md", "theirs/new.md"} <= set(get_changed_files(hub, tip))
+
+    def test_merge_of_two_new_commits_cannot_hide_a_rollback(self, repo):
+        """No parent of the merge is on the hub, so a per-parent check has
+        nothing to compare with; the net diff still does."""
+        from schist.pre_receive import get_changed_files
+
+        old = self._git("rev-parse", "HEAD")
+        self._write("theirs/b.md", "their later edit\n")
+        hub = self._commit("other participant, already on the hub")
+        self._write("mine/one.md", "1\n")
+        new1 = self._commit("mine, on the hub tip")
+        self._git("switch", "-q", "-c", "stale", old)
+        self._write("mine/two.md", "2\n")
+        new2 = self._commit("mine, on an old base")
+        self._git("switch", "-q", "main")
+        tree = self._git("rev-parse", f"{new2}^{{tree}}")
+        merge = self._git("commit-tree", "-p", new1, "-p", new2, "-m", "merge", tree)
+
+        assert "theirs/b.md" in get_changed_files(hub, merge)
+
     def test_new_branch_form_lists_rename_sources_too(self, repo):
         from schist.pre_receive import ZERO_SHA, get_changed_files
 
@@ -571,20 +625,27 @@ class TestNonUtf8VaultYaml:
         repo = tmp_path / "hub.git"
         work = tmp_path / "work"
         subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
-        (work / "vault.yaml").write_bytes(b"participants:\n- name: caf\xe9\n")
+        # A VALID ACL apart from one byte that is not UTF-8, so the rejection
+        # can only come from the decode, not from ACL validation.
+        (work / "vault.yaml").write_bytes(
+            b"name: test-vault\nvault_version: 1\nscope_convention: subdirectory\n"
+            b"participants:\n- name: someone\n  type: agent\n"
+            b"access:\n  someone:\n    read: ['*']\n    write: ['*']\n"
+            b"# caf\xe9\n"
+        )
         for args in (["config", "user.email", "t@example.com"], ["config", "user.name", "t"],
                      ["add", "vault.yaml"], ["commit", "-qm", "acl"]):
             subprocess.run(["git", *args], cwd=work, check=True)
         subprocess.run(["git", "clone", "-q", "--bare", str(work), str(repo)], check=True)
         monkeypatch.chdir(repo)
         monkeypatch.setenv("GIT_DIR", str(repo))
-        monkeypatch.setattr("schist.pre_receive.find_vault_yaml", lambda: None)
 
         rc = main(stdin=["abc def refs/heads/main"], identity="someone")
 
         assert rc == 1
         err = capsys.readouterr().err
         assert "REJECTED: failed to load vault.yaml" in err
+        assert "codec can't decode" in err
         assert "Traceback" not in err
 
 
@@ -598,12 +659,17 @@ class TestGetChangedFiles:
     def test_existing_branch_uses_commit_history_not_net_diff(self):
         from schist.pre_receive import get_changed_files
 
-        mock_result = type("Result", (), {"stdout": b"a.md\0b.md\0a.md\0", "returncode": 0})()
-        with patch("subprocess.run", return_value=mock_result) as mock_run:
+        log = type("Result", (), {"stdout": b"a.md\0b.md\0a.md\0", "returncode": 0})()
+        net = type("Result", (), {"stdout": b"c.md\0a.md\0", "returncode": 0})()
+        with patch("subprocess.run", side_effect=[log, net]) as mock_run:
             result = get_changed_files("aaa", "bbb")
-        assert result == ["a.md", "b.md"]
-        cmd = mock_run.call_args[0][0]
-        assert cmd == ["git", "log", "--name-only", "--no-renames", "-c", "--format=", "-z", "aaa..bbb"]
+        # Per-commit listing first, then the net diff, de-duplicated (#703).
+        assert result == ["a.md", "b.md", "c.md"]
+        cmds = [c[0][0] for c in mock_run.call_args_list]
+        assert cmds == [
+            ["git", "log", "--name-only", "--no-renames", "-c", "--format=", "-z", "aaa..bbb"],
+            ["git", "diff", "--name-only", "--no-renames", "-z", "aaa", "bbb"],
+        ]
 
     def test_new_branch_uses_commit_history_not_tip_diff(self):
         from schist.pre_receive import ZERO_SHA, get_changed_files

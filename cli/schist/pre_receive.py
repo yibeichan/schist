@@ -203,6 +203,16 @@ def get_changed_files(oldrev: str, newrev: str) -> list[str]:
       lists exactly the paths that differ from every parent. Not `-m`: that
       diffs against each parent, so a routine pull-merge would list every path
       the hub side brought in from other participants and be rejected.
+
+    `-c` alone is not enough, because the pusher chooses a merge's parents:
+    with an old hub commit as one parent and its content as the result, any
+    later change in any scope (vault.yaml included) is rolled back while the
+    combined diff lists nothing. So an existing branch also adds the net diff
+    from its current tip: every path whose content this push changes on the
+    branch, however the merge was built. A routine pull-merge adds nothing
+    there that is not the pusher's own, since the hub side is already in
+    `oldrev`. A new branch has no current content to roll back; its new
+    content is all in the per-commit listing.
     """
     if newrev == ZERO_SHA:
         # Branch deletion — nothing to check
@@ -219,6 +229,7 @@ def get_changed_files(oldrev: str, newrev: str) -> list[str]:
             check=True,
             timeout=30,
         )
+        listing = result.stdout
     else:
         result = subprocess.run(
             ["git", "log", "--name-only", "--no-renames", "-c", "--format=", "-z",
@@ -227,6 +238,13 @@ def get_changed_files(oldrev: str, newrev: str) -> list[str]:
             check=True,
             timeout=30,
         )
+        net = subprocess.run(
+            ["git", "diff", "--name-only", "--no-renames", "-z", oldrev, newrev],
+            capture_output=True,
+            check=True,
+            timeout=30,
+        )
+        listing = result.stdout.rstrip(b"\0") + b"\0" + net.stdout
 
     # Bytes, not text: a filename git stores need not be UTF-8, and a strict
     # decode here raised UnicodeDecodeError out of the hook (#697). Explicit
@@ -234,7 +252,7 @@ def get_changed_files(oldrev: str, newrev: str) -> list[str]:
     # sshd forwards the client's LANG/LC_*, so under a latin-1 locale a bad
     # byte would decode to mojibake and slip past check_push. Distinct bad bytes
     # stay distinct, so check_push can reject the path by name.
-    changed_files = [f.decode("utf-8", "surrogateescape") for f in result.stdout.strip(b"\0").split(b"\0") if f]
+    changed_files = [f.decode("utf-8", "surrogateescape") for f in listing.strip(b"\0").split(b"\0") if f]
     return list(dict.fromkeys(changed_files))
 
 
