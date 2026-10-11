@@ -226,7 +226,8 @@ The lock is re-entrant within a process.
 
 Node has no portable `flock`, so the server holds the lock through a helper,
 `schist lock hold`, for the span of one write. Closing the helper's stdin
-releases the lock; so does either process dying.
+releases the lock; so does either process dying. Run by hand, the helper
+defaults to `--timeout 10` and `--max-hold 120`.
 
 | Helper output | Exit code | Meaning |
 |---|---|---|
@@ -242,6 +243,9 @@ a missing binary), the server logs once
 `cross-process vault lock unavailable: <reason>` and serializes within its own
 process only; upgrade the CLI to restore cross-process safety.
 
+The server's background push (`sync push --no-commit` without `--force`) takes
+no lock, because it never touches the index.
+
 Timing to expect:
 
 - A write waiting on the cross-process lock can take up to
@@ -255,7 +259,7 @@ Timing to expect:
   seconds, enough for a slow post-commit ingest.
 
 On NFS, `flock` works across hosts under NFSv4. If a node crashes while
-holding the lock, the server reclaims it when the lease expires, about 90 s
+holding the lock, the NFS server reclaims it when the lease expires, about 90 s
 later. There is one lock file per vault path; a symlinked or dual-mounted
 path resolves to the same file, so that is fine.
 

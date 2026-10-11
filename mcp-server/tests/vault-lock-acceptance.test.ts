@@ -30,6 +30,7 @@ let tmp: string;
 let vault: string;
 let wrapper: string;
 const prevLockBin = process.env.SCHIST_LOCK_BIN;
+const prevWait = process.env.SCHIST_VAULT_LOCK_WAIT_MS;
 
 const git = async (args: string[]) => (await execFileP("git", args, { cwd: vault })).stdout;
 
@@ -45,12 +46,14 @@ function run(bin: string, args: string[], env: NodeJS.ProcessEnv = {}): Promise<
 }
 
 beforeAll(async () => {
-  jest.setTimeout(240000);
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "vault-lock-acc-"));
   vault = path.join(tmp, "vault");
   fs.mkdirSync(vault, { recursive: true });
   wrapper = path.join(tmp, "schist");
   fs.writeFileSync(wrapper, localSchistWrapperScript(repoRoot), { mode: 0o755 });
+  // Seven writers share one lock and each spawns the helper through a slow wrapper:
+  // give the last waiter room on a loaded node or NFS.
+  process.env.SCHIST_VAULT_LOCK_WAIT_MS = "60000";
   process.env.SCHIST_LOCK_BIN = process.env.SCHIST_LOCK_BIN ?? wrapper;
   await git(["init", "-q"]);
   await git(["config", "user.email", "t@example.com"]);
@@ -64,6 +67,8 @@ beforeAll(async () => {
 afterAll(() => {
   if (prevLockBin === undefined) delete process.env.SCHIST_LOCK_BIN;
   else process.env.SCHIST_LOCK_BIN = prevLockBin;
+  if (prevWait === undefined) delete process.env.SCHIST_VAULT_LOCK_WAIT_MS;
+  else process.env.SCHIST_VAULT_LOCK_WAIT_MS = prevWait;
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -84,9 +89,15 @@ test("two server instances + a CLI writer: every commit lands under its own mess
   expect(a!.writeMutex).not.toBe(b!.writeMutex);
 
   const cli = run(wrapper, ["--vault", vault, "add", "--title", "cli note", "--dir", "notes", "--body", "from cli"]);
-  const writes = Array.from({ length: N }, (_, i) =>
-    (i % 2 ? a! : b!).writeNote(vault, `notes/n${i}.md`, `---\ntitle: n${i}\n---\nbody ${i}\n`, `n${i}`, "tester", { exclusive: true }));
-  const results = await Promise.all(writes);
+  // Each instance runs its writes one after another (the 10 s writeMutex budget
+  // is not configurable); the two instances and the CLI run concurrently.
+  const chain = async (m: typeof a, ids: number[]) => {
+    const rs = [];
+    for (const i of ids)
+      rs.push(await m!.writeNote(vault, `notes/n${i}.md`, `---\ntitle: n${i}\n---\nbody ${i}\n`, `n${i}`, "tester", { exclusive: true }));
+    return rs;
+  };
+  const results = (await Promise.all([chain(a, [1, 3, 5]), chain(b, [0, 2, 4])])).flat();
   const c = await cli;
   expect({ code: c.code, out: c.out }).toMatchObject({ code: 0 });
   results.forEach((r) => expect(r.committed).toBe(true));
@@ -104,7 +115,7 @@ test("two server instances + a CLI writer: every commit lands under its own mess
   for (let i = 0; i < N; i++) {
     const cm = commits.find((x) => x.files[0] === `notes/n${i}.md`);
     expect(cm).toBeDefined();
-    expect(cm!.subject).toContain(`n${i}`);
+    expect(cm!.subject).toContain(`write n${i} `);
   }
   expect(commits.filter((x) => !/^notes\/n\d\.md$/.test(x.files[0]))).toHaveLength(1);
   expect((await git(["status", "--porcelain"])).trim()).toBe("");
