@@ -639,6 +639,20 @@ def classify_pull_failure(output: str) -> str:
     return "other"
 
 
+def _fetch_before_pull(vault_path: str) -> None:
+    """Fetch outside the vault write lock, so network time never blocks
+    writers; the pull's own fetch is then an incremental no-op (#724).
+    Never raises: a failed fetch is reported by the pull itself."""
+    try:
+        branch = git_ops.current_branch(vault_path)
+        if not branch:
+            return  # pull_rebase reports the detached HEAD
+        subprocess.run(["git", "fetch", "--quiet", "origin", branch], cwd=vault_path,
+                       capture_output=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
 def sync_pull(args, vault_path: str, db_path: str) -> None:
     """Pull updates from hub and rebuild SQLite index."""
     if not is_spoke(vault_path):
@@ -646,17 +660,18 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
         sys.exit(1)
 
     config = load_spoke_config(vault_path)
-    cleanup_stale_git_state(vault_path, force=_force_enabled(args))
-
+    _fetch_before_pull(vault_path)
     print(f"Pulling from hub as {config.identity}...")
 
     # Opt-in only: `getattr(...) is True` so a caller that never set the flag
     # (or a MagicMock args) cannot turn an implicit pull into a stash. The
     # implicit call keeps its original one-argument shape.
-    if getattr(args, "autostash", False) is True:
-        ok, output = git_ops.pull_rebase(vault_path, autostash=True)
-    else:
-        ok, output = git_ops.pull_rebase(vault_path)
+    with git_ops.vault_write_lock(vault_path):
+        cleanup_stale_git_state(vault_path, force=_force_enabled(args))
+        if getattr(args, "autostash", False) is True:
+            ok, output = git_ops.pull_rebase(vault_path, autostash=True)
+        else:
+            ok, output = git_ops.pull_rebase(vault_path)
     if not ok:
         def _unreachable(*, tree_certain: bool = True) -> None:
             # Parity with sync_push (#567): pull had no network branch at all,
@@ -1181,7 +1196,14 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
 
     config = load_spoke_config(vault_path)
     no_commit = _no_commit_enabled(args)
-    cleanup_stale_git_state(vault_path, force=_force_enabled(args), uses_index=not no_commit)
+    if no_commit and not _force_enabled(args):
+        # Background push (#724): cleanup touches no index state here, and
+        # this path must stay lock-free.
+        cleanup_stale_git_state(vault_path, force=False, uses_index=False)
+    else:
+        with git_ops.vault_write_lock(vault_path):
+            cleanup_stale_git_state(vault_path, force=_force_enabled(args),
+                                    uses_index=not no_commit)
 
     # Snapshot the sentinel BEFORE doing any work, so a failure another process
     # records while this push runs is never mistaken for the one we recovered

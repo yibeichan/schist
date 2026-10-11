@@ -3237,3 +3237,90 @@ def test_hooks_reinstall_survives_non_utf8_git_output_end_to_end(tmp_path, monke
 
     assert (hooks / "pre-commit").exists() and (hooks / "post-commit").exists()
     assert ".schist/" in exclude.read_text()
+
+
+class TestPullUnderVaultLock:
+    def test_rebase_and_cleanup_run_inside_lock_fetch_outside(self, tmp_path, monkeypatch):
+        import fcntl
+        import os as _os
+
+        from schist import git_ops, sync
+
+        vault = _make_spoke(tmp_path)
+
+        def lock_is_held():
+            fd = _os.open(_os.path.join(vault, ".schist", "write.lock"),
+                          _os.O_RDWR | _os.O_CREAT)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                return False
+            except BlockingIOError:
+                return True
+            finally:
+                _os.close(fd)
+
+        seen = {}
+
+        def fake_fetch(v):
+            seen["fetch"] = lock_is_held()
+
+        def fake_cleanup(v, **k):
+            seen["cleanup"] = lock_is_held()
+
+        def fake_rebase(v, **k):
+            seen["rebase"] = lock_is_held()
+            return (True, "")
+
+        monkeypatch.setattr(sync, "_fetch_before_pull", fake_fetch)
+        monkeypatch.setattr(sync, "cleanup_stale_git_state", fake_cleanup)
+        monkeypatch.setattr(git_ops, "pull_rebase", fake_rebase)
+        monkeypatch.setattr(sync, "_rebuild_index", lambda *a, **k: None)
+        sync.sync_pull(MagicMock(autostash=False, force=False), vault,
+                       str(Path(vault) / ".schist" / "schist.db"))
+        assert seen == {"fetch": False, "cleanup": True, "rebase": True}
+
+    def test_fetch_failure_is_swallowed(self, tmp_path, monkeypatch):
+        import subprocess as sp
+
+        from schist import git_ops, sync
+
+        monkeypatch.setattr(git_ops, "current_branch", lambda v: "main")
+
+        def boom(*a, **k):
+            raise sp.TimeoutExpired("git", 30)
+
+        monkeypatch.setattr(sync.subprocess, "run", boom)
+        sync._fetch_before_pull(_make_spoke(tmp_path))
+
+    def test_push_cleanup_locked_except_background_no_commit(self, tmp_path, monkeypatch):
+        import fcntl
+        import os as _os
+
+        from schist import sync
+
+        vault = _make_spoke(tmp_path)
+        held = []
+
+        def probe(v, **k):
+            fd = _os.open(_os.path.join(v, ".schist", "write.lock"), _os.O_RDWR | _os.O_CREAT)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held.append(False)
+            except BlockingIOError:
+                held.append(True)
+            finally:
+                _os.close(fd)
+
+        monkeypatch.setattr(sync, "cleanup_stale_git_state", probe)
+
+        def run(**kw):
+            try:
+                sync.sync_push(MagicMock(**kw), vault, "db.sqlite")
+            except BaseException:
+                pass
+
+        run(no_commit=False, force=False)
+        run(no_commit=True, force=False)
+        run(no_commit=True, force=True)
+        assert held == [True, False, True]
