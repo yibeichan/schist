@@ -737,6 +737,13 @@ def _partial_output(exc: subprocess.TimeoutExpired) -> str:
     return "\n".join(p for p in parts if p).strip()
 
 
+_DETACHED_HEAD_MESSAGE = (
+    "Could not determine current branch (detached HEAD, git failure, or timeout); "
+    "if a previous sync --force left HEAD detached, reattach with "
+    "'git checkout <branch>' in the vault"
+)
+
+
 def pull_rebase(vault_path: str, autostash: bool = False) -> tuple[bool, str]:
     """Pull with rebase from origin. Aborts rebase on conflict.
 
@@ -746,7 +753,98 @@ def pull_rebase(vault_path: str, autostash: bool = False) -> tuple[bool, str]:
     push path's recovery, scheduled jobs -- keep refusing on a dirty tree:
     `--no-autostash` is passed explicitly so a user's `rebase.autoStash`
     config cannot turn one into a silent stash.
+
+    This fetches and rebases in one network-bound step. `schist sync pull`
+    instead runs fetch_origin outside the vault write lock and
+    rebase_onto_fetched inside it (#724), so the hub's latency never holds
+    the lock.
     """
+    def command(branch: str) -> list[str]:
+        return ['git', 'pull', '--rebase',
+                '--autostash' if autostash else '--no-autostash', 'origin', branch]
+
+    return _rebase_onto_origin(vault_path, autostash, command, _pull_timeout_message)
+
+
+def rebase_onto_fetched(vault_path: str, autostash: bool = False) -> tuple[bool, str]:
+    """Rebase the current branch onto the already-fetched origin/<branch>.
+
+    No network: the caller fetched first (fetch_origin). Same contract as
+    pull_rebase -- detached-HEAD refusal, opt-in autostash with the same
+    stash check, abort on conflict, the same (ok, output) shape -- so
+    `schist sync pull` can hold the vault write lock for this step only.
+    """
+    def command(branch: str) -> list[str]:
+        return ['git', 'rebase',
+                '--autostash' if autostash else '--no-autostash', f'origin/{branch}']
+
+    return _rebase_onto_origin(vault_path, autostash, command, _local_rebase_timeout_message)
+
+
+def fetch_origin(vault_path: str, branch: str) -> tuple[bool, str]:
+    """`git fetch origin <branch>`, returning (ok, output) for classification.
+
+    The failure output is what pull_rebase's `git pull` would have printed for
+    the same transport error, and a timeout carries PULL_NO_RESPONSE_PREFIX
+    plus the child's partial output, so sync's pull-failure classification
+    (unreachable, refused, ...) reads it unchanged.
+    """
+    try:
+        result = subprocess.run(
+            ['git', 'fetch', 'origin', branch],
+            cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=60,
+        )
+    except subprocess.TimeoutExpired as timeout_exc:
+        partial = _partial_output(timeout_exc)
+        detail = f"\n{partial}" if partial else ""
+        return False, (f"{PULL_NO_RESPONSE_PREFIX} "
+                       "(hub unreachable, VPN down, or a stalled transport); "
+                       "no changes were applied." + detail)
+    except OSError as e:
+        return False, f"git fetch could not run: {e}"
+    output = (result.stdout + result.stderr).strip()
+    return result.returncode == 0, output
+
+
+def _pull_timeout_message(timeout_exc: subprocess.TimeoutExpired, abort_timed_out: bool) -> str:
+    if abort_timed_out:
+        return (f"{PULL_NO_RESPONSE_PREFIX} "
+                "(rebase --abort also timed out; rerun sync to clean up)")
+    # Keep whatever the child managed to emit before the cap fired (#567).
+    # subprocess.run DISCARDS it on TimeoutExpired, so an unreachable hub
+    # produced a bare "Pull timed out after 60s" carrying no evidence of
+    # anything — and the caller then could not tell a dead network from a
+    # stalled rebase. Worse, ssh's default connect timeout on macOS (~75s,
+    # the TCP SYN retry budget) is LONGER than this 60s cap, so on a down
+    # VPN ssh never reaches its own "Operation timed out" line: the wrapper
+    # kills the only process that knows the answer. Naming "no response
+    # from the hub" is therefore the honest phrasing AND the one
+    # _is_network_error already classifies — since #584 via the
+    # line-anchored PULL_NO_RESPONSE_PREFIX rather than the bare
+    # "timed out" substring this comment used to name — which is what
+    # puts this on the unreachable side of the sync-gating axis instead
+    # of the refused side.
+    partial = _partial_output(timeout_exc)
+    detail = f"\n{partial}" if partial else ""
+    return (f"{PULL_NO_RESPONSE_PREFIX} "
+            "(hub unreachable, VPN down, or a stalled transport); "
+            "no changes were applied." + detail)
+
+
+def _local_rebase_timeout_message(timeout_exc: subprocess.TimeoutExpired,
+                                  abort_timed_out: bool) -> str:
+    # A local rebase has no hub to blame: name the stall instead, and never
+    # open with PULL_NO_RESPONSE_PREFIX, which classifies as unreachable.
+    if abort_timed_out:
+        return (f"Rebase onto the fetched hub branch timed out after {timeout_exc.timeout}s "
+                f"(stale index.lock or NFS stall?), and {PULL_ABORT_FAILED_MARKER}; "
+                "rerun sync to clean up")
+    return (f"Rebase onto the fetched hub branch timed out after {timeout_exc.timeout}s "
+            "(stale index.lock or NFS stall?); the rebase was aborted")
+
+
+def _rebase_onto_origin(vault_path, autostash, command, timeout_message) -> tuple[bool, str]:
+    """Shared body of pull_rebase and rebase_onto_fetched."""
     try:
         branch = current_branch(vault_path)
         if not branch:
@@ -754,11 +852,7 @@ def pull_rebase(vault_path: str, autostash: bool = False) -> tuple[bool, str]:
             # `git pull --rebase origin ''` SUCCEEDS — it fetches the
             # remote's default-branch HEAD and silently rebases the current
             # branch onto it (verified on git 2.50). Fail loudly instead. #325
-            return False, (
-                "Could not determine current branch (detached HEAD, git failure, or timeout); "
-                "if a previous sync --force left HEAD detached, reattach with "
-                "'git checkout <branch>' in the vault"
-            )
+            return False, _DETACHED_HEAD_MESSAGE
         # With --autostash, an uncommitted edit to a tracked file no longer
         # fails the pull ("cannot pull with rebase: You have unstaged
         # changes"): git stashes the edits, rebases, and re-applies them. A
@@ -774,8 +868,7 @@ def pull_rebase(vault_path: str, autostash: bool = False) -> tuple[bool, str]:
                     "commit the edits and pull without --autostash."
                 )
         result = subprocess.run(
-            ['git', 'pull', '--rebase',
-             '--autostash' if autostash else '--no-autostash', 'origin', branch],
+            command(branch),
             cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=60,
         )
         output = result.stdout + result.stderr
@@ -806,27 +899,8 @@ def pull_rebase(vault_path: str, autostash: bool = False) -> tuple[bool, str]:
                 cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=30,
             )
         except subprocess.TimeoutExpired:
-            return False, (f"{PULL_NO_RESPONSE_PREFIX} "
-                           "(rebase --abort also timed out; rerun sync to clean up)")
-        # Keep whatever the child managed to emit before the cap fired (#567).
-        # subprocess.run DISCARDS it on TimeoutExpired, so an unreachable hub
-        # produced a bare "Pull timed out after 60s" carrying no evidence of
-        # anything — and the caller then could not tell a dead network from a
-        # stalled rebase. Worse, ssh's default connect timeout on macOS (~75s,
-        # the TCP SYN retry budget) is LONGER than this 60s cap, so on a down
-        # VPN ssh never reaches its own "Operation timed out" line: the wrapper
-        # kills the only process that knows the answer. Naming "no response
-        # from the hub" is therefore the honest phrasing AND the one
-        # _is_network_error already classifies — since #584 via the
-        # line-anchored PULL_NO_RESPONSE_PREFIX rather than the bare
-        # "timed out" substring this comment used to name — which is what
-        # puts this on the unreachable side of the sync-gating axis instead
-        # of the refused side.
-        partial = _partial_output(timeout_exc)
-        detail = f"\n{partial}" if partial else ""
-        return False, (f"{PULL_NO_RESPONSE_PREFIX} "
-                       "(hub unreachable, VPN down, or a stalled transport); "
-                       "no changes were applied." + detail)
+            return False, timeout_message(timeout_exc, True)
+        return False, timeout_message(timeout_exc, False)
     except subprocess.CalledProcessError as e:
         return False, (e.stdout or '') + (e.stderr or '')
 

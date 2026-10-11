@@ -220,8 +220,11 @@ CLI's `add`, `add-concept`, `link`, `sync push` and `sync pull` commands and eac
 it, two writers' `git add` and `git commit` interleave, one commit sweeps the
 other's staged file in under the wrong message, and a read-modify-write such as
 `add_connection` loses the other writer's edge. A holder never keeps the lock
-while it spawns a child that takes it (that would deadlock); `schist sync pull`,
-for example, fetches outside the lock and takes it only for cleanup and rebase.
+while it spawns a child that takes it (that would deadlock). No network call
+runs under the lock: `schist sync pull` fetches first, without it, and then
+takes it only to clean up and rebase onto the fetched branch, so an unreachable
+hub never holds up writers. A failed fetch is reported (unreachable, refused,
+and so on) without the lock ever being taken.
 The lock is re-entrant within a process.
 
 Node has no portable `flock`, so the server holds the lock through a helper,

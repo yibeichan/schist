@@ -648,18 +648,16 @@ def classify_pull_failure(output: str) -> str:
     return "other"
 
 
-def _fetch_before_pull(vault_path: str) -> None:
-    """Fetch outside the vault write lock, so network time never blocks
-    writers; the pull's own fetch is then an incremental no-op (#724).
-    Never raises: a failed fetch is reported by the pull itself."""
-    try:
-        branch = git_ops.current_branch(vault_path)
-        if not branch:
-            return  # pull_rebase reports the detached HEAD
-        subprocess.run(["git", "fetch", "--quiet", "origin", branch], cwd=vault_path,
-                       capture_output=True, timeout=30)
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+def _fetch_before_pull(vault_path: str) -> tuple[bool, str]:
+    """Fetch origin/<branch> outside the vault write lock (#724), so the hub's
+    latency (up to the 60 s cap on an unreachable hub) never holds the lock
+    every MCP write waits on. Returns (ok, output); a failure's output is
+    classified like a failed pull's. An unknown branch skips the fetch and
+    returns ok: the rebase step then reports the detached HEAD."""
+    branch = git_ops.current_branch(vault_path)
+    if not branch:
+        return True, ""
+    return git_ops.fetch_origin(vault_path, branch)
 
 
 def sync_pull(args, vault_path: str, db_path: str) -> None:
@@ -669,18 +667,29 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
         sys.exit(1)
 
     config = load_spoke_config(vault_path)
-    _fetch_before_pull(vault_path)
     print(f"Pulling from hub as {config.identity}...")
 
-    # Opt-in only: `getattr(...) is True` so a caller that never set the flag
-    # (or a MagicMock args) cannot turn an implicit pull into a stash. The
-    # implicit call keeps its original one-argument shape.
-    with git_ops.vault_write_lock(vault_path):
-        cleanup_stale_git_state(vault_path, force=_force_enabled(args))
-        if getattr(args, "autostash", False) is True:
-            ok, output = git_ops.pull_rebase(vault_path, autostash=True)
-        else:
-            ok, output = git_ops.pull_rebase(vault_path)
+    # A killed pull leaves its rebase behind, with HEAD detached, so the
+    # branch to fetch cannot be read until that state is cleared. Clearing it
+    # needs the lock: the state may instead be another pull's live rebase.
+    if _rebase_state_present(_operation_state_dir(vault_path)):
+        with git_ops.vault_write_lock(vault_path):
+            cleanup_stale_git_state(vault_path, force=_force_enabled(args))
+
+    # The network step runs without the lock; only the local rebase onto the
+    # fetched origin/<branch> holds it (#724). A failed fetch is reported
+    # below exactly like a failed pull.
+    ok, output = _fetch_before_pull(vault_path)
+    if ok:
+        # Opt-in only: `getattr(...) is True` so a caller that never set the
+        # flag (or a MagicMock args) cannot turn an implicit pull into a
+        # stash. The implicit call keeps its original one-argument shape.
+        with git_ops.vault_write_lock(vault_path):
+            cleanup_stale_git_state(vault_path, force=_force_enabled(args))
+            if getattr(args, "autostash", False) is True:
+                ok, output = git_ops.rebase_onto_fetched(vault_path, autostash=True)
+            else:
+                ok, output = git_ops.rebase_onto_fetched(vault_path)
     if not ok:
         def _unreachable(*, tree_certain: bool = True) -> None:
             # Parity with sync_push (#567): pull had no network branch at all,
