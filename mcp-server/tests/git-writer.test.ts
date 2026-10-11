@@ -415,6 +415,11 @@ describe("git-writer under the vault write lock (#724)", () => {
         error: "WRITE_TIMEOUT",
         message: expect.stringMatching(/held by \S+:\d+/),
       });
+      // The message reports the wait actually configured, in flat wording.
+      const err = await writeNote(vault, "notes/b.md", "---\ntitle: b\n---\n", "b", "t").catch((e) => e);
+      expect(err.message).toContain("0.5s");
+      expect(err.message).not.toContain("10s");
+      expect(err.message).not.toMatch(/\([^)]*\(/);
       await expect(fs.access(path.join(vault, "notes", "b.md"))).rejects.toThrow();
     } finally {
       delete process.env.SCHIST_VAULT_LOCK_WAIT_MS;

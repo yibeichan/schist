@@ -32,7 +32,7 @@ export const writeMutex = withTimeout(new Mutex(), 10000, WRITE_TIMEOUT_ERROR);
  * the CLI's sync and every other MCP server take on <vault>/.schist/write.lock.
  * Read per call so the env knob applies without a restart.
  */
-function vaultLockWaitMs(): number {
+export function vaultLockWaitMs(): number {
   return Number(process.env.SCHIST_VAULT_LOCK_WAIT_MS) || 10000;
 }
 
@@ -43,13 +43,15 @@ function vaultLockWaitMs(): number {
  * same retryable code as a busy writeMutex, naming the holder.
  */
 async function underVaultLock<T>(vaultRoot: string, fn: (vlock: VaultLockHandle) => Promise<T>): Promise<T> {
+  const waitMs = vaultLockWaitMs();
   try {
-    return await withVaultLock(vaultRoot, vaultLockWaitMs(), fn);
+    return await withVaultLock(vaultRoot, waitMs, fn);
   } catch (e) {
     if (e instanceof VaultLockTimeout) {
-      throw Object.assign(new Error(`${WRITE_TIMEOUT_ERROR.message ?? "write lock timed out"} (${e.message})`), {
-        error: "WRITE_TIMEOUT",
-      });
+      throw Object.assign(
+        new Error(`Git write timed out after ${waitMs / 1000}s waiting for the vault write lock, held by ${e.holder}; retry the write`),
+        { error: "WRITE_TIMEOUT" },
+      );
     }
     throw e;
   }
