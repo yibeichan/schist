@@ -162,6 +162,13 @@ def main():
         help='Also overwrite hooks marked `# schist-hook-version: pinned` (opt-out marker)',
     )
 
+    # lock: internal helper for the MCP server (hidden from help)
+    p_lock = sub.add_parser('lock')  # no help=: argparse then omits it from the command list
+    lock_sub = p_lock.add_subparsers(dest='lock_action')
+    p_lock_hold = lock_sub.add_parser('hold')
+    p_lock_hold.add_argument('--timeout', type=float, default=10.0)
+    p_lock_hold.add_argument('--max-hold', dest='max_hold', type=float, default=120.0)
+
     # hub: filesystem-side ACL administration of a bare hub repo
     p_hub = sub.add_parser('hub', help='Administer a bare hub vault.yaml (filesystem)')
     hub_sub = p_hub.add_subparsers(dest='hub_action')
@@ -322,6 +329,13 @@ def main():
             print('Usage: schist hooks reinstall', file=sys.stderr)
             sys.exit(1)
         sys.exit(0)
+
+    if args.command == 'lock':
+        from . import lock_cmd
+        if args.lock_action != 'hold':
+            print('Usage: schist lock hold', file=sys.stderr)
+            sys.exit(2)
+        sys.exit(lock_cmd.hold(vault_path, args.timeout, args.max_hold))
 
     dispatch = {
         'add': commands.add,
