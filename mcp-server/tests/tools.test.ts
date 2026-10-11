@@ -13,6 +13,7 @@ import { writeMutex } from "../src/git-writer.js";
 import Database from "better-sqlite3";
 import { INDEX_SCHEMA_VERSION, memoryDbPath } from "../src/sqlite-reader.js";
 import { parseConnections, parseNote } from "../src/markdown-parser.js";
+import { localSchistWrapperScript, spawnHolder } from "./local-schist-bin.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -6153,4 +6154,111 @@ describe("tool-level read-modify-writes under the vault lock (#724)", () => {
       else process.env.SCHIST_BIN = prev;
     }
   }, 30000);
+});
+
+// #724: `schist sync pull` holds the vault write lock for its whole rebase, so
+// rebase state seen while that lock is busy may be another process's LIVE
+// rebase. The server's own `rebase --abort` must take the lock first.
+describe("rebase --abort after a pull conflict runs under the vault lock (#724)", () => {
+  const repoRoot = path.resolve(__dirname, "..", "..");
+  const saved: Record<string, string | undefined> = {};
+  let binDir: string;
+  let wrapper: string;
+  let realGit: string;
+
+  beforeAll(async () => {
+    binDir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-abortlock-"));
+    createdDirs.add(binDir);
+    wrapper = path.join(binDir, "lock-schist");
+    await fs.writeFile(wrapper, localSchistWrapperScript(repoRoot), { mode: 0o755 });
+    realGit = (await execFile("sh", ["-c", "command -v git"])).stdout.trim();
+    for (const k of ["SCHIST_LOCK_BIN", "SCHIST_BIN", "SCHIST_VAULT_LOCK_WAIT_MS", "PATH"]) saved[k] = process.env[k];
+  });
+  afterEach(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    resetSpokePushTrackerForTesting();
+  });
+
+  /** A stub `schist` whose pull leaves rebase state and reports a conflict, and a git shim logging aborts. */
+  async function setUp(vault: string): Promise<{ abortLog: string }> {
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    createdDirs.add(stubDir);
+    const abortLog = path.join(stubDir, "aborts.log");
+    await fs.writeFile(path.join(stubDir, "schist"), `#!/bin/sh
+case "$*" in
+  *"sync pull"*)
+    mkdir -p "${path.join(vault, ".git", "rebase-merge")}"
+    echo "CONFLICT: could not apply commit" >&2
+    exit 1 ;;
+  *)
+    echo " ! [rejected] main -> main (non-fast-forward)" >&2
+    echo "hint: Updates were rejected because the tip of your current branch is behind" >&2
+    exit 1 ;;
+esac
+`, { mode: 0o755 });
+    await fs.writeFile(path.join(stubDir, "git"),
+      `#!/bin/sh\ncase "$*" in *"rebase --abort"*) echo abort >> "${abortLog}" ;; esac\nexec "${realGit}" "$@"\n`,
+      { mode: 0o755 });
+    delete process.env.SCHIST_BIN;
+    process.env.SCHIST_LOCK_BIN = wrapper;
+    process.env.SCHIST_VAULT_LOCK_WAIT_MS = "500";
+    process.env.PATH = `${stubDir}:${saved.PATH}`;
+    return { abortLog };
+  }
+
+  const aborts = async (log: string) =>
+    (await fs.readFile(log, "utf-8").catch(() => "")).split("\n").filter(Boolean).length;
+
+  async function withHolder<T>(vault: string, fn: () => Promise<T>): Promise<T> {
+    const holder = await spawnHolder(wrapper, vault);
+    try {
+      return await fn();
+    } finally {
+      const closed = new Promise((r) => holder.once("close", r));
+      holder.stdin.end();
+      await closed;
+    }
+  }
+
+  async function runSyncRetry(vault: string) {
+    return await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as unknown as Record<string, unknown>;
+  }
+
+  async function runBackgroundRecovery(vault: string) {
+    triggerSpokePush(vault);
+    return await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as unknown as Record<string, unknown>;
+  }
+
+  test.each([
+    ["sync_retry", runSyncRetry, "reason"],
+    ["background recovery", runBackgroundRecovery, "message"],
+  ] as const)("%s skips the abort while another process holds the lock", async (_name, run, field) => {
+    const vault = await makeTempSpokeVault();
+    const { abortLog } = await setUp(vault);
+    const errSpy = jest.spyOn(console, "error");
+    try {
+      const result = await withHolder(vault, () => run(vault));
+      expect(await aborts(abortLog)).toBe(0);
+      const text = String(result[field]);
+      expect(text).toContain("NOT known unchanged");
+      expect(text).toContain("vault write lock");
+      // The real helper was used, not the in-process fallback.
+      expect(errSpy.mock.calls.filter((c) => String(c[0]).includes("cross-process vault lock unavailable"))).toEqual([]);
+    } finally {
+      errSpy.mockRestore();
+    }
+  }, 60000);
+
+  test.each([
+    ["sync_retry", runSyncRetry],
+    ["background recovery", runBackgroundRecovery],
+  ] as const)("%s aborts once the lock is free", async (_name, run) => {
+    const vault = await makeTempSpokeVault();
+    const { abortLog } = await setUp(vault);
+    await run(vault);
+    expect(await aborts(abortLog)).toBe(1);
+  }, 60000);
 });

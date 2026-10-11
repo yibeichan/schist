@@ -5,7 +5,8 @@ import { fileURLToPath } from "url";
 import { spawn } from "child_process";
 import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
-import { writeNote, rewriteNote, updateNote, deleteNote, writeMutex } from "./git-writer.js";
+import { writeNote, rewriteNote, updateNote, deleteNote, writeMutex, vaultLockWaitMs } from "./git-writer.js";
+import { withVaultLock, VaultLockTimeout } from "./vault-lock.js";
 import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython, containsLineBoundary, isRoundTrippableTarget } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
@@ -1323,6 +1324,36 @@ function pushFailureMessage(outcome: SyncCommandOutcome): string | null {
 }
 
 /**
+ * `git rebase --abort` under the vault write lock (#724). `schist sync pull`
+ * holds that lock for its whole rebase, so rebase state seen while the lock is
+ * busy may be another process's live rebase, and aborting it would wreck that
+ * pull. When the lock stays busy past the wait, the abort is skipped and
+ * `lockBusy` names the holder; the caller's tree-state check then reports the
+ * leftover state. No lock-taking child runs inside the lock.
+ */
+async function abortRebaseUnderVaultLock(
+  vaultRoot: string,
+): Promise<SyncCommandOutcome & { lockBusy?: string }> {
+  try {
+    return await withVaultLock(vaultRoot, vaultLockWaitMs(), () =>
+      runGit(vaultRoot, ["rebase", "--abort"], 5_000));
+  } catch (e) {
+    if (e instanceof VaultLockTimeout) {
+      return { ok: false, error: e.message, lockBusy: e.holder };
+    }
+    throw e;
+  }
+}
+
+/** The note on a `git rebase --abort` that did not finish, for a failure message. */
+function abortNote(abort: SyncCommandOutcome & { lockBusy?: string }): string {
+  if (abort.lockBusy !== undefined) {
+    return ` (skipped: the vault write lock is held by ${abort.lockBusy}, possibly a live rebase)`;
+  }
+  return abort.timedOut ? " (which timed out after 5s)" : "";
+}
+
+/**
  * One bounded pull-rebase-push for a spoke that is merely behind (#500).
  *
  * Returns null when the spoke recovered (caller clears the sentinel), or the
@@ -1380,13 +1411,13 @@ async function recoverDivergedSpoke(
       // to do. Keying on a non-zero exit would print the scary message on
       // every routine conflict — trading a claim that is rarely wrong for one
       // that is usually wrong.
-      const abort = await runGit(vaultRoot, ["rebase", "--abort"], 5_000);
+      const abort = await abortRebaseUnderVaultLock(vaultRoot);
       if (await hasStaleGitOperation(vaultRoot)) {
         return {
           outcome: pull,
           failure: "rebase conflict during auto-recovery, and the tree is still mid-operation after " +
           "`git rebase --abort`" +
-          (abort.timedOut ? " (which timed out after 5s)" : "") +
+          abortNote(abort) +
           " -- local state is NOT known unchanged. Clear it with " +
           "`git rebase --abort` in the vault, then sync_retry " +
           "mode=pull-rebase-push",
@@ -2122,7 +2153,8 @@ export async function sync_retry(
     // with a rebase. Acquired after the in-flight await above, which may itself
     // be waiting on commitStraysUnderWriteLock. A busy mutex rejects with
     // WRITE_TIMEOUT, which normalizeError turns into the tool error. Never
-    // withVaultLock here: the children would wait on our own flock.
+    // withVaultLock around the children: they would wait on our own flock.
+    // Only the conflict path's lone `rebase --abort` takes it.
     const releaseWrites = await writeMutex.acquire();
     try {
       if (mode === "pull-rebase-push") {
@@ -2160,7 +2192,9 @@ export async function sync_retry(
             // change it: "Rebase conflict" alone reads as "your tree is fine,
             // go resolve the conflict", when the first thing needed is clearing
             // the leftover state.
-            const abort = await runGit(vaultRoot, ["rebase", "--abort"], 5_000);
+            // Under the vault lock: writeMutex is already held, which is
+            // the required order (writeMutex, then the vault lock).
+            const abort = await abortRebaseUnderVaultLock(vaultRoot);
             const stillDirty = await hasStaleGitOperation(vaultRoot);
             return {
               ...syncFailureResponse(mode, "pull-rebase", pull),
@@ -2168,7 +2202,7 @@ export async function sync_retry(
               reason: stillDirty
                 ? "Rebase conflict, and the tree is still mid-operation after " +
                   "`git rebase --abort`" +
-                  (abort.timedOut ? " (which timed out after 5s)" : "") +
+                  abortNote(abort) +
                   " -- local state is NOT known unchanged"
                 : "Rebase conflict",
             };
