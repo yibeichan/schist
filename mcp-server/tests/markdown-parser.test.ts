@@ -113,6 +113,55 @@ describe("markdown-parser", () => {
     expect(parsed.connections[1].type).toBe(connections[1].type);
   });
 
+  // #732: a mid-line mention of the heading text (prose, inline code, a code
+  // sample) is not a section. buildNote used a substring test plus an
+  // unanchored regex, so it replaced everything from the mention up to the next
+  // `## ` heading with the connection list.
+  test("buildNote keeps body text that mentions '## Connections' mid-line", () => {
+    const body = [
+      "Intro mentions the ## Connections heading in prose.",
+      "",
+      "```ts",
+      'const s = "new body\\n\\n## Connections\\n";',
+      "keep this line",
+      "```",
+      "",
+      "Tail paragraph.",
+      "",
+      "## Next section",
+      "",
+      "Still here.",
+    ].join("\n");
+    const built = buildNote({ title: "t" }, body, [{ target: "notes/a.md", type: "supports" }]);
+    const parsed = parseNote(built);
+    for (const kept of ["Intro mentions", "keep this line", "Tail paragraph.", "## Next section", "Still here."]) {
+      expect(parsed.body).toContain(kept);
+    }
+    expect(parsed.connections.map((c) => c.target)).toEqual(["notes/a.md"]);
+    expect(built.trimEnd().endsWith("## Connections\n\n- supports: notes/a.md")).toBe(true);
+  });
+
+  test("buildNote replaces a real Connections section and keeps what follows it", () => {
+    const body = [
+      "Body.",
+      "",
+      "## Connections",
+      "",
+      "- extends: [[notes/old.md]]",
+      "",
+      "## Appendix",
+      "",
+      "Appendix text.",
+    ].join("\n");
+    const built = buildNote({ title: "t" }, body, [{ target: "notes/new.md", type: "supports" }]);
+    const parsed = parseNote(built);
+    expect(parsed.connections.map((c) => c.target)).toEqual(["notes/new.md"]);
+    expect(parsed.body).toContain("## Appendix");
+    expect(parsed.body).toContain("Appendix text.");
+    expect(parsed.body).not.toContain("notes/old.md");
+    expect(built.match(/^## Connections/gm)).toHaveLength(1);
+  });
+
   test.each(loadFrontmatterParityCases())(
     "parseNote matches shared frontmatter parity fixture: $name",
     ({ frontmatter, expected }) => {

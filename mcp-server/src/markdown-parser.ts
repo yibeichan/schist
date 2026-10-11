@@ -384,13 +384,20 @@ export function buildNote(
   let content = body;
   if (connections && connections.length > 0) {
     const connectionLines = connections.map(buildConnectionLine).join("\n");
-    if (content.includes("## Connections")) {
-      content = content.replace(
-        /## Connections[\s\S]*?(?=\n## |\s*$)/,
-        `## Connections\n\n${connectionLines}\n`
-      );
-    } else {
+    // The section heading is a line whose trimmed text starts with
+    // `## Connections`, the same rule as parseConnections and
+    // insertConnectionLine. A substring test matched mid-line mentions (prose,
+    // code samples) and replaced the text after them (#732).
+    const lines = splitLinesLikePython(content);
+    const start = lines.findIndex((l) => l.trim().startsWith("## Connections"));
+    if (start === -1) {
       content = content.trimEnd() + `\n\n## Connections\n\n${connectionLines}\n`;
+    } else {
+      let end = lines.findIndex((l, i) => i > start && l.trim().startsWith("## "));
+      if (end === -1) end = lines.length;
+      const section = ["## Connections", "", ...connectionLines.split("\n"), ""];
+      content = [...lines.slice(0, start), ...section, ...lines.slice(end)].join("\n");
+      if (end === lines.length) content = content.trimEnd() + "\n";
     }
   }
   return matter.stringify(content, metadata);
