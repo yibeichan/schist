@@ -228,14 +228,25 @@ _DEFAULT_AUTHOR = {
 
 def _git(hub_path: Path, *args: str, input_text: str | None = None,
          env: dict | None = None, check: bool = True) -> subprocess.CompletedProcess:
-    """Run a git plumbing command against the bare repo at hub_path."""
+    """Run a git plumbing command against the bare repo at hub_path.
+
+    Bytes in and out, decoded here (#709): a strict text=True decode raised a
+    bare UnicodeDecodeError traceback out of `schist hub` when, say,
+    vault.yaml was not UTF-8. stdout feeds parsing and ref updates, so it is
+    decoded strictly and a failure names the command; stderr is only shown.
+    """
     cmd = ["git", "--git-dir", str(hub_path), *args]
     full_env = {**os.environ, **(env or {})}
-    r = subprocess.run(cmd, input=input_text, capture_output=True, text=True,
-                       env=full_env, timeout=30)
+    r = subprocess.run(cmd, input=None if input_text is None else input_text.encode("utf-8"),
+                       capture_output=True, env=full_env, timeout=30)
+    stderr = r.stderr.decode("utf-8", "replace")
     if check and r.returncode != 0:
-        raise HubAdminError(f"git {' '.join(args)} failed: {r.stderr.strip()}")
-    return r
+        raise HubAdminError(f"git {' '.join(args)} failed: {stderr.strip()}")
+    try:
+        stdout = r.stdout.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise HubAdminError(f"output of git {' '.join(args)} is not valid UTF-8 ({e})") from None
+    return subprocess.CompletedProcess(r.args, r.returncode, stdout, stderr)
 
 
 def read_hub_vault(hub_path: Path) -> tuple[str, str]:

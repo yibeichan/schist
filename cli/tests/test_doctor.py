@@ -1065,6 +1065,43 @@ class TestCheckSpoke:
             r = check_spoke(str(tmp_path))
             assert r.status == "PASS"
 
+    def _spoke(self, tmp_path, hub):
+        spoke_dir = tmp_path / ".schist"
+        spoke_dir.mkdir()
+        (spoke_dir / "spoke.yaml").write_text(yaml.dump(
+            {"hub": str(hub), "identity": "test", "scope": "research/test"}))
+
+    def test_hub_that_refuses_ls_remote_is_not_reported_reachable(self, tmp_path):
+        """#709: ls-remote's exit code was never checked, so a hub that failed
+        fast (no such repo, auth refused) still read as "hub reachable"."""
+        self._spoke(tmp_path, tmp_path / "no-such-hub.git")
+        r = check_spoke(str(tmp_path))
+        assert r.status == "WARN"
+        assert "reachable" not in r.message.replace("unreachable", "")
+
+    def test_reachable_hub_with_a_non_utf8_ref_name_is_reachable(self, tmp_path):
+        """ls-remote output is not used, so bytes that are not UTF-8 in a ref
+        name must not turn a reachable hub into a "hub error" WARN."""
+        hub = tmp_path / "hub.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(hub)], check=True)
+        work = tmp_path / "work"
+        subprocess.run(["git", "init", "-q", str(work)], check=True)
+        for args in (["config", "user.email", "t@example.com"], ["config", "user.name", "t"],
+                     ["commit", "-q", "--allow-empty", "-m", "seed"]):
+            subprocess.run(["git", *args], cwd=work, check=True)
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=work, capture_output=True,
+                             text=True, check=True).stdout.strip()
+        subprocess.run(["git", "push", "-q", str(hub), "HEAD:refs/heads/main"], cwd=work, check=True)
+        heads = os.fsencode(str(hub / "refs" / "heads"))
+        try:
+            with open(heads + b"/caf\xe9", "w") as f:
+                f.write(sha + "\n")
+        except OSError:
+            pytest.skip("filesystem rejects names that are not UTF-8")
+        self._spoke(tmp_path, hub)
+        r = check_spoke(str(tmp_path))
+        assert r.status == "PASS", r.message
+
     def test_hub_timeout(self, tmp_path):
         spoke_dir = tmp_path / ".schist"
         spoke_dir.mkdir()
@@ -3543,3 +3580,34 @@ class TestMcpDiscoveryAgreement:
         (tmp_path / "x.json").write_text("{}")
         out = _discover_mcp_schist_entries(None)
         assert [n for _c, n, _e in out][0] == "schist"
+
+
+def _hub_with_bytes(tmp_path, name: str, content: bytes):
+    """A bare hub whose HEAD has `name` with exactly `content`."""
+    work = tmp_path / "hub-work"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
+    (work / name).write_bytes(content)
+    for args in (["config", "user.email", "t@example.com"], ["config", "user.name", "t"],
+                 ["add", name], ["commit", "-qm", "seed"]):
+        subprocess.run(["git", *args], cwd=work, check=True)
+    hub = tmp_path / "hub.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(work), str(hub)], check=True)
+    return hub
+
+
+class TestHubFilesThatAreNotUtf8:
+    """#709: hub files read with a strict text decode surfaced as a raw
+    UnicodeDecodeError message. They now say which file is not UTF-8."""
+
+    def test_acl_drift_check_names_the_file(self, tmp_path):
+        from schist.doctor import check_hub_acl_drift
+        hub = _hub_with_bytes(tmp_path, "vault.yaml", b"name: caf\xe9\n")
+        r = check_hub_acl_drift(str(hub))
+        assert r.status == "SKIP"
+        assert "vault.yaml on the hub is not valid UTF-8" in r.message
+
+    def test_hub_acl_loader_names_the_file(self, tmp_path):
+        from schist.doctor import _load_hub_acl
+        hub = _hub_with_bytes(tmp_path, "vault.yaml", b"name: caf\xe9\n")
+        with pytest.raises(ValueError, match="vault.yaml on the hub is not valid UTF-8"):
+            _load_hub_acl(hub)

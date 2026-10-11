@@ -797,10 +797,17 @@ def check_spoke(vault_path: Optional[str]) -> CheckResult:
         cfg = load_spoke_config(vault_path)
         hub = cfg.hub
         try:
-            subprocess.run(
-                ["git", "ls-remote", hub],
-                capture_output=True, text=True, timeout=10,
-            )
+            # Bytes (#709): the ref listing is never used, and a strict text
+            # decode of a ref name that is not UTF-8 turned a reachable hub
+            # into a "hub error" WARN. The exit code was never checked either,
+            # so a hub that refused fast still read as reachable.
+            r = subprocess.run(["git", "ls-remote", hub], capture_output=True, timeout=10)
+            if r.returncode != 0:
+                lines = r.stderr.decode("utf-8", "replace").strip().splitlines()
+                detail = lines[-1] if lines else f"git ls-remote exited {r.returncode}"
+                return CheckResult("WARN", "Spoke",
+                                   f"identity={cfg.identity}, scope={cfg.scope}, hub unreachable: {detail}",
+                                   f"Check that hub {hub} exists and this host can reach it (SSH key, network).")
             return CheckResult("PASS", "Spoke",
                                f"identity={cfg.identity}, scope={cfg.scope}, hub reachable")
         except subprocess.TimeoutExpired:
@@ -1014,12 +1021,9 @@ def _hub_expected_dirs(hub: Path) -> list[str]:
         vals = dirs.values() if isinstance(dirs, dict) else dirs
         return [str(v).rstrip("/") for v in vals]
 
-    r = subprocess.run(
-        ["git", "--git-dir", str(hub), "show", "HEAD:schist.yaml"],
-        capture_output=True, text=True, timeout=10,
-    )
-    if r.returncode == 0:
-        dirs = _dirs_from(r.stdout)
+    text = _hub_file_text(hub, "schist.yaml", required=False)
+    if text is not None:
+        dirs = _dirs_from(text)
     else:
         # Fallback: packaged default.yaml (sibling of this module).
         default_path = Path(__file__).resolve().parent / "default.yaml"
@@ -1044,10 +1048,7 @@ def check_hub_acl_drift(hub_path: Optional[str]) -> CheckResult:
     try:
         import subprocess
         from schist.acl import _scope_matches, parse_vault_data
-        text = subprocess.run(
-            ["git", "--git-dir", str(hub), "show", "HEAD:vault.yaml"],
-            capture_output=True, text=True, check=True, timeout=10,
-        ).stdout
+        text = _hub_file_text(hub, "vault.yaml")
         acl = parse_vault_data(yaml.safe_load(text))
         expected_dirs = _hub_expected_dirs(hub)
     except Exception as e:  # noqa: BLE001 — surface as SKIP so doctor never crashes
@@ -1090,14 +1091,29 @@ def check_hub_acl_drift(hub_path: Optional[str]) -> CheckResult:
     )
 
 
+def _hub_file_text(hub: Path, rel: str, *, required: bool = True) -> Optional[str]:
+    """`HEAD:<rel>` from a bare hub as text.
+
+    Read as bytes and decoded here (#709): a strict text=True decode surfaced
+    as a bare UnicodeDecodeError message that did not say which file was bad.
+    A missing file raises CalledProcessError when required, else returns None.
+    """
+    cmd = ["git", "--git-dir", str(hub), "show", f"HEAD:{rel}"]
+    r = subprocess.run(cmd, capture_output=True, timeout=10)
+    if r.returncode != 0:
+        if not required:
+            return None
+        raise subprocess.CalledProcessError(r.returncode, cmd, r.stdout, r.stderr)
+    try:
+        return r.stdout.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise ValueError(f"{rel} on the hub is not valid UTF-8 ({e})") from None
+
+
 def _load_hub_acl(hub: Path):
     """Parse HEAD:vault.yaml from a bare hub. Raises on any failure."""
     from schist.acl import parse_vault_data
-    text = subprocess.run(
-        ["git", "--git-dir", str(hub), "show", "HEAD:vault.yaml"],
-        capture_output=True, text=True, check=True, timeout=10,
-    ).stdout
-    return parse_vault_data(yaml.safe_load(text))
+    return parse_vault_data(yaml.safe_load(_hub_file_text(hub, "vault.yaml")))
 
 
 def check_hub_key_pinning(hub_path: Optional[str],

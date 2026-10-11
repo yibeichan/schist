@@ -457,3 +457,19 @@ class TestParticipantRateLimitsStaleness:
             hub, lambda d: hub_admin.participant_remove(d, "beta"), "rm beta")
         assert changed is True
         assert "beta" not in _hub_vault_text(hub)
+
+
+def test_read_hub_vault_names_a_vault_yaml_that_is_not_utf8(tmp_path):
+    """#709: `_git(text=True)` raised a bare UnicodeDecodeError traceback out
+    of `schist hub grant`/`revoke`. It is now a HubAdminError naming the file."""
+    work = tmp_path / "work"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
+    (work / "vault.yaml").write_bytes(b"name: caf\xe9\n")
+    for args in (["config", "user.email", "t@example.com"], ["config", "user.name", "t"],
+                 ["add", "vault.yaml"], ["commit", "-qm", "seed"]):
+        subprocess.run(["git", *args], cwd=work, check=True)
+    hub = tmp_path / "hub.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(work), str(hub)], check=True)
+
+    with pytest.raises(HubAdminError, match="not valid UTF-8"):
+        hub_admin.read_hub_vault(hub)
