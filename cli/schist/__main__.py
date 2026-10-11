@@ -5,10 +5,60 @@ import argparse
 import os
 import sys
 
-from . import commands, doctor as doctor_mod, sync
+
+def _lock_hold_args(argv: list) -> "tuple[str, float, float] | None":
+    """(vault, timeout, max_hold) when argv is exactly a well-formed
+    `[--vault V] [--db D] lock hold [--timeout T] [--max-hold M]`, else None.
+
+    The MCP server spawns `lock hold` for every write, so this skips the
+    command modules' imports (about 0.1 s). Anything else, including --help,
+    a bad value, an unknown option or a missing vault, returns None, and the
+    full parser below then handles it, usage errors included.
+    """
+    def take(i: int, flag: str) -> "tuple[str | None, int]":
+        tok = argv[i]
+        if tok == flag:
+            return (argv[i + 1], i + 2) if i + 1 < len(argv) else (None, i)
+        return tok[len(flag) + 1:], i + 1  # --flag=value
+
+    vault = os.environ.get('SCHIST_VAULT_PATH')
+    i = 0
+    while i < len(argv) and argv[i] != 'lock':
+        tok = argv[i]
+        flag = next((f for f in ('--vault', '--db')
+                     if tok == f or tok.startswith(f + '=')), None)
+        if flag is None:
+            return None
+        value, i = take(i, flag)
+        if value is None:
+            return None
+        if flag == '--vault':
+            vault = value
+    if argv[i:i + 2] != ['lock', 'hold'] or not vault:
+        return None
+    opts = {'--timeout': 10.0, '--max-hold': 120.0}
+    i += 2
+    while i < len(argv):
+        tok = argv[i]
+        flag = next((f for f in opts if tok == f or tok.startswith(f + '=')), None)
+        if flag is None:
+            return None
+        value, i = take(i, flag)
+        try:
+            opts[flag] = float(value)
+        except (TypeError, ValueError):
+            return None
+    return vault, opts['--timeout'], opts['--max-hold']
 
 
 def main():
+    fast = _lock_hold_args(sys.argv[1:])
+    if fast is not None:
+        from . import lock_cmd
+        sys.exit(lock_cmd.hold(*fast))
+
+    from . import commands, doctor as doctor_mod, sync
+
     parser = argparse.ArgumentParser(prog='schist', description='Agent-first knowledge graph CLI')
     parser.add_argument('--vault', default=os.environ.get('SCHIST_VAULT_PATH'), help='Path to vault root (or set SCHIST_VAULT_PATH)')
     parser.add_argument('--db', default=None, help='Path to SQLite database (default: <vault>/.schist/schist.db)')

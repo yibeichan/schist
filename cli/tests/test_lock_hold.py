@@ -44,3 +44,45 @@ def test_hidden_from_help():
     # no help line may describe `lock`.
     out = subprocess.run([sys.executable, "-m", "schist", "--help"], capture_output=True, text=True).stdout
     assert not any(line.strip().startswith("lock ") for line in out.splitlines())
+
+
+def test_lock_hold_skips_the_rest_of_the_cli(tmp_path):
+    # The MCP server spawns `lock hold` once per write, so its start-up time is
+    # paid on every write: it must not import the command modules.
+    code = (
+        "import sys\n"
+        "sys.argv = ['schist', '--vault', sys.argv[1], 'lock', 'hold', '--timeout', '1']\n"
+        "from schist import __main__ as m\n"
+        "try:\n"
+        "    m.main()\n"
+        "except SystemExit as e:\n"
+        "    code = e.code\n"
+        "heavy = sorted(n for n in ('schist.commands', 'schist.sync', 'schist.doctor', 'yaml') if n in sys.modules)\n"
+        "print(code, heavy)\n"
+    )
+    r = subprocess.run([sys.executable, "-c", code, str(tmp_path)], stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True)
+    assert r.stdout.strip().splitlines()[-1] == "0 []", r.stdout + r.stderr
+
+
+def test_lock_usage_errors_still_come_from_the_full_parser(tmp_path):
+    run = lambda *a: subprocess.run([sys.executable, "-m", "schist", "--vault", str(tmp_path), *a],
+                                    stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    bad = run("lock", "hold", "--timeout", "soon")
+    assert bad.returncode == 2 and "invalid float value" in bad.stderr
+    unknown = run("lock", "hold", "--bogus")
+    assert unknown.returncode == 2 and "unrecognized arguments" in unknown.stderr
+    bare = run("lock")
+    assert bare.returncode == 2 and "Usage: schist lock hold" in bare.stderr
+    helped = run("lock", "hold", "--help")
+    assert helped.returncode == 0 and "--max-hold" in helped.stdout
+    eq = run("lock", "hold", "--timeout=1", "--max-hold=5")
+    assert eq.returncode == 0 and eq.stdout.strip() == "LOCKED"
+
+
+def test_lock_hold_without_a_vault_reports_it(tmp_path):
+    import os
+    env = {k: v for k, v in os.environ.items() if k != "SCHIST_VAULT_PATH"}
+    r = subprocess.run([sys.executable, "-m", "schist", "lock", "hold"], stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 1 and "--vault required" in r.stderr

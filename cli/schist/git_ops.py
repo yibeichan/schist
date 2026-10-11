@@ -8,8 +8,6 @@ import signal
 import subprocess
 import threading
 
-import yaml
-
 # Decode git's output as UTF-8 and never raise on bytes that are not. These
 # calls sit on error paths whose output is only displayed or classified (a hub
 # `remote:` line echoing a latin-1 filename); a UnicodeDecodeError there
@@ -1224,6 +1222,7 @@ def _global_scope_dirs() -> list[str]:
     default_yaml = Path(__file__).resolve().parent / "default.yaml"
     resolved: list[str] = []
     try:
+        import yaml  # lazily: `schist lock hold` imports this module on every MCP write
         raw = yaml.safe_load(default_yaml.read_text(encoding="utf-8"))
         dirs = raw.get("directories") if isinstance(raw, dict) else None
         if isinstance(dirs, dict):
