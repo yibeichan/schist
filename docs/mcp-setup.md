@@ -272,6 +272,15 @@ holding the lock, the NFS server reclaims it when the lease expires, about 90 s
 later. There is one lock file per vault path; a symlinked or dual-mounted
 path resolves to the same file, so that is fine.
 
+Linux emulates `flock` on NFS with POSIX byte-range locks, which belong to the
+process: closing any descriptor on the file releases the lock. schist keeps
+exactly one descriptor on `write.lock` while it holds the lock, so do not add
+code that opens or closes that file while holding it. Two setups make the lock
+per-host instead of vault-wide, and then writers on different hosts are no
+longer serialized: an NFS mount with `local_lock=flock` or `local_lock=all`,
+and `.schist` symlinked to node-local disk. Use them only when a single host
+writes to the vault.
+
 ### Upgrading: CLI first, then restart every server
 
 CLIs from before this lock serialize on `.schist/cli-write.lock` only, and an
