@@ -6,6 +6,8 @@ import { execFile as execFileCb, execFileSync } from "child_process";
 import { promisify } from "util";
 import { fileURLToPath } from "url";
 import { localSchistWrapperScript, spawnHolder } from "./local-schist-bin.js";
+import { _resetVaultLockWarningForTests } from "../src/vault-lock.js";
+import { jest } from "@jest/globals";
 
 const execFile = promisify(execFileCb);
 
@@ -346,6 +348,19 @@ describe("git-writer under the vault write lock (#724)", () => {
     if (prevWait === undefined) delete process.env.SCHIST_VAULT_LOCK_WAIT_MS;
     else process.env.SCHIST_VAULT_LOCK_WAIT_MS = prevWait;
     for (const dir of createdDirs) await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  // These tests rely on the real helper. The fallback logs once per module,
+  // so reset that flag and fail any test that took the fallback.
+  let errSpy: ReturnType<typeof jest.spyOn>;
+  beforeEach(() => {
+    _resetVaultLockWarningForTests();
+    errSpy = jest.spyOn(console, "error");
+  });
+  afterEach(() => {
+    const fallbacks = errSpy.mock.calls.filter((c: unknown[]) => String(c[0]).includes("cross-process vault lock unavailable"));
+    errSpy.mockRestore();
+    expect(fallbacks).toEqual([]);
   });
 
   /** A pre-commit hook that tries the lock and records the helper's exit code (75 = busy). */

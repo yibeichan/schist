@@ -81,6 +81,9 @@ test("premise: isolateModulesAsync gives each instance its own writeMutex under 
 });
 
 test("two server instances + a CLI writer: every commit lands under its own message", async () => {
+  // The fallback (in-process serialization only) could pass this test by
+  // luck; it must not have been taken.
+  const errSpy = jest.spyOn(console, "error");
   const N = 6;
   let a: typeof import("../src/git-writer.js") | undefined;
   let b: typeof import("../src/git-writer.js") | undefined;
@@ -119,4 +122,7 @@ test("two server instances + a CLI writer: every commit lands under its own mess
   }
   expect(commits.filter((x) => !/^notes\/n\d\.md$/.test(x.files[0]))).toHaveLength(1);
   expect((await git(["status", "--porcelain"])).trim()).toBe("");
+  const fallbacks = errSpy.mock.calls.filter((c) => String(c[0]).includes("cross-process vault lock unavailable"));
+  errSpy.mockRestore();
+  expect(fallbacks).toEqual([]);
 }, 240000);
