@@ -243,8 +243,14 @@ a missing binary), the server logs once
 `cross-process vault lock unavailable: <reason>` and serializes within its own
 process only; upgrade the CLI to restore cross-process safety.
 
-The server's background push (`sync push --no-commit` without `--force`) takes
-no lock, because it never touches the index.
+The server's background push (`sync push --no-commit` without `--force`)
+usually takes no lock: it stages and commits nothing. The exception is leftover
+rebase state (`.git/rebase-merge` or `.git/rebase-apply`). That state may
+belong to a `sync pull` that is still rebasing under the lock, so the push takes
+the lock, checks again, and only then aborts what is left. The server's own
+`git rebase --abort` after a pull conflict also takes the lock; if the lock
+stays busy past `SCHIST_VAULT_LOCK_WAIT_MS`, the abort is skipped and the error
+names the holder.
 
 Timing to expect:
 

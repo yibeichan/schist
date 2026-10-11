@@ -3323,4 +3323,11 @@ class TestPullUnderVaultLock:
         run(no_commit=False, force=False)
         run(no_commit=True, force=False)
         run(no_commit=True, force=True)
-        assert held == [True, False, True]
+        # Rebase state may be a live `sync pull` that holds the lock for its
+        # whole rebase: the background push then takes the lock before its
+        # cleanup aborts anything (#724).
+        for d in ("rebase-merge", "rebase-apply"):
+            (Path(vault) / ".git" / d).mkdir()
+            run(no_commit=True, force=False)
+            (Path(vault) / ".git" / d).rmdir()
+        assert held == [True, False, True, True, True]

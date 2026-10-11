@@ -550,21 +550,8 @@ def _cleanup_stale_index_lock(git_dir: Path) -> None:
         sys.exit(1)
 
 
-def cleanup_stale_git_state(vault_path: str, *, force: bool, uses_index: bool = True) -> None:
-    """Clear stale git operation sentinels before sync.
-
-    Rebase state is always cleaned because a killed `sync pull` leaves the
-    spoke permanently unusable until it is removed. Merge and index-lock cleanup
-    are gated behind --force: merge abort can touch the worktree, and lock files
-    should only be removed as an explicit recovery action. Under --force, remove
-    index.lock before aborting a merge so Git gets a fair chance to restore the
-    worktree. Never drop MERGE_* sentinels after abort failure; that can hide
-    unresolved merge content from later status/staging checks.
-
-    uses_index=False (`sync push --no-commit`) skips the index.lock gate: a
-    push that never stages or commits does not need the index, and the lock
-    is then usually a live MCP commit that must be neither refused nor removed.
-    """
+def _operation_state_dir(vault_path: str) -> Path:
+    """The git directory that holds rebase/merge state for this vault."""
     git_dir = Path(vault_path) / ".git"
     if git_dir.is_file():
         # Linked worktrees and --separate-git-dir vaults store a pointer here.
@@ -581,8 +568,30 @@ def cleanup_stale_git_state(vault_path: str, *, force: bool, uses_index: bool = 
             print(f"Error: cannot locate Git operation state: {detail}", file=sys.stderr)
             sys.exit(1)
         git_dir = Path(resolved.stdout.strip())
-    rebase_present = any((git_dir / d).exists() for d in ("rebase-merge", "rebase-apply"))
-    if rebase_present:
+    return git_dir
+
+
+def _rebase_state_present(git_dir: Path) -> bool:
+    return any((git_dir / d).exists() for d in ("rebase-merge", "rebase-apply"))
+
+
+def cleanup_stale_git_state(vault_path: str, *, force: bool, uses_index: bool = True) -> None:
+    """Clear stale git operation sentinels before sync.
+
+    Rebase state is always cleaned because a killed `sync pull` leaves the
+    spoke permanently unusable until it is removed. Merge and index-lock cleanup
+    are gated behind --force: merge abort can touch the worktree, and lock files
+    should only be removed as an explicit recovery action. Under --force, remove
+    index.lock before aborting a merge so Git gets a fair chance to restore the
+    worktree. Never drop MERGE_* sentinels after abort failure; that can hide
+    unresolved merge content from later status/staging checks.
+
+    uses_index=False (`sync push --no-commit`) skips the index.lock gate: a
+    push that never stages or commits does not need the index, and the lock
+    is then usually a live MCP commit that must be neither refused nor removed.
+    """
+    git_dir = _operation_state_dir(vault_path)
+    if _rebase_state_present(git_dir):
         _cleanup_rebase_state(vault_path)
 
     merge_present = (git_dir / "MERGE_HEAD").exists()
@@ -1196,9 +1205,13 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
 
     config = load_spoke_config(vault_path)
     no_commit = _no_commit_enabled(args)
-    if no_commit and not _force_enabled(args):
-        # Background push (#724): cleanup touches no index state here, and
-        # this path must stay lock-free.
+    if (no_commit and not _force_enabled(args)
+            and not _rebase_state_present(_operation_state_dir(vault_path))):
+        # Background push (#724) with no rebase state: cleanup aborts
+        # nothing, so this common path stays lock-free. Rebase state, by
+        # contrast, may belong to a live `sync pull`, which holds the lock for
+        # its whole rebase; aborting it requires the lock, and the cleanup
+        # re-checks the state once the lock is held.
         cleanup_stale_git_state(vault_path, force=False, uses_index=False)
     else:
         with git_ops.vault_write_lock(vault_path):
