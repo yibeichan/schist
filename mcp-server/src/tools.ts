@@ -5,7 +5,7 @@ import { fileURLToPath } from "url";
 import { spawn } from "child_process";
 import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
-import { writeNote, updateNote, deleteNote, writeMutex } from "./git-writer.js";
+import { writeNote, rewriteNote, updateNote, deleteNote, writeMutex } from "./git-writer.js";
 import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython, containsLineBoundary, isRoundTrippableTarget } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
@@ -1989,7 +1989,7 @@ async function blockingIgnoredScopeFiles(vaultRoot: string): Promise<string[]> {
 export async function sync_status(vaultRoot: string): Promise<SyncStatusResponse | ToolError> {
   try {
     const isSpoke = await isSpokeVault(vaultRoot);
-    const clean = await runGit(vaultRoot, ["status", "--porcelain"], SYNC_STATUS_TIMEOUT_MS);
+    const clean = await runGit(vaultRoot, ["--no-optional-locks", "status", "--porcelain"], SYNC_STATUS_TIMEOUT_MS);
     const head = await runGit(vaultRoot, ["rev-parse", "--short", "HEAD"], SYNC_STATUS_TIMEOUT_MS);
     const sentinel = await readSyncErrorState(vaultRoot);
 
@@ -2117,75 +2117,86 @@ export async function sync_retry(
       };
     }
 
-    if (mode === "pull-rebase-push") {
-      // The one MCP pull an agent explicitly asks for, so the one that may
-      // autostash. Its 30s cap can still SIGKILL a slow pull mid-rebase; the
-      // stashed edits then sit in the rebase state, and the next sync's
-      // cleanup (`rebase --abort`, or `--quit` which keeps them in the stash
-      // list) hands them back.
-      const pull = await runSchistSync(vaultRoot, "pull", SYNC_RETRY_TIMEOUT_MS, { autostash: true });
-      if (!pull.ok) {
-        if (isAutostashConflict(pull)) {
-          // The rebase completed; only the user's uncommitted edits did not
-          // re-apply, and the CLI saved them in the git stash. No push here:
-          // the caller must learn where the edits went before anything else
-          // moves. Retriable only when the CLI's reset actually left the tree
-          // clean — read from the tree, not the message, as #613 does.
-          const unmerged = await runGit(vaultRoot, ["ls-files", "--unmerged"], 5_000);
-          const clean = unmerged.ok && (unmerged.stdout ?? "").trim().length === 0;
-          return {
-            ...syncFailureResponse(mode, "pull-rebase", pull),
-            retriable: clean,
-            reason: clean
-              ? "Pulled, but uncommitted edits conflicted with the incoming changes; " +
-                "they are saved in the git stash (`git stash pop` in the vault to " +
-                "restore and resolve). Run sync_retry again to push."
-              : "Pulled, but uncommitted edits conflicted with the incoming changes " +
-                "and the working tree still has unmerged files; resolve them by hand " +
-                "(see `git stash list`) before syncing again.",
-          };
+    // Hold writeMutex while the CLI children pull and push (#724): they take
+    // the vault flock themselves, so a concurrent MCP write must not interleave
+    // with a rebase. Acquired after the in-flight await above, which may itself
+    // be waiting on commitStraysUnderWriteLock. A busy mutex rejects with
+    // WRITE_TIMEOUT, which normalizeError turns into the tool error. Never
+    // withVaultLock here: the children would wait on our own flock.
+    const releaseWrites = await writeMutex.acquire();
+    try {
+      if (mode === "pull-rebase-push") {
+        // The one MCP pull an agent explicitly asks for, so the one that may
+        // autostash. Its 30s cap can still SIGKILL a slow pull mid-rebase; the
+        // stashed edits then sit in the rebase state, and the next sync's
+        // cleanup (`rebase --abort`, or `--quit` which keeps them in the stash
+        // list) hands them back.
+        const pull = await runSchistSync(vaultRoot, "pull", SYNC_RETRY_TIMEOUT_MS, { autostash: true });
+        if (!pull.ok) {
+          if (isAutostashConflict(pull)) {
+            // The rebase completed; only the user's uncommitted edits did not
+            // re-apply, and the CLI saved them in the git stash. No push here:
+            // the caller must learn where the edits went before anything else
+            // moves. Retriable only when the CLI's reset actually left the tree
+            // clean — read from the tree, not the message, as #613 does.
+            const unmerged = await runGit(vaultRoot, ["ls-files", "--unmerged"], 5_000);
+            const clean = unmerged.ok && (unmerged.stdout ?? "").trim().length === 0;
+            return {
+              ...syncFailureResponse(mode, "pull-rebase", pull),
+              retriable: clean,
+              reason: clean
+                ? "Pulled, but uncommitted edits conflicted with the incoming changes; " +
+                  "they are saved in the git stash (`git stash pop` in the vault to " +
+                  "restore and resolve). Run sync_retry again to push."
+                : "Pulled, but uncommitted edits conflicted with the incoming changes " +
+                  "and the working tree still has unmerged files; resolve them by hand " +
+                  "(see `git stash list`) before syncing again.",
+            };
+          }
+          if (isRebaseConflict(pull)) {
+            // Same discarded outcome as the background path above (#613), and
+            // the same state check rather than the abort's exit code. `reason`
+            // is what the caller acts on, so a tree left mid-operation has to
+            // change it: "Rebase conflict" alone reads as "your tree is fine,
+            // go resolve the conflict", when the first thing needed is clearing
+            // the leftover state.
+            const abort = await runGit(vaultRoot, ["rebase", "--abort"], 5_000);
+            const stillDirty = await hasStaleGitOperation(vaultRoot);
+            return {
+              ...syncFailureResponse(mode, "pull-rebase", pull),
+              retriable: false,
+              reason: stillDirty
+                ? "Rebase conflict, and the tree is still mid-operation after " +
+                  "`git rebase --abort`" +
+                  (abort.timedOut ? " (which timed out after 5s)" : "") +
+                  " -- local state is NOT known unchanged"
+                : "Rebase conflict",
+            };
+          }
+          return syncFailureResponse(mode, "pull-rebase", pull);
         }
-        if (isRebaseConflict(pull)) {
-          // Same discarded outcome as the background path above (#613), and
-          // the same state check rather than the abort's exit code. `reason`
-          // is what the caller acts on, so a tree left mid-operation has to
-          // change it: "Rebase conflict" alone reads as "your tree is fine,
-          // go resolve the conflict", when the first thing needed is clearing
-          // the leftover state.
-          const abort = await runGit(vaultRoot, ["rebase", "--abort"], 5_000);
-          const stillDirty = await hasStaleGitOperation(vaultRoot);
-          return {
-            ...syncFailureResponse(mode, "pull-rebase", pull),
-            retriable: false,
-            reason: stillDirty
-              ? "Rebase conflict, and the tree is still mid-operation after " +
-                "`git rebase --abort`" +
-                (abort.timedOut ? " (which timed out after 5s)" : "") +
-                " -- local state is NOT known unchanged"
-              : "Rebase conflict",
-          };
-        }
-        return syncFailureResponse(mode, "pull-rebase", pull);
       }
-    }
 
-    const push = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS);
-    if (!push.ok) {
-      // Same format as the background path (#501): an operator reading the
-      // sentinel shouldn't be able to tell which code path wrote it, and
-      // sync_status's failure_class must parse either one.
-      await writeSyncError(vaultRoot, formatPushFailure(push, "retry push failed"));
-      return syncFailureResponse(mode, "push", push);
-    }
+      const push = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS);
+      if (!push.ok) {
+        // Same format as the background path (#501): an operator reading the
+        // sentinel shouldn't be able to tell which code path wrote it, and
+        // sync_status's failure_class must parse either one.
+        await writeSyncError(vaultRoot, formatPushFailure(push, "retry push failed"));
+        return syncFailureResponse(mode, "push", push);
+      }
 
-    return {
-      ok: true,
-      mode,
-      phase: "push",
-      retriable: false,
-      message: "Sync retry completed successfully.",
-      cleared_last_sync_error: await clearSyncErrorIfUnchanged(vaultRoot, originalMtimeMs),
-    };
+      return {
+        ok: true,
+        mode,
+        phase: "push",
+        retriable: false,
+        message: "Sync retry completed successfully.",
+        cleared_last_sync_error: await clearSyncErrorIfUnchanged(vaultRoot, originalMtimeMs),
+      };
+    } finally {
+      releaseWrites();
+    }
   } catch (e: unknown) {
     return normalizeError(e);
   }
@@ -3121,14 +3132,15 @@ export async function add_connection(
     // by schema/connection-append-parity.json). The former regex here anchored
     // on a bare `## Connections\n`, so a CRLF note silently dropped the edge
     // while reporting success (#366) — see insertConnectionLine's contract.
-    const newContent = insertConnectionLine(content, connLine);
-
-    const result = await writeNote(
+    // Re-read and insert inside the vault lock (#724): the pre-lock read above
+    // is only for NOT_FOUND and the ACL gate, so a concurrent write to the same
+    // note cannot be overwritten with a stale copy.
+    const result = await rewriteNote(
       vaultRoot,
       args.source,
-      newContent,
       `connection ${args.type} → ${args.target} on ${args.source}`,
-      owner
+      owner,
+      (current) => insertConnectionLine(current, connLine),
     );
 
     triggerIngestion(vaultRoot);
@@ -3466,7 +3478,7 @@ export async function delete_note(
       id: args.id,
       deleted: true,
       commitSha: result.commitSha,
-      repaired: repairs.map((r) => r.relPath),
+      repaired: result.repaired,
       ...(result.commitWarning ? { commitWarning: result.commitWarning } : {}),
       ...(indexWarning !== undefined ? { indexWarning } : {}),
       ...(syncWarning !== undefined ? { syncWarning } : {}),
@@ -3651,10 +3663,9 @@ export async function update_note(
       return buildNote(mergedMeta, mergedBody);
     };
 
-    // Commit subject only — derived from the pre-lock read. A retitle landing in
-    // the lock window would make the subject slightly stale, but the committed
-    // CONTENT is always built from the fresh in-lock read above.
-    const commitTitle = (parseNote(existing).metadata.title as string) || args.id;
+    // Commit subject from the same in-lock read the content is built from.
+    const commitTitle = (current: string): string =>
+      (parseNote(current).metadata.title as string) || args.id;
     const result = await updateNote(vaultRoot, args.id, commitTitle, owner, transform);
 
     triggerIngestion(vaultRoot);

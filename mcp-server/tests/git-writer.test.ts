@@ -450,8 +450,23 @@ describe("git-writer under the vault write lock (#724)", () => {
       { relPath: "notes/same.md", transform: (c) => c },
     ]);
     expect(res.committed).toBe(true);
+    // Only repairs actually written are reported (#724).
+    expect(res.repaired).toEqual([]);
     await expect(fs.access(path.join(vault, "notes", "gone.md"))).rejects.toThrow();
     const files = (await execFile("git", ["show", "--name-only", "--format=", "HEAD"], { cwd: vault })).stdout.trim();
     expect(files).toBe("notes/d.md");
+  }, 60000);
+
+  test("deleteNote reports the repairs it applied, and only those", async () => {
+    const vault = await makeTempVault();
+    await writeNote(vault, "notes/d2.md", "---\ntitle: d2\n---\nx\n", "d2", "t");
+    await writeNote(vault, "notes/hit.md", "---\ntitle: hit\n---\nlink\n", "hit", "t");
+    await writeNote(vault, "notes/miss.md", "---\ntitle: miss\n---\nbody\n", "miss", "t");
+    const res = await deleteNote(vault, "notes/d2.md", "d2", "t", [
+      { relPath: "notes/miss.md", transform: (c) => c },
+      { relPath: "notes/gone.md", transform: () => "x\n" },
+      { relPath: "notes/hit.md", transform: (c) => c.replace("link", "unlinked") },
+    ]);
+    expect(res.repaired).toEqual(["notes/hit.md"]);
   }, 60000);
 });

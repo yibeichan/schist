@@ -6041,3 +6041,116 @@ describe("zero-hit diagnosis bounds its own work (#563)", () => {
     expect(d.truncatedTerms).toBe(0);
   });
 });
+
+describe("tool-level read-modify-writes under the vault lock (#724)", () => {
+  let savedIngestBin: string | undefined;
+  beforeAll(() => {
+    savedIngestBin = process.env.SCHIST_INGEST_BIN;
+    process.env.SCHIST_INGEST_BIN = "/usr/bin/true";
+  });
+  afterAll(() => {
+    if (savedIngestBin === undefined) delete process.env.SCHIST_INGEST_BIN;
+    else process.env.SCHIST_INGEST_BIN = savedIngestBin;
+  });
+
+  async function seedSource(vault: string, rel: string, extra = ""): Promise<void> {
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, rel),
+      `---\ntitle: Racer\n---\n\nbody\n\n## Connections\n\n- extends: notes/seed.md\n${extra}`,
+      "utf-8",
+    );
+    await execFile("git", ["add", "."], { cwd: vault });
+    await execFile("git", ["commit", "-m", "seed"], { cwd: vault });
+  }
+
+  test("add_connection racing update_note keeps both changes", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const S = "notes/racer.md";
+    await seedSource(vault, S);
+    // frontmatter_patch leaves the body (and its Connections section) to the
+    // in-lock read, so the final file must hold both edits in either order. A
+    // body replacement cannot be asserted this way: update_note sent last would
+    // legitimately overwrite the new edge with its own Connections section.
+    // Several add_connections around one update_note: a stale pre-lock copy
+    // written after the update would revert its status, and one written after
+    // another add would drop that edge.
+    const idx = [0, 1, 2, 3, 4, 5];
+    const results = await Promise.all([
+      ...idx.slice(0, 3).map((i) =>
+        add_connection(vault, { owner: TEST_AGENT, source: S, target: `notes/t${i}.md`, type: "supports" }, config)),
+      update_note(vault, { owner: TEST_AGENT, id: S, frontmatter_patch: { status: "review" } }, config),
+      ...idx.slice(3).map((i) =>
+        add_connection(vault, { owner: TEST_AGENT, source: S, target: `notes/t${i}.md`, type: "supports" }, config)),
+    ]) as Array<{ error?: string }>;
+    for (const r of results) expect(r.error).toBeUndefined();
+    const s = await fs.readFile(path.join(vault, S), "utf-8");
+    expect(s).toContain("status: review");
+    for (const i of idx) expect(s).toContain(`notes/t${i}.md`);
+    expect(s).toContain("notes/seed.md");
+  }, 60000);
+
+  test("two add_connection calls on one source keep both edges", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const S = "notes/racer.md";
+    await seedSource(vault, S);
+    const targets = Array.from({ length: 10 }, (_, i) => `notes/t${i}.md`);
+    const results = await Promise.all(
+      targets.map((target) =>
+        add_connection(vault, { owner: TEST_AGENT, source: S, target, type: "supports" }, config),
+      ),
+    ) as Array<{ error?: string }>;
+    for (const r of results) expect(r.error).toBeUndefined();
+    const s = await fs.readFile(path.join(vault, S), "utf-8");
+    for (const t of targets) expect(s).toContain(t);
+  }, 120000);
+
+  test("sync_status probe does not take index.lock", async () => {
+    const vault = await makeTempSpokeVault();
+    const shimDir = await fs.mkdtemp(path.join(os.tmpdir(), "git-shim-"));
+    createdDirs.add(shimDir);
+    const log = path.join(shimDir, "git.log");
+    const realGit = (await execFile("sh", ["-c", "command -v git"])).stdout.trim();
+    await fs.writeFile(
+      path.join(shimDir, "git"),
+      `#!/bin/sh\necho "$@" >> "${log}"\nexec "${realGit}" "$@"\n`,
+      { mode: 0o755 },
+    );
+    const origPath = process.env.PATH;
+    process.env.PATH = `${shimDir}:${origPath}`;
+    try {
+      await sync_status(vault);
+    } finally {
+      process.env.PATH = origPath;
+    }
+    const lines = (await fs.readFile(log, "utf-8")).split("\n");
+    const porcelain = lines.filter((l) => /\bstatus\b/.test(l) && l.includes("--porcelain") && !l.includes("--ignored"));
+    expect(porcelain.length).toBeGreaterThan(0);
+    for (const l of porcelain) expect(l).toContain("--no-optional-locks");
+  }, 30000);
+
+  test("sync_retry holds writeMutex while its CLI children run", async () => {
+    const vault = await makeTempSpokeVault();
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    createdDirs.add(stubDir);
+    const stub = path.join(stubDir, "schist");
+    await fs.writeFile(stub, "#!/bin/sh\nsleep 1\nexit 0\n", { mode: 0o755 });
+    const prev = process.env.SCHIST_BIN;
+    process.env.SCHIST_BIN = stub;
+    try {
+      expect(writeMutex.isLocked()).toBe(false);
+      const pending = sync_retry(vault, { owner: TEST_AGENT, mode: "push-only" });
+      const deadline = Date.now() + 200;
+      while (!writeMutex.isLocked() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+      expect(writeMutex.isLocked()).toBe(true);
+      const result = await pending as unknown as Record<string, unknown>;
+      expect(result.ok).toBe(true);
+      expect(writeMutex.isLocked()).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.SCHIST_BIN;
+      else process.env.SCHIST_BIN = prev;
+    }
+  }, 30000);
+});

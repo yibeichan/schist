@@ -1080,7 +1080,7 @@ export async function deleteNote(
   noteTitle: string,
   owner?: string,
   repairs: Array<{ relPath: string; transform: (current: string) => string }> = []
-): Promise<WriteResult> {
+): Promise<WriteResult & { repaired: string[] }> {
   assertPathSafe(vaultRoot, relPath);
   for (const r of repairs) assertPathSafe(vaultRoot, r.relPath);
   const title = sanitizeCommitTitle(noteTitle && noteTitle.trim().length > 0 ? noteTitle : relPath);
@@ -1155,7 +1155,7 @@ export async function deleteNote(
           // Already on the branch via a concurrent commit: no rollback.
           if (outcome === "landed") {
             const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
-            return { path: relPath, commitSha: sha, committed: true, commitWarning: CONCURRENT_COMMIT_WARNING };
+            return { path: relPath, commitSha: sha, committed: true, commitWarning: CONCURRENT_COMMIT_WARNING, repaired: touched.slice(1) };
           }
         } catch (e) {
           if (!isGitTimeout(e)) throw e;
@@ -1181,6 +1181,8 @@ export async function deleteNote(
           path: relPath,
           commitSha: sha,
           committed: true,
+          // Linkers whose repair was actually written (touched[0] is the note).
+          repaired: touched.slice(1),
           ...(commitWarning !== undefined ? { commitWarning } : {}),
         };
       } catch (e) {
