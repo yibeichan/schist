@@ -2355,8 +2355,15 @@ def _memory_migration_fix(legacy: Path, canonical: Path) -> str:
         f"mkdir -p {canonical.parent} && "
         f"sqlite3 {legacy} \".backup '{canonical.parent}/.agent-state.db.new'\" && "
         f"mv {canonical.parent}/.agent-state.db.new {canonical} "
-        f"# then confirm the counts match and remove {legacy.parent.parent}"
+        f"# then confirm the counts match and {_legacy_cleanup(legacy)}"
     )
+
+
+def _legacy_cleanup(legacy: Path) -> str:
+    """Remove the legacy memory DB and its WAL siblings, and nothing else.
+    `~/.openclaw` is OpenClaw's own directory on hosts that run it (agents/,
+    identity/, workspace/, openclaw.json), so the cleanup must never name it."""
+    return f"rm -f {legacy} {legacy}-wal {legacy}-shm"
 
 
 def _unpinned_memory_db_clients(vault_path: Optional[str]) -> list[str]:
@@ -2386,18 +2393,27 @@ def _unpinned_memory_db_clients(vault_path: Optional[str]) -> list[str]:
     return unpinned
 
 
-def _memory_pin_clause(vault_path: Optional[str]) -> tuple[str, str]:
-    """(message clause, fix clause) describing MCP clients' SCHIST_MEMORY_DB."""
+def _memory_pin_clause(vault_path: Optional[str], canonical: Path) -> tuple[str, str]:
+    """(message clause, fix clause) describing MCP clients' SCHIST_MEMORY_DB.
+
+    The fix carries the literal value to paste. The pin lives in each host's
+    own MCP config, so the value is this host's path: the canonical one even
+    while a legacy DB is live (a pin to the legacy path would freeze the client
+    there), resolved through symlinks so a home reached by an alias (HPC
+    `/home/<u>` -> `/orcd/home/...`) gives the physical path. It must be a
+    literal: building it from $HOME would defeat a pin whose purpose is to
+    survive a remapped $HOME."""
     unpinned = _unpinned_memory_db_clients(vault_path)
     if not unpinned:
         return "", ""
     listed = ", ".join(unpinned)
+    value = os.path.realpath(canonical)
     return (
         f" {len(unpinned)} MCP client entr"
         f"{'y' if len(unpinned) == 1 else 'ies'} ({listed}) do not pin "
         "SCHIST_MEMORY_DB, so a sandbox that remaps $HOME resolves a private "
         "memory DB no other agent can read.",
-        f" Pin \"SCHIST_MEMORY_DB\" in the env block of: {listed}.",
+        f" Pin \"SCHIST_MEMORY_DB\": \"{value}\" in the env block of: {listed}.",
     )
 
 
@@ -2414,7 +2430,7 @@ def check_memory_db_path(vault_path: Optional[str]) -> CheckResult:
     canonical = home / Path(*MEMORY_DB_RELPATH)
     legacy = home / Path(*LEGACY_MEMORY_DB_RELPATH)
 
-    pin_msg, pin_fix = _memory_pin_clause(vault_path)
+    pin_msg, pin_fix = _memory_pin_clause(vault_path, canonical)
 
     if not legacy.exists():
         return CheckResult("PASS", label,
@@ -2435,8 +2451,8 @@ def check_memory_db_path(vault_path: Optional[str]) -> CheckResult:
             + (f" ({canonical_n} entries)" if canonical_n is not None else "")
             + f", but a legacy {legacy_desc} is still on disk — entries only in the "
               "legacy file are now unreachable." + pin_msg,
-            fix=f"Compare the counts; once {canonical} has everything, remove "
-                f"{legacy.parent.parent}. If the legacy file is AHEAD, re-run the "
+            fix=f"Compare the counts; once {canonical} has everything, "
+                f"{_legacy_cleanup(legacy)}. If the legacy file is AHEAD, re-run the "
                 f"migration: {_memory_migration_fix(legacy, canonical)}" + pin_fix,
         )
 
