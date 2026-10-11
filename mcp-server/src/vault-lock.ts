@@ -35,6 +35,11 @@ function warnOnce(reason: string): void {
 
 type Acquired = { child: ChildProcess; exited: () => string | null };
 
+// Node does not guarantee stdout/stderr are drained when `exit` fires, so the
+// helper's final output (TIMEOUT holder, late EXPIRED, stderr) is read on
+// `close`. `exit` only marks the helper dead so assertStillHeld reacts at once.
+const ACQUIRE_GRACE_MS = 5000;
+
 function acquire(vaultRoot: string, timeoutMs: number): Promise<Acquired | { unavailable: string }> {
   return new Promise((resolve, reject) => {
     let child: ChildProcess;
@@ -46,8 +51,23 @@ function acquire(vaultRoot: string, timeoutMs: number): Promise<Acquired | { una
       resolve({ unavailable: String(e) });
       return;
     }
-    let pending = "", out = "", err = "", settled = false, exitReason: string | null = null;
-    let expired = false;
+    let pending = "", out = "", err = "", settled = false;
+    let expired = false, dead = false, spawnError: string | null = null;
+    let deadWhy = "";
+    const exited = (): string | null => {
+      if (spawnError !== null) return spawnError;
+      if (!dead) return null;
+      return expired ? "max-hold expired" : deadWhy;
+    };
+    // Backstop: a helper that wedges before LOCKED or exit (slow `uv run`
+    // resolution, an NFS stall) must not block the caller forever.
+    const backstop = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      reject(new VaultLockTimeout("unknown"));
+    }, timeoutMs + ACQUIRE_GRACE_MS);
+    const settle = () => { settled = true; clearTimeout(backstop); };
     child.stdout!.setEncoding("utf-8");
     child.stderr!.setEncoding("utf-8").on("data", (d: string) => { err += d; });
     // Stdout is parsed by complete lines, so a marker split across chunks still matches.
@@ -59,8 +79,8 @@ function acquire(vaultRoot: string, timeoutMs: number): Promise<Acquired | { una
         pending = pending.slice(nl + 1);
         out += line + "\n";
         if (line === "LOCKED" && !settled) {
-          settled = true;
-          resolve({ child, exited: () => exitReason });
+          settle();
+          resolve({ child, exited });
         } else if (line === "EXPIRED") {
           expired = true;
         }
@@ -69,17 +89,23 @@ function acquire(vaultRoot: string, timeoutMs: number): Promise<Acquired | { una
     // A child can fail to spawn (ENOENT) after spawn() returns; that is
     // "unavailable", not an exception.
     child.on("error", (e) => {
-      exitReason ??= String(e);
-      if (!settled) { settled = true; resolve({ unavailable: String(e) }); }
+      spawnError ??= String(e);
+      if (!settled) { settle(); resolve({ unavailable: String(e) }); }
     });
     child.on("exit", (code, signal) => {
+      dead = true;
+      deadWhy = signal ? `killed by ${signal}` : `exit ${code}`;
+    });
+    child.on("close", (code, signal) => {
+      dead = true;
+      deadWhy ||= signal ? `killed by ${signal}` : `exit ${code}`;
       // Flush an unterminated last line so it is not lost.
-      if (pending.trim()) out += pending.trim() + "\n";
-      if (pending.trim() === "EXPIRED") expired = true;
+      const last = pending.trim();
       pending = "";
-      exitReason ??= expired ? "max-hold expired" : signal ? `killed by ${signal}` : `exit ${code}`;
+      if (last) out += last + "\n";
+      if (last === "EXPIRED") expired = true;
       if (settled) return;
-      settled = true;
+      settle();
       if (code === EXIT_TIMEOUT) {
         const m = /TIMEOUT holder=(\S+)/.exec(out);
         reject(new VaultLockTimeout(m ? m[1] : "unknown"));
@@ -117,16 +143,17 @@ export async function withVaultLock<T>(
 }
 
 async function release(got: Acquired): Promise<void> {
-  if (got.exited() !== null) return;
-  const done = new Promise<void>((r) => got.child.once("exit", () => r()));
-  got.child.stdin!.on("error", () => {});
-  got.child.stdin!.end();
+  const child = got.child;
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const done = new Promise<void>((r) => child.once("close", () => r()));
+  child.stdin!.on("error", () => {});
+  child.stdin!.end();
   let timer: NodeJS.Timeout | undefined;
   const timedOut = new Promise<boolean>((r) => { timer = setTimeout(() => r(true), RELEASE_GRACE_MS); });
   const hung = await Promise.race([done.then(() => false), timedOut]);
   clearTimeout(timer);
   if (hung) {
-    got.child.kill("SIGKILL");
+    child.kill("SIGKILL");
     await Promise.race([done, new Promise<void>((r) => setTimeout(r, 1000))]);
   }
 }

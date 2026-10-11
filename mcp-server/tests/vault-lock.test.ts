@@ -55,7 +55,24 @@ test("timeout names the holder", async () => {
     expect(err).toBeInstanceOf(VaultLockTimeout);
     expect(err.message).toMatch(/^vault write lock busy \(held by .+\)$/);
     expect(err.holder).not.toBe("unknown");
-  } finally { holder.stdin.end(); }
+  } finally {
+    const closed = new Promise((r) => holder.once("close", r));
+    holder.stdin.end();
+    await closed;
+  }
+}, 30000);
+
+test("acquire backstop: a helper that never prints or exits is killed and rejected", async () => {
+  const wedged = writeScript("wedged", "#!/bin/sh\nexec sleep 60\n");
+  const prev = process.env.SCHIST_LOCK_BIN;
+  process.env.SCHIST_LOCK_BIN = wedged;
+  try {
+    const t0 = Date.now();
+    const err = await withVaultLock(vault, 100, async () => {}).catch((e) => e);
+    expect(err).toBeInstanceOf(VaultLockTimeout);
+    expect(err.holder).toBe("unknown");
+    expect(Date.now() - t0).toBeLessThan(15000);
+  } finally { process.env.SCHIST_LOCK_BIN = prev; }
 }, 30000);
 
 test("lost lock: assertStillHeld throws after the helper dies", async () => {
