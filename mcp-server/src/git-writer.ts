@@ -5,6 +5,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { randomBytes } from "crypto";
 import { load as yamlLoad } from "js-yaml";
+import { withVaultLock, VaultLockTimeout, type VaultLockHandle } from "./vault-lock.js";
 
 const execFile = promisify(execFileCb);
 const WRITE_TIMEOUT_ERROR = Object.assign(
@@ -25,6 +26,34 @@ const WRITE_TIMEOUT_ERROR = Object.assign(
  * `.unref()` is needed and graceful shutdown is not affected.
  */
 export const writeMutex = withTimeout(new Mutex(), 10000, WRITE_TIMEOUT_ERROR);
+
+/**
+ * How long one write waits for the cross-process vault write lock (#724) that
+ * the CLI's sync and every other MCP server take on <vault>/.schist/write.lock.
+ * Read per call so the env knob applies without a restart.
+ */
+function vaultLockWaitMs(): number {
+  return Number(process.env.SCHIST_VAULT_LOCK_WAIT_MS) || 10000;
+}
+
+/**
+ * Run fn under the vault write lock. Taken after writeMutex, never the other
+ * way round, and never held while spawning `schist sync …` (which takes the
+ * same lock and would wait on us). A busy lock surfaces as WRITE_TIMEOUT, the
+ * same retryable code as a busy writeMutex, naming the holder.
+ */
+async function underVaultLock<T>(vaultRoot: string, fn: (vlock: VaultLockHandle) => Promise<T>): Promise<T> {
+  try {
+    return await withVaultLock(vaultRoot, vaultLockWaitMs(), fn);
+  } catch (e) {
+    if (e instanceof VaultLockTimeout) {
+      throw Object.assign(new Error(`${WRITE_TIMEOUT_ERROR.message ?? "write lock timed out"} (${e.message})`), {
+        error: "WRITE_TIMEOUT",
+      });
+    }
+    throw e;
+  }
+}
 
 // Fast local git ops (checkout/add/diff/rev-parse) should never take long;
 // `git commit` fires the synchronous post-commit hook (schist-ingest), so it
@@ -491,120 +520,131 @@ function sanitizeCommitTitle(title: string): string {
 async function withWriteLock(
   vaultRoot: string,
   relPath: string,
-  commitMessage: string,
+  commitMessage: string | (() => string),
   fn: (absPath: string) => Promise<void>
 ): Promise<WriteResult> {
   const release = await writeMutex.acquire();
   try {
-    const lockWait = new IndexLockWait();
-    const branch = await getWriteBranch(vaultRoot);
-    await ensureBranch(vaultRoot, branch);
-    // Trailing "--": force the branch reading even if a file shares the name
-    // (universal, ancient). NO --end-of-options here (#444): `git checkout` only
-    // learned to honor that flag after 2.43 (fails on ≤2.43, works on ≥2.49) —
-    // unlike rev-parse/branch, which honor it since 2.24. endOfOptionsArgs()
-    // gates on ≥2.24, so on git in [2.24, ~2.44) the flag reached checkout,
-    // which read it as an operand and rejected the command with "only one
-    // reference expected, 2 given" — breaking EVERY write (the common HPC git
-    // 2.43.x is in that window). The real option-injection defense is
-    // assertValidWriteBranch (full check-ref-format + leading-dash reject),
-    // unconditional and version-independent, so the flag is safe to drop here.
-    await gitWaitingForIndexLock(vaultRoot, ["checkout", branch, "--"], lockWait);
-    await assertAttachedToWriteBranch(vaultRoot, branch);
+    return await underVaultLock(vaultRoot, async (vlock) => {
+      const lockWait = new IndexLockWait();
+      const branch = await getWriteBranch(vaultRoot);
+      await ensureBranch(vaultRoot, branch);
+      // Trailing "--": force the branch reading even if a file shares the name
+      // (universal, ancient). NO --end-of-options here (#444): `git checkout` only
+      // learned to honor that flag after 2.43 (fails on ≤2.43, works on ≥2.49) —
+      // unlike rev-parse/branch, which honor it since 2.24. endOfOptionsArgs()
+      // gates on ≥2.24, so on git in [2.24, ~2.44) the flag reached checkout,
+      // which read it as an operand and rejected the command with "only one
+      // reference expected, 2 given" — breaking EVERY write (the common HPC git
+      // 2.43.x is in that window). The real option-injection defense is
+      // assertValidWriteBranch (full check-ref-format + leading-dash reject),
+      // unconditional and version-independent, so the flag is safe to drop here.
+      await gitWaitingForIndexLock(vaultRoot, ["checkout", branch, "--"], lockWait);
+      await assertAttachedToWriteBranch(vaultRoot, branch);
 
-    const absPath = path.resolve(vaultRoot, relPath);
-    // Containment check on the deepest EXISTING ancestor BEFORE mkdir — the
-    // recursive mkdir follows symlinked ancestors and would otherwise create
-    // real directories outside the vault for a write that the post-mkdir
-    // guard below is about to reject (#335).
-    await assertExistingAncestryInside(vaultRoot, path.dirname(absPath));
-    await fs.mkdir(path.dirname(absPath), { recursive: true });
-    // Authoritative symlink/containment guard, post-checkout — the only point
-    // where on-disk symlink state matches the write branch (see
-    // assertResolvesInside). Lives HERE, not in each caller's fn, so every
-    // writer routed through withWriteLock is covered; writeNote and
-    // appendToNote skipped it when it lived only in updateNote's fn (#323).
-    // Must run AFTER the mkdir above: the guard realpaths the parent dir,
-    // which may not exist yet for a brand-new subdirectory.
-    await assertResolvesInside(vaultRoot, relPath);
-    await fn(absPath);
+      const absPath = path.resolve(vaultRoot, relPath);
+      // Containment check on the deepest EXISTING ancestor BEFORE mkdir — the
+      // recursive mkdir follows symlinked ancestors and would otherwise create
+      // real directories outside the vault for a write that the post-mkdir
+      // guard below is about to reject (#335).
+      await assertExistingAncestryInside(vaultRoot, path.dirname(absPath));
+      await fs.mkdir(path.dirname(absPath), { recursive: true });
+      // Authoritative symlink/containment guard, post-checkout — the only point
+      // where on-disk symlink state matches the write branch (see
+      // assertResolvesInside). Lives HERE, not in each caller's fn, so every
+      // writer routed through withWriteLock is covered; writeNote and
+      // appendToNote skipped it when it lived only in updateNote's fn (#323).
+      // Must run AFTER the mkdir above: the guard realpaths the parent dir,
+      // which may not exist yet for a brand-new subdirectory.
+      await assertResolvesInside(vaultRoot, relPath);
+      // Nothing is written yet, so a lost lock propagates as is.
+      vlock.assertStillHeld();
+      await fn(absPath);
 
-    // Before staging, for landedViaConcurrentCommit below.
-    const headBeforeStage = await headOrNull(vaultRoot);
-    try {
-      await gitWaitingForIndexLock(vaultRoot, ["add", "--", relPath], lockWait);
-    } catch (e) {
-      throw writtenButUncommitted(relPath, e);
-    }
-
-    // Dedup: skip commit if staged content matches HEAD. `git diff --cached
-    // --quiet` exits 0 when there is no staged diff, 1 when there is. execFile
-    // throws on non-zero exit, so we catch the "has diff" branch.
-    let hasChanges = false;
-    try {
-      await execFile("git", ["diff", "--cached", "--quiet", "--", relPath], { cwd: vaultRoot, timeout: GIT_OP_TIMEOUT_MS });
-    } catch (e: unknown) {
-      // `git diff --cached --quiet` exits 1 when there IS a staged diff, which
-      // execFile reports as a throw — that's the normal "has changes" path. A
-      // timeout also throws (killed=true); don't silently treat a hung diff as
-      // "has changes" — surface it so the write fails loudly rather than
-      // committing on a bad signal.
-      if (e !== null && typeof e === "object" && (e as { killed?: boolean }).killed) {
-        throw Object.assign(
-          new Error(`git diff timed out after ${GIT_OP_TIMEOUT_MS}ms`),
-          { error: "GIT_TIMEOUT" },
-        );
-      }
-      hasChanges = true;
-    }
-    if (!hasChanges) {
-      const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
-      return { path: relPath, commitSha: sha, committed: false };
-    }
-
-    // NEVER --no-verify — hard coded out. Larger timeout: commit runs the
-    // synchronous post-commit ingest hook.
-    //
-    // git updates the ref BEFORE running post-commit, so a timeout that fires
-    // during a slow hook kills a commit that already LANDED; reporting that
-    // as GIT_TIMEOUT tells the caller the write failed when it's on the
-    // branch (#336). commitWaitingForIndexLock records HEAD before the
-    // attempt that timed out; re-check it.
-    const staged = await stagedEntries(vaultRoot, [relPath]);
-    let commitWarning: string | undefined;
-    try {
-      const outcome = await commitWaitingForIndexLock(vaultRoot, commitMessage, headBeforeStage, staged, lockWait);
-      if (outcome === "landed") {
-        const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
-        return { path: relPath, commitSha: sha, committed: true, commitWarning: CONCURRENT_COMMIT_WARNING };
-      }
-    } catch (e) {
-      if (!isGitTimeout(e)) throw writtenButUncommitted(relPath, e);
-      let headNow: string | null = null;
+      // Before staging, for landedViaConcurrentCommit below.
+      const headBeforeStage = await headOrNull(vaultRoot);
       try {
-        headNow = await git(vaultRoot, ["rev-parse", "HEAD"]);
-      } catch {
-        // Still unborn / unreadable — treat as "commit did not land".
+        await gitWaitingForIndexLock(vaultRoot, ["add", "--", relPath], lockWait);
+      } catch (e) {
+        throw writtenButUncommitted(relPath, e);
       }
-      // A rev-parse FAILURE here (headNow === null) is deliberately treated as
-      // "did not land" — the conservative direction: we rethrow GIT_TIMEOUT
-      // rather than claim success we can't confirm. The false-negative (commit
-      // actually landed but HEAD was momentarily unreadable) is harmless for
-      // writeNote: a retry re-stages identical content and withWriteLock's
-      // dedup path returns committed:false without churning history.
-      // An unborn branch before the attempt (null): any resolvable HEAD now
-      // means the commit landed.
-      if (headNow === null || headNow === headBeforeTimedOutAttempt(e)) throw e;
-      commitWarning =
-        "committed; post-commit ingest still running or timed out — the index may lag this write until the next ingest";
-    }
-    const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
-    return {
-      path: relPath,
-      commitSha: sha,
-      committed: true,
-      ...(commitWarning !== undefined ? { commitWarning } : {}),
-    };
+
+      // Dedup: skip commit if staged content matches HEAD. `git diff --cached
+      // --quiet` exits 0 when there is no staged diff, 1 when there is. execFile
+      // throws on non-zero exit, so we catch the "has diff" branch.
+      let hasChanges = false;
+      try {
+        await execFile("git", ["diff", "--cached", "--quiet", "--", relPath], { cwd: vaultRoot, timeout: GIT_OP_TIMEOUT_MS });
+      } catch (e: unknown) {
+        // `git diff --cached --quiet` exits 1 when there IS a staged diff, which
+        // execFile reports as a throw — that's the normal "has changes" path. A
+        // timeout also throws (killed=true); don't silently treat a hung diff as
+        // "has changes" — surface it so the write fails loudly rather than
+        // committing on a bad signal.
+        if (e !== null && typeof e === "object" && (e as { killed?: boolean }).killed) {
+          throw Object.assign(
+            new Error(`git diff timed out after ${GIT_OP_TIMEOUT_MS}ms`),
+            { error: "GIT_TIMEOUT" },
+          );
+        }
+        hasChanges = true;
+      }
+      if (!hasChanges) {
+        const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
+        return { path: relPath, commitSha: sha, committed: false };
+      }
+
+      // NEVER --no-verify — hard coded out. Larger timeout: commit runs the
+      // synchronous post-commit ingest hook.
+      //
+      // git updates the ref BEFORE running post-commit, so a timeout that fires
+      // during a slow hook kills a commit that already LANDED; reporting that
+      // as GIT_TIMEOUT tells the caller the write failed when it's on the
+      // branch (#336). commitWaitingForIndexLock records HEAD before the
+      // attempt that timed out; re-check it.
+      const staged = await stagedEntries(vaultRoot, [relPath]);
+      let msg: string;
+      try {
+        msg = typeof commitMessage === "function" ? commitMessage() : commitMessage;
+        vlock.assertStillHeld();
+      } catch (e) {
+        throw writtenButUncommitted(relPath, e);
+      }
+      let commitWarning: string | undefined;
+      try {
+        const outcome = await commitWaitingForIndexLock(vaultRoot, msg, headBeforeStage, staged, lockWait);
+        if (outcome === "landed") {
+          const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
+          return { path: relPath, commitSha: sha, committed: true, commitWarning: CONCURRENT_COMMIT_WARNING };
+        }
+      } catch (e) {
+        if (!isGitTimeout(e)) throw writtenButUncommitted(relPath, e);
+        let headNow: string | null = null;
+        try {
+          headNow = await git(vaultRoot, ["rev-parse", "HEAD"]);
+        } catch {
+          // Still unborn / unreadable — treat as "commit did not land".
+        }
+        // A rev-parse FAILURE here (headNow === null) is deliberately treated as
+        // "did not land" — the conservative direction: we rethrow GIT_TIMEOUT
+        // rather than claim success we can't confirm. The false-negative (commit
+        // actually landed but HEAD was momentarily unreadable) is harmless for
+        // writeNote: a retry re-stages identical content and withWriteLock's
+        // dedup path returns committed:false without churning history.
+        // An unborn branch before the attempt (null): any resolvable HEAD now
+        // means the commit landed.
+        if (headNow === null || headNow === headBeforeTimedOutAttempt(e)) throw e;
+        commitWarning =
+          "committed; post-commit ingest still running or timed out — the index may lag this write until the next ingest";
+      }
+      const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
+      return {
+        path: relPath,
+        commitSha: sha,
+        committed: true,
+        ...(commitWarning !== undefined ? { commitWarning } : {}),
+      };
+    });
   } finally {
     release();
   }
@@ -721,6 +761,15 @@ function headBeforeTimedOutAttempt(e: unknown): string | null {
   return typeof head === "string" ? head : null;
 }
 
+/** A thrown value's message: an Error's, a plain `{ error, message }` ToolError's, or its string form. */
+function errorText(x: unknown): string {
+  if (x instanceof Error) return x.message;
+  if (x !== null && typeof x === "object" && typeof (x as { message?: unknown }).message === "string") {
+    return (x as { message: string }).message;
+  }
+  return String(x);
+}
+
 /**
  * A delete that failed and could not be rolled back: the deletion (and any
  * connection repairs) may still be staged, and a later commit or sync would
@@ -728,7 +777,7 @@ function headBeforeTimedOutAttempt(e: unknown): string | null {
  * instead of assuming nothing changed.
  */
 function deleteLeftStaged(paths: string[], cause: unknown, restoreErr: unknown): Error {
-  const msg = (x: unknown): string => (x instanceof Error ? x.message : String(x)).trim();
+  const msg = (x: unknown): string => errorText(x).trim();
   return Object.assign(
     new Error(
       `delete of ${paths[0]} failed (${msg(cause)}), and rolling it back also failed (${msg(restoreErr)}).\n` +
@@ -748,7 +797,7 @@ function deleteLeftStaged(paths: string[], cause: unknown, restoreErr: unknown):
  * writing, so unlinking could not make "not written" true.
  */
 function writtenButUncommitted(relPath: string, cause: unknown): Error {
-  const detail = cause instanceof Error ? cause.message : String(cause);
+  const detail = errorText(cause);
   const stderr = cause !== null && typeof cause === "object" ? (cause as { stderr?: unknown }).stderr : undefined;
   return Object.assign(
     new Error(
@@ -936,21 +985,56 @@ export async function appendToNote(
  * curation edit from an initial create. The dedup path in withWriteLock makes
  * a no-op update (content unchanged) return `committed: false` rather than
  * churning the history. Issue #119.
+ *
+ * `commitTitle` may be a function of the note's content as read inside the
+ * lock, so the subject names the note as committed, not as it was before a
+ * concurrent edit (#724).
  */
 export async function updateNote(
   vaultRoot: string,
   relPath: string,
-  commitTitle: string | undefined,
+  commitTitle: string | undefined | ((current: string) => string | undefined),
+  owner: string | undefined,
+  transform: (current: string) => string
+): Promise<WriteResult> {
+  return replaceNote("update", vaultRoot, relPath, commitTitle, owner, transform);
+}
+
+/**
+ * updateNote with writeNote's `write` verb: a read-modify-write whose commit
+ * reads as a write (add_connection). The transform sees the note as read
+ * inside the lock (#724).
+ */
+export async function rewriteNote(
+  vaultRoot: string,
+  relPath: string,
+  commitTitle: string | undefined | ((current: string) => string | undefined),
+  owner: string | undefined,
+  transform: (current: string) => string
+): Promise<WriteResult> {
+  return replaceNote("write", vaultRoot, relPath, commitTitle, owner, transform);
+}
+
+async function replaceNote(
+  verb: "update" | "write",
+  vaultRoot: string,
+  relPath: string,
+  commitTitle: string | undefined | ((current: string) => string | undefined),
   owner: string | undefined,
   transform: (current: string) => string
 ): Promise<WriteResult> {
   assertPathSafe(vaultRoot, relPath);
-  const rawTitle = commitTitle && commitTitle.trim().length > 0 ? commitTitle : relPath;
-  const title = sanitizeCommitTitle(rawTitle);
+  const subject = (raw: string | undefined): string =>
+    `feat(schist): ${verb} ${sanitizeCommitTitle(raw && raw.trim().length > 0 ? raw : relPath)} — ${attribution(owner)}`;
+  let current: string | undefined;
+  const message =
+    typeof commitTitle === "function"
+      ? () => subject(current === undefined ? undefined : commitTitle(current))
+      : subject(commitTitle);
   return withWriteLock(
     vaultRoot,
     relPath,
-    `feat(schist): update ${title} — ${attribution(owner)}`,
+    message,
     async (absPath) => {
       // Symlink/containment guard runs in withWriteLock, post-checkout,
       // before this callback (#323).
@@ -959,13 +1043,14 @@ export async function updateNote(
       // handler's pre-lock read — e.g. a concurrent delete_note committed in the
       // window — abort with NOT_FOUND rather than resurrecting it from stale
       // content. #119.
-      let current: string;
+      let read: string;
       try {
-        current = await fs.readFile(absPath, "utf-8");
+        read = await fs.readFile(absPath, "utf-8");
       } catch {
         throw { error: "NOT_FOUND", message: `Note not found: ${relPath}` };
       }
-      await atomicWriteFile(absPath, transform(current), vaultRoot);
+      current = read;
+      await atomicWriteFile(absPath, transform(read), vaultRoot);
     }
   );
 }
@@ -974,8 +1059,11 @@ export async function updateNote(
  * Delete a note via `git rm`, optionally repairing notes that linked to it in
  * the SAME commit (the cascade path — see delete_note in tools.ts). Issue #119.
  *
- * `repairs` are pre-computed (caller stripped the dangling `## Connections`
- * lines). Order matters: `git rm` runs FIRST (it's the operation most likely
+ * `repairs` are transforms applied to each linker as read INSIDE the lock, so
+ * an edit that lands between the caller's scan and the lock is kept rather
+ * than overwritten with a stale repaired copy (#724). A repair whose file
+ * vanished, or whose transform returns its input unchanged, is skipped.
+ * Order matters: `git rm` runs FIRST (it's the operation most likely
  * to fail — e.g. target untracked on the write branch), then the repairs are
  * written + staged, then a single commit lands the deletion and edge cleanup
  * atomically. On ANY failure we roll back ONLY the paths this call touched
@@ -991,116 +1079,133 @@ export async function deleteNote(
   relPath: string,
   noteTitle: string,
   owner?: string,
-  repairs: Array<{ relPath: string; content: string }> = []
+  repairs: Array<{ relPath: string; transform: (current: string) => string }> = []
 ): Promise<WriteResult> {
   assertPathSafe(vaultRoot, relPath);
   for (const r of repairs) assertPathSafe(vaultRoot, r.relPath);
   const title = sanitizeCommitTitle(noteTitle && noteTitle.trim().length > 0 ? noteTitle : relPath);
   const release = await writeMutex.acquire();
   try {
-    const lockWait = new IndexLockWait();
-    const branch = await getWriteBranch(vaultRoot);
-    await ensureBranch(vaultRoot, branch);
-    // Same option-injection hardening as withWriteLock: trailing "--" is
-    // universal, and NO --end-of-options — `git checkout` only honors that flag
-    // after 2.43 (fails on ≤2.43), so with endOfOptionsArgs()'s ≥2.24 gate it
-    // broke every delete on the common HPC git 2.43.x (#444).
-    // assertValidWriteBranch is the real, version-independent defense.
-    await gitWaitingForIndexLock(vaultRoot, ["checkout", branch, "--"], lockWait);
-    await assertAttachedToWriteBranch(vaultRoot, branch);
+    return await underVaultLock(vaultRoot, async (vlock) => {
+      const lockWait = new IndexLockWait();
+      const branch = await getWriteBranch(vaultRoot);
+      await ensureBranch(vaultRoot, branch);
+      // Same option-injection hardening as withWriteLock: trailing "--" is
+      // universal, and NO --end-of-options — `git checkout` only honors that flag
+      // after 2.43 (fails on ≤2.43), so with endOfOptionsArgs()'s ≥2.24 gate it
+      // broke every delete on the common HPC git 2.43.x (#444).
+      // assertValidWriteBranch is the real, version-independent defense.
+      await gitWaitingForIndexLock(vaultRoot, ["checkout", branch, "--"], lockWait);
+      await assertAttachedToWriteBranch(vaultRoot, branch);
 
-    try {
-      // Before staging, for landedViaConcurrentCommit below.
-      const headBeforeStage = await headOrNull(vaultRoot);
-      await gitWaitingForIndexLock(vaultRoot, ["rm", "--quiet", "--", relPath], lockWait);
-
-      for (const r of repairs) {
-        // Post-checkout symlink/containment guard before writing through the
-        // repair path (a write-branch symlink could redirect outside the vault;
-        // the `git rm` of the delete target above is safe — it removes the link
-        // rather than writing through it). #119.
-        await assertResolvesInside(vaultRoot, r.relPath);
-        const absPath = path.resolve(vaultRoot, r.relPath);
-        await atomicWriteFile(absPath, r.content, vaultRoot);
-        await gitWaitingForIndexLock(vaultRoot, ["add", "--", r.relPath], lockWait);
-      }
-
-      // NEVER --no-verify — hard coded out (mirrors withWriteLock). Commit
-      // runs the synchronous post-commit ingest hook, so it needs the larger
-      // ceiling — the 30s default killed deletes on large vaults (#324).
-      //
-      // As in withWriteLock: the ref moves BEFORE post-commit runs, so a
-      // timeout during a slow hook can kill a commit that already landed.
-      // Without the HEAD re-check, that case fell through to the rollback
-      // below, whose `git restore --source=HEAD -- <path>` referenced the NEW
-      // HEAD (which no longer has the path), failed, and was swallowed —
-      // while the caller was told the delete failed (#336). Now the rollback
-      // only runs when the commit genuinely did not land, which is exactly
-      // when `--source=HEAD` is correct.
-      const staged = await stagedEntries(vaultRoot, [relPath, ...repairs.map((r) => r.relPath)]);
-      let commitWarning: string | undefined;
+      // Nothing is staged yet, so a lost lock propagates without a rollback.
+      vlock.assertStillHeld();
+      // Only the paths this call staged or wrote: rolling back a skipped repair
+      // would restore a linker someone deleted, or fail on one HEAD never had.
+      const touched = [relPath];
       try {
-        const outcome = await commitWaitingForIndexLock(
-          vaultRoot,
-          `feat(schist): delete ${title} — ${attribution(owner)}`,
-          headBeforeStage,
-          staged,
-          lockWait,
-        );
-        // Already on the branch via a concurrent commit: no rollback.
-        if (outcome === "landed") {
-          const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
-          return { path: relPath, commitSha: sha, committed: true, commitWarning: CONCURRENT_COMMIT_WARNING };
+        // Before staging, for landedViaConcurrentCommit below.
+        const headBeforeStage = await headOrNull(vaultRoot);
+        await gitWaitingForIndexLock(vaultRoot, ["rm", "--quiet", "--", relPath], lockWait);
+
+        for (const r of repairs) {
+          // Post-checkout symlink/containment guard before writing through the
+          // repair path (a write-branch symlink could redirect outside the vault;
+          // the `git rm` of the delete target above is safe — it removes the link
+          // rather than writing through it). #119.
+          await assertResolvesInside(vaultRoot, r.relPath);
+          const absPath = path.resolve(vaultRoot, r.relPath);
+          let current: string;
+          try {
+            current = await fs.readFile(absPath, "utf-8");
+          } catch {
+            continue; // vanished: nothing to repair
+          }
+          const next = r.transform(current);
+          if (next === current) continue;
+          touched.push(r.relPath);
+          await atomicWriteFile(absPath, next, vaultRoot);
+          await gitWaitingForIndexLock(vaultRoot, ["add", "--", r.relPath], lockWait);
         }
-      } catch (e) {
-        if (!isGitTimeout(e)) throw e;
-        let headNow: string | null = null;
+
+        // NEVER --no-verify — hard coded out (mirrors withWriteLock). Commit
+        // runs the synchronous post-commit ingest hook, so it needs the larger
+        // ceiling — the 30s default killed deletes on large vaults (#324).
+        //
+        // As in withWriteLock: the ref moves BEFORE post-commit runs, so a
+        // timeout during a slow hook can kill a commit that already landed.
+        // Without the HEAD re-check, that case fell through to the rollback
+        // below, whose `git restore --source=HEAD -- <path>` referenced the NEW
+        // HEAD (which no longer has the path), failed, and was swallowed —
+        // while the caller was told the delete failed (#336). Now the rollback
+        // only runs when the commit genuinely did not land, which is exactly
+        // when `--source=HEAD` is correct.
+        const staged = await stagedEntries(vaultRoot, touched);
+        // A lost lock here takes the rollback below: the deletion is staged.
+        vlock.assertStillHeld();
+        let commitWarning: string | undefined;
         try {
-          headNow = await git(vaultRoot, ["rev-parse", "HEAD"]);
-        } catch {
-          // Unreadable HEAD — treat as "commit did not land"; outer rollback runs.
+          const outcome = await commitWaitingForIndexLock(
+            vaultRoot,
+            `feat(schist): delete ${title} — ${attribution(owner)}`,
+            headBeforeStage,
+            staged,
+            lockWait,
+          );
+          // Already on the branch via a concurrent commit: no rollback.
+          if (outcome === "landed") {
+            const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
+            return { path: relPath, commitSha: sha, committed: true, commitWarning: CONCURRENT_COMMIT_WARNING };
+          }
+        } catch (e) {
+          if (!isGitTimeout(e)) throw e;
+          let headNow: string | null = null;
+          try {
+            headNow = await git(vaultRoot, ["rev-parse", "HEAD"]);
+          } catch {
+            // Unreadable HEAD — treat as "commit did not land"; outer rollback runs.
+          }
+          // A rev-parse FAILURE here (headNow === null) is deliberately treated
+          // as "did not land" — the conservative direction: rethrow GIT_TIMEOUT
+          // and run the rollback rather than claim a success we can't confirm.
+          // The false-negative (delete actually committed but HEAD was
+          // momentarily unreadable) self-corrects: a retried deleteNote hits
+          // `git rm` on a now-untracked path and fails fast rather than
+          // double-deleting.
+          if (headNow === null || headNow === headBeforeTimedOutAttempt(e)) throw e;
+          commitWarning =
+            "committed; post-commit ingest still running or timed out — the index may lag this delete until the next ingest";
         }
-        // A rev-parse FAILURE here (headNow === null) is deliberately treated
-        // as "did not land" — the conservative direction: rethrow GIT_TIMEOUT
-        // and run the rollback rather than claim a success we can't confirm.
-        // The false-negative (delete actually committed but HEAD was
-        // momentarily unreadable) self-corrects: a retried deleteNote hits
-        // `git rm` on a now-untracked path and fails fast rather than
-        // double-deleting.
-        if (headNow === null || headNow === headBeforeTimedOutAttempt(e)) throw e;
-        commitWarning =
-          "committed; post-commit ingest still running or timed out — the index may lag this delete until the next ingest";
+        const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
+        return {
+          path: relPath,
+          commitSha: sha,
+          committed: true,
+          ...(commitWarning !== undefined ? { commitWarning } : {}),
+        };
+      } catch (e) {
+        // Roll back ONLY the paths this delete touched (the removed note + any
+        // repaired linkers), NOT the whole tree. A `git reset --hard HEAD` here
+        // would also discard unrelated uncommitted edits elsewhere in the vault
+        // (human edits, pre-existing staged work) on any delete failure. `git
+        // restore --source=HEAD --staged --worktree` un-deletes / un-modifies
+        // exactly these paths. The restore gets its own index-lock allowance:
+        // a commit that ran out of waiting usually failed on a lock that is
+        // still held, and a swallowed restore failure left the deletion staged
+        // for the next commit or sync to land under its own message, while the
+        // caller was told the delete failed (#719).
+        try {
+          await gitWaitingForIndexLock(
+            vaultRoot,
+            ["restore", "--staged", "--worktree", "--source=HEAD", "--", ...touched],
+            new IndexLockWait(),
+          );
+        } catch (restoreErr) {
+          throw deleteLeftStaged(touched, e, restoreErr);
+        }
+        throw e;
       }
-      const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
-      return {
-        path: relPath,
-        commitSha: sha,
-        committed: true,
-        ...(commitWarning !== undefined ? { commitWarning } : {}),
-      };
-    } catch (e) {
-      // Roll back ONLY the paths this delete touched (the removed note + any
-      // repaired linkers), NOT the whole tree. A `git reset --hard HEAD` here
-      // would also discard unrelated uncommitted edits elsewhere in the vault
-      // (human edits, pre-existing staged work) on any delete failure. `git
-      // restore --source=HEAD --staged --worktree` un-deletes / un-modifies
-      // exactly these paths. The restore gets its own index-lock allowance:
-      // a commit that ran out of waiting usually failed on a lock that is
-      // still held, and a swallowed restore failure left the deletion staged
-      // for the next commit or sync to land under its own message, while the
-      // caller was told the delete failed (#719).
-      const touched = [relPath, ...repairs.map((r) => r.relPath)];
-      try {
-        await gitWaitingForIndexLock(
-          vaultRoot,
-          ["restore", "--staged", "--worktree", "--source=HEAD", "--", ...touched],
-          new IndexLockWait(),
-        );
-      } catch (restoreErr) {
-        throw deleteLeftStaged(touched, e, restoreErr);
-      }
-      throw e;
-    }
+    });
   } finally {
     release();
   }

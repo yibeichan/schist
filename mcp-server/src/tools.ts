@@ -3446,7 +3446,17 @@ export async function delete_note(
       // fall back to id for the commit subject
     }
 
-    const result = await deleteNote(vaultRoot, args.id, title, owner, repairs);
+    // Each repair re-strips the linker as read inside the vault lock (#724).
+    const result = await deleteNote(
+      vaultRoot,
+      args.id,
+      title,
+      owner,
+      repairs.map((r) => ({
+        relPath: r.relPath,
+        transform: (c: string) => stripConceptRefs(stripConnectionsTo(c, refTokens).content, refTokens).content,
+      })),
+    );
 
     triggerIngestion(vaultRoot);
     triggerSpokePush(vaultRoot);
