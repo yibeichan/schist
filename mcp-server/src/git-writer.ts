@@ -39,6 +39,41 @@ function isGitTimeout(e: unknown): boolean {
 }
 
 /**
+ * Waits between attempts when another process holds `.git/index.lock` (#719).
+ * writeMutex only serializes this process's writes; the `schist sync push`
+ * that triggerSpokePush spawns after every write is a separate process, and
+ * its `git add`/`git commit` take the index lock while our next write is
+ * staging or committing. git holds that lock for one command at a time (the
+ * commit's window is its pre-commit hook plus the index write), so a short
+ * wait clears it. The total (~3s) stays well inside writeMutex's 10s acquire
+ * timeout, which a queued sibling write is spending while we wait.
+ */
+const INDEX_LOCK_RETRY_DELAYS_MS = [100, 200, 400, 800, 1600];
+
+/**
+ * A git failure caused by a live `index.lock`. git's sentence is localized,
+ * but the lock's path is printed verbatim in every locale, so match on that.
+ */
+function isIndexLockContention(e: unknown): boolean {
+  const stderr = e !== null && typeof e === "object" ? (e as { stderr?: unknown }).stderr : undefined;
+  return typeof stderr === "string" && stderr.includes("index.lock");
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** git(), retried while another process holds the index lock. */
+async function gitWaitingForIndexLock(vaultRoot: string, args: string[]): Promise<string> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await git(vaultRoot, args);
+    } catch (e) {
+      if (attempt >= INDEX_LOCK_RETRY_DELAYS_MS.length || !isIndexLockContention(e)) throw e;
+      await sleep(INDEX_LOCK_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+}
+
+/**
  * `--end-of-options` (which stops git parsing later args as flags) was only
  * added in git 2.24. On an HPC login node the user lands on a different host
  * each session with whatever git module happens to be loaded — possibly an
@@ -451,7 +486,7 @@ async function withWriteLock(
     // 2.43.x is in that window). The real option-injection defense is
     // assertValidWriteBranch (full check-ref-format + leading-dash reject),
     // unconditional and version-independent, so the flag is safe to drop here.
-    await git(vaultRoot, ["checkout", branch, "--"]);
+    await gitWaitingForIndexLock(vaultRoot, ["checkout", branch, "--"]);
     await assertAttachedToWriteBranch(vaultRoot, branch);
 
     const absPath = path.resolve(vaultRoot, relPath);
@@ -473,7 +508,11 @@ async function withWriteLock(
 
     // Before staging, for landedViaConcurrentCommit below.
     const headBeforeStage = await headOrNull(vaultRoot);
-    await git(vaultRoot, ["add", "--", relPath]);
+    try {
+      await gitWaitingForIndexLock(vaultRoot, ["add", "--", relPath]);
+    } catch (e) {
+      throw writtenButUncommitted(relPath, e);
+    }
 
     // Dedup: skip commit if staged content matches HEAD. `git diff --cached
     // --quiet` exits 0 when there is no staged diff, 1 when there is. execFile
@@ -516,14 +555,13 @@ async function withWriteLock(
     const staged = await stagedEntries(vaultRoot, [relPath]);
     let commitWarning: string | undefined;
     try {
-      await git(vaultRoot, ["commit", "-m", commitMessage], GIT_COMMIT_TIMEOUT_MS);
-    } catch (e) {
-      if (!isGitTimeout(e)) {
-        if (!(await landedViaConcurrentCommit(vaultRoot, headBeforeStage, staged))) throw e;
-        commitWarning = CONCURRENT_COMMIT_WARNING;
+      const outcome = await commitWaitingForIndexLock(vaultRoot, commitMessage, headBeforeStage, staged);
+      if (outcome === "landed") {
         const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
-        return { path: relPath, commitSha: sha, committed: true, commitWarning };
+        return { path: relPath, commitSha: sha, committed: true, commitWarning: CONCURRENT_COMMIT_WARNING };
       }
+    } catch (e) {
+      if (!isGitTimeout(e)) throw writtenButUncommitted(relPath, e);
       let headNow: string | null = null;
       try {
         headNow = await git(vaultRoot, ["rev-parse", "HEAD"]);
@@ -625,6 +663,57 @@ async function landedViaConcurrentCommit(
 
 const CONCURRENT_COMMIT_WARNING =
   "committed by a concurrent sync commit — the content is on the branch, under that commit's message";
+
+/**
+ * `git commit -m message`, retried while another process holds the index lock
+ * (#719). "landed" when a concurrent commit already carries what we staged —
+ * checked after every failure, because the lock holder is usually a
+ * `schist sync push` whose commit sweeps our staged paths while we wait.
+ * Throws the last failure otherwise; a GIT_TIMEOUT is thrown at once for the
+ * caller's landed-before-the-hook check.
+ */
+async function commitWaitingForIndexLock(
+  vaultRoot: string,
+  message: string,
+  headBeforeStage: string | null,
+  staged: Map<string, string | null> | null,
+): Promise<"committed" | "landed"> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await git(vaultRoot, ["commit", "-m", message], GIT_COMMIT_TIMEOUT_MS);
+      return "committed";
+    } catch (e) {
+      if (isGitTimeout(e)) throw e;
+      if (await landedViaConcurrentCommit(vaultRoot, headBeforeStage, staged)) return "landed";
+      if (attempt >= INDEX_LOCK_RETRY_DELAYS_MS.length || !isIndexLockContention(e)) throw e;
+      await sleep(INDEX_LOCK_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+}
+
+/**
+ * A write whose file is on disk but whose stage or commit failed. A plain
+ * GIT_ERROR read as "nothing was written", and a caller that retried created
+ * a duplicate note once the next commit or sync swept the first copy in
+ * (#719). The file is deliberately left in place: when the commit lost the
+ * index lock, the holder may already have our blob in the commit it is
+ * writing, so unlinking could not make "not written" true.
+ */
+function writtenButUncommitted(relPath: string, cause: unknown): Error {
+  const detail = cause instanceof Error ? cause.message : String(cause);
+  const stderr = cause !== null && typeof cause === "object" ? (cause as { stderr?: unknown }).stderr : undefined;
+  return Object.assign(
+    new Error(
+      `${relPath} was written to disk, but committing it failed: ${detail.trim()}\n` +
+        "The file is on disk and a later commit or sync may include it. Check the vault " +
+        "before retrying: a retry can create a duplicate note.",
+    ),
+    {
+      error: "GIT_COMMIT_FAILED_FILE_WRITTEN",
+      details: { path: relPath, ...(typeof stderr === "string" ? { stderr } : {}) },
+    },
+  );
+}
 
 /**
  * Commit-message attribution: `— by {owner}` when `owner` is provided (the
@@ -868,13 +957,13 @@ export async function deleteNote(
     // after 2.43 (fails on ≤2.43), so with endOfOptionsArgs()'s ≥2.24 gate it
     // broke every delete on the common HPC git 2.43.x (#444).
     // assertValidWriteBranch is the real, version-independent defense.
-    await git(vaultRoot, ["checkout", branch, "--"]);
+    await gitWaitingForIndexLock(vaultRoot, ["checkout", branch, "--"]);
     await assertAttachedToWriteBranch(vaultRoot, branch);
 
     try {
       // Before staging, for landedViaConcurrentCommit below.
       const headBeforeStage = await headOrNull(vaultRoot);
-      await git(vaultRoot, ["rm", "--quiet", "--", relPath]);
+      await gitWaitingForIndexLock(vaultRoot, ["rm", "--quiet", "--", relPath]);
 
       for (const r of repairs) {
         // Post-checkout symlink/containment guard before writing through the
@@ -884,7 +973,7 @@ export async function deleteNote(
         await assertResolvesInside(vaultRoot, r.relPath);
         const absPath = path.resolve(vaultRoot, r.relPath);
         await atomicWriteFile(absPath, r.content, vaultRoot);
-        await git(vaultRoot, ["add", "--", r.relPath]);
+        await gitWaitingForIndexLock(vaultRoot, ["add", "--", r.relPath]);
       }
 
       // NEVER --no-verify — hard coded out (mirrors withWriteLock). Commit
@@ -903,18 +992,19 @@ export async function deleteNote(
       const staged = await stagedEntries(vaultRoot, [relPath, ...repairs.map((r) => r.relPath)]);
       let commitWarning: string | undefined;
       try {
-        await git(
+        const outcome = await commitWaitingForIndexLock(
           vaultRoot,
-          ["commit", "-m", `feat(schist): delete ${title} — ${attribution(owner)}`],
-          GIT_COMMIT_TIMEOUT_MS,
+          `feat(schist): delete ${title} — ${attribution(owner)}`,
+          headBeforeStage,
+          staged,
         );
-      } catch (e) {
-        if (!isGitTimeout(e)) {
-          // Already on the branch via a concurrent commit: no rollback.
-          if (!(await landedViaConcurrentCommit(vaultRoot, headBeforeStage, staged))) throw e;
+        // Already on the branch via a concurrent commit: no rollback.
+        if (outcome === "landed") {
           const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
           return { path: relPath, commitSha: sha, committed: true, commitWarning: CONCURRENT_COMMIT_WARNING };
         }
+      } catch (e) {
+        if (!isGitTimeout(e)) throw e;
         let headNow: string | null = null;
         try {
           headNow = await git(vaultRoot, ["rev-parse", "HEAD"]);
