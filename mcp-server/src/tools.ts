@@ -771,7 +771,22 @@ function truncateOutput(s: string, cap = 12_000): string {
 async function runCommand(
   command: string,
   args: string[],
-  opts: { cwd: string; timeoutMs: number; env?: NodeJS.ProcessEnv; capture?: boolean; stdin?: string }
+  opts: {
+    cwd: string;
+    timeoutMs: number;
+    env?: NodeJS.ProcessEnv;
+    capture?: boolean;
+    stdin?: string;
+    /**
+     * For output parsed as data, not shown (#705): stdout is returned whole
+     * (no truncation, which fused half-paths and desynced NUL records) as a
+     * latin1 string holding the exact bytes, one byte per character, and
+     * stdin is written back the same way. A path that is not UTF-8 then
+     * round-trips to the next git command unchanged; decode for display with
+     * displayPath().
+     */
+    binary?: boolean;
+  }
 ): Promise<SyncCommandOutcome> {
   return await new Promise<SyncCommandOutcome>((resolve) => {
     const child = spawn(command, args, {
@@ -787,9 +802,10 @@ async function runCommand(
       // EPIPE if the child exits before consuming stdin (e.g. usage error) —
       // swallow it; the exit-code path already reports the failure.
       child.stdin?.on("error", () => { /* ignored */ });
-      child.stdin?.end(opts.stdin);
+      child.stdin?.end(opts.binary ? Buffer.from(opts.stdin, "latin1") : opts.stdin);
     }
     let stdout = "";
+    const stdoutChunks: Buffer[] = [];
     let stderr = "";
     let settled = false;
 
@@ -799,12 +815,17 @@ async function runCommand(
       clearTimeout(timer);
       resolve({
         ...outcome,
-        stdout: opts.capture ? truncateOutput(stdout) : undefined,
+        stdout: !opts.capture ? undefined
+          : opts.binary ? Buffer.concat(stdoutChunks).toString("latin1")
+          : truncateOutput(stdout),
         stderr: opts.capture ? truncateOutput(stderr) : undefined,
       });
     };
 
-    child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf-8"); });
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (opts.binary) stdoutChunks.push(chunk);
+      else stdout += chunk.toString("utf-8");
+    });
     child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf-8"); });
 
     const killGroup = (sig: NodeJS.Signals): void => {
@@ -1865,6 +1886,8 @@ async function confirmedJunk(vaultRoot: string, candidates: string[]): Promise<S
   // ignored (expected: porcelain said ALL are); 1 = none; 128 = error.
   // runCommand treats non-zero as !ok, which correctly confirms nothing
   // for both failure shapes.
+  // binary (#705): candidates are exact bytes from the porcelain probe and
+  // go back to check-ignore unchanged, and the records come back whole.
   const probe = await runCommand(
     "git",
     ["check-ignore", "--verbose", "--stdin", "-z"],
@@ -1874,6 +1897,7 @@ async function confirmedJunk(vaultRoot: string, candidates: string[]): Promise<S
       env: process.env,
       capture: true,
       stdin: candidates.join("\0") + "\0",
+      binary: true,
     },
   );
   if (!probe.ok) return new Set();
@@ -1913,6 +1937,11 @@ async function spokeScopeTargets(vaultRoot: string): Promise<string[]> {
  *  cli/schist/git_ops.py _ignored_paths_from_porcelain_z. Entries are
  *  NUL-terminated `XY <path>`; a rename/copy (`R`/`C` in either column) is
  *  followed by one more token, the original path, which must be skipped. */
+/** A path held as exact bytes (runCommand `binary`), decoded for display. */
+function displayPath(bytes: string): string {
+  return Buffer.from(bytes, "latin1").toString("utf-8");
+}
+
 export function ignoredPathsFromPorcelainZ(raw: string): string[] {
   const tokens = raw.split("\0");
   const ignored: string[] = [];
@@ -1939,10 +1968,14 @@ async function blockingIgnoredScopeFiles(vaultRoot: string): Promise<string[]> {
   // -z, as in the CLI probe (#698): porcelain v1 double-quotes a name with a
   // space, newline or `"` even under core.quotePath=off, and keeping those
   // quotes hid `*~` from isJunkBasename.
-  const probe = await runGit(
-    vaultRoot,
+  //
+  // binary (#705): the whole listing, as exact bytes. A UTF-8 decode turned a
+  // name that is not UTF-8 into U+FFFD, so check-ignore was asked about a
+  // different path, and the 12,000-char display cap cut the listing.
+  const probe = await runCommand(
+    "git",
     ["status", "--porcelain", "-z", "--ignored=matching", "--", ...targets],
-    SYNC_STATUS_TIMEOUT_MS,
+    { cwd: vaultRoot, timeoutMs: SYNC_STATUS_TIMEOUT_MS, env: process.env, capture: true, binary: true },
   );
   if (!probe.ok) return [];
   const ignored = ignoredPathsFromPorcelainZ(probe.stdout ?? "");
@@ -1950,7 +1983,7 @@ async function blockingIgnoredScopeFiles(vaultRoot: string): Promise<string[]> {
   // only nominates a candidate; the exclusion must also be attributed to a
   // junk-shaped pattern. Common path (no junk-looking files) pays nothing.
   const confirmed = await confirmedJunk(vaultRoot, ignored.filter(isJunkBasename));
-  return ignored.filter((p) => !confirmed.has(p));
+  return ignored.filter((p) => !confirmed.has(p)).map(displayPath);
 }
 
 export async function sync_status(vaultRoot: string): Promise<SyncStatusResponse | ToolError> {
