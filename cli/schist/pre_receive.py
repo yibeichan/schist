@@ -193,6 +193,16 @@ def get_changed_files(oldrev: str, newrev: str) -> list[str]:
     net diff. A multi-commit push can add an out-of-scope file in an
     intermediate commit and remove it before the tip; the hook must still see
     that file because it entered git history.
+
+    Two flags close what the plain listing missed (#703):
+    - `--no-renames`: with rename detection a rename is listed by its
+      destination only, so deleting a file in a scope the pusher cannot write
+      went unchecked as long as the content reappeared in one they can.
+    - `-c`: by default a merge commit lists nothing, so a path added or
+      deleted only in the merge result was never checked. The combined diff
+      lists exactly the paths that differ from every parent. Not `-m`: that
+      diffs against each parent, so a routine pull-merge would list every path
+      the hub side brought in from other participants and be rejected.
     """
     if newrev == ZERO_SHA:
         # Branch deletion — nothing to check
@@ -203,14 +213,16 @@ def get_changed_files(oldrev: str, newrev: str) -> list[str]:
         # already reachable from existing refs so creating a branch at an
         # existing commit does not re-count old history.
         result = subprocess.run(
-            ["git", "log", "--name-only", "--format=", "-z", newrev, "--not", "--all"],
+            ["git", "log", "--name-only", "--no-renames", "-c", "--format=", "-z",
+             newrev, "--not", "--all"],
             capture_output=True,
             check=True,
             timeout=30,
         )
     else:
         result = subprocess.run(
-            ["git", "log", "--name-only", "--format=", "-z", f"{oldrev}..{newrev}"],
+            ["git", "log", "--name-only", "--no-renames", "-c", "--format=", "-z",
+             f"{oldrev}..{newrev}"],
             capture_output=True,
             check=True,
             timeout=30,

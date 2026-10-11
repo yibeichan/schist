@@ -436,6 +436,158 @@ class TestMain:
 # ---------------------------------------------------------------------------
 
 
+class TestGetChangedFilesRealGit:
+    """#703: shapes of change the plain `git log --name-only` listing missed,
+    checked against real repositories. A rename was listed by its destination
+    only, and a merge commit listed nothing, so a path that exists only in the
+    merge result (or was deleted only there) was never checked."""
+
+    @pytest.fixture
+    def repo(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        monkeypatch.chdir(repo)
+        self._git("init", "-q", "-b", "main")
+        self._git("config", "user.email", "t@example.com")
+        self._git("config", "user.name", "t")
+        self._write("mine/a.md", "a\n")
+        self._write("theirs/b.md", "b\n")
+        self._git("add", ".")
+        self._git("commit", "-qm", "base")
+        return repo
+
+    @staticmethod
+    def _git(*args: str) -> str:
+        return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout.strip()
+
+    @staticmethod
+    def _write(rel: str, content: str) -> None:
+        p = Path(rel)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+
+    def _commit(self, message: str) -> str:
+        self._git("add", "-A")
+        self._git("commit", "-qm", message)
+        return self._git("rev-parse", "HEAD")
+
+    def _hub_side(self, base: str, rel: str) -> str:
+        """Another participant's commit on top of `base`, already on the hub."""
+        self._git("switch", "-q", "-c", "hub", base)
+        self._write(rel, "theirs\n")
+        tip = self._commit("other participant")
+        self._git("switch", "-q", "main")
+        return tip
+
+    def test_rename_lists_the_source_path_too(self, repo):
+        from schist.pre_receive import get_changed_files
+
+        base = self._git("rev-parse", "HEAD")
+        self._git("mv", "theirs/b.md", "mine/b.md")
+        tip = self._commit("move it")
+
+        assert set(get_changed_files(base, tip)) == {"theirs/b.md", "mine/b.md"}
+
+    def test_clean_pull_merge_does_not_list_the_other_parents_files(self, repo):
+        """A routine merge of work already on the hub must not be rejected for
+        paths in another participant's scope that it merely brought in."""
+        from schist.pre_receive import get_changed_files
+
+        base = self._git("rev-parse", "HEAD")
+        hub = self._hub_side(base, "theirs/new.md")
+        self._write("mine/w.md", "w\n")
+        self._commit("mine")
+        self._git("merge", "-q", "--no-edit", "hub")
+        tip = self._git("rev-parse", "HEAD")
+
+        assert get_changed_files(hub, tip) == ["mine/w.md"]
+
+    def test_file_added_only_in_the_merge_result_is_listed(self, repo):
+        from schist.pre_receive import get_changed_files
+
+        base = self._git("rev-parse", "HEAD")
+        hub = self._hub_side(base, "theirs/new.md")
+        self._write("mine/w.md", "w\n")
+        self._commit("mine")
+        self._git("merge", "-q", "--no-commit", "hub")
+        self._write("theirs/evil.md", "added by the merge\n")
+        tip = self._commit("merge")
+
+        assert set(get_changed_files(hub, tip)) == {"mine/w.md", "theirs/evil.md"}
+
+    def test_file_deleted_only_in_the_merge_result_is_listed(self, repo):
+        from schist.pre_receive import get_changed_files
+
+        base = self._git("rev-parse", "HEAD")
+        hub = self._hub_side(base, "theirs/new.md")
+        self._write("mine/w.md", "w\n")
+        self._commit("mine")
+        self._git("merge", "-q", "--no-commit", "hub")
+        self._git("rm", "-q", "theirs/b.md")
+        tip = self._commit("merge")
+
+        assert set(get_changed_files(hub, tip)) == {"mine/w.md", "theirs/b.md"}
+
+    def test_octopus_merge_lists_only_what_differs_from_every_parent(self, repo):
+        from schist.pre_receive import get_changed_files
+
+        base = self._git("rev-parse", "HEAD")
+        hub = self._hub_side(base, "theirs/new.md")
+        self._git("switch", "-q", "-c", "hub2", base)
+        self._write("theirs/other.md", "x\n")
+        hub2 = self._commit("third participant")
+        self._git("switch", "-q", "main")
+        self._write("mine/w.md", "w\n")
+        self._commit("mine")
+        self._git("merge", "-q", "--no-commit", "hub", "hub2")
+        self._write("theirs/evil.md", "added by the octopus\n")
+        tip = self._commit("octopus")
+
+        # The range hub..tip also contains hub2's own commit (theirs/other.md);
+        # the merge itself must add only the path it introduced.
+        assert set(get_changed_files(hub, tip)) - {"theirs/other.md"} == {"mine/w.md", "theirs/evil.md"}
+        assert hub2
+
+    def test_new_branch_form_lists_rename_sources_too(self, repo):
+        from schist.pre_receive import ZERO_SHA, get_changed_files
+
+        self._git("switch", "-q", "-c", "feature")
+        self._git("mv", "theirs/b.md", "mine/b.md")
+        tip = self._commit("move it")
+        self._git("switch", "-q", "main")
+        self._git("branch", "-D", "feature")
+
+        assert set(get_changed_files(ZERO_SHA, tip)) == {"theirs/b.md", "mine/b.md"}
+
+
+class TestNonUtf8VaultYaml:
+    def test_a_vault_yaml_that_is_not_utf8_rejects_the_push(self, tmp_path, monkeypatch, capsys):
+        """#709 listed `extract_vault_yaml_from_git`'s strict decode as a
+        traceback risk. main() already turns any load failure into a REJECTED
+        line, and that is the behavior to keep: returning None from the
+        extractor instead would read as "no vault.yaml" and ALLOW the push."""
+        from schist.pre_receive import main
+
+        repo = tmp_path / "hub.git"
+        work = tmp_path / "work"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
+        (work / "vault.yaml").write_bytes(b"participants:\n- name: caf\xe9\n")
+        for args in (["config", "user.email", "t@example.com"], ["config", "user.name", "t"],
+                     ["add", "vault.yaml"], ["commit", "-qm", "acl"]):
+            subprocess.run(["git", *args], cwd=work, check=True)
+        subprocess.run(["git", "clone", "-q", "--bare", str(work), str(repo)], check=True)
+        monkeypatch.chdir(repo)
+        monkeypatch.setenv("GIT_DIR", str(repo))
+        monkeypatch.setattr("schist.pre_receive.find_vault_yaml", lambda: None)
+
+        rc = main(stdin=["abc def refs/heads/main"], identity="someone")
+
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "REJECTED: failed to load vault.yaml" in err
+        assert "Traceback" not in err
+
+
 class TestGetChangedFiles:
     def test_deleted_branch_returns_empty(self):
         from schist.pre_receive import ZERO_SHA, get_changed_files
@@ -451,7 +603,7 @@ class TestGetChangedFiles:
             result = get_changed_files("aaa", "bbb")
         assert result == ["a.md", "b.md"]
         cmd = mock_run.call_args[0][0]
-        assert cmd == ["git", "log", "--name-only", "--format=", "-z", "aaa..bbb"]
+        assert cmd == ["git", "log", "--name-only", "--no-renames", "-c", "--format=", "-z", "aaa..bbb"]
 
     def test_new_branch_uses_commit_history_not_tip_diff(self):
         from schist.pre_receive import ZERO_SHA, get_changed_files
@@ -462,7 +614,7 @@ class TestGetChangedFiles:
         assert result == ["new-file.md"]
         cmd = mock_run.call_args[0][0]
         assert cmd == [
-            "git", "log", "--name-only", "--format=", "-z",
+            "git", "log", "--name-only", "--no-renames", "-c", "--format=", "-z",
             "abc123", "--not", "--all",
         ]
 
