@@ -3154,8 +3154,32 @@ class TestCheckMemoryDbPath:
         self._seed_db(tmp_path / ".schist" / "memory" / "agent-state.db", rows=1)
         both = self._run(monkeypatch, tmp_path)
         from schist.doctor import _memory_pin_clause
-        pin_msg, _ = _memory_pin_clause(None)
+        pin_msg, _ = _memory_pin_clause(None, tmp_path / ".schist" / "memory" / "agent-state.db")
         assert pin_msg and pin_msg in legacy_only.message and pin_msg in both.message
+
+    def test_pin_fix_gives_this_hosts_physical_canonical_path(self, tmp_path, monkeypatch):
+        """The pin is per host (each host's own MCP config), so the fix prints
+        the literal value to paste. It is the canonical path even while the
+        legacy DB is live — pinning the legacy path would freeze the client on
+        it — and it is resolved through symlinks, so a home reached by an
+        alias (HPC: /home/<u> -> /orcd/home/...) yields the physical path."""
+        monkeypatch.setattr("schist.doctor._unpinned_memory_db_clients",
+                            lambda vault_path: ["schist"])
+        real_home = tmp_path / "physical" / "home"
+        real_home.mkdir(parents=True)
+        alias = tmp_path / "alias-home"
+        alias.symlink_to(real_home)
+        expected = f'"SCHIST_MEMORY_DB": "{real_home / ".schist" / "memory" / "agent-state.db"}"'
+
+        clean = self._run(monkeypatch, alias)
+        self._seed_db(alias / ".openclaw" / "memory" / "agent-state.db", rows=1)
+        legacy_only = self._run(monkeypatch, alias)
+        self._seed_db(alias / ".schist" / "memory" / "agent-state.db", rows=1)
+        both = self._run(monkeypatch, alias)
+        for r in (clean, legacy_only, both):
+            assert expected in (r.fix or ""), r.fix
+            pin = (r.fix or "").split('Pin "SCHIST_MEMORY_DB"', 1)[1]
+            assert str(alias) not in pin, r.fix
 
     def test_both_present_without_unpinned_clients_has_no_pin_note(self, tmp_path, monkeypatch):
         monkeypatch.setattr("schist.doctor._unpinned_memory_db_clients",
