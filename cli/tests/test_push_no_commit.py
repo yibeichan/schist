@@ -128,3 +128,46 @@ def test_the_uncommitted_check_takes_no_optional_index_lock(monkeypatch):
     monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
     git_ops.has_uncommitted_changes("/nonexistent")
     assert seen and seen[0][:3] == ["git", "--no-optional-locks", "status"], seen
+
+
+# --commit-only: the other half of the background push. The MCP server runs it
+# under its own write lock when the vault has uncommitted files (hand edits),
+# so they keep syncing without racing the server's writes, then pushes with
+# --no-commit outside the lock.
+
+def _push_commit_only(vault: str) -> None:
+    sync.sync_push(types.SimpleNamespace(commit_only=True), vault, vault + "/.schist/schist.db")
+
+
+def test_commit_only_commits_in_scope_changes_and_does_not_push(tmp_path, capsys):
+    vault = _spoke(tmp_path)
+    hub_before = _hub_head(tmp_path)
+    (Path(vault) / "research" / "hand-edit.md").write_text("edited in an editor\n")
+
+    _push_commit_only(vault)
+
+    assert _local_head(vault) != hub_before, "a sync commit was made"
+    assert _hub_head(tmp_path) == hub_before, "nothing was pushed"
+    assert _run("git", "status", "--porcelain", "--", "research", cwd=vault).stdout == ""
+    subject = _run("git", "log", "-1", "--format=%s", cwd=vault).stdout.strip()
+    assert subject == "sync(t): 1 file"
+    assert "Pushing" not in capsys.readouterr().out
+
+
+def test_commit_only_with_nothing_to_commit_is_a_clean_no_op(tmp_path):
+    vault = _spoke(tmp_path)
+    head = _local_head(vault)
+
+    _push_commit_only(vault)
+
+    assert _local_head(vault) == head
+
+
+def test_commit_only_and_no_commit_are_mutually_exclusive(tmp_path):
+    vault = _spoke(tmp_path)
+    r = subprocess.run(
+        [sys.executable, "-m", "schist", "--vault", vault, "sync", "push", "--commit-only", "--no-commit"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 2
+    assert "not allowed with" in r.stderr

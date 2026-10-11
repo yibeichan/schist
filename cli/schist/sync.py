@@ -616,6 +616,10 @@ def _no_commit_enabled(args) -> bool:
     return getattr(args, "no_commit", False) is True
 
 
+def _commit_only_enabled(args) -> bool:
+    return getattr(args, "commit_only", False) is True
+
+
 def classify_pull_failure(output: str) -> str:
     """The recovery branch for a failed pull, in the order sync_pull uses."""
     # First: the pull succeeded and only re-applying the user's autostashed
@@ -1294,6 +1298,13 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
                         # stranded an already-landed commit unpushed.
                         print(f"Warning: {output}", file=sys.stderr)
                     print(f"Committed {n} file{'s' if n != 1 else ''}")
+
+    # --commit-only (#724): the MCP server's commit step, run under its own
+    # write lock so stray in-scope files (hand edits) keep syncing without
+    # racing its writes. The push follows separately with --no-commit. The
+    # sentinel is the push's to clear, so it is left alone here.
+    if _commit_only_enabled(args):
+        return
 
     # Push
     if not git_ops.has_unpushed_commits(vault_path):

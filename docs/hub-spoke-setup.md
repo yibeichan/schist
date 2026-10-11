@@ -170,13 +170,15 @@ Once wired up, the MCP server detects the spoke (by looking for
 - **On write** (`create_note`, `add_connection`): before mutating, the server
   checks for `.schist/last-sync-error`. If a prior background push failed, the
   write returns `SYNC_DIRTY` so the agent does not compound spoke/hub
-  divergence. After a clean local commit and ingestion, the server fires
-  `schist --vault <root> sync push --no-commit` in the background. That push
-  sends existing commits only: the server has already committed the write, and
-  the push never stages or commits, so it cannot take the index lock from the
-  server's next write. Uncommitted files in the vault (hand edits, say) stay
-  uncommitted until you run `schist sync push` or `sync_retry`; `sync_status`
-  reports them as `clean_working_tree: false`.
+  divergence. After a clean local commit and ingestion, the server pushes in
+  the background, in two steps. If the vault has uncommitted files (a hand
+  edit in an editor, say), it first runs `schist --vault <root> sync push
+  --commit-only` while holding its own write lock, so those files are
+  committed (as `sync(<identity>): N files`) without racing the server's next
+  write. It then runs `schist --vault <root> sync push --no-commit` outside the
+  lock, which only sends existing commits. A push with nothing to send still
+  clears an earlier sync-error sentinel, even if some files could not be
+  committed; `sync_status` reports those as `clean_working_tree: false`.
 - **On read** (`get_context` only): before querying SQLite, the server awaits
   `python3 -m schist --vault <root> sync pull` with a **5-second hard
   timeout**. If the hub is unreachable or slow, the pull is killed and the

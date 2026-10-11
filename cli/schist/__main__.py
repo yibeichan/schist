@@ -136,11 +136,18 @@ def main():
         '--force', action='store_true', default=argparse.SUPPRESS,
         help='Clear stale git rebase/merge/index-lock state before pushing',
     )
-    p_sync_push.add_argument(
+    push_mode = p_sync_push.add_mutually_exclusive_group()
+    push_mode.add_argument(
         '--no-commit', dest='no_commit', action='store_true', default=argparse.SUPPRESS,
         help='Push existing commits only: never stage or commit uncommitted '
              'files, and do not refuse on a live index.lock. The MCP server '
              'commits each write itself and pushes with this.',
+    )
+    push_mode.add_argument(
+        '--commit-only', dest='commit_only', action='store_true', default=argparse.SUPPRESS,
+        help='Stage and commit uncommitted in-scope files, then stop without '
+             'pushing. The MCP server runs this under its own write lock '
+             'before a --no-commit push.',
     )
 
     # hooks
