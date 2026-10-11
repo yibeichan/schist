@@ -15,7 +15,48 @@ def _hold_in_child(vault, seconds):
 def test_lock_file_is_write_lock(tmp_path):
     with git_ops.vault_write_lock(str(tmp_path)):
         assert (tmp_path / ".schist" / "write.lock").exists()
-    assert not (tmp_path / ".schist" / "cli-write.lock").exists()
+
+
+def _flock_is_held(path):
+    fd = os.open(path, os.O_RDWR | os.O_CREAT)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def test_also_holds_the_legacy_cli_lock_for_older_clis(tmp_path):
+    # Upgrade window: CLIs from before #724 serialize on cli-write.lock only.
+    legacy = tmp_path / ".schist" / "cli-write.lock"
+    with git_ops.vault_write_lock(str(tmp_path)):
+        assert _flock_is_held(legacy)
+        assert _flock_is_held(tmp_path / ".schist" / "write.lock")
+    assert not _flock_is_held(legacy)
+
+
+def test_waits_for_an_older_cli_on_the_legacy_lock(tmp_path):
+    (tmp_path / ".schist").mkdir()
+    code = (
+        "import fcntl,os,sys,time\n"
+        "fd=os.open(sys.argv[1], os.O_CREAT|os.O_RDWR)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX); print('held', flush=True); time.sleep(5)\n"
+    )
+    p = subprocess.Popen([sys.executable, "-c", code, str(tmp_path / ".schist" / "cli-write.lock")],
+                         stdout=subprocess.PIPE, text=True)
+    try:
+        assert p.stdout.readline().strip() == "held"
+        with pytest.raises(git_ops.VaultLockTimeout) as ei:
+            with git_ops.vault_write_lock(str(tmp_path), timeout=0.5):
+                pass
+        assert "older schist CLI" in ei.value.holder
+        # The new lock is not left held after the timeout.
+        assert not _flock_is_held(tmp_path / ".schist" / "write.lock")
+    finally:
+        p.kill(); p.wait()
 
 def test_holder_note_written(tmp_path):
     import socket

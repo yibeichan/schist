@@ -272,6 +272,25 @@ holding the lock, the NFS server reclaims it when the lease expires, about 90 s
 later. There is one lock file per vault path; a symlinked or dual-mounted
 path resolves to the same file, so that is fine.
 
+### Upgrading: CLI first, then restart every server
+
+CLIs from before this lock serialize on `.schist/cli-write.lock` only, and an
+MCP server keeps the code it was started with, so a server started before the
+upgrade takes no cross-process lock at all. To close that window:
+
+1. Upgrade the CLI on every host that writes to the vault.
+2. Restart every MCP server on every host that shares the vault (each Claude
+   session's server, on every spoke that mounts it).
+
+Until the next release the new CLI, and so every new server through its
+helper, also takes `cli-write.lock` after `write.lock`, which keeps an older
+CLI that is still installed somewhere excluded from new writers. That cannot
+deadlock, because an older CLI only ever takes `cli-write.lock`. A server that
+logs `cross-process vault lock unavailable: <reason>` is running against a CLI
+too old for `schist lock hold` (or one it cannot find, see `SCHIST_LOCK_BIN`);
+it keeps working but serializes only within its own process. Upgrade that CLI
+and restart the server to clear it.
+
 | Variable | Default | Effect |
 |---|---|---|
 | `SCHIST_LOCK_BIN` | `SCHIST_BIN`, then `schist` | Binary that provides `lock hold` |

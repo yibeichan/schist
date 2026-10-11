@@ -19,6 +19,12 @@ _GIT_TEXT = {"encoding": "utf-8", "errors": "replace"}
 
 
 LOCK_FILENAME = "write.lock"
+# The lock CLIs before #724 take, and the only one they take. For one release
+# vault_write_lock also holds it, so an older CLI still on PATH somewhere (or
+# an MCP server started before the upgrade, which shells out to one) stays
+# excluded from new writers. Remove after the next release.
+LEGACY_LOCK_FILENAME = "cli-write.lock"
+_LEGACY_HOLDER = "unknown (an older schist CLI holding .schist/cli-write.lock)"
 _held: dict = {}  # realpath -> re-entrancy depth, per process
 _held_guard = threading.Lock()
 
@@ -29,17 +35,69 @@ class VaultLockTimeout(Exception):
         self.holder = holder
 
 
-def _lock_path(vault_path: str) -> str:
-    return os.path.join(vault_path, '.schist', LOCK_FILENAME)
+def _lock_path(vault_path: str, name: str = LOCK_FILENAME) -> str:
+    return os.path.join(vault_path, '.schist', name)
 
 
 def read_holder(vault_path: str) -> str:
-    """The "host:pid" note in the lock file, or "unknown"."""
+    """The "host:pid" note in the lock file, or "unknown".
+
+    Opens and closes write.lock, so it must only be called by a process that
+    does NOT hold the lock (see vault_write_lock: on NFS, closing any fd on
+    the file drops a lock this process holds)."""
     try:
         with open(_lock_path(vault_path), encoding='utf-8', errors='replace') as f:
             return f.read().strip() or "unknown"
     except OSError:
         return "unknown"
+
+
+def _open_lock_file(lock_path: str) -> "tuple[int, bool]":
+    """(fd, writable) for a lock file, creating it if needed."""
+    import sys
+    try:
+        return os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644), True
+    except PermissionError:
+        # A second unix user on a shared vault can't O_RDWR a 0o644 lock
+        # file owned by the first (/review finding). flock(2) grants LOCK_EX
+        # on ANY fd regardless of open mode, so read-only is just as
+        # exclusive; fall back before failing.
+        try:
+            return os.open(lock_path, os.O_RDONLY), False
+        except OSError as e:
+            print(
+                f'Error: cannot open the vault write lock {lock_path}: {e} — '
+                f'fix its permissions (any mode readable by every vault '
+                f'writer works)',
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+
+def _wait_for_flock(fd: int, timeout: "float | None", start: float, holder) -> None:
+    """Take an exclusive flock on fd, polling. `holder()` names the current
+    holder for the timeout error and the one-time wait notice; `timeout`
+    counts from `start`, so two locks taken in turn share one budget."""
+    import fcntl
+    import sys
+    import time
+
+    delay = 0.05
+    warned = False
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            waited = time.monotonic() - start
+            if timeout is not None and waited >= timeout:
+                raise VaultLockTimeout(holder())
+            if timeout is None and not warned and waited >= 2:
+                print(f'waiting for vault write lock (held by {holder()})…',
+                      file=sys.stderr)
+                warned = True
+            time.sleep(delay)
+            delay = min(delay * 2, 0.5)
 
 
 @contextmanager
@@ -71,10 +129,20 @@ def vault_write_lock(vault_path: str, timeout: "float | None" = None):
     would deadlock against ourselves. With `timeout` (seconds) it raises
     VaultLockTimeout, carrying the holder note, instead of waiting forever.
     The holder ("host:pid") is written into the lock file for diagnostics.
+
+    For one release it also takes the pre-#724 lock, .schist/cli-write.lock,
+    after write.lock and released before it. Older CLIs take only that file,
+    so the order cannot deadlock. Remove after the next release.
+
+    NFS: Linux emulates flock on NFS with POSIX (fcntl) locks, which belong
+    to the process, not to the open file description, and closing ANY fd on
+    the file drops them. Invariant: never open or close write.lock while
+    holding it. The fd that holds the lock is the only one this process
+    keeps on the file, and read_holder (which opens it) runs only while
+    waiting for the lock, never while holding it.
     """
     import fcntl
     import socket
-    import sys
     import time
 
     key = os.path.realpath(vault_path)
@@ -91,60 +159,34 @@ def vault_write_lock(vault_path: str, timeout: "float | None" = None):
         return
 
     os.makedirs(os.path.join(vault_path, '.schist'), exist_ok=True)
-    lock_path = _lock_path(vault_path)
-    writable = True
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
-    except PermissionError:
-        # A second unix user on a shared vault can't O_RDWR a 0o644 lock
-        # file owned by the first (/review finding). flock(2) grants LOCK_EX
-        # on ANY fd regardless of open mode, so read-only is just as
-        # exclusive; fall back before failing.
-        writable = False
-        try:
-            fd = os.open(lock_path, os.O_RDONLY)
-        except OSError as e:
-            print(
-                f'Error: cannot open the vault write lock {lock_path}: {e} — '
-                f'fix its permissions (any mode readable by every vault '
-                f'writer works)',
-                file=sys.stderr,
-            )
-            sys.exit(1)
+    fd, writable = _open_lock_file(_lock_path(vault_path))
     try:
         start = time.monotonic()
-        delay = 0.05
-        warned = False
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                waited = time.monotonic() - start
-                if timeout is not None and waited >= timeout:
-                    raise VaultLockTimeout(read_holder(vault_path))
-                if timeout is None and not warned and waited >= 2:
-                    print(
-                        f'waiting for vault write lock '
-                        f'(held by {read_holder(vault_path)})…',
-                        file=sys.stderr,
-                    )
-                    warned = True
-                time.sleep(delay)
-                delay = min(delay * 2, 0.5)
-        if writable:
-            try:
-                os.ftruncate(fd, 0)
-                os.pwrite(fd, f'{socket.gethostname()}:{os.getpid()}\n'.encode(), 0)
-            except OSError:
-                pass  # diagnostics only
-        with _held_guard:
-            _held[key] = 1
+        _wait_for_flock(fd, timeout, start, lambda: read_holder(vault_path))
         try:
-            yield
+            if writable:
+                try:
+                    os.ftruncate(fd, 0)
+                    os.pwrite(fd, f'{socket.gethostname()}:{os.getpid()}\n'.encode(), 0)
+                except OSError:
+                    pass  # diagnostics only
+            # Legacy lock (remove after the next release). Its holder can only
+            # be an older CLI, which writes no note; and write.lock must not
+            # be opened again here, since this process now holds it.
+            legacy_fd, _ = _open_lock_file(_lock_path(vault_path, LEGACY_LOCK_FILENAME))
+            try:
+                _wait_for_flock(legacy_fd, timeout, start, lambda: _LEGACY_HOLDER)
+                with _held_guard:
+                    _held[key] = 1
+                try:
+                    yield
+                finally:
+                    with _held_guard:
+                        _held.pop(key, None)
+                    fcntl.flock(legacy_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(legacy_fd)
         finally:
-            with _held_guard:
-                _held.pop(key, None)
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
