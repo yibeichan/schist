@@ -13,6 +13,7 @@ import { writeMutex } from "../src/git-writer.js";
 import Database from "better-sqlite3";
 import { INDEX_SCHEMA_VERSION, memoryDbPath } from "../src/sqlite-reader.js";
 import { parseConnections, parseNote } from "../src/markdown-parser.js";
+import { localSchistWrapperScript, spawnHolder } from "./local-schist-bin.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1615,7 +1616,29 @@ describe("maybeSpokePull", () => {
       // --autostash.
       await execFile("git", ["checkout", "--", "tracked.md"], { cwd: vault });
       await maybeSpokePull(vault, 5000);
-      expect((await fs.readFile(logPath, "utf-8")).trim()).toBe(`--vault ${vault} sync pull`);
+      expect((await fs.readFile(logPath, "utf-8")).trim()).toBe(`--vault ${vault} sync pull --lock-timeout 1`);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  test("retries without --lock-timeout when the CLI predates it (#724)", async () => {
+    const vault = await makeTempSpokeVault();
+    const logPath = path.join(vault, ".schist", "pull-log");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(path.join(stubDir, "schist"),
+      `#!/bin/sh\necho "$@" >> "${logPath}"\n` +
+      `case "$*" in *--lock-timeout*) echo "schist: error: unrecognized arguments: --lock-timeout 1" >&2; exit 2;; esac\n` +
+      "exit 0\n", { mode: 0o755 });
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      await maybeSpokePull(vault, 5000);
+      expect((await fs.readFile(logPath, "utf-8")).trim().split("\n")).toEqual([
+        `--vault ${vault} sync pull --lock-timeout 1`,
+        `--vault ${vault} sync pull`,
+      ]);
     } finally {
       process.env.PATH = origPath;
       await fs.rm(stubDir, { recursive: true, force: true });
@@ -6040,4 +6063,224 @@ describe("zero-hit diagnosis bounds its own work (#563)", () => {
     const d = diagnoseZeroHits({ query: "alpha beta gamma" })!;
     expect(d.truncatedTerms).toBe(0);
   });
+});
+
+describe("tool-level read-modify-writes under the vault lock (#724)", () => {
+  let savedIngestBin: string | undefined;
+  beforeAll(() => {
+    savedIngestBin = process.env.SCHIST_INGEST_BIN;
+    process.env.SCHIST_INGEST_BIN = "/usr/bin/true";
+  });
+  afterAll(() => {
+    if (savedIngestBin === undefined) delete process.env.SCHIST_INGEST_BIN;
+    else process.env.SCHIST_INGEST_BIN = savedIngestBin;
+  });
+
+  async function seedSource(vault: string, rel: string, extra = ""): Promise<void> {
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, rel),
+      `---\ntitle: Racer\n---\n\nbody\n\n## Connections\n\n- extends: notes/seed.md\n${extra}`,
+      "utf-8",
+    );
+    await execFile("git", ["add", "."], { cwd: vault });
+    await execFile("git", ["commit", "-m", "seed"], { cwd: vault });
+  }
+
+  test("add_connection racing update_note keeps both changes", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const S = "notes/racer.md";
+    await seedSource(vault, S);
+    // frontmatter_patch leaves the body (and its Connections section) to the
+    // in-lock read, so the final file must hold both edits in either order. A
+    // body replacement cannot be asserted this way: update_note sent last would
+    // legitimately overwrite the new edge with its own Connections section.
+    // Several add_connections around one update_note: a stale pre-lock copy
+    // written after the update would revert its status, and one written after
+    // another add would drop that edge.
+    const idx = [0, 1, 2, 3, 4, 5];
+    const results = await Promise.all([
+      ...idx.slice(0, 3).map((i) =>
+        add_connection(vault, { owner: TEST_AGENT, source: S, target: `notes/t${i}.md`, type: "supports" }, config)),
+      update_note(vault, { owner: TEST_AGENT, id: S, frontmatter_patch: { status: "review" } }, config),
+      ...idx.slice(3).map((i) =>
+        add_connection(vault, { owner: TEST_AGENT, source: S, target: `notes/t${i}.md`, type: "supports" }, config)),
+    ]) as Array<{ error?: string }>;
+    for (const r of results) expect(r.error).toBeUndefined();
+    const s = await fs.readFile(path.join(vault, S), "utf-8");
+    expect(s).toContain("status: review");
+    for (const i of idx) expect(s).toContain(`notes/t${i}.md`);
+    expect(s).toContain("notes/seed.md");
+  }, 60000);
+
+  test("two add_connection calls on one source keep both edges", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const S = "notes/racer.md";
+    await seedSource(vault, S);
+    const targets = Array.from({ length: 10 }, (_, i) => `notes/t${i}.md`);
+    const results = await Promise.all(
+      targets.map((target) =>
+        add_connection(vault, { owner: TEST_AGENT, source: S, target, type: "supports" }, config),
+      ),
+    ) as Array<{ error?: string }>;
+    for (const r of results) expect(r.error).toBeUndefined();
+    const s = await fs.readFile(path.join(vault, S), "utf-8");
+    for (const t of targets) expect(s).toContain(t);
+  }, 120000);
+
+  test("sync_status probe does not take index.lock", async () => {
+    const vault = await makeTempSpokeVault();
+    const shimDir = await fs.mkdtemp(path.join(os.tmpdir(), "git-shim-"));
+    createdDirs.add(shimDir);
+    const log = path.join(shimDir, "git.log");
+    const realGit = (await execFile("sh", ["-c", "command -v git"])).stdout.trim();
+    await fs.writeFile(
+      path.join(shimDir, "git"),
+      `#!/bin/sh\necho "$@" >> "${log}"\nexec "${realGit}" "$@"\n`,
+      { mode: 0o755 },
+    );
+    const origPath = process.env.PATH;
+    process.env.PATH = `${shimDir}:${origPath}`;
+    try {
+      await sync_status(vault);
+    } finally {
+      process.env.PATH = origPath;
+    }
+    const lines = (await fs.readFile(log, "utf-8")).split("\n");
+    const porcelain = lines.filter((l) => /\bstatus\b/.test(l) && l.includes("--porcelain") && !l.includes("--ignored"));
+    expect(porcelain.length).toBeGreaterThan(0);
+    for (const l of porcelain) expect(l).toContain("--no-optional-locks");
+  }, 30000);
+
+  test("sync_retry holds writeMutex while its CLI children run", async () => {
+    const vault = await makeTempSpokeVault();
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    createdDirs.add(stubDir);
+    const stub = path.join(stubDir, "schist");
+    await fs.writeFile(stub, "#!/bin/sh\nsleep 1\nexit 0\n", { mode: 0o755 });
+    const prev = process.env.SCHIST_BIN;
+    process.env.SCHIST_BIN = stub;
+    try {
+      expect(writeMutex.isLocked()).toBe(false);
+      const pending = sync_retry(vault, { owner: TEST_AGENT, mode: "push-only" });
+      const deadline = Date.now() + 200;
+      while (!writeMutex.isLocked() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+      expect(writeMutex.isLocked()).toBe(true);
+      const result = await pending as unknown as Record<string, unknown>;
+      expect(result.ok).toBe(true);
+      expect(writeMutex.isLocked()).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.SCHIST_BIN;
+      else process.env.SCHIST_BIN = prev;
+    }
+  }, 30000);
+});
+
+// #724: `schist sync pull` holds the vault write lock for its whole rebase, so
+// rebase state seen while that lock is busy may be another process's LIVE
+// rebase. The server's own `rebase --abort` must take the lock first.
+describe("rebase --abort after a pull conflict runs under the vault lock (#724)", () => {
+  const repoRoot = path.resolve(__dirname, "..", "..");
+  const saved: Record<string, string | undefined> = {};
+  let binDir: string;
+  let wrapper: string;
+  let realGit: string;
+
+  beforeAll(async () => {
+    binDir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-abortlock-"));
+    createdDirs.add(binDir);
+    wrapper = path.join(binDir, "lock-schist");
+    await fs.writeFile(wrapper, localSchistWrapperScript(repoRoot), { mode: 0o755 });
+    realGit = (await execFile("sh", ["-c", "command -v git"])).stdout.trim();
+    for (const k of ["SCHIST_LOCK_BIN", "SCHIST_BIN", "SCHIST_VAULT_LOCK_WAIT_MS", "PATH"]) saved[k] = process.env[k];
+  });
+  afterEach(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    resetSpokePushTrackerForTesting();
+  });
+
+  /** A stub `schist` whose pull leaves rebase state and reports a conflict, and a git shim logging aborts. */
+  async function setUp(vault: string): Promise<{ abortLog: string }> {
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    createdDirs.add(stubDir);
+    const abortLog = path.join(stubDir, "aborts.log");
+    await fs.writeFile(path.join(stubDir, "schist"), `#!/bin/sh
+case "$*" in
+  *"sync pull"*)
+    mkdir -p "${path.join(vault, ".git", "rebase-merge")}"
+    echo "CONFLICT: could not apply commit" >&2
+    exit 1 ;;
+  *)
+    echo " ! [rejected] main -> main (non-fast-forward)" >&2
+    echo "hint: Updates were rejected because the tip of your current branch is behind" >&2
+    exit 1 ;;
+esac
+`, { mode: 0o755 });
+    await fs.writeFile(path.join(stubDir, "git"),
+      `#!/bin/sh\ncase "$*" in *"rebase --abort"*) echo abort >> "${abortLog}" ;; esac\nexec "${realGit}" "$@"\n`,
+      { mode: 0o755 });
+    delete process.env.SCHIST_BIN;
+    process.env.SCHIST_LOCK_BIN = wrapper;
+    process.env.SCHIST_VAULT_LOCK_WAIT_MS = "500";
+    process.env.PATH = `${stubDir}:${saved.PATH}`;
+    return { abortLog };
+  }
+
+  const aborts = async (log: string) =>
+    (await fs.readFile(log, "utf-8").catch(() => "")).split("\n").filter(Boolean).length;
+
+  async function withHolder<T>(vault: string, fn: () => Promise<T>): Promise<T> {
+    const holder = await spawnHolder(wrapper, vault);
+    try {
+      return await fn();
+    } finally {
+      const closed = new Promise((r) => holder.once("close", r));
+      holder.stdin.end();
+      await closed;
+    }
+  }
+
+  async function runSyncRetry(vault: string) {
+    return await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as unknown as Record<string, unknown>;
+  }
+
+  async function runBackgroundRecovery(vault: string) {
+    triggerSpokePush(vault);
+    return await sync_retry(vault, { owner: TEST_AGENT, mode: "pull-rebase-push" }) as unknown as Record<string, unknown>;
+  }
+
+  test.each([
+    ["sync_retry", runSyncRetry, "reason"],
+    ["background recovery", runBackgroundRecovery, "message"],
+  ] as const)("%s skips the abort while another process holds the lock", async (_name, run, field) => {
+    const vault = await makeTempSpokeVault();
+    const { abortLog } = await setUp(vault);
+    const errSpy = jest.spyOn(console, "error");
+    try {
+      const result = await withHolder(vault, () => run(vault));
+      expect(await aborts(abortLog)).toBe(0);
+      const text = String(result[field]);
+      expect(text).toContain("NOT known unchanged");
+      expect(text).toContain("vault write lock");
+      // The real helper was used, not the in-process fallback.
+      expect(errSpy.mock.calls.filter((c) => String(c[0]).includes("cross-process vault lock unavailable"))).toEqual([]);
+    } finally {
+      errSpy.mockRestore();
+    }
+  }, 60000);
+
+  test.each([
+    ["sync_retry", runSyncRetry],
+    ["background recovery", runBackgroundRecovery],
+  ] as const)("%s aborts once the lock is free", async (_name, run) => {
+    const vault = await makeTempSpokeVault();
+    const { abortLog } = await setUp(vault);
+    await run(vault);
+    expect(await aborts(abortLog)).toBe(1);
+  }, 60000);
 });

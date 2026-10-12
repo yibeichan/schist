@@ -6,8 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import signal
 import subprocess
-
-import yaml
+import threading
 
 # Decode git's output as UTF-8 and never raise on bytes that are not. These
 # calls sit on error paths whose output is only displayed or classified (a hub
@@ -17,11 +16,93 @@ import yaml
 _GIT_TEXT = {"encoding": "utf-8", "errors": "replace"}
 
 
-@contextmanager
-def vault_write_lock(vault_path: str):
-    """Serialize CLI vault writes across processes (#412, #419).
+LOCK_FILENAME = "write.lock"
+# The lock CLIs before #724 take, and the only one they take. For one release
+# vault_write_lock also holds it, so an older CLI still on PATH somewhere (or
+# an MCP server started before the upgrade, which shells out to one) stays
+# excluded from new writers. Remove after the next release.
+LEGACY_LOCK_FILENAME = "cli-write.lock"
+_LEGACY_HOLDER = "unknown (an older schist CLI holding .schist/cli-write.lock)"
+_held: dict = {}  # realpath -> re-entrancy depth, per process
+_held_guard = threading.Lock()
 
-    Exclusive advisory flock on <vault>/.schist/cli-write.lock. Two things
+
+class VaultLockTimeout(Exception):
+    def __init__(self, holder: str):
+        super().__init__(f"vault write lock busy (held by {holder})")
+        self.holder = holder
+
+
+def _lock_path(vault_path: str, name: str = LOCK_FILENAME) -> str:
+    return os.path.join(vault_path, '.schist', name)
+
+
+def read_holder(vault_path: str) -> str:
+    """The "host:pid" note in the lock file, or "unknown".
+
+    Opens and closes write.lock, so it must only be called by a process that
+    does NOT hold the lock (see vault_write_lock: on NFS, closing any fd on
+    the file drops a lock this process holds)."""
+    try:
+        with open(_lock_path(vault_path), encoding='utf-8', errors='replace') as f:
+            return f.read().strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
+def _open_lock_file(lock_path: str) -> "tuple[int, bool]":
+    """(fd, writable) for a lock file, creating it if needed."""
+    import sys
+    try:
+        return os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644), True
+    except PermissionError:
+        # A second unix user on a shared vault can't O_RDWR a 0o644 lock
+        # file owned by the first (/review finding). flock(2) grants LOCK_EX
+        # on ANY fd regardless of open mode, so read-only is just as
+        # exclusive; fall back before failing.
+        try:
+            return os.open(lock_path, os.O_RDONLY), False
+        except OSError as e:
+            print(
+                f'Error: cannot open the vault write lock {lock_path}: {e} — '
+                f'fix its permissions (any mode readable by every vault '
+                f'writer works)',
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+
+def _wait_for_flock(fd: int, timeout: "float | None", start: float, holder) -> None:
+    """Take an exclusive flock on fd, polling. `holder()` names the current
+    holder for the timeout error and the one-time wait notice; `timeout`
+    counts from `start`, so two locks taken in turn share one budget."""
+    import fcntl
+    import sys
+    import time
+
+    delay = 0.05
+    warned = False
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            waited = time.monotonic() - start
+            if timeout is not None and waited >= timeout:
+                raise VaultLockTimeout(holder())
+            if timeout is None and not warned and waited >= 2:
+                print(f'waiting for vault write lock (held by {holder()})…',
+                      file=sys.stderr)
+                warned = True
+            time.sleep(delay)
+            delay = min(delay * 2, 0.5)
+
+
+@contextmanager
+def vault_write_lock(vault_path: str, timeout: "float | None" = None):
+    """Serialize vault writes across processes (#412, #419).
+
+    Exclusive advisory flock on <vault>/.schist/write.lock. Two things
     need this serialization:
     - read-modify-writes: append_connection is read → insert → whole-file
       rewrite, so two unserialized `schist link` calls on the same source
@@ -31,47 +112,81 @@ def vault_write_lock(vault_path: str):
       stage=False) then a plain `git commit -m`, which commits EVERYTHING staged — an unserialized
       concurrent stage+commit pair sweeps the other caller's staged file
       into the wrong commit and leaves the loser's own commit empty
-      (#419). Every CLI stage+commit (add, link, sync push) must run
-      inside this lock.
+      (#419). Every stage+commit (add, link, sync push, MCP writes)
+      must run inside this lock.
     Lives here (not commands.py) because sync.py stages+commits too. The
     lock file sits under .schist/ (gitignored runtime state, like
     schist.db) and is never deleted — unlinking a flock'd path is a classic
     unlock-bypass race. flock is POSIX-only, like the rest of the
-    deployment (Mac/Linux spokes, Pi hub). NOTE: this serializes CLI↔CLI
-    only; the MCP server serializes its own writes in-process and does not
-    take this lock — the cross-writer CLI↔MCP window is the remaining gap
-    noted in #412. Its commit-race half (one writer's commit sweeping the
-    other's staged paths) is recovered by landed_via_concurrent_commit
-    (#715); the read-modify-write half is not.
+    deployment (Mac/Linux spokes, Pi hub).
+
+    Every writer takes this lock, the MCP server included (#724), so the
+    CLI and MCP no longer race on read-modify-writes or on the git index.
+    The lock is re-entrant within a process (a per-process depth count keyed
+    by the vault's realpath), because flock on a second fd of the same file
+    would deadlock against ourselves. With `timeout` (seconds) it raises
+    VaultLockTimeout, carrying the holder note, instead of waiting forever.
+    The holder ("host:pid") is written into the lock file for diagnostics.
+
+    For one release it also takes the pre-#724 lock, .schist/cli-write.lock,
+    after write.lock and released before it. Older CLIs take only that file,
+    so the order cannot deadlock. Remove after the next release.
+
+    NFS: Linux emulates flock on NFS with POSIX (fcntl) locks, which belong
+    to the process, not to the open file description, and closing ANY fd on
+    the file drops them. Invariant: never open or close write.lock while
+    holding it. The fd that holds the lock is the only one this process
+    keeps on the file, and read_holder (which opens it) runs only while
+    waiting for the lock, never while holding it.
     """
     import fcntl
-    import sys
+    import socket
+    import time
 
-    lock_dir = os.path.join(vault_path, '.schist')
-    os.makedirs(lock_dir, exist_ok=True)
-    lock_path = os.path.join(lock_dir, 'cli-write.lock')
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
-    except PermissionError:
-        # A second unix user on a shared vault can't O_RDWR a 0o644 lock
-        # file owned by the first (/review finding). flock(2) grants LOCK_EX
-        # on ANY fd regardless of open mode, so read-only is just as
-        # exclusive — fall back before failing.
+    key = os.path.realpath(vault_path)
+    with _held_guard:
+        reentered = _held.get(key, 0) > 0
+        if reentered:
+            _held[key] += 1
+    if reentered:
         try:
-            fd = os.open(lock_path, os.O_RDONLY)
-        except OSError as e:
-            print(
-                f'Error: cannot open the vault write lock {lock_path}: {e} — '
-                f'fix its permissions (any mode readable by every vault '
-                f'writer works; the lock carries no data)',
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            yield
+        finally:
+            with _held_guard:
+                _held[key] -= 1
+        return
+
+    os.makedirs(os.path.join(vault_path, '.schist'), exist_ok=True)
+    fd, writable = _open_lock_file(_lock_path(vault_path))
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        start = time.monotonic()
+        _wait_for_flock(fd, timeout, start, lambda: read_holder(vault_path))
+        try:
+            if writable:
+                try:
+                    os.ftruncate(fd, 0)
+                    os.pwrite(fd, f'{socket.gethostname()}:{os.getpid()}\n'.encode(), 0)
+                except OSError:
+                    pass  # diagnostics only
+            # Legacy lock (remove after the next release). Its holder can only
+            # be an older CLI, which writes no note; and write.lock must not
+            # be opened again here, since this process now holds it.
+            legacy_fd, _ = _open_lock_file(_lock_path(vault_path, LEGACY_LOCK_FILENAME))
+            try:
+                _wait_for_flock(legacy_fd, timeout, start, lambda: _LEGACY_HOLDER)
+                with _held_guard:
+                    _held[key] = 1
+                try:
+                    yield
+                finally:
+                    with _held_guard:
+                        _held.pop(key, None)
+                    fcntl.flock(legacy_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(legacy_fd)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
 
@@ -291,9 +406,9 @@ def landed_via_concurrent_commit(vault_path: str, head_before: str,
                                  staged: dict) -> bool:
     """Did another writer already commit exactly what we staged?
 
-    Two writers share one git index: the MCP server serializes its own writes
-    in-process and does not take vault_write_lock (#412), and both sides end
-    in a plain `git commit`, which commits EVERYTHING staged. So a commit can
+    Two writers share one git index: the CLI and the MCP server both take
+    vault_write_lock (#724), yet a writer that bypasses it (a manual `git`
+    in the vault) still ends in a plain `git commit`, which commits EVERYTHING staged. So a commit can
     sweep the other writer's staged paths, and the loser's own commit then
     fails with nothing left to commit, although its content is on the branch.
 
@@ -662,6 +777,13 @@ def _partial_output(exc: subprocess.TimeoutExpired) -> str:
     return "\n".join(p for p in parts if p).strip()
 
 
+_DETACHED_HEAD_MESSAGE = (
+    "Could not determine current branch (detached HEAD, git failure, or timeout); "
+    "if a previous sync --force left HEAD detached, reattach with "
+    "'git checkout <branch>' in the vault"
+)
+
+
 def pull_rebase(vault_path: str, autostash: bool = False) -> tuple[bool, str]:
     """Pull with rebase from origin. Aborts rebase on conflict.
 
@@ -671,7 +793,125 @@ def pull_rebase(vault_path: str, autostash: bool = False) -> tuple[bool, str]:
     push path's recovery, scheduled jobs -- keep refusing on a dirty tree:
     `--no-autostash` is passed explicitly so a user's `rebase.autoStash`
     config cannot turn one into a silent stash.
+
+    This fetches and rebases in one network-bound step. `schist sync pull`
+    instead runs fetch_origin outside the vault write lock and
+    rebase_onto_fetched inside it (#724), so the hub's latency never holds
+    the lock.
     """
+    def command(branch: str) -> list[str]:
+        return ['git', 'pull', '--rebase',
+                '--autostash' if autostash else '--no-autostash', 'origin', branch]
+
+    return _rebase_onto_origin(vault_path, autostash, command, _pull_timeout_message)
+
+
+def _remote_tracking_ref(branch: str) -> str:
+    """Full ref name, so a local branch called `origin/<branch>` cannot shadow it."""
+    return f'refs/remotes/origin/{branch}'
+
+
+def rebase_onto_fetched(vault_path: str, autostash: bool = False,
+                        fetched_branch: "str | None" = None) -> tuple[bool, str]:
+    """Rebase the current branch onto the already-fetched origin/<branch>.
+
+    No network: the caller fetched first (fetch_origin). Same contract as
+    pull_rebase -- detached-HEAD refusal, opt-in autostash with the same
+    stash check, abort on conflict, the same (ok, output) shape -- so
+    `schist sync pull` can hold the vault write lock for this step only.
+
+    `fetched_branch` is the branch fetch_origin fetched. The fetch ran
+    without the lock, so another writer may have checked out a different
+    branch since; rebasing that one onto a remote-tracking ref this pull
+    never refreshed would be wrong, so a mismatch refuses instead.
+    """
+    if fetched_branch is not None:
+        branch_now = current_branch(vault_path)
+        if branch_now and branch_now != fetched_branch:
+            return False, (
+                f"The vault switched from branch '{fetched_branch}' to '{branch_now}' "
+                "while the pull was fetching, so nothing was rebased. Run "
+                "`schist sync pull` again."
+            )
+
+    def command(branch: str) -> list[str]:
+        return ['git', 'rebase',
+                '--autostash' if autostash else '--no-autostash', _remote_tracking_ref(branch)]
+
+    return _rebase_onto_origin(vault_path, autostash, command, _local_rebase_timeout_message)
+
+
+def fetch_origin(vault_path: str, branch: str) -> tuple[bool, str]:
+    """`git fetch origin <branch>`, returning (ok, output) for classification.
+
+    The failure output is what pull_rebase's `git pull` would have printed for
+    the same transport error, and a timeout carries PULL_NO_RESPONSE_PREFIX
+    plus the child's partial output, so sync's pull-failure classification
+    (unreachable, refused, ...) reads it unchanged.
+
+    The refspec is explicit because a spoke is a shallow, hence
+    single-branch, clone: its configured refspec covers only the hub's
+    default branch, and a bare `git fetch origin <branch>` for any other
+    branch updates FETCH_HEAD but not origin/<branch>, which
+    rebase_onto_fetched reads. FETCH_HEAD is no substitute: a concurrent
+    fetch overwrites it.
+    """
+    try:
+        result = subprocess.run(
+            ['git', 'fetch', 'origin', f'+refs/heads/{branch}:{_remote_tracking_ref(branch)}'],
+            cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=60,
+        )
+    except subprocess.TimeoutExpired as timeout_exc:
+        partial = _partial_output(timeout_exc)
+        detail = f"\n{partial}" if partial else ""
+        return False, (f"{PULL_NO_RESPONSE_PREFIX} "
+                       "(hub unreachable, VPN down, or a stalled transport); "
+                       "no changes were applied." + detail)
+    except OSError as e:
+        return False, f"git fetch could not run: {e}"
+    output = (result.stdout + result.stderr).strip()
+    return result.returncode == 0, output
+
+
+def _pull_timeout_message(timeout_exc: subprocess.TimeoutExpired, abort_timed_out: bool) -> str:
+    if abort_timed_out:
+        return (f"{PULL_NO_RESPONSE_PREFIX} "
+                "(rebase --abort also timed out; rerun sync to clean up)")
+    # Keep whatever the child managed to emit before the cap fired (#567).
+    # subprocess.run DISCARDS it on TimeoutExpired, so an unreachable hub
+    # produced a bare "Pull timed out after 60s" carrying no evidence of
+    # anything — and the caller then could not tell a dead network from a
+    # stalled rebase. Worse, ssh's default connect timeout on macOS (~75s,
+    # the TCP SYN retry budget) is LONGER than this 60s cap, so on a down
+    # VPN ssh never reaches its own "Operation timed out" line: the wrapper
+    # kills the only process that knows the answer. Naming "no response
+    # from the hub" is therefore the honest phrasing AND the one
+    # _is_network_error already classifies — since #584 via the
+    # line-anchored PULL_NO_RESPONSE_PREFIX rather than the bare
+    # "timed out" substring this comment used to name — which is what
+    # puts this on the unreachable side of the sync-gating axis instead
+    # of the refused side.
+    partial = _partial_output(timeout_exc)
+    detail = f"\n{partial}" if partial else ""
+    return (f"{PULL_NO_RESPONSE_PREFIX} "
+            "(hub unreachable, VPN down, or a stalled transport); "
+            "no changes were applied." + detail)
+
+
+def _local_rebase_timeout_message(timeout_exc: subprocess.TimeoutExpired,
+                                  abort_timed_out: bool) -> str:
+    # A local rebase has no hub to blame: name the stall instead, and never
+    # open with PULL_NO_RESPONSE_PREFIX, which classifies as unreachable.
+    if abort_timed_out:
+        return (f"Rebase onto the fetched hub branch timed out after {timeout_exc.timeout}s "
+                f"(stale index.lock or NFS stall?), and {PULL_ABORT_FAILED_MARKER}; "
+                "rerun sync to clean up")
+    return (f"Rebase onto the fetched hub branch timed out after {timeout_exc.timeout}s "
+            "(stale index.lock or NFS stall?); the rebase was aborted")
+
+
+def _rebase_onto_origin(vault_path, autostash, command, timeout_message) -> tuple[bool, str]:
+    """Shared body of pull_rebase and rebase_onto_fetched."""
     try:
         branch = current_branch(vault_path)
         if not branch:
@@ -679,11 +919,7 @@ def pull_rebase(vault_path: str, autostash: bool = False) -> tuple[bool, str]:
             # `git pull --rebase origin ''` SUCCEEDS — it fetches the
             # remote's default-branch HEAD and silently rebases the current
             # branch onto it (verified on git 2.50). Fail loudly instead. #325
-            return False, (
-                "Could not determine current branch (detached HEAD, git failure, or timeout); "
-                "if a previous sync --force left HEAD detached, reattach with "
-                "'git checkout <branch>' in the vault"
-            )
+            return False, _DETACHED_HEAD_MESSAGE
         # With --autostash, an uncommitted edit to a tracked file no longer
         # fails the pull ("cannot pull with rebase: You have unstaged
         # changes"): git stashes the edits, rebases, and re-applies them. A
@@ -699,8 +935,7 @@ def pull_rebase(vault_path: str, autostash: bool = False) -> tuple[bool, str]:
                     "commit the edits and pull without --autostash."
                 )
         result = subprocess.run(
-            ['git', 'pull', '--rebase',
-             '--autostash' if autostash else '--no-autostash', 'origin', branch],
+            command(branch),
             cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=60,
         )
         output = result.stdout + result.stderr
@@ -731,27 +966,8 @@ def pull_rebase(vault_path: str, autostash: bool = False) -> tuple[bool, str]:
                 cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=30,
             )
         except subprocess.TimeoutExpired:
-            return False, (f"{PULL_NO_RESPONSE_PREFIX} "
-                           "(rebase --abort also timed out; rerun sync to clean up)")
-        # Keep whatever the child managed to emit before the cap fired (#567).
-        # subprocess.run DISCARDS it on TimeoutExpired, so an unreachable hub
-        # produced a bare "Pull timed out after 60s" carrying no evidence of
-        # anything — and the caller then could not tell a dead network from a
-        # stalled rebase. Worse, ssh's default connect timeout on macOS (~75s,
-        # the TCP SYN retry budget) is LONGER than this 60s cap, so on a down
-        # VPN ssh never reaches its own "Operation timed out" line: the wrapper
-        # kills the only process that knows the answer. Naming "no response
-        # from the hub" is therefore the honest phrasing AND the one
-        # _is_network_error already classifies — since #584 via the
-        # line-anchored PULL_NO_RESPONSE_PREFIX rather than the bare
-        # "timed out" substring this comment used to name — which is what
-        # puts this on the unreachable side of the sync-gating axis instead
-        # of the refused side.
-        partial = _partial_output(timeout_exc)
-        detail = f"\n{partial}" if partial else ""
-        return False, (f"{PULL_NO_RESPONSE_PREFIX} "
-                       "(hub unreachable, VPN down, or a stalled transport); "
-                       "no changes were applied." + detail)
+            return False, timeout_message(timeout_exc, True)
+        return False, timeout_message(timeout_exc, False)
     except subprocess.CalledProcessError as e:
         return False, (e.stdout or '') + (e.stderr or '')
 
@@ -1033,6 +1249,7 @@ def _global_scope_dirs() -> list[str]:
     default_yaml = Path(__file__).resolve().parent / "default.yaml"
     resolved: list[str] = []
     try:
+        import yaml  # lazily: `schist lock hold` imports this module on every MCP write
         raw = yaml.safe_load(default_yaml.read_text(encoding="utf-8"))
         dirs = raw.get("directories") if isinstance(raw, dict) else None
         if isinstance(dirs, dict):

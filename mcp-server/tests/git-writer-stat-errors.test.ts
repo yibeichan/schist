@@ -32,6 +32,9 @@ async function makeTempVault(): Promise<string> {
     path.join(dir, "schist.yaml"),
     "name: test\nwrite_branch: drafts\n",
   );
+  // Runtime state (the vault write lock, staged temps) lives in .schist/,
+  // which real vaults ignore; without this the lock file shows as untracked.
+  await realFs.writeFile(path.join(dir, ".gitignore"), ".schist/\n");
   await execFile("git", ["add", "."], { cwd: dir });
   await execFile("git", ["commit", "-m", "init"], { cwd: dir });
   return dir;

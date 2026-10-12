@@ -70,16 +70,31 @@ def _stash_count(repo: Path) -> int:
     return len(_git(repo, "stash", "list").stdout.splitlines())
 
 
+def _fetch_then_rebase(vault: str, autostash: bool = False) -> tuple[bool, str]:
+    """`schist sync pull`'s split (#724): fetch outside the lock, then rebase."""
+    ok, output = git_ops.fetch_origin(vault, git_ops.current_branch(vault))
+    if not ok:
+        return ok, output
+    return git_ops.rebase_onto_fetched(vault, autostash=autostash)
+
+
+@pytest.fixture(params=["pull_rebase", "fetch_then_rebase"])
+def pull(request):
+    """Every scenario runs against both pull forms: one network-bound
+    `git pull --rebase`, and the fetch + local rebase that sync_pull uses."""
+    return git_ops.pull_rebase if request.param == "pull_rebase" else _fetch_then_rebase
+
+
 # --- opt-in: implicit pulls never stash --------------------------------------
 
-def test_without_autostash_a_dirty_tree_still_refuses_and_nothing_is_stashed(tmp_path):
+def test_without_autostash_a_dirty_tree_still_refuses_and_nothing_is_stashed(tmp_path, pull):
     other, spoke = _hub_and_two_clones(tmp_path)
     _remote_commit(other, "shared.md", "from the hub\n")
     (spoke / "notes.md").write_text("one\nhalf-finished edit\nthree\n")
     # A user's own rebase.autoStash must not turn an implicit pull into one.
     _git(spoke, "config", "rebase.autoStash", "true")
 
-    ok, _output = git_ops.pull_rebase(str(spoke))
+    ok, _output = pull(str(spoke))
 
     assert not ok
     assert _stash_count(spoke) == 0
@@ -96,8 +111,8 @@ def test_sync_pull_autostashes_only_when_the_flag_is_set(tmp_path, monkeypatch):
 
     vault = _make_spoke(tmp_path)
     seen = []
-    monkeypatch.setattr(sync.git_ops, "pull_rebase",
-                        lambda v, autostash=False: (seen.append(autostash), (True, ""))[1])
+    monkeypatch.setattr(sync.git_ops, "rebase_onto_fetched",
+                        lambda v, autostash=False, **k: (seen.append(autostash), (True, ""))[1])
     monkeypatch.setattr(sync, "_rebuild_index", lambda v, d: None)
 
     sync.sync_pull(SimpleNamespace(autostash=True), vault, "db")
@@ -109,12 +124,12 @@ def test_sync_pull_autostashes_only_when_the_flag_is_set(tmp_path, monkeypatch):
 
 # --- explicit autostash pulls --------------------------------------------------
 
-def test_uncommitted_edit_no_longer_blocks_an_autostash_pull(tmp_path):
+def test_uncommitted_edit_no_longer_blocks_an_autostash_pull(tmp_path, pull):
     other, spoke = _hub_and_two_clones(tmp_path)
     _remote_commit(other, "shared.md", "from the hub\n")
     (spoke / "notes.md").write_text("one\nhalf-finished edit\nthree\n")
 
-    ok, output = git_ops.pull_rebase(str(spoke), autostash=True)
+    ok, output = pull(str(spoke), autostash=True)
 
     assert ok, output
     assert (spoke / "shared.md").read_text() == "from the hub\n"
@@ -122,14 +137,14 @@ def test_uncommitted_edit_no_longer_blocks_an_autostash_pull(tmp_path):
     assert _stash_count(spoke) == 0  # re-applied, not left behind
 
 
-def test_stash_that_will_not_reapply_is_saved_and_the_tree_reset(tmp_path):
+def test_stash_that_will_not_reapply_is_saved_and_the_tree_reset(tmp_path, pull):
     """git exits 0 here, leaving conflict markers that a push would publish."""
     other, spoke = _hub_and_two_clones(tmp_path)
     _remote_commit(other, "shared.md", "hub version\n")
     _local_commit(spoke, "notes.md", "one\ntwo\nthree\nlocal commit\n")
     (spoke / "shared.md").write_text("my uncommitted version\n")
 
-    ok, output = git_ops.pull_rebase(str(spoke), autostash=True)
+    ok, output = pull(str(spoke), autostash=True)
 
     assert not ok
     assert output.startswith(git_ops.PULL_AUTOSTASH_CONFLICT_PREFIX)
@@ -148,7 +163,7 @@ def test_stash_that_will_not_reapply_is_saved_and_the_tree_reset(tmp_path):
     ("echo created-by-hook > brand-new.md\n", "added"),
 ], ids=["rewrites-stashed-path", "creates-staged-new-path"])
 def test_a_stash_git_did_not_reapply_fails_loudly_even_without_conflicts(
-        tmp_path, hook, dirty):
+        tmp_path, pull, hook, dirty):
     """git exits 0, leaves NO unmerged entries, and keeps the edit only in the
     stash. Read by unmerged entries alone this was a clean success, and the
     edit vanished from the tree without a word."""
@@ -162,7 +177,7 @@ def test_a_stash_git_did_not_reapply_fails_loudly_even_without_conflicts(
         _git(spoke, "add", "brand-new.md")
     _post_rewrite_hook(spoke, hook)
 
-    ok, output = git_ops.pull_rebase(str(spoke), autostash=True)
+    ok, output = pull(str(spoke), autostash=True)
 
     assert not ok, output
     assert output.startswith(git_ops.PULL_AUTOSTASH_CONFLICT_PREFIX)
@@ -172,7 +187,7 @@ def test_a_stash_git_did_not_reapply_fails_loudly_even_without_conflicts(
     assert _stash_count(spoke) == 1
 
 
-def test_a_conflicted_tree_that_something_else_also_changed_is_not_reset(tmp_path):
+def test_a_conflicted_tree_that_something_else_also_changed_is_not_reset(tmp_path, pull):
     """Unmerged entries alone do not license `reset --hard`: the hook's edit
     to a path the stash does not hold must survive."""
     other, spoke = _hub_and_two_clones(tmp_path)
@@ -181,7 +196,7 @@ def test_a_conflicted_tree_that_something_else_also_changed_is_not_reset(tmp_pat
     (spoke / "shared.md").write_text("my uncommitted version\n")
     _post_rewrite_hook(spoke, "echo concurrent-writer > aside.md\n")
 
-    ok, output = git_ops.pull_rebase(str(spoke), autostash=True)
+    ok, output = pull(str(spoke), autostash=True)
 
     assert not ok
     assert output.startswith(git_ops.PULL_AUTOSTASH_CONFLICT_PREFIX)
@@ -191,13 +206,13 @@ def test_a_conflicted_tree_that_something_else_also_changed_is_not_reset(tmp_pat
     assert _stash_count(spoke) == 1
 
 
-def test_a_real_rebase_conflict_gives_the_uncommitted_edits_back(tmp_path):
+def test_a_real_rebase_conflict_gives_the_uncommitted_edits_back(tmp_path, pull):
     other, spoke = _hub_and_two_clones(tmp_path)
     _remote_commit(other, "shared.md", "hub version\n")
     _local_commit(spoke, "shared.md", "conflicting local commit\n")
     (spoke / "notes.md").write_text("one\nuncommitted\nthree\n")
 
-    ok, output = git_ops.pull_rebase(str(spoke), autostash=True)
+    ok, output = pull(str(spoke), autostash=True)
 
     assert not ok
     assert not output.startswith(git_ops.PULL_AUTOSTASH_CONFLICT_PREFIX)
@@ -254,8 +269,8 @@ def _autostash_failure(monkeypatch, tmp_path, unmerged):
     message = (f"{git_ops.PULL_AUTOSTASH_CONFLICT_PREFIX}. They are saved in the git "
                "stash (abc); The working tree was reset to the pulled commit.\n"
                "Applying autostash resulted in conflicts.")
-    monkeypatch.setattr(sync.git_ops, "pull_rebase",
-                        lambda _v, autostash=False: (False, message))
+    monkeypatch.setattr(sync.git_ops, "rebase_onto_fetched",
+                        lambda _v, autostash=False, **k: (False, message))
     monkeypatch.setattr(sync.git_ops, "has_unmerged_entries", lambda _v: unmerged)
     rebuilt = []
     monkeypatch.setattr(sync, "_rebuild_index", lambda v, d: rebuilt.append(v))
@@ -296,14 +311,14 @@ def test_classifier_reads_the_autostash_prefix_only_at_line_start():
     ) == "conflict"
 
 
-def test_staging_refuses_a_tree_with_unmerged_entries(tmp_path):
+def test_staging_refuses_a_tree_with_unmerged_entries(tmp_path, pull):
     """`git add` would mark the conflicted file resolved, markers and all."""
     other, spoke = _hub_and_two_clones(tmp_path)
     _remote_commit(other, "shared.md", "hub version\n")
     _local_commit(spoke, "notes.md", "one\ntwo\nthree\nlocal commit\n")
     (spoke / "shared.md").write_text("my uncommitted version\n")
     _post_rewrite_hook(spoke, "echo concurrent-writer > aside.md\n")
-    git_ops.pull_rebase(str(spoke), autostash=True)  # leaves the tree unmerged
+    pull(str(spoke), autostash=True)  # leaves the tree unmerged
     assert _git(spoke, "ls-files", "--unmerged").stdout != ""
 
     ok, output = git_ops.stage_scope_files(str(spoke), "global")
@@ -313,7 +328,7 @@ def test_staging_refuses_a_tree_with_unmerged_entries(tmp_path):
     assert _git(spoke, "ls-files", "--unmerged").stdout != ""  # nothing staged
 
 
-def test_staged_edits_come_back_unstaged_after_an_aborted_autostash_pull(tmp_path):
+def test_staged_edits_come_back_unstaged_after_an_aborted_autostash_pull(tmp_path, pull):
     """Documented in hub-spoke-setup.md: git re-applies an autostash without
     --index, so the edit survives but its staged state does not."""
     other, spoke = _hub_and_two_clones(tmp_path)
@@ -322,7 +337,7 @@ def test_staged_edits_come_back_unstaged_after_an_aborted_autostash_pull(tmp_pat
     (spoke / "notes.md").write_text("one\nstaged edit\nthree\n")
     _git(spoke, "add", "notes.md")
 
-    ok, _output = git_ops.pull_rebase(str(spoke), autostash=True)
+    ok, _output = pull(str(spoke), autostash=True)
 
     assert not ok
     assert (spoke / "notes.md").read_text() == "one\nstaged edit\nthree\n"
@@ -352,3 +367,28 @@ def test_quit_fallback_that_saves_the_autostash_tells_the_user_and_stops(tmp_pat
     # (the push sentinel) carries it rather than the index.lock error.
     assert "index.lock" not in err.split("HEAD is detached", 1)[1].split("rebase --abort:", 1)[0]
     assert _stash_count(spoke) == 1
+
+
+def test_fetch_then_rebase_pulls_a_branch_outside_the_fetch_refspec(tmp_path):
+    """A spoke is a shallow clone, which is single-branch: its fetch refspec
+    covers only the hub's default branch. A bare `git fetch origin drafts`
+    then updates FETCH_HEAD but never origin/drafts, so a rebase onto
+    origin/drafts would miss the hub's new commit (#724). `git pull origin
+    drafts`, which this split replaced, had no such gap."""
+    other, _ = _hub_and_two_clones(tmp_path)
+    _git(other, "checkout", "-qb", "drafts")
+    _git(other, "push", "-q", "origin", "drafts")
+    spoke = tmp_path / "single"
+    _git(tmp_path, "clone", "-q", "--single-branch", "--branch", "drafts",
+         str(tmp_path / "hub.git"), str(spoke))
+    _git(spoke, "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main")
+    _git(spoke, "update-ref", "-d", "refs/remotes/origin/drafts")
+    (other / "late.md").write_text("late\n")
+    _git(other, "add", "late.md")
+    _git(other, "commit", "-qm", "remote late")
+    _git(other, "push", "-q", "origin", "drafts")
+
+    ok, output = _fetch_then_rebase(str(spoke))
+
+    assert ok, output
+    assert (spoke / "late.md").read_text() == "late\n"

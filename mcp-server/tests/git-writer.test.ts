@@ -1,9 +1,13 @@
-import { writeNote, appendToNote, updateNote, writeMutex } from "../src/git-writer.js";
+import { writeNote, appendToNote, updateNote, deleteNote, writeMutex, vaultLockWaitMs } from "../src/git-writer.js";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
-import { execFile as execFileCb } from "child_process";
+import { execFile as execFileCb, execFileSync } from "child_process";
 import { promisify } from "util";
+import { fileURLToPath } from "url";
+import { localSchistWrapperScript, spawnHolder } from "./local-schist-bin.js";
+import { _resetVaultLockWarningForTests } from "../src/vault-lock.js";
+import { jest } from "@jest/globals";
 
 const execFile = promisify(execFileCb);
 
@@ -27,6 +31,36 @@ describe("git-writer", () => {
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
+  test("SYNC_DIRTY: refuses to write over an unfinished rebase, leaving the tree untouched (#724)", async () => {
+    // A killed `sync pull` leaves rebase-merge/ behind. Writing on top of it
+    // would commit to the branch, and the next sync's `rebase --abort` would
+    // reset the branch and drop that commit after the tool reported success.
+    const vault = await makeTempVault();
+    const { stdout } = await execFile("git", ["rev-parse", "--git-path", "rebase-merge"], { cwd: vault });
+    await fs.mkdir(path.resolve(vault, stdout.trim()));
+    const head = (await execFile("git", ["rev-parse", "HEAD"], { cwd: vault })).stdout;
+    await expect(writeNote(vault, "notes/n.md", "---\ntitle: N\n---\nbody")).rejects.toMatchObject({
+      error: "SYNC_DIRTY",
+      message: expect.stringContaining("unfinished rebase"),
+    });
+    await expect(deleteNote(vault, "schist.yaml", "schist")).rejects.toMatchObject({ error: "SYNC_DIRTY" });
+    await expect(fs.access(path.join(vault, "notes", "n.md"))).rejects.toThrow();
+    expect((await execFile("git", ["rev-parse", "HEAD"], { cwd: vault })).stdout).toBe(head);
+  });
+
+  test("vaultLockWaitMs keeps the wait finite and below Node's timer limit", () => {
+    const prev = process.env.SCHIST_VAULT_LOCK_WAIT_MS;
+    try {
+      for (const [raw, want] of [["Infinity", 10000], ["NaN", 10000], ["-5", 10000], ["1e12", 600000], ["2500", 2500]] as const) {
+        process.env.SCHIST_VAULT_LOCK_WAIT_MS = raw;
+        expect(vaultLockWaitMs()).toBe(want);
+      }
+    } finally {
+      if (prev === undefined) delete process.env.SCHIST_VAULT_LOCK_WAIT_MS;
+      else process.env.SCHIST_VAULT_LOCK_WAIT_MS = prev;
+    }
+  });
+
   test("PATH_TRAVERSAL: rejects writes outside vault root", async () => {
     const vault = await makeTempVault();
     await expect(writeNote(vault, "../../etc/passwd", "evil")).rejects.toMatchObject({
@@ -319,4 +353,170 @@ describe("git-writer", () => {
     },
     30000
   );
+});
+
+// #724: every index write holds the CLI's cross-process vault write lock
+// (<vault>/.schist/write.lock) through a `schist lock hold` helper.
+describe("git-writer under the vault write lock (#724)", () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+  const prevBin = process.env.SCHIST_LOCK_BIN;
+  const prevWait = process.env.SCHIST_VAULT_LOCK_WAIT_MS;
+  let binDir: string;
+  let wrapper: string;
+
+  beforeAll(async () => {
+    binDir = await fs.mkdtemp(path.join(os.tmpdir(), "schist-lockbin-"));
+    createdDirs.add(binDir);
+    wrapper = path.join(binDir, "schist");
+    await fs.writeFile(wrapper, localSchistWrapperScript(repoRoot), { mode: 0o755 });
+    process.env.SCHIST_LOCK_BIN = wrapper;
+  });
+
+  afterAll(async () => {
+    if (prevBin === undefined) delete process.env.SCHIST_LOCK_BIN;
+    else process.env.SCHIST_LOCK_BIN = prevBin;
+    if (prevWait === undefined) delete process.env.SCHIST_VAULT_LOCK_WAIT_MS;
+    else process.env.SCHIST_VAULT_LOCK_WAIT_MS = prevWait;
+    for (const dir of createdDirs) await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  // These tests rely on the real helper. The fallback logs once per module,
+  // so reset that flag and fail any test that took the fallback.
+  let errSpy: ReturnType<typeof jest.spyOn>;
+  beforeEach(() => {
+    _resetVaultLockWarningForTests();
+    errSpy = jest.spyOn(console, "error");
+  });
+  afterEach(() => {
+    const fallbacks = errSpy.mock.calls.filter((c: unknown[]) => String(c[0]).includes("cross-process vault lock unavailable"));
+    errSpy.mockRestore();
+    expect(fallbacks).toEqual([]);
+  });
+
+  /** A pre-commit hook that tries the lock and records the helper's exit code (75 = busy). */
+  async function installLockProbeHook(vault: string): Promise<string> {
+    const probe = path.join(vault, ".schist", "probe");
+    await fs.mkdir(path.dirname(probe), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, ".git", "hooks", "pre-commit"),
+      `#!/bin/sh\n"${wrapper}" --vault "${vault}" lock hold --timeout 0.2 </dev/null >/dev/null 2>&1\necho $? > "${probe}"\n`,
+      { mode: 0o755 },
+    );
+    return probe;
+  }
+
+  const headSubject = async (vault: string) =>
+    (await execFile("git", ["log", "-1", "--format=%s"], { cwd: vault })).stdout.trim();
+
+  test("writeNote holds the vault flock while it writes and commits", async () => {
+    const vault = await makeTempVault();
+    const probe = await installLockProbeHook(vault);
+    await writeNote(vault, "notes/a.md", "---\ntitle: a\n---\nx\n", "a", "tester");
+    expect((await fs.readFile(probe, "utf-8")).trim()).toBe("75");
+  }, 60000);
+
+  test("deleteNote holds the vault flock while it removes and commits", async () => {
+    const vault = await makeTempVault();
+    await writeNote(vault, "notes/d.md", "---\ntitle: d\n---\nx\n", "d", "tester");
+    const probe = await installLockProbeHook(vault);
+    await deleteNote(vault, "notes/d.md", "d", "tester");
+    expect((await fs.readFile(probe, "utf-8")).trim()).toBe("75");
+  }, 60000);
+
+  test("lock lost after the write: written-but-uncommitted, nothing committed", async () => {
+    const vault = await makeTempVault();
+    const rel = "notes/lost.md";
+    await writeNote(vault, rel, "---\ntitle: lost\n---\nv1\n", "lost", "tester");
+    const before = await headSubject(vault);
+    // The transform runs inside the lock, after the pre-write check: SIGKILL
+    // the helper holding this vault's lock there, and wait until it is gone,
+    // so the pre-commit check is the one that sees the lock lost.
+    const pattern = `--vault ${vault} lock hold`;
+    const killHelper = () => {
+      execFileSync("pkill", ["-KILL", "-f", "--", pattern]);
+      for (let i = 0; i < 200; i++) {
+        try { execFileSync("pgrep", ["-f", "--", pattern]); } catch { return; }
+        execFileSync("sleep", ["0.05"]);
+      }
+      throw new Error("lock helper did not die");
+    };
+    const err = await updateNote(vault, rel, "lost", "tester", () => {
+      killHelper();
+      return "---\ntitle: lost\n---\nv2\n";
+    }).catch((e) => e);
+    expect(err).toMatchObject({ error: "GIT_COMMIT_FAILED_FILE_WRITTEN" });
+    expect(err.message).toMatch(/written to disk, but committing it failed/);
+    expect(err.message).toMatch(/vault write lock lost/);
+    expect(await headSubject(vault)).toBe(before);
+    expect(await fs.readFile(path.join(vault, rel), "utf-8")).toContain("v2");
+  }, 60000);
+
+  test("lock wait timeout surfaces as WRITE_TIMEOUT naming the holder", async () => {
+    const vault = await makeTempVault();
+    process.env.SCHIST_VAULT_LOCK_WAIT_MS = "500";
+    const holder = await spawnHolder(wrapper, vault);
+    try {
+      await expect(writeNote(vault, "notes/b.md", "---\ntitle: b\n---\n", "b", "t")).rejects.toMatchObject({
+        error: "WRITE_TIMEOUT",
+        message: expect.stringMatching(/held by \S+:\d+/),
+      });
+      // The message reports the wait actually configured, in flat wording.
+      const err = await writeNote(vault, "notes/b.md", "---\ntitle: b\n---\n", "b", "t").catch((e) => e);
+      expect(err.message).toContain("0.5s");
+      expect(err.message).not.toContain("10s");
+      expect(err.message).not.toMatch(/\([^)]*\(/);
+      await expect(fs.access(path.join(vault, "notes", "b.md"))).rejects.toThrow();
+    } finally {
+      delete process.env.SCHIST_VAULT_LOCK_WAIT_MS;
+      const closed = new Promise((r) => holder.once("close", r));
+      holder.stdin.end();
+      await closed;
+    }
+  }, 60000);
+
+  test("deleteNote repairs read inside the lock (a concurrent edit is not overwritten)", async () => {
+    const vault = await makeTempVault();
+    const linker = "notes/l.md";
+    await writeNote(vault, "notes/d.md", "---\ntitle: d\n---\nx\n", "d", "t");
+    await writeNote(vault, linker, "---\ntitle: l\n---\n## Connections\n- extends: [[notes/d]]\n", "l", "t");
+    const stripLink = (c: string) => c.split("\n").filter((l) => !l.includes("[[notes/d]]")).join("\n");
+    // The repair is decided before this edit lands; it must be applied to the
+    // file as it is inside the lock.
+    await fs.appendFile(path.join(vault, linker), "EDIT\n");
+    await deleteNote(vault, "notes/d.md", "d", "t", [{ relPath: linker, transform: stripLink }]);
+    const after = await fs.readFile(path.join(vault, linker), "utf-8");
+    expect(after).toContain("EDIT");
+    expect(after).not.toContain("[[notes/d]]");
+    const committed = (await execFile("git", ["show", `HEAD:${linker}`], { cwd: vault })).stdout;
+    expect(committed).toContain("EDIT");
+  }, 60000);
+
+  test("deleteNote skips a repair whose file vanished or whose transform changes nothing", async () => {
+    const vault = await makeTempVault();
+    await writeNote(vault, "notes/d.md", "---\ntitle: d\n---\nx\n", "d", "t");
+    await writeNote(vault, "notes/same.md", "---\ntitle: same\n---\nbody\n", "same", "t");
+    const res = await deleteNote(vault, "notes/d.md", "d", "t", [
+      { relPath: "notes/gone.md", transform: () => "resurrected\n" },
+      { relPath: "notes/same.md", transform: (c) => c },
+    ]);
+    expect(res.committed).toBe(true);
+    // Only repairs actually written are reported (#724).
+    expect(res.repaired).toEqual([]);
+    await expect(fs.access(path.join(vault, "notes", "gone.md"))).rejects.toThrow();
+    const files = (await execFile("git", ["show", "--name-only", "--format=", "HEAD"], { cwd: vault })).stdout.trim();
+    expect(files).toBe("notes/d.md");
+  }, 60000);
+
+  test("deleteNote reports the repairs it applied, and only those", async () => {
+    const vault = await makeTempVault();
+    await writeNote(vault, "notes/d2.md", "---\ntitle: d2\n---\nx\n", "d2", "t");
+    await writeNote(vault, "notes/hit.md", "---\ntitle: hit\n---\nlink\n", "hit", "t");
+    await writeNote(vault, "notes/miss.md", "---\ntitle: miss\n---\nbody\n", "miss", "t");
+    const res = await deleteNote(vault, "notes/d2.md", "d2", "t", [
+      { relPath: "notes/miss.md", transform: (c) => c },
+      { relPath: "notes/gone.md", transform: () => "x\n" },
+      { relPath: "notes/hit.md", transform: (c) => c.replace("link", "unlinked") },
+    ]);
+    expect(res.repaired).toEqual(["notes/hit.md"]);
+  }, 60000);
 });

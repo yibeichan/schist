@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shlex
@@ -550,21 +551,8 @@ def _cleanup_stale_index_lock(git_dir: Path) -> None:
         sys.exit(1)
 
 
-def cleanup_stale_git_state(vault_path: str, *, force: bool, uses_index: bool = True) -> None:
-    """Clear stale git operation sentinels before sync.
-
-    Rebase state is always cleaned because a killed `sync pull` leaves the
-    spoke permanently unusable until it is removed. Merge and index-lock cleanup
-    are gated behind --force: merge abort can touch the worktree, and lock files
-    should only be removed as an explicit recovery action. Under --force, remove
-    index.lock before aborting a merge so Git gets a fair chance to restore the
-    worktree. Never drop MERGE_* sentinels after abort failure; that can hide
-    unresolved merge content from later status/staging checks.
-
-    uses_index=False (`sync push --no-commit`) skips the index.lock gate: a
-    push that never stages or commits does not need the index, and the lock
-    is then usually a live MCP commit that must be neither refused nor removed.
-    """
+def _operation_state_dir(vault_path: str) -> Path:
+    """The git directory that holds rebase/merge state for this vault."""
     git_dir = Path(vault_path) / ".git"
     if git_dir.is_file():
         # Linked worktrees and --separate-git-dir vaults store a pointer here.
@@ -581,8 +569,36 @@ def cleanup_stale_git_state(vault_path: str, *, force: bool, uses_index: bool = 
             print(f"Error: cannot locate Git operation state: {detail}", file=sys.stderr)
             sys.exit(1)
         git_dir = Path(resolved.stdout.strip())
-    rebase_present = any((git_dir / d).exists() for d in ("rebase-merge", "rebase-apply"))
-    if rebase_present:
+    return git_dir
+
+
+def _rebase_state_present(git_dir: Path) -> bool:
+    return any((git_dir / d).exists() for d in ("rebase-merge", "rebase-apply"))
+
+
+def cleanup_stale_git_state(vault_path: str, *, force: bool, uses_index: bool = True,
+                            skip_rebase: bool = False) -> None:
+    """Clear stale git operation sentinels before sync.
+
+    Rebase state is always cleaned because a killed `sync pull` leaves the
+    spoke permanently unusable until it is removed. Merge and index-lock cleanup
+    are gated behind --force: merge abort can touch the worktree, and lock files
+    should only be removed as an explicit recovery action. Under --force, remove
+    index.lock before aborting a merge so Git gets a fair chance to restore the
+    worktree. Never drop MERGE_* sentinels after abort failure; that can hide
+    unresolved merge content from later status/staging checks.
+
+    uses_index=False (`sync push --no-commit`) skips the index.lock gate: a
+    push that never stages or commits does not need the index, and the lock
+    is then usually a live MCP commit that must be neither refused nor removed.
+
+    skip_rebase=True leaves rebase state alone. A caller that does not hold
+    the vault write lock must pass it (#724): rebase state can appear after
+    the caller looked, from a `sync pull` that holds the lock for its whole
+    rebase, and aborting that live rebase would wreck the pull.
+    """
+    git_dir = _operation_state_dir(vault_path)
+    if not skip_rebase and _rebase_state_present(git_dir):
         _cleanup_rebase_state(vault_path)
 
     merge_present = (git_dir / "MERGE_HEAD").exists()
@@ -639,6 +655,49 @@ def classify_pull_failure(output: str) -> str:
     return "other"
 
 
+def _fetch_before_pull(vault_path: str) -> tuple[bool, str, "str | None"]:
+    """Fetch origin/<branch> outside the vault write lock (#724), so the hub's
+    latency (up to the 60 s cap on an unreachable hub) never holds the lock
+    every MCP write waits on. Returns (ok, output, branch fetched); a
+    failure's output is classified like a failed pull's. An unknown branch
+    skips the fetch and returns ok: the rebase step then reports the
+    detached HEAD."""
+    branch = git_ops.current_branch(vault_path)
+    if not branch:
+        return True, "", None
+    ok, output = git_ops.fetch_origin(vault_path, branch)
+    return ok, output, branch
+
+
+# `sync pull --lock-timeout` gave up waiting for the vault write lock. Same
+# value as `lock hold`'s timeout exit (EX_TEMPFAIL): nothing was changed.
+PULL_LOCK_BUSY_EXIT = 75
+
+
+def _lock_timeout(args) -> "float | None":
+    """--lock-timeout in seconds, or None (wait as long as it takes). A
+    MagicMock args, or one built without the flag, reads as None."""
+    value = getattr(args, "lock_timeout", None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _enter_pull_lock(stack: contextlib.ExitStack, vault_path: str, args) -> None:
+    """Take the vault write lock for a pull step, or skip the pull.
+
+    The MCP server's pre-read pull runs under a 5 s kill (#724). Waiting on
+    the lock past --lock-timeout and then starting a rebase would let that
+    kill land mid-rebase, so a busy lock ends the pull before anything is
+    touched."""
+    try:
+        stack.enter_context(git_ops.vault_write_lock(vault_path, timeout=_lock_timeout(args)))
+    except git_ops.VaultLockTimeout as e:
+        print(f"Skipped pull: the vault write lock is busy (held by {e.holder}); "
+              "nothing was changed.", file=sys.stderr)
+        sys.exit(PULL_LOCK_BUSY_EXIT)
+
+
 def sync_pull(args, vault_path: str, db_path: str) -> None:
     """Pull updates from hub and rebuild SQLite index."""
     if not is_spoke(vault_path):
@@ -646,17 +705,33 @@ def sync_pull(args, vault_path: str, db_path: str) -> None:
         sys.exit(1)
 
     config = load_spoke_config(vault_path)
-    cleanup_stale_git_state(vault_path, force=_force_enabled(args))
-
     print(f"Pulling from hub as {config.identity}...")
 
-    # Opt-in only: `getattr(...) is True` so a caller that never set the flag
-    # (or a MagicMock args) cannot turn an implicit pull into a stash. The
-    # implicit call keeps its original one-argument shape.
-    if getattr(args, "autostash", False) is True:
-        ok, output = git_ops.pull_rebase(vault_path, autostash=True)
-    else:
-        ok, output = git_ops.pull_rebase(vault_path)
+    # A killed pull leaves its rebase behind, with HEAD detached, so the
+    # branch to fetch cannot be read until that state is cleared. Clearing it
+    # needs the lock: the state may instead be another pull's live rebase.
+    if _rebase_state_present(_operation_state_dir(vault_path)):
+        with contextlib.ExitStack() as stack:
+            _enter_pull_lock(stack, vault_path, args)
+            cleanup_stale_git_state(vault_path, force=_force_enabled(args))
+
+    # The network step runs without the lock; only the local rebase onto the
+    # fetched origin/<branch> holds it (#724). A failed fetch is reported
+    # below exactly like a failed pull.
+    ok, output, fetched_branch = _fetch_before_pull(vault_path)
+    if ok:
+        # Opt-in only: `getattr(...) is True` so a caller that never set the
+        # flag (or a MagicMock args) cannot turn an implicit pull into a
+        # stash. The implicit call keeps its original one-argument shape.
+        with contextlib.ExitStack() as stack:
+            _enter_pull_lock(stack, vault_path, args)
+            cleanup_stale_git_state(vault_path, force=_force_enabled(args))
+            if getattr(args, "autostash", False) is True:
+                ok, output = git_ops.rebase_onto_fetched(
+                    vault_path, autostash=True, fetched_branch=fetched_branch)
+            else:
+                ok, output = git_ops.rebase_onto_fetched(
+                    vault_path, fetched_branch=fetched_branch)
     if not ok:
         def _unreachable(*, tree_certain: bool = True) -> None:
             # Parity with sync_push (#567): pull had no network branch at all,
@@ -1181,7 +1256,18 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
 
     config = load_spoke_config(vault_path)
     no_commit = _no_commit_enabled(args)
-    cleanup_stale_git_state(vault_path, force=_force_enabled(args), uses_index=not no_commit)
+    if (no_commit and not _force_enabled(args)
+            and not _rebase_state_present(_operation_state_dir(vault_path))):
+        # Background push (#724) with no rebase state: cleanup aborts
+        # nothing, so this common path stays lock-free. Rebase state, by
+        # contrast, may belong to a live `sync pull`, which holds the lock for
+        # its whole rebase; aborting it requires the lock, and the cleanup
+        # re-checks the state once the lock is held.
+        cleanup_stale_git_state(vault_path, force=False, uses_index=False, skip_rebase=True)
+    else:
+        with git_ops.vault_write_lock(vault_path):
+            cleanup_stale_git_state(vault_path, force=_force_enabled(args),
+                                    uses_index=not no_commit)
 
     # Snapshot the sentinel BEFORE doing any work, so a failure another process
     # records while this push runs is never mistaken for the one we recovered

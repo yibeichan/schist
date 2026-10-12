@@ -2,13 +2,76 @@
 """schist CLI — agent-first knowledge graph."""
 
 import argparse
+import math
 import os
 import sys
 
-from . import commands, doctor as doctor_mod, sync
+
+def _seconds(value: str) -> float:
+    """A finite, non-negative number of seconds. `nan` and `inf` parse as
+    floats but would make a lock wait never time out."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        seconds = math.nan
+    if not math.isfinite(seconds) or seconds < 0:
+        raise argparse.ArgumentTypeError(f'expected a finite number of seconds >= 0, got {value!r}')
+    return seconds
+
+
+def _lock_hold_args(argv: list) -> "tuple[str, float, float] | None":
+    """(vault, timeout, max_hold) when argv is exactly a well-formed
+    `[--vault V] [--db D] lock hold [--timeout T] [--max-hold M]`, else None.
+
+    The MCP server spawns `lock hold` for every write, so this skips the
+    command modules' imports (about 0.1 s). Anything else, including --help,
+    a bad value, an unknown option or a missing vault, returns None, and the
+    full parser below then handles it, usage errors included.
+    """
+    def take(i: int, flag: str) -> "tuple[str | None, int]":
+        tok = argv[i]
+        if tok == flag:
+            return (argv[i + 1], i + 2) if i + 1 < len(argv) else (None, i)
+        return tok[len(flag) + 1:], i + 1  # --flag=value
+
+    vault = os.environ.get('SCHIST_VAULT_PATH')
+    i = 0
+    while i < len(argv) and argv[i] != 'lock':
+        tok = argv[i]
+        flag = next((f for f in ('--vault', '--db')
+                     if tok == f or tok.startswith(f + '=')), None)
+        if flag is None:
+            return None
+        value, i = take(i, flag)
+        if value is None:
+            return None
+        if flag == '--vault':
+            vault = value
+    if argv[i:i + 2] != ['lock', 'hold'] or not vault:
+        return None
+    opts = {'--timeout': 10.0, '--max-hold': 120.0}
+    i += 2
+    while i < len(argv):
+        tok = argv[i]
+        flag = next((f for f in opts if tok == f or tok.startswith(f + '=')), None)
+        if flag is None:
+            return None
+        value, i = take(i, flag)
+        try:
+            opts[flag] = _seconds(value)
+        except argparse.ArgumentTypeError:
+            return None
+    return vault, opts['--timeout'], opts['--max-hold']
 
 
 def main():
+    fast = _lock_hold_args(sys.argv[1:])
+    if fast is not None:
+        from . import lock_cmd
+        sys.exit(lock_cmd.hold(*fast))
+
+    from . import commands, doctor as doctor_mod, sync
+
     parser = argparse.ArgumentParser(prog='schist', description='Agent-first knowledge graph CLI')
     parser.add_argument('--vault', default=os.environ.get('SCHIST_VAULT_PATH'), help='Path to vault root (or set SCHIST_VAULT_PATH)')
     parser.add_argument('--db', default=None, help='Path to SQLite database (default: <vault>/.schist/schist.db)')
@@ -122,6 +185,11 @@ def main():
     sync_sub = p_sync.add_subparsers(dest='sync_action')
     p_sync_pull = sync_sub.add_parser('pull', help='Pull updates from hub')
     p_sync_pull.add_argument(
+        '--lock-timeout', dest='lock_timeout', type=_seconds, default=None,
+        help='Give up after this many seconds waiting for the vault write '
+             'lock, changing nothing and exiting 75 (default: wait)',
+    )
+    p_sync_pull.add_argument(
         '--force', action='store_true', default=argparse.SUPPRESS,
         help='Clear stale git rebase/merge/index-lock state before pulling',
     )
@@ -161,6 +229,13 @@ def main():
         '--force', action='store_true',
         help='Also overwrite hooks marked `# schist-hook-version: pinned` (opt-out marker)',
     )
+
+    # lock: internal helper for the MCP server (hidden from help)
+    p_lock = sub.add_parser('lock')  # no help=: argparse then omits it from the command list
+    lock_sub = p_lock.add_subparsers(dest='lock_action')
+    p_lock_hold = lock_sub.add_parser('hold')
+    p_lock_hold.add_argument('--timeout', type=_seconds, default=10.0)
+    p_lock_hold.add_argument('--max-hold', dest='max_hold', type=_seconds, default=120.0)
 
     # hub: filesystem-side ACL administration of a bare hub repo
     p_hub = sub.add_parser('hub', help='Administer a bare hub vault.yaml (filesystem)')
@@ -322,6 +397,13 @@ def main():
             print('Usage: schist hooks reinstall', file=sys.stderr)
             sys.exit(1)
         sys.exit(0)
+
+    if args.command == 'lock':
+        from . import lock_cmd
+        if args.lock_action != 'hold':
+            print('Usage: schist lock hold', file=sys.stderr)
+            sys.exit(2)
+        sys.exit(lock_cmd.hold(vault_path, args.timeout, args.max_hold))
 
     dispatch = {
         'add': commands.add,

@@ -444,7 +444,7 @@ class TestSyncPull:
             sync_pull(args, str(vault), "db.sqlite")
         assert "not a spoke vault" in capsys.readouterr().err
 
-    @patch("schist.sync.git_ops.pull_rebase", return_value=(True, "Already up to date."))
+    @patch("schist.sync.git_ops.rebase_onto_fetched", return_value=(True, "Already up to date."))
     @patch("schist.sync._rebuild_index")
     def test_pull_rebuilds_db(self, mock_ingest, mock_pull, tmp_path, capsys):
         from schist.sync import sync_pull
@@ -461,7 +461,7 @@ class TestSyncPull:
         mock_ingest.assert_called_once()
         assert "Pull complete" in capsys.readouterr().out
 
-    @patch("schist.sync.git_ops.pull_rebase", return_value=(True, ""))
+    @patch("schist.sync.git_ops.rebase_onto_fetched", return_value=(True, ""))
     @patch("schist.sync._rebuild_index")
     @patch("subprocess.run")
     def test_pull_heals_leftover_rebase(self, mock_run, mock_ingest, mock_pull, tmp_path, capsys):
@@ -486,7 +486,7 @@ class TestSyncPull:
         assert called_with_abort, f"expected rebase --abort, got calls: {mock_run.call_args_list}"
         assert "Aborting leftover rebase" in capsys.readouterr().err
 
-    @patch("schist.sync.git_ops.pull_rebase", return_value=(True, ""))
+    @patch("schist.sync.git_ops.rebase_onto_fetched", return_value=(True, ""))
     @patch("schist.sync._rebuild_index")
     @patch("subprocess.run")
     def test_pull_falls_back_to_rebase_quit(self, mock_run, mock_ingest, mock_pull, tmp_path, capsys):
@@ -534,7 +534,7 @@ class TestSyncPull:
         assert "Manual fix" in err
 
     @patch(
-        "schist.sync.git_ops.pull_rebase",
+        "schist.sync.git_ops.rebase_onto_fetched",
         return_value=(
             False,
             "Auto-merging research/mario/a.md\n"
@@ -590,7 +590,7 @@ class TestSyncPull:
         vault = _make_spoke(tmp_path)
         args = MagicMock()
         with patch(
-            "schist.sync.git_ops.pull_rebase",
+            "schist.sync.git_ops.rebase_onto_fetched",
             return_value=(False, "fatal: Could not resolve hostname pi.local"),
         ), pytest.raises(SystemExit):
             sync_pull(args, vault, "db.sqlite")
@@ -610,7 +610,7 @@ class TestSyncPull:
         vault = _make_spoke(tmp_path)
         args = MagicMock()
         with patch(
-            "schist.sync.git_ops.pull_rebase",
+            "schist.sync.git_ops.rebase_onto_fetched",
             return_value=(False, "error: cannot rebase: You have unstaged changes."),
         ), pytest.raises(SystemExit):
             sync_pull(args, vault, "db.sqlite")
@@ -756,7 +756,7 @@ class TestSyncPush:
         def assert_locked(vault_path, *_a, **_k):
             # A nonblocking flock on a fresh fd must fail while the exclusive
             # lock is held (flock is per open-file-description).
-            fd = _os.open(_os.path.join(vault_path, ".schist", "cli-write.lock"), _os.O_RDWR)
+            fd = _os.open(_os.path.join(vault_path, ".schist", "write.lock"), _os.O_RDWR)
             try:
                 with pytest.raises(BlockingIOError):
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -2024,8 +2024,8 @@ class TestPullTransportClassification:
 
         vault = _make_spoke(tmp_path)
         monkeypatch.setattr(
-            git_ops, "pull_rebase",
-            lambda _p: (False, f"{git_ops.PULL_NO_RESPONSE_PREFIX} (hub unreachable, "
+            git_ops, "rebase_onto_fetched",
+            lambda _p, **k: (False, f"{git_ops.PULL_NO_RESPONSE_PREFIX} (hub unreachable, "
                                "VPN down, or a stalled transport); no changes were applied."))
         with pytest.raises(SystemExit):
             sync_pull(MagicMock(), vault, "db.sqlite")
@@ -2057,7 +2057,7 @@ class TestPullTransportClassification:
         # No longer steerable: vault content cannot reach the network branch.
         from schist.sync import _is_network_error
         assert _is_network_error(conflicty) is False
-        monkeypatch.setattr(git_ops, "pull_rebase", lambda _p: (False, conflicty))
+        monkeypatch.setattr(git_ops, "rebase_onto_fetched", lambda _p, **k: (False, conflicty))
         with pytest.raises(SystemExit):
             sync_pull(MagicMock(), vault, "db.sqlite")
         out = capsys.readouterr()
@@ -2078,7 +2078,7 @@ class TestPullFailureBranchOrdering:
 
     def _pull_returns(self, monkeypatch, output):
         from schist import git_ops
-        monkeypatch.setattr(git_ops, "pull_rebase", lambda _p: (False, output))
+        monkeypatch.setattr(git_ops, "rebase_onto_fetched", lambda _p, **k: (False, output))
 
     def _run(self, tmp_path, capsys):
         from schist.sync import sync_pull
@@ -3237,3 +3237,299 @@ def test_hooks_reinstall_survives_non_utf8_git_output_end_to_end(tmp_path, monke
 
     assert (hooks / "pre-commit").exists() and (hooks / "post-commit").exists()
     assert ".schist/" in exclude.read_text()
+
+
+class TestPullUnderVaultLock:
+    def test_rebase_and_cleanup_run_inside_lock_fetch_outside(self, tmp_path, monkeypatch):
+        import fcntl
+        import os as _os
+
+        from schist import git_ops, sync
+
+        vault = _make_spoke(tmp_path)
+
+        def lock_is_held():
+            fd = _os.open(_os.path.join(vault, ".schist", "write.lock"),
+                          _os.O_RDWR | _os.O_CREAT)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                return False
+            except BlockingIOError:
+                return True
+            finally:
+                _os.close(fd)
+
+        seen = {}
+
+        def fake_fetch(v):
+            seen["fetch"] = lock_is_held()
+            return True, "", "main"
+
+        def fake_cleanup(v, **k):
+            seen["cleanup"] = lock_is_held()
+
+        def fake_rebase(v, **k):
+            seen["rebase"] = lock_is_held()
+            return (True, "")
+
+        monkeypatch.setattr(sync, "_fetch_before_pull", fake_fetch)
+        monkeypatch.setattr(sync, "cleanup_stale_git_state", fake_cleanup)
+        monkeypatch.setattr(git_ops, "rebase_onto_fetched", fake_rebase)
+        monkeypatch.setattr(sync, "_rebuild_index", lambda *a, **k: None)
+        sync.sync_pull(MagicMock(autostash=False, force=False), vault,
+                       str(Path(vault) / ".schist" / "schist.db"))
+        assert seen == {"fetch": False, "cleanup": True, "rebase": True}
+
+    def test_fetch_timeout_is_reported_as_no_response(self, tmp_path, monkeypatch):
+        import subprocess as sp
+
+        from schist import git_ops, sync
+
+        monkeypatch.setattr(git_ops, "current_branch", lambda v: "main")
+
+        def boom(*a, **k):
+            raise sp.TimeoutExpired(
+                "git", 60, output="",
+                stderr="ssh: connect to host 192.0.2.1 port 22: Operation timed out\n")
+
+        monkeypatch.setattr(git_ops.subprocess, "run", boom)
+        ok, output, _ = sync._fetch_before_pull(_make_spoke(tmp_path))
+        assert ok is False
+        assert output.startswith(git_ops.PULL_NO_RESPONSE_PREFIX)
+        assert "connect to host 192.0.2.1" in output
+        assert sync.classify_pull_failure(output) == "timeout"
+
+    def test_unknown_branch_defers_to_the_rebase_step(self, tmp_path, monkeypatch):
+        from schist import git_ops, sync
+
+        monkeypatch.setattr(git_ops, "current_branch", lambda v: "")
+        assert sync._fetch_before_pull(_make_spoke(tmp_path)) == (True, "", None)
+
+    def test_push_cleanup_locked_except_background_no_commit(self, tmp_path, monkeypatch):
+        import fcntl
+        import os as _os
+
+        from schist import sync
+
+        vault = _make_spoke(tmp_path)
+        held = []
+
+        def probe(v, **k):
+            fd = _os.open(_os.path.join(v, ".schist", "write.lock"), _os.O_RDWR | _os.O_CREAT)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held.append(False)
+            except BlockingIOError:
+                held.append(True)
+            finally:
+                _os.close(fd)
+
+        monkeypatch.setattr(sync, "cleanup_stale_git_state", probe)
+
+        def run(**kw):
+            try:
+                sync.sync_push(MagicMock(**kw), vault, "db.sqlite")
+            except BaseException:
+                pass
+
+        run(no_commit=False, force=False)
+        run(no_commit=True, force=False)
+        run(no_commit=True, force=True)
+        # Rebase state may be a live `sync pull` that holds the lock for its
+        # whole rebase: the background push then takes the lock before its
+        # cleanup aborts anything (#724).
+        for d in ("rebase-merge", "rebase-apply"):
+            (Path(vault) / ".git" / d).mkdir()
+            run(no_commit=True, force=False)
+            (Path(vault) / ".git" / d).rmdir()
+        assert held == [True, False, True, True, True]
+
+
+class TestPullNetworkOutsideLock:
+    """#724: `sync pull` fetches outside the vault write lock and rebases onto
+    the fetched origin/<branch> inside it, so a slow or unreachable hub never
+    holds the lock that every MCP write waits on."""
+
+    @staticmethod
+    def _spoke_pair(tmp_path):
+        from .test_pull_autostash import _hub_and_two_clones
+        other, spoke = _hub_and_two_clones(tmp_path)
+        save_spoke_config(str(spoke), SpokeConfig(
+            hub=str(tmp_path / "hub.git"), identity="spoke", scope="notes"))
+        (spoke / ".git" / "info" / "exclude").write_text(".schist/\n")
+        return other, spoke
+
+    @staticmethod
+    def _git(cwd, *args):
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True,
+                              text=True, check=True).stdout
+
+    def _commit(self, repo, name, text, push=False):
+        (repo / name).write_text(text)
+        self._git(repo, "add", name)
+        self._git(repo, "commit", "-qm", f"add {name}")
+        if push:
+            self._git(repo, "push", "-q", "origin", "main")
+
+    def test_rebase_under_the_lock_does_no_network_fetch(self, tmp_path, monkeypatch):
+        from schist import git_ops, sync
+
+        other, spoke = self._spoke_pair(tmp_path)
+        self._commit(other, "remote.md", "from the hub\n", push=True)
+        self._commit(spoke, "local.md", "local\n")
+        real_fetch = sync._fetch_before_pull
+
+        def fetch_then_lose_the_hub(v):
+            result = real_fetch(v)
+            # Any network access after this point fails.
+            (tmp_path / "hub.git").rename(tmp_path / "hub-gone.git")
+            return result
+
+        monkeypatch.setattr(sync, "_fetch_before_pull", fetch_then_lose_the_hub)
+        monkeypatch.setattr(sync, "_rebuild_index", lambda *a, **k: None)
+        sync.sync_pull(MagicMock(autostash=False, force=False), str(spoke), "db")
+
+        assert (spoke / "remote.md").read_text() == "from the hub\n"
+        assert (spoke / "local.md").read_text() == "local\n"
+        log = self._git(spoke, "log", "--format=%s", "-2").split("\n")
+        assert log[:2] == ["add local.md", "add remote.md"]  # rebased, not merged
+        assert git_ops.current_branch(str(spoke)) == "main"
+
+    def test_rebase_conflict_is_aborted_and_reported(self, tmp_path, monkeypatch, capsys):
+        from schist import sync
+
+        other, spoke = self._spoke_pair(tmp_path)
+        self._commit(other, "shared.md", "hub side\n", push=True)
+        self._commit(spoke, "shared.md", "spoke side\n")
+        monkeypatch.setattr(sync, "_rebuild_index", lambda *a, **k: None)
+        with pytest.raises(SystemExit):
+            sync.sync_pull(MagicMock(autostash=False, force=False), str(spoke), "db")
+        err = capsys.readouterr().err
+        assert "pull failed with conflicts" in err
+        assert "Local state is unchanged" in err
+        assert "shared.md" in err
+        assert not (spoke / ".git" / "rebase-merge").exists()
+        assert (spoke / "shared.md").read_text() == "spoke side\n"
+
+    def test_unreachable_hub_is_classified_and_never_takes_the_lock(
+            self, tmp_path, monkeypatch, capsys):
+        from contextlib import contextmanager
+
+        from schist import git_ops, sync
+
+        other, spoke = self._spoke_pair(tmp_path)
+        self._git(spoke, "remote", "set-url", "origin", "ssh://git@hub.invalid/vault.git")
+        fake_ssh = tmp_path / "fake-ssh"
+        fake_ssh.write_text(
+            "#!/bin/sh\necho 'ssh: connect to host hub.invalid port 22: "
+            "Connection refused' >&2\nexit 255\n")
+        fake_ssh.chmod(0o755)
+        monkeypatch.setenv("GIT_SSH_COMMAND", str(fake_ssh))
+        taken = []
+
+        @contextmanager
+        def recording_lock(v, timeout=None):
+            taken.append(v)
+            yield
+
+        monkeypatch.setattr(git_ops, "vault_write_lock", recording_lock)
+        monkeypatch.setattr(sync, "_rebuild_index", lambda *a, **k: None)
+        with pytest.raises(SystemExit):
+            sync.sync_pull(MagicMock(autostash=False, force=False), str(spoke), "db")
+        err = capsys.readouterr().err
+        assert "Hub unreachable" in err
+        assert "connect to host hub.invalid" in err
+        assert taken == []
+
+    def test_a_killed_pull_left_mid_rebase_is_cleared_before_the_fetch(self, tmp_path, monkeypatch):
+        from schist import git_ops, sync
+
+        other, spoke = self._spoke_pair(tmp_path)
+        self._commit(other, "first.md", "1\n", push=True)
+        self._commit(spoke, "local.md", "local\n")
+        self._git(spoke, "fetch", "-q", "origin")
+        # Stop the rebase partway, as a killed `sync pull` leaves it: rebase
+        # state present and HEAD detached, so the branch reads as unknown.
+        subprocess.run(["git", "rebase", "-x", "false", "origin/main"], cwd=spoke,
+                       capture_output=True)
+        assert (spoke / ".git" / "rebase-merge").exists()
+        assert git_ops.current_branch(str(spoke)) == ""
+        self._commit(other, "second.md", "2\n", push=True)
+        monkeypatch.setattr(sync, "_rebuild_index", lambda *a, **k: None)
+        sync.sync_pull(MagicMock(autostash=False, force=False), str(spoke), "db")
+        assert (spoke / "second.md").exists()
+        assert (spoke / "local.md").exists()
+        assert git_ops.current_branch(str(spoke)) == "main"
+
+
+class TestPullLockTimeoutAndBranchGuard:
+    """Review fixes for #724: a busy lock skips the pull, a branch switch
+    during the unlocked fetch refuses the rebase, and the lock-free
+    background push never aborts rebase state."""
+
+    @staticmethod
+    def _hold_lock(vault: str):
+        import fcntl
+
+        fd = os.open(os.path.join(vault, ".schist", "write.lock"), os.O_RDWR | os.O_CREAT)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd
+
+    def test_busy_lock_with_lock_timeout_skips_the_pull(self, tmp_path, monkeypatch, capsys):
+        from schist import git_ops, sync
+
+        vault = _make_spoke(tmp_path)
+        monkeypatch.setattr(sync, "_fetch_before_pull", lambda v: (True, "", "main"))
+        rebased = []
+        monkeypatch.setattr(git_ops, "rebase_onto_fetched",
+                            lambda *a, **k: (rebased.append(1), (True, ""))[1])
+        fd = self._hold_lock(vault)
+        try:
+            with pytest.raises(SystemExit) as exc:
+                sync.sync_pull(types.SimpleNamespace(lock_timeout=0.2, autostash=False),
+                               vault, "db")
+        finally:
+            os.close(fd)
+        assert exc.value.code == sync.PULL_LOCK_BUSY_EXIT
+        assert rebased == []
+        assert "Skipped pull: the vault write lock is busy" in capsys.readouterr().err
+
+    def test_lock_timeout_absent_means_wait(self):
+        from schist import sync
+
+        assert sync._lock_timeout(MagicMock()) is None
+        assert sync._lock_timeout(types.SimpleNamespace()) is None
+        assert sync._lock_timeout(types.SimpleNamespace(lock_timeout=1)) == 1.0
+
+    def test_rebase_refuses_when_the_branch_changed_after_the_fetch(self, tmp_path):
+        from schist import git_ops
+
+        repo = tmp_path / "r"
+        subprocess.run(["git", "init", "-q", "-b", "drafts", str(repo)], check=True)
+        ok, output = git_ops.rebase_onto_fetched(str(repo), fetched_branch="main")
+        assert ok is False
+        assert "switched from branch 'main' to 'drafts'" in output
+
+    def test_skip_rebase_leaves_rebase_state_alone(self, tmp_path, monkeypatch):
+        from schist import sync
+
+        vault = _make_spoke(tmp_path)
+        (Path(vault) / ".git" / "rebase-merge").mkdir()
+        aborted = []
+        monkeypatch.setattr(sync, "_cleanup_rebase_state", lambda v: aborted.append(v))
+        sync.cleanup_stale_git_state(vault, force=False, uses_index=False, skip_rebase=True)
+        assert aborted == []
+        sync.cleanup_stale_git_state(vault, force=False, uses_index=False)
+        assert aborted == [vault]
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "-1"])
+def test_lock_seconds_reject_non_finite_and_negative(value):
+    import argparse
+
+    from schist import __main__ as cli_main
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        cli_main._seconds(value)
+    assert cli_main._lock_hold_args(["--vault", "v", "lock", "hold", "--timeout", value]) is None
