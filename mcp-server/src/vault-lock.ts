@@ -13,10 +13,24 @@ export class VaultLockTimeout extends Error {
   constructor(public holder: string) { super(`vault write lock busy (held by ${holder})`); }
 }
 
+/**
+ * The helper ran but could not take the lock (a mount without lock support,
+ * a permission error, a crash). Not a fallback case: writing without the
+ * lock is the corruption it exists to prevent, so the write fails instead.
+ */
+export class VaultLockFailed extends Error {
+  constructor(public detail: string) { super(`vault write lock could not be taken: ${detail}`); }
+}
+
 const EXIT_TIMEOUT = 75;
+// argparse's exit status for a usage error: the CLI predates `lock hold`.
+const EXIT_USAGE = 2;
 const GIT_COMMIT_TIMEOUT_MS = Number(process.env.SCHIST_GIT_COMMIT_TIMEOUT_MS) || 120000;
-// Covers a slow post-commit ingest: the commit is the last step under the lock.
-const MAX_HOLD_S = Math.ceil(GIT_COMMIT_TIMEOUT_MS / 1000) + 60;
+// A valve against a parent that is alive but hung; a parent that dies closes
+// stdin and ends the hold at once. It has to outlast a whole write, whose git
+// steps each have their own 30 s ceiling on a stalled NFS mount, so it is
+// generous: an expiry mid-commit is reported, but it is still a lost lock.
+const MAX_HOLD_S = Math.max(600, Math.ceil(GIT_COMMIT_TIMEOUT_MS / 1000) * 3);
 // How long release waits for a helper that ignores stdin EOF before SIGKILL.
 const RELEASE_GRACE_MS = 5000;
 
@@ -44,9 +58,12 @@ function acquire(vaultRoot: string, timeoutMs: number): Promise<Acquired | { una
   return new Promise((resolve, reject) => {
     let child: ChildProcess;
     try {
+      // detached: its own process group, so a kill reaches the Python helper
+      // even when SCHIST_LOCK_BIN is a wrapper (a `uv run` shim) that does not
+      // exec it. Killing only the wrapper would leave the helper holding the lock.
       child = spawn(lockBin(), ["--vault", vaultRoot, "lock", "hold",
         "--timeout", String(timeoutMs / 1000), "--max-hold", String(MAX_HOLD_S)],
-        { stdio: ["pipe", "pipe", "pipe"] });
+        { stdio: ["pipe", "pipe", "pipe"], detached: true });
     } catch (e) {
       resolve({ unavailable: String(e) });
       return;
@@ -67,7 +84,8 @@ function acquire(vaultRoot: string, timeoutMs: number): Promise<Acquired | { una
     const backstop = setTimeout(() => {
       if (settled) return;
       settled = true;
-      child.kill("SIGKILL");
+      endStdin(child);
+      killGroup(child, "SIGKILL");
       reject(new VaultLockTimeout("unknown"));
     }, timeoutMs + ACQUIRE_GRACE_MS);
     const settle = () => { settled = true; clearTimeout(backstop); };
@@ -93,7 +111,12 @@ function acquire(vaultRoot: string, timeoutMs: number): Promise<Acquired | { una
     // "unavailable", not an exception.
     child.on("error", (e) => {
       spawnError ??= String(e);
-      if (!settled) { settle(); resolve({ unavailable: String(e) }); }
+      if (settled) return;
+      settle();
+      // Only a missing binary means "no helper here"; any other spawn failure
+      // (EACCES, EMFILE) is a lock that could not be taken.
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") resolve({ unavailable: String(e) });
+      else reject(new VaultLockFailed(String(e)));
     });
     child.on("exit", (code, signal) => {
       dead = true;
@@ -109,11 +132,15 @@ function acquire(vaultRoot: string, timeoutMs: number): Promise<Acquired | { una
       if (last === "EXPIRED") expired = true;
       if (settled) return;
       settle();
+      const lastErr = err.trim().split("\n").pop() || "";
       if (code === EXIT_TIMEOUT) {
-        const m = /TIMEOUT holder=(\S+)/.exec(out);
-        reject(new VaultLockTimeout(m ? m[1] : "unknown"));
+        // To the end of the line: an older CLI's holder note has spaces.
+        const m = /^TIMEOUT holder=(.+)$/m.exec(out);
+        reject(new VaultLockTimeout(m ? m[1].trim() : "unknown"));
+      } else if (code === EXIT_USAGE && /invalid choice: 'lock'/.test(err)) {
+        resolve({ unavailable: `this schist CLI predates the vault lock (${lastErr})` });
       } else {
-        resolve({ unavailable: err.trim().split("\n").pop() || `helper exit ${code}` });
+        reject(new VaultLockFailed(lastErr || `helper ${signal ? `killed by ${signal}` : `exited ${code}`} before taking the lock`));
       }
     });
   });
@@ -145,18 +172,27 @@ export async function withVaultLock<T>(
   }
 }
 
+function endStdin(child: ChildProcess): void {
+  child.stdin?.on("error", () => {});
+  child.stdin?.end();
+}
+
+function killGroup(child: ChildProcess, sig: NodeJS.Signals): void {
+  if (child.pid === undefined) return;
+  try { process.kill(-child.pid, sig); } catch { /* already gone */ }
+}
+
 async function release(got: Acquired): Promise<void> {
   const child = got.child;
   if (child.exitCode !== null || child.signalCode !== null) return;
   const done = new Promise<void>((r) => child.once("close", () => r()));
-  child.stdin!.on("error", () => {});
-  child.stdin!.end();
+  endStdin(child);
   let timer: NodeJS.Timeout | undefined;
   const timedOut = new Promise<boolean>((r) => { timer = setTimeout(() => r(true), RELEASE_GRACE_MS); });
   const hung = await Promise.race([done.then(() => false), timedOut]);
   clearTimeout(timer);
   if (hung) {
-    child.kill("SIGKILL");
+    killGroup(child, "SIGKILL");
     await Promise.race([done, new Promise<void>((r) => setTimeout(r, 1000))]);
   }
 }

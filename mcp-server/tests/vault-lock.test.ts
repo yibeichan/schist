@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { fileURLToPath } from "url";
-import { withVaultLock, VaultLockTimeout, _resetVaultLockWarningForTests } from "../src/vault-lock.js";
+import { withVaultLock, VaultLockTimeout, VaultLockFailed, _resetVaultLockWarningForTests } from "../src/vault-lock.js";
 import { localSchistWrapperScript, spawnHolder, tryLock } from "./local-schist-bin.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -148,5 +148,48 @@ test("EXPIRED counts as lost at once, before the helper exits", async () => {
       expect((h as any)._child.exitCode).toBeNull();
       expect(() => h.assertStillHeld()).toThrow(/max-hold expired/);
     });
+  } finally { process.env.SCHIST_LOCK_BIN = prev; }
+}, 30000);
+
+test("a helper that fails before LOCKED fails the write instead of falling back", async () => {
+  _resetVaultLockWarningForTests();
+  const broken = writeScript("broken", "#!/bin/sh\necho 'OSError: [Errno 37] No locks available' >&2; exit 1\n");
+  const prev = process.env.SCHIST_LOCK_BIN;
+  process.env.SCHIST_LOCK_BIN = broken;
+  const err = jest.spyOn(console, "error").mockImplementation(() => {});
+  let ran = false;
+  try {
+    const e = await withVaultLock(vault, 1000, async () => { ran = true; }).catch((x) => x);
+    expect(e).toBeInstanceOf(VaultLockFailed);
+    expect(e.message).toContain("No locks available");
+    expect(ran).toBe(false);
+    expect(err.mock.calls.filter((c) => String(c[0]).includes("cross-process vault lock unavailable"))).toEqual([]);
+  } finally { process.env.SCHIST_LOCK_BIN = prev; err.mockRestore(); }
+});
+
+test("the timeout holder keeps its whole line, spaces included", async () => {
+  const legacy = writeScript("legacy-busy", "#!/bin/sh\necho 'TIMEOUT holder=unknown (an older schist CLI holding .schist/cli-write.lock)'; exit 75\n");
+  const prev = process.env.SCHIST_LOCK_BIN;
+  process.env.SCHIST_LOCK_BIN = legacy;
+  try {
+    const e = await withVaultLock(vault, 1000, async () => {}).catch((x) => x);
+    expect(e).toBeInstanceOf(VaultLockTimeout);
+    expect(e.holder).toBe("unknown (an older schist CLI holding .schist/cli-write.lock)");
+  } finally { process.env.SCHIST_LOCK_BIN = prev; }
+});
+
+test("the acquire backstop kills a wrapper's whole process group", async () => {
+  // A wrapper that does not exec its helper: killing only the wrapper would
+  // leave the grandchild alive, free to take and hold the lock.
+  const pidFile = path.join(tmp, "grandchild.pid");
+  const wrapperNoExec = writeScript("no-exec", `#!/bin/sh\nsleep 30 &\necho $! > '${pidFile}'\nwait\n`);
+  const prev = process.env.SCHIST_LOCK_BIN;
+  process.env.SCHIST_LOCK_BIN = wrapperNoExec;
+  try {
+    const e = await withVaultLock(vault, 100, async () => {}).catch((x) => x);
+    expect(e).toBeInstanceOf(VaultLockTimeout);
+    const pid = Number(fs.readFileSync(pidFile, "utf-8").trim());
+    await new Promise((r) => setTimeout(r, 300));
+    expect(() => process.kill(pid, 0)).toThrow();
   } finally { process.env.SCHIST_LOCK_BIN = prev; }
 }, 30000);
