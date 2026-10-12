@@ -811,14 +811,29 @@ def _remote_tracking_ref(branch: str) -> str:
     return f'refs/remotes/origin/{branch}'
 
 
-def rebase_onto_fetched(vault_path: str, autostash: bool = False) -> tuple[bool, str]:
+def rebase_onto_fetched(vault_path: str, autostash: bool = False,
+                        fetched_branch: "str | None" = None) -> tuple[bool, str]:
     """Rebase the current branch onto the already-fetched origin/<branch>.
 
     No network: the caller fetched first (fetch_origin). Same contract as
     pull_rebase -- detached-HEAD refusal, opt-in autostash with the same
     stash check, abort on conflict, the same (ok, output) shape -- so
     `schist sync pull` can hold the vault write lock for this step only.
+
+    `fetched_branch` is the branch fetch_origin fetched. The fetch ran
+    without the lock, so another writer may have checked out a different
+    branch since; rebasing that one onto a remote-tracking ref this pull
+    never refreshed would be wrong, so a mismatch refuses instead.
     """
+    if fetched_branch is not None:
+        branch_now = current_branch(vault_path)
+        if branch_now and branch_now != fetched_branch:
+            return False, (
+                f"The vault switched from branch '{fetched_branch}' to '{branch_now}' "
+                "while the pull was fetching, so nothing was rebased. Run "
+                "`schist sync pull` again."
+            )
+
     def command(branch: str) -> list[str]:
         return ['git', 'rebase',
                 '--autostash' if autostash else '--no-autostash', _remote_tracking_ref(branch)]

@@ -2,8 +2,18 @@
 """schist CLI — agent-first knowledge graph."""
 
 import argparse
+import math
 import os
 import sys
+
+
+def _seconds(value: str) -> float:
+    """A finite, non-negative number of seconds. `nan` and `inf` parse as
+    floats but would make a lock wait never time out."""
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds < 0:
+        raise argparse.ArgumentTypeError(f'expected a finite number of seconds >= 0, got {value!r}')
+    return seconds
 
 
 def _lock_hold_args(argv: list) -> "tuple[str, float, float] | None":
@@ -45,8 +55,8 @@ def _lock_hold_args(argv: list) -> "tuple[str, float, float] | None":
             return None
         value, i = take(i, flag)
         try:
-            opts[flag] = float(value)
-        except (TypeError, ValueError):
+            opts[flag] = _seconds(value)
+        except (TypeError, ValueError, argparse.ArgumentTypeError):
             return None
     return vault, opts['--timeout'], opts['--max-hold']
 
@@ -172,6 +182,11 @@ def main():
     sync_sub = p_sync.add_subparsers(dest='sync_action')
     p_sync_pull = sync_sub.add_parser('pull', help='Pull updates from hub')
     p_sync_pull.add_argument(
+        '--lock-timeout', dest='lock_timeout', type=_seconds, default=None,
+        help='Give up after this many seconds waiting for the vault write '
+             'lock, changing nothing and exiting 75 (default: wait)',
+    )
+    p_sync_pull.add_argument(
         '--force', action='store_true', default=argparse.SUPPRESS,
         help='Clear stale git rebase/merge/index-lock state before pulling',
     )
@@ -216,8 +231,8 @@ def main():
     p_lock = sub.add_parser('lock')  # no help=: argparse then omits it from the command list
     lock_sub = p_lock.add_subparsers(dest='lock_action')
     p_lock_hold = lock_sub.add_parser('hold')
-    p_lock_hold.add_argument('--timeout', type=float, default=10.0)
-    p_lock_hold.add_argument('--max-hold', dest='max_hold', type=float, default=120.0)
+    p_lock_hold.add_argument('--timeout', type=_seconds, default=10.0)
+    p_lock_hold.add_argument('--max-hold', dest='max_hold', type=_seconds, default=120.0)
 
     # hub: filesystem-side ACL administration of a bare hub repo
     p_hub = sub.add_parser('hub', help='Administer a bare hub vault.yaml (filesystem)')

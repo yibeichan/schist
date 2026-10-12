@@ -112,7 +112,7 @@ def test_sync_pull_autostashes_only_when_the_flag_is_set(tmp_path, monkeypatch):
     vault = _make_spoke(tmp_path)
     seen = []
     monkeypatch.setattr(sync.git_ops, "rebase_onto_fetched",
-                        lambda v, autostash=False: (seen.append(autostash), (True, ""))[1])
+                        lambda v, autostash=False, **k: (seen.append(autostash), (True, ""))[1])
     monkeypatch.setattr(sync, "_rebuild_index", lambda v, d: None)
 
     sync.sync_pull(SimpleNamespace(autostash=True), vault, "db")
@@ -270,7 +270,7 @@ def _autostash_failure(monkeypatch, tmp_path, unmerged):
                "stash (abc); The working tree was reset to the pulled commit.\n"
                "Applying autostash resulted in conflicts.")
     monkeypatch.setattr(sync.git_ops, "rebase_onto_fetched",
-                        lambda _v, autostash=False: (False, message))
+                        lambda _v, autostash=False, **k: (False, message))
     monkeypatch.setattr(sync.git_ops, "has_unmerged_entries", lambda _v: unmerged)
     rebuilt = []
     monkeypatch.setattr(sync, "_rebuild_index", lambda v, d: rebuilt.append(v))

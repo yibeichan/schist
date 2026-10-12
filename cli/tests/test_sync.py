@@ -2025,7 +2025,7 @@ class TestPullTransportClassification:
         vault = _make_spoke(tmp_path)
         monkeypatch.setattr(
             git_ops, "rebase_onto_fetched",
-            lambda _p: (False, f"{git_ops.PULL_NO_RESPONSE_PREFIX} (hub unreachable, "
+            lambda _p, **k: (False, f"{git_ops.PULL_NO_RESPONSE_PREFIX} (hub unreachable, "
                                "VPN down, or a stalled transport); no changes were applied."))
         with pytest.raises(SystemExit):
             sync_pull(MagicMock(), vault, "db.sqlite")
@@ -2057,7 +2057,7 @@ class TestPullTransportClassification:
         # No longer steerable: vault content cannot reach the network branch.
         from schist.sync import _is_network_error
         assert _is_network_error(conflicty) is False
-        monkeypatch.setattr(git_ops, "rebase_onto_fetched", lambda _p: (False, conflicty))
+        monkeypatch.setattr(git_ops, "rebase_onto_fetched", lambda _p, **k: (False, conflicty))
         with pytest.raises(SystemExit):
             sync_pull(MagicMock(), vault, "db.sqlite")
         out = capsys.readouterr()
@@ -2078,7 +2078,7 @@ class TestPullFailureBranchOrdering:
 
     def _pull_returns(self, monkeypatch, output):
         from schist import git_ops
-        monkeypatch.setattr(git_ops, "rebase_onto_fetched", lambda _p: (False, output))
+        monkeypatch.setattr(git_ops, "rebase_onto_fetched", lambda _p, **k: (False, output))
 
     def _run(self, tmp_path, capsys):
         from schist.sync import sync_pull
@@ -3264,7 +3264,7 @@ class TestPullUnderVaultLock:
 
         def fake_fetch(v):
             seen["fetch"] = lock_is_held()
-            return True, ""
+            return True, "", "main"
 
         def fake_cleanup(v, **k):
             seen["cleanup"] = lock_is_held()
@@ -3294,7 +3294,7 @@ class TestPullUnderVaultLock:
                 stderr="ssh: connect to host 192.0.2.1 port 22: Operation timed out\n")
 
         monkeypatch.setattr(git_ops.subprocess, "run", boom)
-        ok, output = sync._fetch_before_pull(_make_spoke(tmp_path))
+        ok, output, _ = sync._fetch_before_pull(_make_spoke(tmp_path))
         assert ok is False
         assert output.startswith(git_ops.PULL_NO_RESPONSE_PREFIX)
         assert "connect to host 192.0.2.1" in output
@@ -3304,7 +3304,7 @@ class TestPullUnderVaultLock:
         from schist import git_ops, sync
 
         monkeypatch.setattr(git_ops, "current_branch", lambda v: "")
-        assert sync._fetch_before_pull(_make_spoke(tmp_path)) == (True, "")
+        assert sync._fetch_before_pull(_make_spoke(tmp_path)) == (True, "", None)
 
     def test_push_cleanup_locked_except_background_no_commit(self, tmp_path, monkeypatch):
         import fcntl
@@ -3461,3 +3461,75 @@ class TestPullNetworkOutsideLock:
         assert (spoke / "second.md").exists()
         assert (spoke / "local.md").exists()
         assert git_ops.current_branch(str(spoke)) == "main"
+
+
+class TestPullLockTimeoutAndBranchGuard:
+    """Review fixes for #724: a busy lock skips the pull, a branch switch
+    during the unlocked fetch refuses the rebase, and the lock-free
+    background push never aborts rebase state."""
+
+    @staticmethod
+    def _hold_lock(vault: str):
+        import fcntl
+
+        fd = os.open(os.path.join(vault, ".schist", "write.lock"), os.O_RDWR | os.O_CREAT)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd
+
+    def test_busy_lock_with_lock_timeout_skips_the_pull(self, tmp_path, monkeypatch, capsys):
+        from schist import git_ops, sync
+
+        vault = _make_spoke(tmp_path)
+        monkeypatch.setattr(sync, "_fetch_before_pull", lambda v: (True, "", "main"))
+        rebased = []
+        monkeypatch.setattr(git_ops, "rebase_onto_fetched",
+                            lambda *a, **k: (rebased.append(1), (True, ""))[1])
+        fd = self._hold_lock(vault)
+        try:
+            with pytest.raises(SystemExit) as exc:
+                sync.sync_pull(types.SimpleNamespace(lock_timeout=0.2, autostash=False),
+                               vault, "db")
+        finally:
+            os.close(fd)
+        assert exc.value.code == sync.PULL_LOCK_BUSY_EXIT
+        assert rebased == []
+        assert "Skipped pull: the vault write lock is busy" in capsys.readouterr().err
+
+    def test_lock_timeout_absent_means_wait(self):
+        from schist import sync
+
+        assert sync._lock_timeout(MagicMock()) is None
+        assert sync._lock_timeout(types.SimpleNamespace()) is None
+        assert sync._lock_timeout(types.SimpleNamespace(lock_timeout=1)) == 1.0
+
+    def test_rebase_refuses_when_the_branch_changed_after_the_fetch(self, tmp_path):
+        from schist import git_ops
+
+        repo = tmp_path / "r"
+        subprocess.run(["git", "init", "-q", "-b", "drafts", str(repo)], check=True)
+        ok, output = git_ops.rebase_onto_fetched(str(repo), fetched_branch="main")
+        assert ok is False
+        assert "switched from branch 'main' to 'drafts'" in output
+
+    def test_skip_rebase_leaves_rebase_state_alone(self, tmp_path, monkeypatch):
+        from schist import sync
+
+        vault = _make_spoke(tmp_path)
+        (Path(vault) / ".git" / "rebase-merge").mkdir()
+        aborted = []
+        monkeypatch.setattr(sync, "_cleanup_rebase_state", lambda v: aborted.append(v))
+        sync.cleanup_stale_git_state(vault, force=False, uses_index=False, skip_rebase=True)
+        assert aborted == []
+        sync.cleanup_stale_git_state(vault, force=False, uses_index=False)
+        assert aborted == [vault]
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "-1"])
+def test_lock_seconds_reject_non_finite_and_negative(value):
+    import argparse
+
+    from schist import __main__ as cli_main
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        cli_main._seconds(value)
+    assert cli_main._lock_hold_args(["--vault", "v", "lock", "hold", "--timeout", value]) is None
