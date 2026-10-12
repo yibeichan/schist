@@ -1,4 +1,4 @@
-import { writeNote, appendToNote, updateNote, deleteNote, writeMutex } from "../src/git-writer.js";
+import { writeNote, appendToNote, updateNote, deleteNote, writeMutex, vaultLockWaitMs } from "../src/git-writer.js";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
@@ -31,6 +31,36 @@ describe("git-writer", () => {
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
+  test("SYNC_DIRTY: refuses to write over an unfinished rebase, leaving the tree untouched (#724)", async () => {
+    // A killed `sync pull` leaves rebase-merge/ behind. Writing on top of it
+    // would commit to the branch, and the next sync's `rebase --abort` would
+    // reset the branch and drop that commit after the tool reported success.
+    const vault = await makeTempVault();
+    const { stdout } = await execFile("git", ["rev-parse", "--git-path", "rebase-merge"], { cwd: vault });
+    await fs.mkdir(path.resolve(vault, stdout.trim()));
+    const head = (await execFile("git", ["rev-parse", "HEAD"], { cwd: vault })).stdout;
+    await expect(writeNote(vault, "notes/n.md", "---\ntitle: N\n---\nbody")).rejects.toMatchObject({
+      error: "SYNC_DIRTY",
+      message: expect.stringContaining("unfinished rebase"),
+    });
+    await expect(deleteNote(vault, "schist.yaml", "schist")).rejects.toMatchObject({ error: "SYNC_DIRTY" });
+    await expect(fs.access(path.join(vault, "notes", "n.md"))).rejects.toThrow();
+    expect((await execFile("git", ["rev-parse", "HEAD"], { cwd: vault })).stdout).toBe(head);
+  });
+
+  test("vaultLockWaitMs keeps the wait finite and below Node's timer limit", () => {
+    const prev = process.env.SCHIST_VAULT_LOCK_WAIT_MS;
+    try {
+      for (const [raw, want] of [["Infinity", 10000], ["NaN", 10000], ["-5", 10000], ["1e12", 600000], ["2500", 2500]] as const) {
+        process.env.SCHIST_VAULT_LOCK_WAIT_MS = raw;
+        expect(vaultLockWaitMs()).toBe(want);
+      }
+    } finally {
+      if (prev === undefined) delete process.env.SCHIST_VAULT_LOCK_WAIT_MS;
+      else process.env.SCHIST_VAULT_LOCK_WAIT_MS = prev;
+    }
+  });
+
   test("PATH_TRAVERSAL: rejects writes outside vault root", async () => {
     const vault = await makeTempVault();
     await expect(writeNote(vault, "../../etc/passwd", "evil")).rejects.toMatchObject({

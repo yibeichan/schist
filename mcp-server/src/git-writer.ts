@@ -5,7 +5,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { randomBytes } from "crypto";
 import { load as yamlLoad } from "js-yaml";
-import { withVaultLock, VaultLockTimeout, type VaultLockHandle } from "./vault-lock.js";
+import { withVaultLock, VaultLockTimeout, VaultLockFailed, type VaultLockHandle } from "./vault-lock.js";
 
 const execFile = promisify(execFileCb);
 const WRITE_TIMEOUT_ERROR = Object.assign(
@@ -33,7 +33,59 @@ export const writeMutex = withTimeout(new Mutex(), 10000, WRITE_TIMEOUT_ERROR);
  * Read per call so the env knob applies without a restart.
  */
 export function vaultLockWaitMs(): number {
-  return Number(process.env.SCHIST_VAULT_LOCK_WAIT_MS) || 10000;
+  const ms = Number(process.env.SCHIST_VAULT_LOCK_WAIT_MS);
+  // Capped: Node clamps a timer of 2^31 ms or more (or Infinity) to 1 ms,
+  // which would kill every helper at once.
+  return Number.isFinite(ms) && ms > 0 ? Math.min(ms, MAX_VAULT_LOCK_WAIT_MS) : 10000;
+}
+
+const MAX_VAULT_LOCK_WAIT_MS = 600_000;
+
+/**
+ * Refuse to write while a rebase is unfinished (#724). A `sync pull` killed
+ * mid-rebase leaves rebase-merge/ behind with HEAD detached; a write would
+ * check out the branch and commit, and the next sync's `rebase --abort`
+ * would then reset the branch to where the rebase started, taking the
+ * write's commit off it after the tool reported success. Checked under the
+ * vault lock, so the state is not another process's live rebase.
+ */
+async function assertNoUnfinishedRebase(vaultRoot: string): Promise<void> {
+  for (const name of ["rebase-merge", "rebase-apply"]) {
+    const rel = await git(vaultRoot, ["rev-parse", "--git-path", name]);
+    try {
+      await fs.access(path.resolve(vaultRoot, rel));
+    } catch {
+      continue;
+    }
+    throw {
+      error: "SYNC_DIRTY",
+      message:
+        "The vault has an unfinished rebase, left by an interrupted `sync pull`, so nothing " +
+        "was written: a write now would be undone when that rebase is cleared. Run " +
+        "`sync_retry` (or `schist sync pull` in the vault), which clears it, then retry.",
+    };
+  }
+}
+
+/**
+ * A commit that finished after the lock was lost (the helper died or its
+ * max-hold expired mid-commit) is on the branch, but another writer may have
+ * run alongside it, so the result says so.
+ */
+function withLockLossWarning<T>(result: T, vlock: VaultLockHandle): T {
+  if (result === null || typeof result !== "object" || (result as { committed?: unknown }).committed !== true) {
+    return result;
+  }
+  try {
+    vlock.assertStillHeld();
+    return result;
+  } catch (e) {
+    const why = (e as { message?: string }).message ?? String(e);
+    const warning = `committed, but ${why} before the commit finished, so another writer may have ` +
+      "run at the same time; check sync_status";
+    const prior = (result as { commitWarning?: string }).commitWarning;
+    return { ...result, commitWarning: prior ? `${prior}; ${warning}` : warning };
+  }
 }
 
 /**
@@ -45,12 +97,23 @@ export function vaultLockWaitMs(): number {
 async function underVaultLock<T>(vaultRoot: string, fn: (vlock: VaultLockHandle) => Promise<T>): Promise<T> {
   const waitMs = vaultLockWaitMs();
   try {
-    return await withVaultLock(vaultRoot, waitMs, fn);
+    return await withVaultLock(vaultRoot, waitMs, async (vlock) => {
+      await assertNoUnfinishedRebase(vaultRoot);
+      return withLockLossWarning(await fn(vlock), vlock);
+    });
   } catch (e) {
     if (e instanceof VaultLockTimeout) {
       throw Object.assign(
         new Error(`Git write timed out after ${waitMs / 1000}s waiting for the vault write lock, held by ${e.holder}; retry the write`),
         { error: "WRITE_TIMEOUT" },
+      );
+    }
+    if (e instanceof VaultLockFailed) {
+      throw Object.assign(
+        new Error(`${e.message}; nothing was written. Writing without the lock could interleave with ` +
+          "another schist process, so the write was refused. Check that the vault's filesystem supports " +
+          "locking and that `schist lock hold` runs, then retry."),
+        { error: "IO_ERROR" },
       );
     }
     throw e;
@@ -693,11 +756,13 @@ async function stagedEntries(vaultRoot: string, paths: string[]): Promise<Map<st
 /**
  * Did another writer already commit exactly what we staged? Mirrors
  * `landed_via_concurrent_commit` in cli/schist/git_ops.py — keep the rule in
- * step. This server serializes its own writes but does not take the CLI's
- * vault write lock (#412), and both sides end in a plain `git commit` that
- * commits everything staged, so a background `schist sync push` can sweep our
- * staged note into its commit and leave ours with nothing to commit — on a
- * write that is already on the branch. Decided by repo state, not git's
+ * step. Every schist writer now holds the vault write lock (#724), so this
+ * only fires when that lock was unavailable (an old or missing CLI, which
+ * falls back to in-process serialization) or when a git command outside
+ * schist commits concurrently. Both sides end in a plain `git commit` that
+ * commits everything staged, so such a writer can sweep our staged note into
+ * its commit and leave ours with nothing to commit — on a write that is
+ * already on the branch. Decided by repo state, not git's
  * localized message: HEAD moved since `headBeforeStage`, and every path sits
  * in HEAD with the exact mode+blob we staged (absent, for a staged deletion).
  * HEAD moving alone is not enough — a concurrent autostashing pull moves HEAD
