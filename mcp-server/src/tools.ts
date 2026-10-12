@@ -6,7 +6,7 @@ import { spawn } from "child_process";
 import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote, rewriteNote, updateNote, deleteNote, writeMutex, vaultLockWaitMs } from "./git-writer.js";
-import { withVaultLock, VaultLockTimeout } from "./vault-lock.js";
+import { withVaultLock, VaultLockTimeout, VaultLockFailed } from "./vault-lock.js";
 import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython, containsLineBoundary, isRoundTrippableTarget } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
@@ -1323,6 +1323,9 @@ function pushFailureMessage(outcome: SyncCommandOutcome): string | null {
   return null;
 }
 
+/** A locked abort's outcome; lockBusy / lockSkipped say why it did not run. */
+type AbortOutcome = SyncCommandOutcome & { lockBusy?: string; lockSkipped?: string };
+
 /**
  * `git rebase --abort` under the vault write lock (#724). `schist sync pull`
  * holds that lock for its whole rebase, so rebase state seen while the lock is
@@ -1333,23 +1336,34 @@ function pushFailureMessage(outcome: SyncCommandOutcome): string | null {
  */
 async function abortRebaseUnderVaultLock(
   vaultRoot: string,
-): Promise<SyncCommandOutcome & { lockBusy?: string }> {
+): Promise<AbortOutcome> {
   try {
-    return await withVaultLock(vaultRoot, vaultLockWaitMs(), () =>
-      runGit(vaultRoot, ["rebase", "--abort"], 5_000));
+    return await withVaultLock(vaultRoot, vaultLockWaitMs(), (vlock) => {
+      // A helper that died right after LOCKED leaves no lock to abort under.
+      vlock.assertStillHeld();
+      return runGit(vaultRoot, ["rebase", "--abort"], 5_000);
+    });
   } catch (e) {
     if (e instanceof VaultLockTimeout) {
       return { ok: false, error: e.message, lockBusy: e.holder };
+    }
+    if (e instanceof VaultLockFailed) {
+      return { ok: false, error: e.message, lockSkipped: e.message };
+    }
+    const lost = (e as { message?: unknown } | null)?.message;
+    if (typeof lost === "string" && lost.startsWith("vault write lock lost")) {
+      return { ok: false, error: lost, lockSkipped: lost };
     }
     throw e;
   }
 }
 
 /** The note on a `git rebase --abort` that did not finish, for a failure message. */
-function abortNote(abort: SyncCommandOutcome & { lockBusy?: string }): string {
+function abortNote(abort: AbortOutcome): string {
   if (abort.lockBusy !== undefined) {
     return ` (skipped: the vault write lock is held by ${abort.lockBusy}, possibly a live rebase)`;
   }
+  if (abort.lockSkipped !== undefined) return ` (skipped: ${abort.lockSkipped})`;
   return abort.timedOut ? " (which timed out after 5s)" : "";
 }
 
@@ -1534,12 +1548,39 @@ export async function maybeSpokePull(vaultRoot: string, timeoutMs = 5000): Promi
   const dirty = await runGit(
     vaultRoot, ["--no-optional-locks", "status", "--porcelain", "--untracked-files=no"], Math.min(2_000, timeoutMs));
   if (!dirty.ok || (dirty.stdout ?? "").trim().length > 0) return;
-  await new Promise<void>((resolve) => {
+  // --lock-timeout (#724): a pull that would wait on the vault write lock
+  // and then start its rebase with little of the 5s left gets killed
+  // mid-rebase, and the rebase state it leaves blocks every write until a
+  // sync clears it. A busy lock now ends the pull before it touches anything,
+  // and the read uses the tree as it is.
+  const deadline = Date.now() + timeoutMs;
+  const lockTimeoutS = String(Math.max(0, Math.min(PRE_READ_PULL_LOCK_WAIT_MS, timeoutMs / 2)) / 1000);
+  const first = await runPrereadPull(vaultRoot, ["--lock-timeout", lockTimeoutS], timeoutMs);
+  // A CLI older than --lock-timeout rejects it as a usage error; pull the old way.
+  if (first.code === 2 && /unrecognized arguments:.*--lock-timeout/.test(first.stderr)) {
+    const left = deadline - Date.now();
+    if (left > 0) await runPrereadPull(vaultRoot, [], left);
+  }
+}
+
+/** How long the pre-read pull waits for the vault write lock before skipping. */
+const PRE_READ_PULL_LOCK_WAIT_MS = 1000;
+
+/** One bounded `schist sync pull`; resolves with its exit code (null when killed) and stderr. */
+function runPrereadPull(
+  vaultRoot: string, extraArgs: string[], timeoutMs: number,
+): Promise<{ code: number | null; stderr: string }> {
+  return new Promise((resolve) => {
     const child = spawn(
       schistCliBin("schist"),
-      ["--vault", vaultRoot, "sync", "pull"],
-      { cwd: vaultRoot, stdio: "ignore", env: process.env, detached: true }
+      ["--vault", vaultRoot, "sync", "pull", ...extraArgs],
+      // stderr is read only to spot a usage error, so it is capped.
+      { cwd: vaultRoot, stdio: ["ignore", "ignore", "pipe"], env: process.env, detached: true }
     );
+    let stderr = "";
+    child.stderr?.setEncoding("utf-8").on("data", (d: string) => {
+      if (stderr.length < 4096) stderr += d;
+    });
     // `detached: true` puts the child in its own process group. On timeout we
     // must signal the whole group (negative PID) — child.kill() only signals
     // the schist CLI process, leaving git-fetch/git-rebase grandchildren alive
@@ -1552,15 +1593,15 @@ export async function maybeSpokePull(vaultRoot: string, timeoutMs = 5000): Promi
     const timer = setTimeout(() => {
       killGroup("SIGTERM");
       setTimeout(() => killGroup("SIGKILL"), 500);
-      resolve();
+      resolve({ code: null, stderr });
     }, timeoutMs);
-    child.on("exit", () => {
+    child.on("exit", (code) => {
       clearTimeout(timer);
-      resolve();
+      resolve({ code, stderr });
     });
     child.on("error", () => {
       clearTimeout(timer);
-      resolve();
+      resolve({ code: null, stderr });
     });
   });
 }

@@ -1616,7 +1616,29 @@ describe("maybeSpokePull", () => {
       // --autostash.
       await execFile("git", ["checkout", "--", "tracked.md"], { cwd: vault });
       await maybeSpokePull(vault, 5000);
-      expect((await fs.readFile(logPath, "utf-8")).trim()).toBe(`--vault ${vault} sync pull`);
+      expect((await fs.readFile(logPath, "utf-8")).trim()).toBe(`--vault ${vault} sync pull --lock-timeout 1`);
+    } finally {
+      process.env.PATH = origPath;
+      await fs.rm(stubDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  test("retries without --lock-timeout when the CLI predates it (#724)", async () => {
+    const vault = await makeTempSpokeVault();
+    const logPath = path.join(vault, ".schist", "pull-log");
+    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
+    await fs.writeFile(path.join(stubDir, "schist"),
+      `#!/bin/sh\necho "$@" >> "${logPath}"\n` +
+      `case "$*" in *--lock-timeout*) echo "schist: error: unrecognized arguments: --lock-timeout 1" >&2; exit 2;; esac\n` +
+      "exit 0\n", { mode: 0o755 });
+    const origPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${origPath}`;
+    try {
+      await maybeSpokePull(vault, 5000);
+      expect((await fs.readFile(logPath, "utf-8")).trim().split("\n")).toEqual([
+        `--vault ${vault} sync pull --lock-timeout 1`,
+        `--vault ${vault} sync pull`,
+      ]);
     } finally {
       process.env.PATH = origPath;
       await fs.rm(stubDir, { recursive: true, force: true });
