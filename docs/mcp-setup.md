@@ -224,7 +224,15 @@ while it spawns a child that takes it (that would deadlock). No network call
 runs under the lock: `schist sync pull` fetches first, without it, and then
 takes it only to clean up and rebase onto the fetched branch, so an unreachable
 hub never holds up writers. A failed fetch is reported (unreachable, refused,
-and so on) without the lock ever being taken.
+and so on) without the lock ever being taken. The fetch names its refspec,
+`+refs/heads/<branch>:refs/remotes/origin/<branch>`, because a spoke is a
+single-branch clone whose configured refspec covers only the hub's default
+branch. If the vault's branch changed while the fetch ran, the pull rebases
+nothing and asks to be run again. `schist sync pull --lock-timeout <seconds>`
+gives up waiting for the lock after that long, changes nothing, and exits 75;
+the server's pull before a read passes `--lock-timeout 1`, so a pull that
+cannot get the lock soon is skipped rather than killed mid-rebase by that
+pull's 5 s limit.
 The lock is re-entrant within a process.
 
 Node has no portable `flock`, so the server holds the lock through a helper,
@@ -235,16 +243,32 @@ defaults to `--timeout 10` and `--max-hold 120`.
 | Helper output | Exit code | Meaning |
 |---|---|---|
 | `LOCKED` | 0 once stdin reaches EOF | Lock acquired; held until EOF |
-| `TIMEOUT holder=<host:pid>` | 75 | Not acquired within `--timeout` |
+| `TIMEOUT holder=<host:pid>` | 75 | Not acquired within `--timeout`; the holder note runs to the end of the line |
 | `EXPIRED` | 76 | Held past `--max-hold`; the helper released it |
-| (usage error) | 2 | A CLI too old to have `lock hold` |
+| (usage error) | 2 | A CLI too old to have `lock hold`, or a value that is not a finite number of seconds |
 
 Inside the server the order is always the in-process `writeMutex` first, then
-the vault lock. The write is checked as still held before it touches the
-file and again before the commit. When the helper cannot be run (an old CLI,
-a missing binary), the server logs once
-`cross-process vault lock unavailable: <reason>` and serializes within its own
-process only; upgrade the CLI to restore cross-process safety.
+the vault lock. The server starts the helper in its own process group and
+kills the whole group on a timeout, so a wrapper script that does not `exec`
+the helper cannot leave it running with the lock. The write is checked as
+still held before it touches the file and again before the commit; a commit
+that finished after the lock was lost succeeds with a `commitWarning` that
+says so.
+
+Only two helper failures fall back to serializing within the server's own
+process: a missing binary, and a CLI too old to have `lock hold` (usage error
+`invalid choice: 'lock'`). The server then logs once
+`cross-process vault lock unavailable: <reason>`; upgrade the CLI to restore
+cross-process safety. Any other failure before `LOCKED` (a mount without lock
+support, a permission error on `.schist/`, a crash) fails the write with
+`IO_ERROR` and the helper's last stderr line, and nothing is written: writing
+without the lock is what the lock prevents.
+
+Once it holds the lock, a write also refuses, with `SYNC_DIRTY`, while a
+rebase is unfinished (`rebase-merge` or `rebase-apply` in the git directory,
+left by an interrupted `sync pull`). A commit made then would be undone when
+the next sync aborts that rebase. `sync_retry`, or `schist sync pull` in the
+vault, clears the state; then retry the write.
 
 The server's background push (`sync push --no-commit` without `--force`)
 usually takes no lock: it stages and commits nothing. The exception is leftover
@@ -264,8 +288,10 @@ Timing to expect:
 - `sync_retry` holds the in-process write mutex around its CLI children for up
   to about 60 s, so concurrent MCP writes may return `WRITE_TIMEOUT` meanwhile
   and should be retried.
-- The helper's `--max-hold` is `ceil(SCHIST_GIT_COMMIT_TIMEOUT_MS / 1000) + 60`
-  seconds, enough for a slow post-commit ingest.
+- The helper's `--max-hold` is the larger of 600 s and three times
+  `SCHIST_GIT_COMMIT_TIMEOUT_MS`, enough for a whole write on a stalled NFS
+  mount. It only matters for a server that is alive but hung: a server that
+  exits closes the helper's stdin, which ends the hold at once.
 
 On NFS, `flock` works across hosts under NFSv4. If a node crashes while
 holding the lock, the NFS server reclaims it when the lease expires, about 90 s
@@ -303,7 +329,7 @@ and restart the server to clear it.
 | Variable | Default | Effect |
 |---|---|---|
 | `SCHIST_LOCK_BIN` | `SCHIST_BIN`, then `schist` | Binary that provides `lock hold` |
-| `SCHIST_VAULT_LOCK_WAIT_MS` | `10000` | How long a write waits for the lock; read on each call |
+| `SCHIST_VAULT_LOCK_WAIT_MS` | `10000` | How long a write waits for the lock, capped at 600000; read on each call |
 
 The acceptance test `mcp-server/tests/vault-lock-acceptance.test.ts` runs two
 server instances and a CLI writer against one vault and checks that every
