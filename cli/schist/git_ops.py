@@ -806,6 +806,11 @@ def pull_rebase(vault_path: str, autostash: bool = False) -> tuple[bool, str]:
     return _rebase_onto_origin(vault_path, autostash, command, _pull_timeout_message)
 
 
+def _remote_tracking_ref(branch: str) -> str:
+    """Full ref name, so a local branch called `origin/<branch>` cannot shadow it."""
+    return f'refs/remotes/origin/{branch}'
+
+
 def rebase_onto_fetched(vault_path: str, autostash: bool = False) -> tuple[bool, str]:
     """Rebase the current branch onto the already-fetched origin/<branch>.
 
@@ -816,7 +821,7 @@ def rebase_onto_fetched(vault_path: str, autostash: bool = False) -> tuple[bool,
     """
     def command(branch: str) -> list[str]:
         return ['git', 'rebase',
-                '--autostash' if autostash else '--no-autostash', f'origin/{branch}']
+                '--autostash' if autostash else '--no-autostash', _remote_tracking_ref(branch)]
 
     return _rebase_onto_origin(vault_path, autostash, command, _local_rebase_timeout_message)
 
@@ -828,10 +833,17 @@ def fetch_origin(vault_path: str, branch: str) -> tuple[bool, str]:
     the same transport error, and a timeout carries PULL_NO_RESPONSE_PREFIX
     plus the child's partial output, so sync's pull-failure classification
     (unreachable, refused, ...) reads it unchanged.
+
+    The refspec is explicit because a spoke is a shallow, hence
+    single-branch, clone: its configured refspec covers only the hub's
+    default branch, and a bare `git fetch origin <branch>` for any other
+    branch updates FETCH_HEAD but not origin/<branch>, which
+    rebase_onto_fetched reads. FETCH_HEAD is no substitute: a concurrent
+    fetch overwrites it.
     """
     try:
         result = subprocess.run(
-            ['git', 'fetch', 'origin', branch],
+            ['git', 'fetch', 'origin', f'+refs/heads/{branch}:{_remote_tracking_ref(branch)}'],
             cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=60,
         )
     except subprocess.TimeoutExpired as timeout_exc:

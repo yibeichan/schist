@@ -367,3 +367,28 @@ def test_quit_fallback_that_saves_the_autostash_tells_the_user_and_stops(tmp_pat
     # (the push sentinel) carries it rather than the index.lock error.
     assert "index.lock" not in err.split("HEAD is detached", 1)[1].split("rebase --abort:", 1)[0]
     assert _stash_count(spoke) == 1
+
+
+def test_fetch_then_rebase_pulls_a_branch_outside_the_fetch_refspec(tmp_path):
+    """A spoke is a shallow clone, which is single-branch: its fetch refspec
+    covers only the hub's default branch. A bare `git fetch origin drafts`
+    then updates FETCH_HEAD but never origin/drafts, so a rebase onto
+    origin/drafts would miss the hub's new commit (#724). `git pull origin
+    drafts`, which this split replaced, had no such gap."""
+    other, _ = _hub_and_two_clones(tmp_path)
+    _git(other, "checkout", "-qb", "drafts")
+    _git(other, "push", "-q", "origin", "drafts")
+    spoke = tmp_path / "single"
+    _git(tmp_path, "clone", "-q", "--single-branch", "--branch", "drafts",
+         str(tmp_path / "hub.git"), str(spoke))
+    _git(spoke, "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main")
+    _git(spoke, "update-ref", "-d", "refs/remotes/origin/drafts")
+    (other / "late.md").write_text("late\n")
+    _git(other, "add", "late.md")
+    _git(other, "commit", "-qm", "remote late")
+    _git(other, "push", "-q", "origin", "drafts")
+
+    ok, output = _fetch_then_rebase(str(spoke))
+
+    assert ok, output
+    assert (spoke / "late.md").read_text() == "late\n"
