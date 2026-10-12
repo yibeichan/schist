@@ -10,7 +10,10 @@ import sys
 def _seconds(value: str) -> float:
     """A finite, non-negative number of seconds. `nan` and `inf` parse as
     floats but would make a lock wait never time out."""
-    seconds = float(value)
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        seconds = math.nan
     if not math.isfinite(seconds) or seconds < 0:
         raise argparse.ArgumentTypeError(f'expected a finite number of seconds >= 0, got {value!r}')
     return seconds
@@ -56,7 +59,7 @@ def _lock_hold_args(argv: list) -> "tuple[str, float, float] | None":
         value, i = take(i, flag)
         try:
             opts[flag] = _seconds(value)
-        except (TypeError, ValueError, argparse.ArgumentTypeError):
+        except argparse.ArgumentTypeError:
             return None
     return vault, opts['--timeout'], opts['--max-hold']
 

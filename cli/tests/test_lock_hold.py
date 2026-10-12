@@ -69,7 +69,7 @@ def test_lock_usage_errors_still_come_from_the_full_parser(tmp_path):
     run = lambda *a: subprocess.run([sys.executable, "-m", "schist", "--vault", str(tmp_path), *a],
                                     stdin=subprocess.DEVNULL, capture_output=True, text=True)
     bad = run("lock", "hold", "--timeout", "soon")
-    assert bad.returncode == 2 and "invalid float value" in bad.stderr
+    assert bad.returncode == 2 and "expected a finite number of seconds" in bad.stderr
     unknown = run("lock", "hold", "--bogus")
     assert unknown.returncode == 2 and "unrecognized arguments" in unknown.stderr
     bare = run("lock")
