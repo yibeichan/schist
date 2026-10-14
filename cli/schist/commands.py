@@ -662,13 +662,18 @@ def query(args, vault_path: str, db_path: str):
 
 def build(args, vault_path: str, db_path: str):
     """Build the static viewer site (graph.json, search-index.json, index.html)."""
-    from .viewer.build import write_site
+    from .viewer.build import ViewerPageMissing, write_site
 
     # get_db ingests first when the index is missing, empty or lacks tables;
     # the viewer builder then reads the same file.
     sqlite_query.get_db(vault_path, db_path).close()
     out_dir = args.out or os.path.join(vault_path, '.schist', 'data')
-    write_site(Path(db_path), Path(out_dir))
+    try:
+        write_site(Path(db_path), Path(out_dir))
+    except ViewerPageMissing as e:
+        # A broken install, like a missing default.yaml: main() prints it as
+        # one Error: line rather than a traceback (#603).
+        raise SchemaConfigError(str(e)) from e
 
 
 def context(args, vault_path: str, db_path: str):

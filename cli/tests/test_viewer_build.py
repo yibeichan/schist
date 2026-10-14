@@ -376,12 +376,44 @@ def _persist(conn: sqlite3.Connection, path: Path) -> Path:
     return path
 
 
+# Property reads in index.html, by the variable names the page uses for each
+# kind of object. A trailing `(` marks a method call (`meta.appendChild(`), and
+# D3 adds its own simulation fields to nodes and resolves link endpoints in
+# place, so neither comes from the builder.
+_D3_FIELDS = {"x", "y", "fx", "fy", "vx", "vy", "index", "source", "target"}
+
+
+def _page_reads(page: str, receivers: tuple[str, ...]) -> set[str]:
+    alt = "|".join(receivers)
+    return set(re.findall(rf"\b(?:{alt})\??\.([A-Za-z_]\w*)\b(?!\s*\()", page))
+
+
 class TestShapeContract:
-    """Pins both sides of the build → page interface. If the page starts
-    reading a different key, or the builder stops writing one, a test here
-    fails instead of the viewer rendering an empty graph."""
+    """Pins both sides of the build → page interface: the files and top-level
+    keys the page loads, the node types it branches on, and every field it
+    reads from a node, a store entry or a link. If the page starts reading a
+    field the builder does not write, or the builder stops writing one the
+    page reads, a test here fails instead of the viewer rendering blanks."""
 
     PAGE = build.INDEX_HTML.read_text(encoding="utf-8")
+
+    def test_page_reads_only_fields_the_builder_writes(self, vault_db):
+        graph = build.build_graph(vault_db)
+        search = build.build_search_index(vault_db)
+        node_keys = set().union(*(n.keys() for n in graph["nodes"]))
+        store_keys = set().union(*(v.keys() for v in search["store"].values()))
+        link_keys = set().union(*(link.keys() for link in graph["links"]))
+
+        node_reads = _page_reads(self.PAGE, ("n", "d", "node", "peer")) - _D3_FIELDS
+        store_reads = _page_reads(self.PAGE, ("meta",))
+        link_reads = _page_reads(self.PAGE, ("l",))
+        # Non-empty, so a renamed variable cannot make the subset checks vacuous.
+        assert {"label", "type"} <= node_reads
+        assert "body" in store_reads
+        assert "type" in link_reads
+        assert node_reads <= node_keys, node_reads - node_keys
+        assert store_reads <= store_keys, store_reads - store_keys
+        assert link_reads <= link_keys, link_reads - link_keys
 
     def test_page_reads_the_keys_the_builder_writes(self):
         assert 'fetch("graph.json")' in self.PAGE
@@ -412,10 +444,16 @@ class TestShapeContract:
         assert {d["id"] for d in search["documents"]} == note_ids
         assert (out / "index.html").is_file()
 
-    def test_missing_page_raises(self, tmp_path, vault_db, monkeypatch):
+    def test_missing_page_raises_before_writing(self, tmp_path, vault_db, monkeypatch):
         monkeypatch.setattr(build, "INDEX_HTML", tmp_path / "absent.html")
-        with pytest.raises(FileNotFoundError, match="reinstall schist"):
+        with pytest.raises(build.ViewerPageMissing, match="Reinstall the CLI"):
             build.write_site(_persist(vault_db, tmp_path / "schist.db"), tmp_path / "site")
+        assert not (tmp_path / "site").exists()
+
+    def test_output_is_ascii(self, tmp_path, vault_db, capsys):
+        build.write_site(_persist(vault_db, tmp_path / "schist.db"), tmp_path / "site")
+        out = capsys.readouterr().out
+        assert "skipped" in out and out.isascii()
 
 
 # ---------------------------------------------------------------------------
@@ -463,6 +501,25 @@ class TestSchistBuildCommand:
         } in graph["links"]
         assert list(search["store"]) == ["notes/2026-04-16-hello.md"]
         assert (out / "index.html").read_bytes() == build.INDEX_HTML.read_bytes()
+
+    def test_schist_build_missing_page_is_one_error_line(self, tmp_path):
+        """A broken install prints `Error: ...` and exits 1, not a traceback (#603)."""
+        vault = _vault(tmp_path / "vault")
+        code = (
+            "import sys, pathlib\n"
+            "import schist.viewer.build as b\n"
+            "b.INDEX_HTML = pathlib.Path(sys.argv[1])\n"
+            "sys.argv = ['schist', '--vault', sys.argv[2], 'build', '--out', sys.argv[3]]\n"
+            "from schist.__main__ import main\n"
+            "main()\n"
+        )
+        r = subprocess.run(
+            [sys.executable, "-c", code, str(tmp_path / "absent.html"), str(vault), str(tmp_path / "site")],
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 1
+        assert r.stderr.startswith("Error: viewer page not found")
+        assert "Traceback" not in r.stderr
 
     def test_schist_build_default_out_is_vault_data_dir(self, tmp_path):
         vault = _vault(tmp_path / "vault")

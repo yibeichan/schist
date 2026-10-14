@@ -28,6 +28,10 @@ from pathlib import Path
 INDEX_HTML = Path(__file__).parent / "index.html"
 
 
+class ViewerPageMissing(FileNotFoundError):
+    """index.html is not next to this module: a broken install or checkout."""
+
+
 def normalize_endpoint(endpoint: str) -> str:
     """Normalise an edge source/target to the canonical node ID.
 
@@ -119,7 +123,7 @@ def build_graph(db: sqlite3.Connection) -> dict:
         )
 
     if skipped:
-        print(f"  NOTE: {skipped} edge(s) skipped — endpoint not found in graph nodes")
+        print(f"  NOTE: {skipped} edge(s) skipped - endpoint not found in graph nodes")
 
     return {"nodes": nodes, "links": links}
 
@@ -173,7 +177,11 @@ def write_site(db_path: Path, out_dir: Path) -> dict:
     db_path = Path(db_path)
     out_dir = Path(out_dir)
     if not INDEX_HTML.exists():
-        raise FileNotFoundError(f"viewer page not found: {INDEX_HTML} (reinstall schist)")
+        raise ViewerPageMissing(
+            f"viewer page not found: {INDEX_HTML}. Reinstall the CLI "
+            f"(uv tool install --reinstall <path-to-cli>), or in a checkout restore "
+            f"it with: git checkout -- cli/schist/viewer/index.html"
+        )
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -198,9 +206,11 @@ def write_site(db_path: Path, out_dir: Path) -> dict:
         "links": len(graph["links"]),
         "documents": len(search["documents"]),
     }
-    print(f"graph.json        → {graph_out}  ({counts['nodes']} nodes, {counts['links']} links)")
-    print(f"search-index.json → {search_out}  ({counts['documents']} docs)")
-    print(f"index.html        → {out_dir / 'index.html'}")
+    # ASCII only: a non-UTF-8 stdout (a latin-1 locale, PYTHONIOENCODING)
+    # would otherwise fail the command after the site is written.
+    print(f"graph.json        -> {graph_out}  ({counts['nodes']} nodes, {counts['links']} links)")
+    print(f"search-index.json -> {search_out}  ({counts['documents']} docs)")
+    print(f"index.html        -> {out_dir / 'index.html'}")
     return counts
 
 

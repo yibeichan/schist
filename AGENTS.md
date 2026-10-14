@@ -72,9 +72,13 @@ they work from a wheel install as well as a checkout.
 schist --vault <path> build --out <dir>          # default out: <vault>/.schist/data/
 python -m schist.viewer.build --db <path> --out <dir>   # same site from a given DB
 ```
-`viewer/build.py` remains as a shim for the second form. Open `<dir>/index.html`
-through a local web server (`python -m http.server -d <dir>`): the page fetches
-`graph.json` and `search-index.json`.
+`viewer/build.py` remains as a shim for the second form. The site holds the full
+text of every note in the index, whatever its scope, so treat it as vault content.
+To view it, serve the directory on the loopback interface only
+(`python -m http.server --bind 127.0.0.1 -d <dir>`); without `--bind`,
+`http.server` listens on every interface. Other users of a shared host can still
+reach 127.0.0.1, so on a shared login node forward the port over SSH from a host
+you do not share instead.
 
 ## Architecture
 

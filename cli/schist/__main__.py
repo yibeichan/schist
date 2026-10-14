@@ -127,7 +127,7 @@ def main():
     p_query.add_argument('--json', action='store_true', dest='as_json')
 
     # build
-    p_build = sub.add_parser('build', help='Build the static viewer site (graph, search index, page)')
+    p_build = sub.add_parser('build', help='Build the static viewer site (graph, search index, page); it holds the full text of every note')
     p_build.add_argument('--out', default=None, help='Output directory (default: <vault>/.schist/data/)')
 
     # context
