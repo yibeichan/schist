@@ -26,7 +26,7 @@ Summarize changes since the last release in Keep a Changelog format:
 ### 3. CI Status
 
 Ensure all CI checks pass on `main`:
-- [ ] CLI tests (`python -m pytest cli/tests viewer/tests`)
+- [ ] CLI tests (`python -m pytest cli/tests`)
 - [ ] MCP server tests (`npm test` in `mcp-server/`)
 - [ ] Type-check passes (`npm run build` completes cleanly)
 

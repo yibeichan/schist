@@ -39,7 +39,7 @@ schist context --vault ~/vaults/research
 | `schist link` | Add a connection between nodes |
 | `schist search` | Full-text search |
 | `schist query` | Raw SQL query |
-| `schist build` | Generate static viewer data |
+| `schist build` | Build the static viewer site (`graph.json`, `search-index.json`, `index.html`) |
 | `schist context` | Dump session context |
 | `schist schema` | Print or validate schema |
 

@@ -661,44 +661,14 @@ def query(args, vault_path: str, db_path: str):
 
 
 def build(args, vault_path: str, db_path: str):
-    """Build graph.json and search-index.json from SQLite."""
-    db = sqlite_query.get_db(vault_path, db_path)
+    """Build the static viewer site (graph.json, search-index.json, index.html)."""
+    from .viewer.build import write_site
+
+    # get_db ingests first when the index is missing, empty or lacks tables;
+    # the viewer builder then reads the same file.
+    sqlite_query.get_db(vault_path, db_path).close()
     out_dir = args.out or os.path.join(vault_path, '.schist', 'data')
-    os.makedirs(out_dir, exist_ok=True)
-
-    # Build graph
-    nodes = []
-    for row in db.execute('SELECT id, title, status, tags FROM docs').fetchall():
-        tags = json.loads(row['tags']) if row['tags'] else []
-        nodes.append({'id': row['id'], 'title': row['title'], 'type': 'doc', 'tags': tags})
-    for row in db.execute('SELECT slug, title, tags FROM concepts').fetchall():
-        tags = json.loads(row['tags']) if row['tags'] else []
-        nodes.append({'id': row['slug'], 'title': row['title'], 'type': 'concept', 'tags': tags})
-
-    edges = []
-    for row in db.execute('SELECT source, target, type, context FROM edges').fetchall():
-        edges.append({'source': row['source'], 'target': row['target'], 'type': row['type'], 'context': row['context']})
-
-    graph_path = os.path.join(out_dir, 'graph.json')
-    with open(graph_path, 'w') as f:
-        json.dump({'nodes': nodes, 'edges': edges}, f, indent=2)
-
-    # Build search index
-    documents = []
-    for row in db.execute('SELECT id, title, body, tags FROM docs').fetchall():
-        tags = json.loads(row['tags']) if row['tags'] else []
-        documents.append({'id': row['id'], 'title': row['title'], 'body': row['body'][:500], 'tags': tags})
-
-    index_path = os.path.join(out_dir, 'search-index.json')
-    with open(index_path, 'w') as f:
-        json.dump({'fields': ['id', 'title', 'body', 'tags'], 'documents': documents}, f, indent=2)
-
-    db.close()
-
-    g_size = os.path.getsize(graph_path)
-    i_size = os.path.getsize(index_path)
-    print(f'graph.json: {g_size} bytes')
-    print(f'search-index.json: {i_size} bytes')
+    write_site(Path(db_path), Path(out_dir))
 
 
 def context(args, vault_path: str, db_path: str):

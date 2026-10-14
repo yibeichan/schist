@@ -1882,7 +1882,8 @@ def _make_venv(path: Path) -> Path:
 def test_wheel_install_ships_schema_and_console_script(tmp_path: Path) -> None:
     """Integration: building the wheel and installing it into a fresh
     venv yields a working `schist-ingest` console script that can ingest
-    a vault using the bundled schema.sql.
+    a vault using the bundled schema.sql, and a `schist build` that writes
+    the viewer site from the bundled viewer module and index.html.
 
     Catches packaging regressions that unit tests cannot see — missing
     package-data, un-registered entry points, or paths that only work
@@ -1920,6 +1921,16 @@ def test_wheel_install_ships_schema_and_console_script(tmp_path: Path) -> None:
     )
 
     _assert_vault_ingested(db)
+
+    # `schist build` needs the viewer module and its index.html as package
+    # data; from a wheel neither is reachable through the repo's viewer/ dir.
+    site = tmp_path / "site"
+    _run_subprocess(
+        [str(venv_dir / "bin" / "schist"), "--vault", str(vault), "build", "--out", str(site)],
+        env=env,
+    )
+    assert sorted(p.name for p in site.iterdir()) == ["graph.json", "index.html", "search-index.json"]
+    assert set(json.loads((site / "graph.json").read_text(encoding="utf-8"))) == {"nodes", "links"}
 
 
 def test_run_ingest_deletes_partial_db_on_failure(tmp_path: Path) -> None:
