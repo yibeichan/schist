@@ -72,14 +72,9 @@ schist/
 │   # Ingestion ships inside the schist package — see cli/schist/ingest.py
 │   # and cli/schist/schema.sql.
 ├── viewer/
-│   ├── src/
-│   │   ├── graph.js              # D3.js force-directed graph
-│   │   ├── search.js             # lunr.js client-side search
-│   │   └── main.js               # App entry point
-│   ├── static/
-│   │   ├── index.html            # Single-page viewer
-│   │   └── style.css             # Minimal dark theme
-│   └── build.py                  # Markdown → graph.json + search-index.json
+│   └── build.py                  # Shim for `python viewer/build.py`; the viewer
+│                                 # ships in cli/schist/viewer/ (build.py: SQLite →
+│                                 # graph.json + search-index.json; index.html: D3 + lunr)
 ├── cli/
 │   ├── schist/
 │   │   ├── __init__.py
@@ -414,9 +409,9 @@ Raw SQL against the SQLite DB. SELECT only.
 
 ### `schist build`
 ```
-schist build --vault ~/vaults/research --out ./viewer/static/data
+schist --vault ~/vaults/research build --out ./site
 ```
-Parses all markdown → outputs `graph.json` and `search-index.json` for the static viewer.
+Reads the SQLite index and writes `graph.json`, `search-index.json` and `index.html` (default output: `<vault>/.schist/data/`). The site holds the full text of every note in the index, whatever its scope.
 
 ### `schist context`
 ```
@@ -438,48 +433,13 @@ Prints the active schema config. With `--validate`, checks all vault files again
 vault commit → post-commit hook → python ingest.py → schist.db updated
 ```
 
-### GitHub Actions (for viewer deployment)
-```yaml
-# .github/workflows/deploy-viewer.yml
-name: Deploy Viewer
-on:
-  push:
-    branches: [main]
-    paths: ['vault/**']
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-      - run: pip install pyyaml python-frontmatter
-      - run: python viewer/build.py --vault ./vault --out ./viewer/static/data
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: ./viewer/static
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-    steps:
-      - uses: actions/deploy-pages@v4
-```
+### Publishing the viewer
+The built site carries every note's full text, so publishing it publishes the vault. A GitHub Pages site is public unless the account's plan supports private Pages. Build with `schist build` and serve only where access is controlled.
 
 ### Local Viewer (Tailscale)
 ```bash
 # Serve on Tailscale IP only
-cd viewer/static
-python -m http.server 8420 --bind $(tailscale ip -4)
+python -m http.server 8420 --bind $(tailscale ip -4) -d ./site
 ```
 
 ## Agent Integration Guide
