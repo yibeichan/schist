@@ -397,6 +397,18 @@ class TestShapeContract:
 
     PAGE = build.INDEX_HTML.read_text(encoding="utf-8")
 
+    def test_external_scripts_are_pinned_with_integrity(self):
+        """The page holds every note's full text, so a CDN script it loads must
+        be an exact version checked by Subresource Integrity, not a floating
+        `d3@7` the CDN can change under it."""
+        tags = re.findall(r"<script\b[^>]*\bsrc=\"(https?://[^\"]+)\"[^>]*>", self.PAGE)
+        assert len(tags) >= 2  # d3 and lunr; guards against a regex that matches nothing
+        for tag in re.findall(r"<script\b[^>]*\bsrc=\"https?://[^>]*>", self.PAGE):
+            src = re.search(r'src="([^"]+)"', tag).group(1)
+            assert re.search(r"@\d+\.\d+\.\d+/", src), f"unpinned version: {src}"
+            assert re.search(r'integrity="sha(256|384|512)-[A-Za-z0-9+/=]+"', tag), f"no integrity: {src}"
+            assert 'crossorigin="anonymous"' in tag, f"no crossorigin: {src}"
+
     def test_page_reads_only_fields_the_builder_writes(self, vault_db):
         graph = build.build_graph(vault_db)
         search = build.build_search_index(vault_db)

@@ -15,9 +15,6 @@ build/
 # Schist vault derived data
 .schist/
 
-# Viewer build output
-viewer/static/data/
-
 # OS
 .DS_Store
 Thumbs.db
