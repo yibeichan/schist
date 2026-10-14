@@ -1847,20 +1847,31 @@ def _has_uv() -> bool:
 
 
 def _build_wheel(dest: Path) -> Path:
-    """Build the schist wheel into dest/. Returns the wheel file path."""
+    """Build the schist wheel into dest/. Returns the wheel file path.
+
+    Builds from a copy of cli/ without `build/`, `*.egg-info` and the like:
+    setuptools copies sources into `build/lib` but never prunes it, so an
+    earlier local build would leak files the current config no longer ships
+    into the wheel, and this test would pass on a packaging regression.
+    """
+    src = dest.parent / "cli-src"
+    shutil.copytree(
+        _cli_source_dir(), src,
+        ignore=shutil.ignore_patterns("build", "*.egg-info", ".venv", "__pycache__", ".pytest_cache"),
+    )
     if _has_uv():
         _run_subprocess([
             "uv", "build",
             "--wheel",
             "--out-dir", str(dest),
-            str(_cli_source_dir()),
+            str(src),
         ])
     else:
         _run_subprocess([
             sys.executable, "-m", "pip", "wheel",
             "--no-deps",
             "--wheel-dir", str(dest),
-            str(_cli_source_dir()),
+            str(src),
         ])
     wheels = list(dest.glob("schist-*.whl"))
     assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"

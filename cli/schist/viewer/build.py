@@ -7,11 +7,17 @@ the repo-root ``viewer/build.py`` shim run ``main``.
 Usage:
     python -m schist.viewer.build --db /path/to/vault/.schist/schist.db --out /path/to/output/dir
 
-Output files (generic, no vault-specific content):
+Output files:
     graph.json        — nodes (docs + concepts) and links for D3 force graph
     search-index.json — lunr.js document list + metadata store (index built client-side)
     index.html        — viewer UI (shipped as package data next to this module)
+
+The JSON files carry every non-concept note in the database, whatever its
+scope: titles, tags and full bodies. Treat a built site as vault content.
+Stdlib-only, so the ``viewer/build.py`` shim can run it without an install.
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -182,7 +188,10 @@ def write_site(db_path: Path, out_dir: Path) -> dict:
     search_out = out_dir / "search-index.json"
     graph_out.write_text(json.dumps(graph, indent=2, ensure_ascii=False), encoding="utf-8")
     search_out.write_text(json.dumps(search, indent=2, ensure_ascii=False), encoding="utf-8")
-    shutil.copy(INDEX_HTML, out_dir / "index.html")
+    # copyfile, not copy: an installed page can be read-only (a Nix store
+    # file is 0444), and copying its mode would make the next build into
+    # this directory fail to overwrite it.
+    shutil.copyfile(INDEX_HTML, out_dir / "index.html")
 
     counts = {
         "nodes": len(graph["nodes"]),

@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Compatibility entry point. The builder lives in the CLI package as
-``schist.viewer.build``; prefer ``schist build`` or
-``python -m schist.viewer.build``."""
+"""Compatibility entry point for ``python viewer/build.py --db ... --out ...``.
 
-import sys
+The builder lives in the CLI package as ``schist.viewer.build``; prefer
+``schist build`` or ``python -m schist.viewer.build``. This shim loads the
+builder from this checkout by file path rather than importing ``schist``, so
+an installed ``schist`` of another version, or none at all, does not change
+what it runs. The builder is stdlib-only, so no install is needed.
+"""
+
+import importlib.util
 from pathlib import Path
 
-try:
-    from schist.viewer.build import main
-except ImportError:  # source checkout without the CLI installed
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cli"))
-    from schist.viewer.build import main
+BUILDER = Path(__file__).resolve().parents[1] / "cli" / "schist" / "viewer" / "build.py"
 
 if __name__ == "__main__":
-    main()
+    spec = importlib.util.spec_from_file_location("schist_viewer_build", BUILDER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.main()

@@ -13,6 +13,7 @@ used to carry its own builder, whose output the page could not render).
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -467,6 +468,36 @@ class TestSchistBuildCommand:
         vault = _vault(tmp_path / "vault")
         self._run("-m", "schist", "--vault", str(vault), "build")
         assert (vault / ".schist" / "data" / "index.html").is_file()
+
+    def test_repo_shim_ignores_an_installed_schist_of_another_version(self, tmp_path):
+        """An older `schist` without `schist.viewer` first on the path must not
+        stop the shim: it loads the checkout's builder by file path. `-S` keeps
+        site-packages (and an editable install's import hook) out of the way,
+        so only the fake package can answer `import schist`."""
+        vault = _vault(tmp_path / "vault")
+        self._run("-m", "schist", "--vault", str(vault), "build", "--out", str(tmp_path / "cli"))
+        old = tmp_path / "old-install" / "schist"
+        old.mkdir(parents=True)
+        (old / "__init__.py").write_text("", encoding="utf-8")
+        out = tmp_path / "shim"
+        subprocess.run(
+            [sys.executable, "-S", str(REPO_ROOT / "viewer" / "build.py"),
+             "--db", str(vault / ".schist" / "schist.db"), "--out", str(out)],
+            capture_output=True, text=True, check=True,
+            env={**os.environ, "PYTHONPATH": str(old.parent)},
+        )
+        assert (out / "index.html").read_bytes() == build.INDEX_HTML.read_bytes()
+
+    def test_copied_page_is_writable_when_installed_page_is_not(self, tmp_path, vault_db, monkeypatch):
+        page = tmp_path / "installed" / "index.html"
+        page.parent.mkdir()
+        page.write_text("<!doctype html>", encoding="utf-8")
+        page.chmod(0o444)
+        monkeypatch.setattr(build, "INDEX_HTML", page)
+        db = _persist(vault_db, tmp_path / "schist.db")
+        build.write_site(db, tmp_path / "site")
+        build.write_site(db, tmp_path / "site")  # second build overwrites the copy
+        assert os.access(tmp_path / "site" / "index.html", os.W_OK)
 
     def test_repo_shim_matches_schist_build(self, tmp_path):
         vault = _vault(tmp_path / "vault")
