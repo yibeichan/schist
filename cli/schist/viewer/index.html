@@ -208,13 +208,56 @@
   const { documents, store } = searchData;
 
   // ── lunr index ───────────────────────────────────────────────────────────
+  // Notes are indexed on their full body (the store's copy; documents[].body
+  // is a 500-char excerpt), concepts on their title and description, so a
+  // search reaches every node the list can show.
   const idx = lunr(function () {
     this.ref("id");
     this.field("title", { boost: 10 });
     this.field("tags", { boost: 5 });
     this.field("body");
-    documents.forEach(doc => this.add(doc));
+    documents.forEach(doc => this.add({ ...doc, body: store[doc.id]?.body ?? doc.body }));
+    nodes.filter(n => n.type === "concept").forEach(n =>
+      this.add({ id: n.id, title: n.label, tags: "", body: n.description || "" }));
   });
+
+  // Every query word must match, ranked by lunr's score. The query is built
+  // with idx.query, never parsed as lunr syntax, so input like `a:b` or a
+  // leading `-` cannot throw. Words split on anything that is not a letter,
+  // digit or underscore, and stop words are dropped as the index drops them
+  // (a required "the" would match nothing). The last word also matches as a
+  // prefix (the user may still be typing it), merged by score with the exact
+  // hits; if neither matches, every word is retried with one typo.
+  function queryTerms(q) {
+    return q.split(/[^\p{L}\p{N}_]+/u)
+      .map(w => lunr.trimmer(new lunr.Token(w.toLowerCase())))
+      .filter(t => t.toString() && lunr.stopWordFilter(t))
+      .map(t => t.toString());
+  }
+  function runSearch(terms, mode) {
+    return idx.query(q => terms.forEach((term, i) => {
+      const opts = { presence: lunr.Query.presence.REQUIRED };
+      if (mode === "prefix" && i === terms.length - 1) {
+        opts.wildcard = lunr.Query.wildcard.TRAILING;
+        opts.usePipeline = false;
+      }
+      if (mode === "typo") {
+        opts.editDistance = 1;
+        opts.usePipeline = false;
+      }
+      q.term(term, opts);
+    }));
+  }
+  function search(q) {
+    const terms = queryTerms(q);
+    if (!terms.length) return null;
+    const best = new Map();
+    for (const h of [...runSearch(terms, "exact"), ...runSearch(terms, "prefix")]) {
+      if (!best.has(h.ref) || best.get(h.ref).score < h.score) best.set(h.ref, h);
+    }
+    const hits = best.size ? [...best.values()] : runSearch(terms, "typo");
+    return hits.sort((a, b) => b.score - a.score);
+  }
 
   // ── State ─────────────────────────────────────────────────────────────────
   let selectedId = null;
@@ -271,17 +314,16 @@
       return true;
     });
 
-    if (searchQuery.trim()) {
-      try {
-        const hits = idx.search(searchQuery + "~1");
-        const hitIds = new Set(hits.map(h => h.ref));
-        items = items.filter(n => hitIds.has(n.id));
-      } catch {
-        // partial/empty query — show all
-      }
+    const hits = searchQuery.trim() ? search(searchQuery) : null;
+    if (hits) {
+      // Best match first; a query with only stop words or punctuation
+      // (hits === null) leaves the full list.
+      const rank = new Map(hits.map((h, i) => [h.ref, i]));
+      items = items.filter(n => rank.has(n.id));
+      items.sort((a, b) => rank.get(a.id) - rank.get(b.id));
+    } else {
+      items.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
     }
-
-    items.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
 
     // #2 XSS fix: build DOM nodes — no innerHTML interpolation of vault data
     const frag = document.createDocumentFragment();
