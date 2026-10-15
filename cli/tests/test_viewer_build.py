@@ -424,6 +424,20 @@ class TestShapeContract:
             assert re.search(r"color:\s*inherit", decls), f".{cls} keeps the button text colour"
             assert re.search(r"text-align:\s*left", decls), f".{cls} keeps centred button text"
 
+    def test_vault_html_only_through_dompurify(self):
+        """Note bodies are rendered as Markdown into innerHTML. Every innerHTML
+        write must be DOMPurify.sanitize(...) output, so a note cannot inject
+        script into a page that holds the whole vault."""
+        writes = re.findall(r"\.innerHTML\s*=\s*([^;]+);", self.PAGE)
+        assert writes, "no innerHTML write found; update this test if rendering moved"
+        for rhs in writes:
+            assert rhs.strip().startswith("DOMPurify.sanitize("), f"unsanitized innerHTML: {rhs.strip()}"
+        assert not re.search(r"insertAdjacentHTML|outerHTML\s*=|document\.write", self.PAGE)
+        # Opening a note must not fetch from third-party hosts.
+        forbid = re.search(r"FORBID_TAGS:\s*\[([^\]]*)\]", self.PAGE).group(1)
+        for tag in ("img", "iframe", "video", "audio", "object", "embed"):
+            assert f'"{tag}"' in forbid, f"<{tag}> is not forbidden"
+
     def test_page_reads_only_fields_the_builder_writes(self, vault_db):
         graph = build.build_graph(vault_db)
         search = build.build_search_index(vault_db)
