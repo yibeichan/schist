@@ -196,7 +196,7 @@ This gives the agent a snapshot of graph stats, recent notes, and hot concepts.
 | `schist link` | Add a connection from a document to another document or concept |
 | `schist search` | Full-text search |
 | `schist query` | Raw SQL query |
-| `schist build` | Generate static viewer data |
+| `schist build` | Build the static viewer site (`graph.json`, `search-index.json`, `index.html`) |
 | `schist context` | Dump session context |
 | `schist schema` | Print or validate schema |
 

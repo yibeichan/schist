@@ -1847,20 +1847,31 @@ def _has_uv() -> bool:
 
 
 def _build_wheel(dest: Path) -> Path:
-    """Build the schist wheel into dest/. Returns the wheel file path."""
+    """Build the schist wheel into dest/. Returns the wheel file path.
+
+    Builds from a copy of cli/ without `build/`, `*.egg-info` and the like:
+    setuptools copies sources into `build/lib` but never prunes it, so an
+    earlier local build would leak files the current config no longer ships
+    into the wheel, and this test would pass on a packaging regression.
+    """
+    src = dest.parent / "cli-src"
+    shutil.copytree(
+        _cli_source_dir(), src,
+        ignore=shutil.ignore_patterns("build", "*.egg-info", ".venv", "__pycache__", ".pytest_cache"),
+    )
     if _has_uv():
         _run_subprocess([
             "uv", "build",
             "--wheel",
             "--out-dir", str(dest),
-            str(_cli_source_dir()),
+            str(src),
         ])
     else:
         _run_subprocess([
             sys.executable, "-m", "pip", "wheel",
             "--no-deps",
             "--wheel-dir", str(dest),
-            str(_cli_source_dir()),
+            str(src),
         ])
     wheels = list(dest.glob("schist-*.whl"))
     assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
@@ -1882,7 +1893,8 @@ def _make_venv(path: Path) -> Path:
 def test_wheel_install_ships_schema_and_console_script(tmp_path: Path) -> None:
     """Integration: building the wheel and installing it into a fresh
     venv yields a working `schist-ingest` console script that can ingest
-    a vault using the bundled schema.sql.
+    a vault using the bundled schema.sql, and a `schist build` that writes
+    the viewer site from the bundled viewer module and index.html.
 
     Catches packaging regressions that unit tests cannot see — missing
     package-data, un-registered entry points, or paths that only work
@@ -1920,6 +1932,16 @@ def test_wheel_install_ships_schema_and_console_script(tmp_path: Path) -> None:
     )
 
     _assert_vault_ingested(db)
+
+    # `schist build` needs the viewer module and its index.html as package
+    # data; from a wheel neither is reachable through the repo's viewer/ dir.
+    site = tmp_path / "site"
+    _run_subprocess(
+        [str(venv_dir / "bin" / "schist"), "--vault", str(vault), "build", "--out", str(site)],
+        env=env,
+    )
+    assert sorted(p.name for p in site.iterdir()) == ["graph.json", "index.html", "search-index.json"]
+    assert set(json.loads((site / "graph.json").read_text(encoding="utf-8"))) == {"nodes", "links"}
 
 
 def test_run_ingest_deletes_partial_db_on_failure(tmp_path: Path) -> None:

@@ -65,7 +65,7 @@ Open a [GitHub Issue](https://github.com/yibeichan/schist/issues/new). Include:
 3. **Make your changes** with clear, focused commits
 4. **Run tests** before pushing:
    ```bash
-   python -m pytest cli/tests viewer/tests
+   python -m pytest cli/tests
    cd mcp-server && npm test
    ```
 5. **Push** your branch and open a Pull Request against `main`
@@ -98,14 +98,12 @@ If you're an AI agent, prefix with `[agent-name]:` — e.g. `[octopus]: update R
 schist/
 ├── cli/              # Python CLI + ingestion
 │   ├── schist/       # Source code
+│   │   └── viewer/   # Static web viewer: builder + index.html (D3.js + lunr.js)
 │   └── tests/        # CLI tests
 ├── mcp-server/       # Node.js MCP server
 │   ├── src/          # TypeScript source
 │   └── tests/        # Server tests
-├── viewer/           # Static web viewer (D3.js + lunr.js)
-│   ├── src/
-│   ├── static/
-│   └── tests/
+├── viewer/           # build.py: shim for `python viewer/build.py`
 ├── hooks/            # Git hooks (pre-commit, post-commit)
 ├── schema/           # Markdown schema specification
 ├── docs/             # Documentation

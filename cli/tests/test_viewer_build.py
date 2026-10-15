@@ -1,25 +1,30 @@
-"""Unit tests for viewer/build.py — the static graph + search index builder.
+"""Unit tests for schist.viewer.build — the static graph + search index builder.
 
 These tests exercise the pure functions (`normalize_endpoint`, `build_graph`,
 `build_search_index`) against an in-memory SQLite database shaped like the
-real vault DB so that a schema drift in `cli/schist/schema.sql` or `build.py`
+real vault DB so that a schema drift in `cli/schist/schema.sql` or the builder
 would be caught by CI instead of slipping through to a broken static build.
+
+`TestShapeContract` checks the builder's output against what `index.html`
+reads, and `TestSchistBuildCommand` runs `schist build` itself (#432: the CLI
+used to carry its own builder, whose output the page could not render).
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-# Make the viewer package importable without installing it.
-VIEWER_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(VIEWER_DIR))
+from schist.viewer import build
 
-import build  # noqa: E402 — the path insert above is load-bearing
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ---------------------------------------------------------------------------
@@ -319,9 +324,9 @@ class TestBuildSearchIndex:
 
 
 class TestBuildE2E:
-    def test_main_writes_graph_and_search_index_files(self, tmp_path, vault_db, monkeypatch):
-        """`python build.py --db X --out Y` writes both JSON files with
-        the expected top-level keys."""
+    def test_main_writes_graph_and_search_index_files(self, tmp_path, vault_db):
+        """`python -m schist.viewer.build --db X --out Y` writes both JSON
+        files with the expected top-level keys, plus the page."""
         # Persist the in-memory vault_db to disk
         db_path = tmp_path / "schist.db"
         disk_db = sqlite3.connect(str(db_path))
@@ -332,13 +337,13 @@ class TestBuildE2E:
 
         out_dir = tmp_path / "out"
 
-        monkeypatch.setattr(sys, "argv", ["build.py", "--db", str(db_path), "--out", str(out_dir)])
-        build.main()
+        build.main(["--db", str(db_path), "--out", str(out_dir)])
 
         graph_out = out_dir / "graph.json"
         search_out = out_dir / "search-index.json"
         assert graph_out.is_file()
         assert search_out.is_file()
+        assert (out_dir / "index.html").read_bytes() == build.INDEX_HTML.read_bytes()
 
         graph = json.loads(graph_out.read_text())
         assert "nodes" in graph and "links" in graph
@@ -348,13 +353,214 @@ class TestBuildE2E:
         assert "documents" in search and "store" in search
         assert len(search["documents"]) >= 2  # 2 notes
 
-    def test_main_errors_on_missing_db(self, tmp_path, monkeypatch):
+    def test_main_errors_on_missing_db(self, tmp_path):
         """Missing --db path → clean SystemExit with a helpful message."""
         missing = tmp_path / "absent.db"
         out_dir = tmp_path / "out"
-        monkeypatch.setattr(
-            sys, "argv", ["build.py", "--db", str(missing), "--out", str(out_dir)]
-        )
         with pytest.raises(SystemExit) as exc_info:
-            build.main()
+            build.main(["--db", str(missing), "--out", str(out_dir)])
         assert "database not found" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Shape contract: what the builder writes is what index.html reads
+# ---------------------------------------------------------------------------
+
+
+def _persist(conn: sqlite3.Connection, path: Path) -> Path:
+    disk = sqlite3.connect(str(path))
+    try:
+        conn.backup(disk)
+    finally:
+        disk.close()
+    return path
+
+
+# Property reads in index.html, by the variable names the page uses for each
+# kind of object. A trailing `(` marks a method call (`meta.appendChild(`), and
+# D3 adds its own simulation fields to nodes and resolves link endpoints in
+# place, so neither comes from the builder.
+_D3_FIELDS = {"x", "y", "fx", "fy", "vx", "vy", "index", "source", "target"}
+
+
+def _page_reads(page: str, receivers: tuple[str, ...]) -> set[str]:
+    alt = "|".join(receivers)
+    return set(re.findall(rf"\b(?:{alt})\??\.([A-Za-z_]\w*)\b(?!\s*\()", page))
+
+
+class TestShapeContract:
+    """Pins both sides of the build → page interface: the files and top-level
+    keys the page loads, the node types it branches on, and every field it
+    reads from a node, a store entry or a link. If the page starts reading a
+    field the builder does not write, or the builder stops writing one the
+    page reads, a test here fails instead of the viewer rendering blanks."""
+
+    PAGE = build.INDEX_HTML.read_text(encoding="utf-8")
+
+    def test_page_reads_only_fields_the_builder_writes(self, vault_db):
+        graph = build.build_graph(vault_db)
+        search = build.build_search_index(vault_db)
+        node_keys = set().union(*(n.keys() for n in graph["nodes"]))
+        store_keys = set().union(*(v.keys() for v in search["store"].values()))
+        link_keys = set().union(*(link.keys() for link in graph["links"]))
+
+        node_reads = _page_reads(self.PAGE, ("n", "d", "node", "peer")) - _D3_FIELDS
+        store_reads = _page_reads(self.PAGE, ("meta",))
+        link_reads = _page_reads(self.PAGE, ("l",))
+        # Non-empty, so a renamed variable cannot make the subset checks vacuous.
+        assert {"label", "type"} <= node_reads
+        assert "body" in store_reads
+        assert "type" in link_reads
+        assert node_reads <= node_keys, node_reads - node_keys
+        assert store_reads <= store_keys, store_reads - store_keys
+        assert link_reads <= link_keys, link_reads - link_keys
+
+    def test_page_reads_the_keys_the_builder_writes(self):
+        assert 'fetch("graph.json")' in self.PAGE
+        assert 'fetch("search-index.json")' in self.PAGE
+        assert re.search(r"const\s*\{\s*nodes,\s*links\s*\}\s*=\s*graphData", self.PAGE)
+        assert re.search(r"const\s*\{\s*documents,\s*store\s*\}\s*=\s*searchData", self.PAGE)
+
+    def test_page_node_types_match_builder_node_types(self, vault_db):
+        page_types = set(re.findall(r'\.type === "(\w+)"', self.PAGE))
+        graph_types = {n["type"] for n in build.build_graph(vault_db)["nodes"]}
+        assert graph_types == {"note", "concept"}
+        assert page_types == graph_types
+
+    def test_built_files_satisfy_the_page(self, tmp_path, vault_db):
+        out = tmp_path / "site"
+        build.write_site(_persist(vault_db, tmp_path / "schist.db"), out)
+        graph = json.loads((out / "graph.json").read_text(encoding="utf-8"))
+        search = json.loads((out / "search-index.json").read_text(encoding="utf-8"))
+
+        assert set(graph) == {"nodes", "links"}
+        assert set(search) == {"documents", "store"}
+        ids = {n["id"] for n in graph["nodes"]}
+        for link in graph["links"]:
+            assert link["source"] in ids and link["target"] in ids
+        # The detail panel looks up note metadata by node id in `store`.
+        note_ids = {n["id"] for n in graph["nodes"] if n["type"] == "note"}
+        assert set(search["store"]) == note_ids
+        assert {d["id"] for d in search["documents"]} == note_ids
+        assert (out / "index.html").is_file()
+
+    def test_missing_page_raises_before_writing(self, tmp_path, vault_db, monkeypatch):
+        monkeypatch.setattr(build, "INDEX_HTML", tmp_path / "absent.html")
+        with pytest.raises(build.ViewerPageMissing, match="Reinstall the CLI"):
+            build.write_site(_persist(vault_db, tmp_path / "schist.db"), tmp_path / "site")
+        assert not (tmp_path / "site").exists()
+
+    def test_output_is_ascii(self, tmp_path, vault_db, capsys):
+        build.write_site(_persist(vault_db, tmp_path / "schist.db"), tmp_path / "site")
+        out = capsys.readouterr().out
+        assert "skipped" in out and out.isascii()
+
+
+# ---------------------------------------------------------------------------
+# `schist build` and the repo-root shim produce the same site
+# ---------------------------------------------------------------------------
+
+
+def _vault(root: Path) -> Path:
+    (root / "notes").mkdir(parents=True)
+    (root / "concepts").mkdir()
+    (root / "notes" / "2026-04-16-hello.md").write_text(
+        "---\ntitle: Hello\ndate: 2026-04-16\ntags: [smoke]\nstatus: draft\n"
+        "concepts: [ingestion]\n---\n\nBody.\n\n## Connections\n"
+        "- extends: concepts/ingestion.md\n",
+        encoding="utf-8",
+    )
+    (root / "concepts" / "ingestion.md").write_text(
+        "---\nconcept: ingestion\ntitle: Ingestion\n---\n\nMarkdown to SQLite.\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+class TestSchistBuildCommand:
+    def _run(self, *argv: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, *argv], capture_output=True, text=True, check=True
+        )
+
+    def test_schist_build_writes_a_site_the_page_can_render(self, tmp_path):
+        vault = _vault(tmp_path / "vault")
+        out = tmp_path / "site"
+        self._run("-m", "schist", "--vault", str(vault), "build", "--out", str(out))
+
+        graph = json.loads((out / "graph.json").read_text(encoding="utf-8"))
+        search = json.loads((out / "search-index.json").read_text(encoding="utf-8"))
+        assert set(graph) == {"nodes", "links"}
+        assert {n["type"] for n in graph["nodes"]} == {"note", "concept"}
+        # The concepts/ingestion.md target arrives as the bare concept slug.
+        assert {
+            "source": "notes/2026-04-16-hello.md",
+            "target": "ingestion",
+            "type": "extends",
+            "context": "",
+        } in graph["links"]
+        assert list(search["store"]) == ["notes/2026-04-16-hello.md"]
+        assert (out / "index.html").read_bytes() == build.INDEX_HTML.read_bytes()
+
+    def test_schist_build_missing_page_is_one_error_line(self, tmp_path):
+        """A broken install prints `Error: ...` and exits 1, not a traceback (#603)."""
+        vault = _vault(tmp_path / "vault")
+        code = (
+            "import sys, pathlib\n"
+            "import schist.viewer.build as b\n"
+            "b.INDEX_HTML = pathlib.Path(sys.argv[1])\n"
+            "sys.argv = ['schist', '--vault', sys.argv[2], 'build', '--out', sys.argv[3]]\n"
+            "from schist.__main__ import main\n"
+            "main()\n"
+        )
+        r = subprocess.run(
+            [sys.executable, "-c", code, str(tmp_path / "absent.html"), str(vault), str(tmp_path / "site")],
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 1
+        assert r.stderr.startswith("Error: viewer page not found")
+        assert "Traceback" not in r.stderr
+
+    def test_schist_build_default_out_is_vault_data_dir(self, tmp_path):
+        vault = _vault(tmp_path / "vault")
+        self._run("-m", "schist", "--vault", str(vault), "build")
+        assert (vault / ".schist" / "data" / "index.html").is_file()
+
+    def test_repo_shim_ignores_an_installed_schist_of_another_version(self, tmp_path):
+        """An older `schist` without `schist.viewer` first on the path must not
+        stop the shim: it loads the checkout's builder by file path. `-S` keeps
+        site-packages (and an editable install's import hook) out of the way,
+        so only the fake package can answer `import schist`."""
+        vault = _vault(tmp_path / "vault")
+        self._run("-m", "schist", "--vault", str(vault), "build", "--out", str(tmp_path / "cli"))
+        old = tmp_path / "old-install" / "schist"
+        old.mkdir(parents=True)
+        (old / "__init__.py").write_text("", encoding="utf-8")
+        out = tmp_path / "shim"
+        subprocess.run(
+            [sys.executable, "-S", str(REPO_ROOT / "viewer" / "build.py"),
+             "--db", str(vault / ".schist" / "schist.db"), "--out", str(out)],
+            capture_output=True, text=True, check=True,
+            env={**os.environ, "PYTHONPATH": str(old.parent)},
+        )
+        assert (out / "index.html").read_bytes() == build.INDEX_HTML.read_bytes()
+
+    def test_copied_page_is_writable_when_installed_page_is_not(self, tmp_path, vault_db, monkeypatch):
+        page = tmp_path / "installed" / "index.html"
+        page.parent.mkdir()
+        page.write_text("<!doctype html>", encoding="utf-8")
+        page.chmod(0o444)
+        monkeypatch.setattr(build, "INDEX_HTML", page)
+        db = _persist(vault_db, tmp_path / "schist.db")
+        build.write_site(db, tmp_path / "site")
+        build.write_site(db, tmp_path / "site")  # second build overwrites the copy
+        assert os.access(tmp_path / "site" / "index.html", os.W_OK)
+
+    def test_repo_shim_matches_schist_build(self, tmp_path):
+        vault = _vault(tmp_path / "vault")
+        via_cli, via_shim = tmp_path / "cli", tmp_path / "shim"
+        self._run("-m", "schist", "--vault", str(vault), "build", "--out", str(via_cli))
+        db = vault / ".schist" / "schist.db"
+        self._run(str(REPO_ROOT / "viewer" / "build.py"), "--db", str(db), "--out", str(via_shim))
+        for name in ("graph.json", "search-index.json", "index.html"):
+            assert (via_shim / name).read_bytes() == (via_cli / name).read_bytes()
