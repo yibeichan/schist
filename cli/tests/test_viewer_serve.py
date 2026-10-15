@@ -217,6 +217,15 @@ class TestAgentLoop:
         assert store.list()[0]['question'] == 'save a summary'
         assert _git(vault, 'rev-parse', 'HEAD') == head
 
+    def test_text_before_a_tool_call_is_marked_interim(self, vault, db_path):
+        plan = [{'message': {'role': 'assistant', 'content': 'Let me search.'}}] + \
+            _call('search_notes', query='lock')
+        fake = FakeOllama([plan, _say('Answer.')])
+        agent, _ = self._agent(vault, db_path, fake)
+        kinds = [e['type'] for e in agent.run([{'role': 'user', 'content': 'q'}])]
+        first_tool = kinds.index('step', 1)
+        assert kinds[first_tool - 1] == 'interim' and kinds.count('interim') == 1
+
     def test_round_limit(self, vault, db_path):
         fake = FakeOllama([_call('search_notes', query='x')] * agent_mod.MAX_ROUNDS)
         agent, _ = self._agent(vault, db_path, fake)

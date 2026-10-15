@@ -299,6 +299,10 @@ class Agent:
                 if not calls:
                     yield {'type': 'done'}
                     return
+                if content:
+                    # Text before a tool call is the model narrating its plan,
+                    # not the answer: the page moves it out of the answer.
+                    yield {'type': 'interim'}
                 for call in calls:
                     fn = call.get('function') or {}
                     args = fn.get('arguments') or {}
