@@ -62,16 +62,18 @@ def _open_lock_file(lock_path: str) -> "tuple[int, bool]":
         return os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644), True
     except PermissionError:
         # A second unix user on a shared vault can't O_RDWR a 0o644 lock
-        # file owned by the first (/review finding). flock(2) grants LOCK_EX
-        # on ANY fd regardless of open mode, so read-only is just as
-        # exclusive; fall back before failing.
+        # file owned by the first (/review finding). On a local filesystem
+        # flock(2) grants LOCK_EX on ANY fd regardless of open mode, so
+        # read-only is just as exclusive; fall back before failing. On NFS it
+        # is not: the client emulates flock with a POSIX write lock, which
+        # needs a writable fd, and _wait_for_flock reports that (#748).
         try:
             return os.open(lock_path, os.O_RDONLY), False
         except OSError as e:
             print(
                 f'Error: cannot open the vault write lock {lock_path}: {e} — '
-                f'fix its permissions (any mode readable by every vault '
-                f'writer works)',
+                f'fix its permissions (readable by every vault writer, and '
+                f'writable by every writer if the vault is on NFS)',
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -107,10 +109,13 @@ def _wait_for_thread_lock(lock: threading.Lock, timeout: "float | None", start: 
         lock.acquire()
 
 
-def _wait_for_flock(fd: int, timeout: "float | None", start: float, holder) -> None:
+def _wait_for_flock(fd: int, timeout: "float | None", start: float, holder,
+                    lock_path: str) -> None:
     """Take an exclusive flock on fd, polling. `holder()` names the current
     holder for the timeout error and the one-time wait notice; `timeout`
-    counts from `start`, so two locks taken in turn share one budget."""
+    counts from `start`, so two locks taken in turn share one budget.
+    `lock_path` names the file in the error for an fd that cannot lock."""
+    import errno
     import fcntl
     import sys
     import time
@@ -131,6 +136,19 @@ def _wait_for_flock(fd: int, timeout: "float | None", start: float, holder) -> N
                 warned = True
             time.sleep(delay)
             delay = min(delay * 2, 0.5)
+        except OSError as e:
+            if e.errno != errno.EBADF:
+                raise
+            # Only a read-only fd gets here (_open_lock_file's fallback):
+            # on NFS, flock is a POSIX write lock and needs write access.
+            print(
+                f'Error: cannot lock the vault write lock {lock_path} through '
+                f'a read-only file: on this filesystem (NFS, for example) '
+                f'locking needs write access. Make it writable by every vault '
+                f'writer, e.g. chgrp it to a group they all share and chmod g+w.',
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
 
 @contextmanager
@@ -212,7 +230,8 @@ def _hold_vault_flock(vault_path, key, depth, timeout, start):
     os.makedirs(os.path.join(vault_path, '.schist'), exist_ok=True)
     fd, writable = _open_lock_file(_lock_path(vault_path))
     try:
-        _wait_for_flock(fd, timeout, start, lambda: read_holder(vault_path))
+        _wait_for_flock(fd, timeout, start, lambda: read_holder(vault_path),
+                        _lock_path(vault_path))
         try:
             if writable:
                 try:
@@ -223,9 +242,10 @@ def _hold_vault_flock(vault_path, key, depth, timeout, start):
             # Legacy lock (remove after the next release). Its holder can only
             # be an older CLI, which writes no note; and write.lock must not
             # be opened again here, since this process now holds it.
-            legacy_fd, _ = _open_lock_file(_lock_path(vault_path, LEGACY_LOCK_FILENAME))
+            legacy_path = _lock_path(vault_path, LEGACY_LOCK_FILENAME)
+            legacy_fd, _ = _open_lock_file(legacy_path)
             try:
-                _wait_for_flock(legacy_fd, timeout, start, lambda: _LEGACY_HOLDER)
+                _wait_for_flock(legacy_fd, timeout, start, lambda: _LEGACY_HOLDER, legacy_path)
                 depth[key] = 1
                 try:
                     yield

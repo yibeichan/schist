@@ -1,4 +1,4 @@
-import fcntl, os, subprocess, sys, threading, time
+import errno, fcntl, os, subprocess, sys, threading, time
 import pytest
 from schist import git_ops
 
@@ -86,16 +86,70 @@ def test_waits_then_acquires(tmp_path):
         pass
     p.wait()
 
+def _readonly_flock_works(directory):
+    """False where flock needs a writable fd: the Linux NFS client emulates
+    flock with a POSIX write lock, so LOCK_EX on an O_RDONLY fd is EBADF."""
+    probe = directory / "readonly-flock-probe"
+    probe.write_text("")
+    fd = os.open(probe, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError as e:
+        if e.errno == errno.EBADF:
+            return False
+        raise
+    finally:
+        os.close(fd)
+        probe.unlink()
+
+
 def test_unwritable_lock_file_still_locks(tmp_path):
     d = tmp_path / ".schist"; d.mkdir()
     lock = d / "write.lock"; lock.write_text(""); lock.chmod(0o444)
     if os.access(lock, os.W_OK):
         pytest.skip("running as root")
+    if not _readonly_flock_works(d):
+        pytest.skip("flock needs a writable fd here (NFS); see the next test")
     with git_ops.vault_write_lock(str(tmp_path)):
         fd = os.open(lock, os.O_RDONLY)
         with pytest.raises(BlockingIOError):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         os.close(fd)
+
+
+@pytest.mark.parametrize("name", ["write.lock", "cli-write.lock"])
+def test_unwritable_lock_file_where_flock_needs_write_access(tmp_path, monkeypatch, capsys, name):
+    # #748: on NFS a read-only fd cannot take the lock, so a writer that can
+    # only open a lock file read-only gets a message naming the file and the
+    # permission it needs, not an OSError traceback. On a local filesystem
+    # the NFS behaviour is simulated; on NFS it is the real one.
+    d = tmp_path / ".schist"; d.mkdir()
+    lock = d / name; lock.write_text(""); lock.chmod(0o444)
+    if os.access(lock, os.W_OK):
+        pytest.skip("running as root")
+    if _readonly_flock_works(d):
+        real_flock = fcntl.flock
+
+        def nfs_flock(fd, op):
+            if op & (fcntl.LOCK_EX | fcntl.LOCK_SH) and \
+                    fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY:
+                raise OSError(errno.EBADF, os.strerror(errno.EBADF))
+            return real_flock(fd, op)
+        monkeypatch.setattr(fcntl, "flock", nfs_flock)
+    with pytest.raises(SystemExit) as ei:
+        with git_ops.vault_write_lock(str(tmp_path)):
+            pytest.fail("entered the lock through a read-only fd that cannot lock")
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert str(lock) in err
+    assert "write access" in err
+    assert "Traceback" not in err
+    # Nothing is left held: once the file is writable, the lock works.
+    monkeypatch.undo()
+    lock.chmod(0o644)
+    with git_ops.vault_write_lock(str(tmp_path), timeout=1):
+        pass
 
 
 # #745 — re-entry is per thread. A second thread of the same process must wait
