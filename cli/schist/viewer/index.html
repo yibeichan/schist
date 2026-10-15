@@ -37,6 +37,19 @@
     #sidebar-header { padding: 16px; border-bottom: 1px solid var(--border); }
     #sidebar-header h1 { font-size: 16px; font-weight: 600; color: var(--text); letter-spacing: 0.02em; }
     #sidebar-header p { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    /* Build status and Rebuild button: shown only when the server has /api/status */
+    #build-bar { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 11px; color: var(--muted); }
+    #build-bar[hidden] { display: none; }
+    #build-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+    #build-dot.fresh { background: #4caf7d; }
+    #build-dot.stale { background: #e0a43a; }
+    #build-status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #rebuild-btn {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+      color: var(--text); font: inherit; padding: 3px 8px; cursor: pointer;
+    }
+    #rebuild-btn:hover:not(:disabled) { border-color: var(--accent); }
+    #rebuild-btn:disabled { opacity: 0.6; cursor: default; }
 
     #search-wrap { padding: 10px 12px; border-bottom: 1px solid var(--border); }
     #search {
@@ -133,6 +146,11 @@
     <div id="sidebar-header">
       <h1>schist</h1>
       <p id="vault-name">knowledge graph</p>
+      <div id="build-bar" hidden>
+        <span id="build-dot"></span>
+        <span id="build-status"></span>
+        <button id="rebuild-btn" type="button">Rebuild</button>
+      </div>
     </div>
     <div id="search-wrap">
       <input id="search" type="search" placeholder="Search notes…" autocomplete="off" />
@@ -467,6 +485,96 @@
   document.getElementById("vault-name").textContent =
     `${nodes.filter(n => n.type === "note").length} notes · ${nodes.filter(n => n.type === "concept").length} concepts`;
 
+})();
+</script>
+
+<script>
+// ── Rebuild button ──────────────────────────────────────────────────────────
+// A local server may offer GET /api/status ({built_at, built_head, vault_head,
+// building}) and POST /api/rebuild, which needs the X-Schist-Rebuild header
+// (a cross-site form cannot send it). Served any other way — a plain static
+// server, a copy of the site — /api/status fails and the bar stays hidden.
+// This runs apart from the graph script, so a rebuild can repair a site
+// whose data failed to load.
+(function () {
+  const bar = document.getElementById("build-bar");
+  const dot = document.getElementById("build-dot");
+  const statusEl = document.getElementById("build-status");
+  const btn = document.getElementById("rebuild-btn");
+  let busy = false;
+
+  function ago(epochSeconds) {
+    const s = Math.max(0, Math.round(Date.now() / 1000 - epochSeconds));
+    if (s < 60) return "just now";
+    if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+    return `${Math.floor(s / 86400)} d ago`;
+  }
+
+  async function getStatus() {
+    const r = await fetch("api/status", { cache: "no-store" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const st = await r.json();
+    if (typeof st !== "object" || st === null || typeof st.built_at !== "number") throw new Error("not a build status");
+    return st;
+  }
+
+  function show(st) {
+    const stale = !!st.built_head && !!st.vault_head && st.built_head !== st.vault_head;
+    dot.className = stale ? "stale" : "fresh";
+    dot.title = stale ? "The vault has commits this build does not include" : "Built from the current vault commit";
+    statusEl.textContent = st.building ? "building…" : `built ${ago(st.built_at)}${stale ? " · stale" : ""}`;
+    statusEl.title = `built ${new Date(st.built_at * 1000).toLocaleString()}` +
+      (st.built_head ? `, from ${String(st.built_head).slice(0, 7)}` : "") +
+      (st.vault_head ? `; vault at ${String(st.vault_head).slice(0, 7)}` : "");
+    if (!busy) btn.disabled = !!st.building;
+    bar.hidden = false;
+  }
+
+  async function refresh() {
+    try { show(await getStatus()); } catch { if (!busy) bar.hidden = true; }
+  }
+
+  async function waitForBuild() {
+    for (let i = 0; i < 60; i++) {
+      await new Promise(res => setTimeout(res, 1000));
+      try { if (!(await getStatus()).building) return true; } catch { return false; }
+    }
+    return false;
+  }
+
+  btn.addEventListener("click", async () => {
+    busy = true;
+    btn.disabled = true;
+    statusEl.textContent = "rebuilding…";
+    statusEl.title = "";
+    let r, body = {};
+    try {
+      r = await fetch("api/rebuild", { method: "POST", headers: { "X-Schist-Rebuild": "1" }, cache: "no-store" });
+      try { body = await r.json(); } catch { /* no JSON body */ }
+    } catch (err) {
+      statusEl.textContent = "rebuild failed: server unreachable";
+      busy = false; btn.disabled = false;
+      return;
+    }
+    if (r.ok && body.ok !== false) { location.reload(); return; }
+    if (r.status === 409) {
+      statusEl.textContent = "a build is already running…";
+      if (await waitForBuild()) { location.reload(); return; }
+    } else if (r.status === 429) {
+      statusEl.textContent = "rebuilt moments ago; try again shortly";
+      setTimeout(refresh, 5000);
+    } else {
+      // Kept until the next periodic refresh; the log tail is in the tooltip.
+      statusEl.textContent = `rebuild failed (HTTP ${r.status})`;
+      if (body.log) statusEl.title = String(body.log);
+    }
+    busy = false;
+    btn.disabled = false;
+  });
+
+  refresh();
+  setInterval(refresh, 60000);
 })();
 </script>
 </body>

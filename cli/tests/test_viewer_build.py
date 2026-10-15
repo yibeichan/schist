@@ -424,6 +424,18 @@ class TestShapeContract:
             assert re.search(r"color:\s*inherit", decls), f".{cls} keeps the button text colour"
             assert re.search(r"text-align:\s*left", decls), f".{cls} keeps centred button text"
 
+    def test_rebuild_bar_is_hidden_unless_the_server_answers(self):
+        """The Rebuild button needs a server with /api/status; served as plain
+        static files the page must look as before. The rebuild POST carries
+        the X-Schist-Rebuild header the server requires, which a cross-site
+        form cannot send."""
+        assert re.search(r'<div id="build-bar" hidden>', self.PAGE)
+        assert 'fetch("api/status"' in self.PAGE
+        post = re.search(r'fetch\("api/rebuild",\s*\{([^}]*\{[^}]*\}[^}]*)\}', self.PAGE)
+        assert post, "no POST to api/rebuild found"
+        assert 'method: "POST"' in post.group(1)
+        assert '"X-Schist-Rebuild": "1"' in post.group(1)
+
     def test_page_reads_only_fields_the_builder_writes(self, vault_db):
         graph = build.build_graph(vault_db)
         search = build.build_search_index(vault_db)
