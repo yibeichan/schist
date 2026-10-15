@@ -66,9 +66,19 @@ schist-ingest --vault <path> --db <path>               # rebuild SQLite from mar
 ```
 
 ### Viewer
+The builder and its page ship in the CLI package (`cli/schist/viewer/`), so
+they work from a wheel install as well as a checkout.
 ```bash
-python viewer/build.py --db ./vault/.schist/schist.db --out ./viewer/static/data
+schist --vault <path> build --out <dir>          # default out: <vault>/.schist/data/
+python -m schist.viewer.build --db <path> --out <dir>   # same site from a given DB
 ```
+`viewer/build.py` remains as a shim for the second form. The site holds the full
+text of every note in the index, whatever its scope, so treat it as vault content.
+To view it, serve the directory on the loopback interface only
+(`python -m http.server --bind 127.0.0.1 -d <dir>`); without `--bind`,
+`http.server` listens on every interface. Other users of a shared host can still
+reach 127.0.0.1, so on a shared login node forward the port over SSH from a host
+you do not share instead.
 
 ## Architecture
 
@@ -120,7 +130,7 @@ ACLs. Create one with `schist init --hub --hub-path /path --name X
 | CLI | Python | `cli/schist/__main__.py` | Agent fallback + human CLI |
 | ACL Parser | Python | `cli/schist/acl.py` | vault.yaml scope resolution, rate limits |
 | Ingestion | Python | `cli/schist/ingest.py` (entry: `schist-ingest`) | Markdown → SQLite rebuild |
-| Viewer | Python+JS | `viewer/build.py`, `viewer/src/index.html` | Static D3.js graph + lunr.js search |
+| Viewer | Python+JS | `cli/schist/viewer/build.py` (entry: `schist build`), `cli/schist/viewer/index.html` | Static D3.js graph + lunr.js search |
 
 ### Schema
 - **Document notes** (`notes/`, `papers/`): `YYYY-MM-DD-slug.md` with YAML frontmatter (title, date, tags, status, concepts, related) and optional `## Connections` section

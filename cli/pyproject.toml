@@ -42,10 +42,10 @@ schist-shell = "schist.hub_shell:main"
 # under cli/hooks/ by default even though the log file is gitignored).
 # setuptools then errors with "Multiple top-level packages discovered in
 # a flat-layout: ['hooks', 'schist']" because .gitignore is invisible
-# to it. Pinning packages to ["schist"] makes the install deterministic
+# to it. Pinning the package list makes the install deterministic
 # regardless of stray local directories.
 [tool.setuptools]
-packages = ["schist"]
+packages = ["schist", "schist.viewer"]
 
 # Ship schema.sql inside the wheel so `schist-ingest` works after
 # `pip install schist` — ingest.py reads schema.sql via
@@ -56,6 +56,8 @@ packages = ["schist"]
 # Path(__file__).parent / 'default.yaml' for both editable and wheel installs.
 [tool.setuptools.package-data]
 schist = ["*.sql", "default.yaml", "acl-fixtures/*.yaml", "acl-fixtures/*.json", "acl-fixtures/*.md"]
+# The viewer page is copied next to graph.json by `schist build`.
+"schist.viewer" = ["index.html"]
 
 [tool.pytest.ini_options]
 markers = [
