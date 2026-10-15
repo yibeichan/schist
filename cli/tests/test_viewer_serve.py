@@ -43,6 +43,9 @@ def vault(tmp_path) -> Path:
     (v / 'concepts' / 'locking.md').write_text(
         '---\ntitle: Locking\n---\n\nMutual exclusion.\n', encoding='utf-8')
     _git(v, 'init', '-q', '-b', 'main')
+    # CI has no global identity, and the suite pins global config to empty.
+    _git(v, 'config', 'user.email', 't@example.com')
+    _git(v, 'config', 'user.name', 't')
     _git(v, 'add', '-A')
     _git(v, 'commit', '-q', '-m', 'seed')
     sqlite_query.get_db(str(v), str(v / '.schist' / 'schist.db')).close()
