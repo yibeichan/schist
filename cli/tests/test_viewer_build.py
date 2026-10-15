@@ -413,7 +413,10 @@ class TestShapeContract:
         """Result and connection rows are <button>s. Without a reset they take
         the browser's default button background and text colour, so on the
         dark page each row is a white box with dark text."""
-        classes = set(re.findall(r'el\("button",\s*"([\w-]+)', self.PAGE))
+        # The graph script's buttons are rows; the Ask panel's are styled
+        # buttons, checked in test_ask_buttons_are_styled.
+        main = self.PAGE[:self.PAGE.index("// ── Ask the vault")]
+        classes = set(re.findall(r'el\("button",\s*"([\w-]+)', main))
         assert {"result-item", "conn-item"} <= classes  # guards against a regex that matches nothing
         css = re.sub(r"/\*.*?\*/", "", self.PAGE, flags=re.S)
         rules = re.findall(r"([^{}]+)\{([^}]*)\}", css)
@@ -435,6 +438,40 @@ class TestShapeContract:
         assert post, "no POST to api/rebuild found"
         assert 'method: "POST"' in post.group(1)
         assert '"X-Schist-Rebuild": "1"' in post.group(1)
+
+    def test_ask_panel_is_hidden_unless_the_server_has_an_agent(self):
+        """The Ask button needs `schist serve`; served as plain static files the
+        page must look as before. Every agent POST (chat, approve, reject)
+        carries the X-Schist-Agent header the server requires."""
+        assert re.search(r'<button id="ask-btn" type="button" hidden>', self.PAGE)
+        assert 'fetch("api/agent/status"' in self.PAGE
+        assert re.search(r'const HDR = \{[^}]*"X-Schist-Agent": "1"', self.PAGE)
+        chat = re.search(r'fetch\("api/agent/chat",\s*\{([^}]*)\}', self.PAGE)
+        assert chat and 'method: "POST"' in chat.group(1) and "headers: HDR" in chat.group(1)
+        decide = re.search(r'fetch\(`api/proposals/\$\{encodeURIComponent\(p\.id\)\}/\$\{action\}`,\s*\{([^}]*)\}', self.PAGE)
+        assert decide and 'method: "POST"' in decide.group(1) and "headers: HDR" in decide.group(1)
+
+    def test_ask_answers_render_through_the_sanitized_renderer(self):
+        """Agent answers quote vault text, so they render through renderBody
+        (DOMPurify) and citations are added as DOM nodes, never as HTML."""
+        assert "renderMarkdown: renderBody" in self.PAGE
+        ask = self.PAGE[self.PAGE.index("// ── Ask the vault"):]
+        assert "viewer.renderMarkdown(target, md)" in ask
+        assert "innerHTML" not in ask and "insertAdjacentHTML" not in ask
+
+    def test_ask_buttons_are_styled(self):
+        """Every button the Ask panel builds sets its own background and colour,
+        so none renders as a default white button on the dark page."""
+        ask = self.PAGE[self.PAGE.index("// ── Ask the vault"):]
+        classes = {c.split()[0] for c in re.findall(r'el\("button",\s*"([\w -]+)', ask)}
+        assert {"cite", "src", "proposal-chip", "p-approve", "p-reject"} <= classes
+        css = re.sub(r"/\*.*?\*/", "", self.PAGE, flags=re.S)
+        rules = re.findall(r"([^{}]+)\{([^}]*)\}", css)
+        for cls in classes:
+            decls = " ".join(body for sel, body in rules
+                             if any(re.search(rf"\.{cls}(?![\w-])", part) for part in sel.split(",")))
+            assert re.search(r"background:", decls), f".{cls} keeps the button background"
+            assert re.search(r"(?<![-\w])color:", decls), f".{cls} keeps the button text colour"
 
     def test_vault_html_only_through_dompurify(self):
         """Note bodies are rendered as Markdown into innerHTML. Every innerHTML

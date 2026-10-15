@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>schist — knowledge graph</title>
+  <link rel="icon" href="data:," />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -156,6 +157,94 @@
     .legend-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; vertical-align: middle; }
     .legend-note { background: var(--note); }
     .legend-concept { background: var(--concept); }
+
+    /* Ask the vault: shown only when the server offers /api/agent/status */
+    #ask-btn {
+      margin-top: 8px; width: 100%; padding: 6px 10px;
+      background: var(--accent-dim); border: 1px solid var(--accent); border-radius: 6px;
+      color: var(--text); font: inherit; font-size: 12px; cursor: pointer;
+    }
+    #ask-btn[hidden] { display: none; }
+    #ask-btn .badge { margin-left: 6px; }
+    .badge { display: inline-block; min-width: 16px; padding: 0 5px; border-radius: 8px; background: #e0a43a; color: #111; font-size: 10px; font-weight: 600; line-height: 16px; text-align: center; }
+    .badge[hidden] { display: none; }
+    #ask {
+      position: absolute; left: 0; top: 0; bottom: 0;
+      width: min(400px, 100%); background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex; flex-direction: column;
+      transform: translateX(-100%); transition: transform 0.2s ease;
+      z-index: 11;
+    }
+    #ask.open { transform: translateX(0); }
+    #ask-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+    #ask-head h2 { font-size: 14px; font-weight: 600; flex: 1; }
+    #ask-model { font-size: 11px; color: var(--muted); }
+    .ask-icon-btn { background: none; border: none; color: var(--muted); font-size: 18px; line-height: 1; cursor: pointer; padding: 0 2px; }
+    .ask-icon-btn:hover { color: var(--text); }
+    #ask-tabs { display: flex; border-bottom: 1px solid var(--border); }
+    .ask-tab { flex: 1; padding: 8px; background: none; border: none; border-bottom: 2px solid transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
+    .ask-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+    .ask-pane { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px; }
+    .ask-pane[hidden] { display: none; }
+    #ask-log:empty::before { content: "Ask about anything in the vault. Answers cite the notes they come from; click a citation to open it. The agent cannot change the vault: it can only propose a note or link for you to approve."; color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .msg-user { margin: 4px 0 10px auto; max-width: 85%; width: fit-content; background: var(--accent-dim); border-radius: 10px 10px 2px 10px; padding: 7px 10px; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .msg-agent { margin: 0 0 16px; }
+    .msg-steps { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+    .msg-steps summary { cursor: pointer; }
+    .msg-steps div { padding: 1px 0; overflow-wrap: anywhere; }
+    .msg-steps .live::after { content: " …"; }
+    .msg-answer { font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+    .msg-answer.plain { white-space: pre-wrap; }
+    .msg-answer > :first-child { margin-top: 0; }
+    .msg-answer h1, .msg-answer h2, .msg-answer h3, .msg-answer h4 { font-size: 13px; font-weight: 600; margin: 12px 0 4px; }
+    .msg-answer p, .msg-answer ul, .msg-answer ol, .msg-answer pre, .msg-answer blockquote, .msg-answer table { margin: 0 0 8px; }
+    .msg-answer ul, .msg-answer ol { padding-left: 18px; }
+    .msg-answer a { color: var(--accent); }
+    .msg-answer code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--bg); border-radius: 3px; padding: 1px 4px; }
+    .msg-answer pre { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; overflow-x: auto; }
+    .msg-answer pre code { padding: 0; background: none; }
+    .msg-error { color: #f08a7e; font-size: 12px; }
+    .cite {
+      appearance: none; display: inline; border: 0; margin: 0 1px; padding: 0;
+      background: none; color: var(--note); font: inherit; font-size: 10px; vertical-align: super; line-height: 1; cursor: pointer;
+    }
+    .cite:hover { text-decoration: underline; }
+    .cite.unknown, .src.unknown { color: var(--muted); text-decoration: line-through; cursor: help; }
+    .msg-sources { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); font-size: 11px; }
+    .msg-sources:empty { display: none; }
+    .src {
+      appearance: none; display: block; width: 100%; text-align: left; border: 0; padding: 2px 0;
+      background: none; color: var(--muted); font: inherit; cursor: pointer; overflow-wrap: anywhere;
+    }
+    .src b { color: var(--note); font-weight: 500; margin-right: 4px; }
+    .src:hover:not(.unknown) { color: var(--text); }
+    .proposal-chip { display: inline-block; margin: 4px 0; padding: 3px 8px; border: 1px solid #e0a43a; border-radius: 10px; background: none; color: #e0a43a; font: inherit; font-size: 11px; cursor: pointer; }
+    #ask-form { border-top: 1px solid var(--border); padding: 10px 12px; display: flex; gap: 8px; align-items: flex-end; }
+    #ask-form[hidden] { display: none; }
+    #ask-input {
+      flex: 1; resize: none; min-height: 36px; max-height: 140px;
+      padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+      color: var(--text); font: inherit; font-size: 13px; outline: none;
+    }
+    #ask-input:focus { border-color: var(--accent); }
+    #ask-input:disabled { opacity: 0.6; }
+    #ask-send { padding: 8px 12px; background: var(--accent); border: none; border-radius: 6px; color: #fff; font: inherit; font-size: 12px; cursor: pointer; }
+    #ask-send:disabled { opacity: 0.5; cursor: default; }
+    #ask-send.stop { background: var(--border); color: var(--text); }
+    #ask-note { padding: 0 14px 8px; font-size: 11px; color: var(--muted); }
+    #ask-note:empty { display: none; }
+    #proposals:empty::before { content: "No pending proposals. Ask the agent to save or link something and it will appear here for review."; color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .proposal { border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-bottom: 10px; }
+    .proposal h3 { font-size: 13px; font-weight: 600; margin-bottom: 4px; overflow-wrap: anywhere; }
+    .proposal .p-meta { font-size: 11px; color: var(--muted); margin-bottom: 6px; overflow-wrap: anywhere; }
+    .proposal .p-why { font-size: 12px; margin-bottom: 6px; }
+    .proposal pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: #8fd19e; }
+    .proposal .p-actions { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+    .proposal .p-actions .p-reject { background: var(--bg); color: var(--text); }
+    .proposal .p-actions button { padding: 4px 12px; border-radius: 4px; font: inherit; font-size: 12px; cursor: pointer; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+    .proposal .p-actions .p-approve { background: var(--bg); border-color: #4caf7d; color: #8fd19e; }
+    .proposal .p-result { font-size: 11px; color: var(--muted); flex: 1; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
@@ -169,6 +258,7 @@
         <span id="build-status"></span>
         <button id="rebuild-btn" type="button">Rebuild</button>
       </div>
+      <button id="ask-btn" type="button" hidden>Ask the vault<span id="ask-badge" class="badge" hidden></span></button>
     </div>
     <div id="search-wrap">
       <input id="search" type="search" placeholder="Search notes…" autocomplete="off" />
@@ -190,6 +280,25 @@
       <div id="detail-meta"></div>
       <div id="detail-body"></div>
       <div id="detail-connections"></div>
+    </div>
+    <div id="ask" aria-label="Ask the vault">
+      <div id="ask-head">
+        <h2>Ask the vault</h2>
+        <span id="ask-model"></span>
+        <button id="ask-new" class="ask-icon-btn" type="button" title="New chat" aria-label="New chat">⟲</button>
+        <button id="ask-close" class="ask-icon-btn" type="button" title="Close" aria-label="Close">×</button>
+      </div>
+      <div id="ask-tabs">
+        <button class="ask-tab active" type="button" data-pane="ask-log">Chat</button>
+        <button class="ask-tab" type="button" data-pane="proposals">Proposals <span id="tab-badge" class="badge" hidden></span></button>
+      </div>
+      <div id="ask-log" class="ask-pane"></div>
+      <div id="proposals" class="ask-pane" hidden></div>
+      <div id="ask-note"></div>
+      <form id="ask-form">
+        <textarea id="ask-input" rows="1" placeholder="Ask about your notes…"></textarea>
+        <button id="ask-send" type="submit">Ask</button>
+      </form>
     </div>
     <div id="tooltip"></div>
     <div id="legend">
@@ -571,6 +680,14 @@
     simulation.force("center", d3.forceCenter(width / 2, height / 2)).alpha(0.1).restart();
   }).observe(wrap);
 
+  // ── Hooks for the Ask panel (separate script below) ──────────────────────
+  window.schistViewer = {
+    label: id => nodes.find(n => n.id === id)?.label ?? null,
+    open: id => { if (nodes.some(n => n.id === id)) selectNode(id); },
+    renderMarkdown: renderBody,
+  };
+  document.dispatchEvent(new Event("schist:ready"));
+
   // ── Init ──────────────────────────────────────────────────────────────────
   renderList();
   document.getElementById("vault-name").textContent =
@@ -666,6 +783,273 @@
 
   refresh();
   setInterval(refresh, 60000);
+})();
+</script>
+<script>
+// ── Ask the vault ───────────────────────────────────────────────────────────
+// A local server may offer GET api/agent/status ({available, model, reason})
+// and POST api/agent/chat, which streams server-sent events:
+//   step {text} · token {text} · interim · proposal {id, title} · done · error {message}
+// The agent only reads; it can file proposals (GET api/proposals, POST
+// api/proposals/<id>/approve|reject), and nothing is written until approved
+// here. Every POST carries X-Schist-Agent: 1, which a cross-site page cannot
+// send. Served any other way, the status request fails and the button stays
+// hidden. Answers render through the page's sanitized Markdown renderer;
+// [[note-id]] citations become buttons inserted as DOM nodes afterwards.
+(function () {
+  const $ = id => document.getElementById(id);
+  const btn = $("ask-btn"), panel = $("ask"), log = $("ask-log"), props = $("proposals");
+  const form = $("ask-form"), input = $("ask-input"), send = $("ask-send"), note = $("ask-note");
+  const HDR = { "Content-Type": "application/json", "X-Schist-Agent": "1" };
+  const CITE = /\[\[([^\]\n]{1,300})\]\]/g;
+  let history = [], controller = null, available = false;
+
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+
+  // ── status & proposals count ──
+  async function status() {
+    try {
+      const r = await fetch("api/agent/status", { cache: "no-store" });
+      if (!r.ok) throw 0;
+      const st = await r.json();
+      if (typeof st !== "object" || st === null || typeof st.available !== "boolean") throw 0;
+      available = st.available;
+      $("ask-model").textContent = st.model || "";
+      note.textContent = st.available ? "" : (st.reason || "agent unavailable");
+      input.disabled = !st.available;
+      if (!controller) send.disabled = !st.available;
+      btn.hidden = false;
+    } catch { btn.hidden = true; }
+  }
+
+  async function loadProposals() {
+    let list = [];
+    try {
+      const r = await fetch("api/proposals", { cache: "no-store" });
+      if (r.ok) list = await r.json();
+    } catch { /* keep the old list */ return; }
+    if (!Array.isArray(list)) return;
+    for (const b of [$("ask-badge"), $("tab-badge")]) {
+      b.textContent = String(list.length);
+      b.hidden = list.length === 0;
+    }
+    const frag = document.createDocumentFragment();
+    for (const p of list) frag.appendChild(proposalCard(p));
+    props.replaceChildren(frag);
+  }
+
+  function proposalCard(p) {
+    const card = el("div", "proposal");
+    card.appendChild(el("h3", null, p.title));
+    card.appendChild(el("div", "p-meta",
+      `${p.kind === "link" ? "new connection in" : "new note"} ${p.target} · ${new Date(p.created_at).toLocaleString()}`));
+    if (p.rationale) card.appendChild(el("div", "p-why", p.rationale));
+    if (p.question) card.appendChild(el("div", "p-meta", `asked: “${p.question}”`));
+    card.appendChild(el("pre", null, p.diff || ""));
+    const actions = el("div", "p-actions");
+    const ok = el("button", "p-approve", "Approve"), no = el("button", "p-reject", "Reject");
+    ok.type = no.type = "button";
+    const result = el("span", "p-result");
+    actions.append(ok, no, result);
+    card.appendChild(actions);
+    async function decide(action) {
+      ok.disabled = no.disabled = true;
+      result.textContent = action === "approve" ? "writing…" : "rejecting…";
+      try {
+        const r = await fetch(`api/proposals/${encodeURIComponent(p.id)}/${action}`, { method: "POST", headers: HDR });
+        const body = await r.json().catch(() => ({}));
+        if (r.ok && body.ok) {
+          result.textContent = action === "approve" ? "approved and committed; the site rebuilds shortly" : "rejected";
+          setTimeout(loadProposals, 1500);
+          return;
+        }
+        result.textContent = `failed: ${body.reason || body.status || "HTTP " + r.status}`;
+        result.title = body.output || "";
+      } catch { result.textContent = "failed: server unreachable"; }
+      ok.disabled = no.disabled = false;
+    }
+    ok.addEventListener("click", () => decide("approve"));
+    no.addEventListener("click", () => decide("reject"));
+    return card;
+  }
+
+  // ── rendering an answer ──
+  // Citations become numbered footnotes ([1], [2] …, one number per note)
+  // with a Sources list under the answer. An id that is not in the graph is
+  // struck through: the model invented it.
+  function renderAnswer(target, sources, text) {
+    const ids = [];
+    const md = text.replace(CITE, (_, id) => {
+      id = id.trim();
+      let n = ids.indexOf(id);
+      if (n < 0) n = ids.push(id) - 1;
+      return `@@CITE${n}@@`;
+    });
+    const viewer = window.schistViewer;
+    if (viewer) viewer.renderMarkdown(target, md);
+    else { target.classList.add("plain"); target.textContent = md; }
+    const label = id => viewer?.label(id) || null;
+    const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT);
+    const hits = [];
+    while (walker.nextNode()) if (walker.currentNode.nodeValue.includes("@@CITE")) hits.push(walker.currentNode);
+    for (const tn of hits) {
+      const parts = tn.nodeValue.split(/@@CITE(\d+)@@/);
+      const frag = document.createDocumentFragment();
+      parts.forEach((part, i) => {
+        if (i % 2 === 0) { if (part) frag.appendChild(document.createTextNode(part)); return; }
+        const n = Number(part), id = ids[n], name = label(id);
+        const b = el("button", "cite" + (name ? "" : " unknown"), `[${n + 1}]`);
+        b.type = "button";
+        b.title = name || `${id} — no note has this id; the model may have invented it`;
+        if (name) b.addEventListener("click", () => viewer.open(id));
+        frag.appendChild(b);
+      });
+      tn.replaceWith(frag);
+    }
+    const list = document.createDocumentFragment();
+    ids.forEach((id, n) => {
+      const name = label(id);
+      const row = el("button", "src" + (name ? "" : " unknown"));
+      row.type = "button";
+      row.appendChild(el("b", null, `[${n + 1}]`));
+      row.appendChild(document.createTextNode(name || id));
+      row.title = name ? id : "No note has this id; the model may have invented it";
+      if (name) row.addEventListener("click", () => viewer.open(id));
+      list.appendChild(row);
+    });
+    sources.replaceChildren(list);
+  }
+
+  // ── chat ──
+  function addTurn(question) {
+    log.appendChild(el("div", "msg-user", question));
+    const turn = el("div", "msg-agent");
+    const steps = el("details", "msg-steps");
+    steps.open = true;
+    steps.appendChild(el("summary", null, "working"));
+    const answer = el("div", "msg-answer");
+    const sources = el("div", "msg-sources");
+    turn.append(steps, answer, sources);
+    log.appendChild(turn);
+    return { turn, steps, answer, sources };
+  }
+
+  function scroll() { log.scrollTop = log.scrollHeight; }
+
+  async function ask(question) {
+    history.push({ role: "user", content: question });
+    const t = addTurn(question);
+    let text = "", pending = false, live = null, nsteps = 0;
+    const step = s => {
+      if (live) live.classList.remove("live");
+      live = el("div", "live", s);
+      t.steps.appendChild(live);
+      nsteps++;
+      scroll();
+    };
+    const paint = () => {
+      if (pending) return;
+      pending = true;
+      requestAnimationFrame(() => { pending = false; renderAnswer(t.answer, t.sources, text); scroll(); });
+    };
+    controller = new AbortController();
+    send.textContent = "Stop"; send.classList.add("stop"); send.disabled = false;
+    let finished = false, failed = null;
+    try {
+      const r = await fetch("api/agent/chat", {
+        method: "POST", headers: HDR, signal: controller.signal,
+        body: JSON.stringify({ messages: history }),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.reason || `HTTP ${r.status}`);
+      }
+      const reader = r.body.getReader(), dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let cut;
+        while ((cut = buf.indexOf("\n\n")) >= 0) {
+          const line = buf.slice(0, cut); buf = buf.slice(cut + 2);
+          if (!line.startsWith("data: ")) continue;
+          let ev;
+          try { ev = JSON.parse(line.slice(6)); } catch { continue; }
+          const kind = ev.type;
+          if (kind === "step") step(ev.text);
+          else if (kind === "token") { text += ev.text; paint(); }
+          else if (kind === "interim") {
+            // The text so far was the model narrating its plan, not the answer.
+            if (text.trim()) step(text.trim().replace(CITE, "$1").slice(0, 300));
+            text = ""; paint();
+          } else if (kind === "proposal") {
+            const chip = el("button", "proposal-chip", `proposal filed: ${ev.title} — review`);
+            chip.type = "button";
+            chip.addEventListener("click", () => showPane("proposals"));
+            t.turn.insertBefore(chip, t.answer);
+            loadProposals();
+          } else if (kind === "error") failed = ev.message;
+          else if (kind === "done") finished = true;
+        }
+      }
+    } catch (err) {
+      failed = err.name === "AbortError" ? "stopped" : err.message;
+    }
+    controller = null;
+    send.textContent = "Ask"; send.classList.remove("stop"); send.disabled = !available;
+    if (live) live.classList.remove("live");
+    renderAnswer(t.answer, t.sources, text);
+    t.steps.firstChild.textContent = `${nsteps} step${nsteps === 1 ? "" : "s"}`;
+    t.steps.open = false;
+    if (failed || !finished) t.turn.appendChild(el("div", "msg-error", failed || "the answer was cut off"));
+    if (text.trim()) history.push({ role: "assistant", content: text });
+    else history.pop();   // keep the history a clean user/assistant alternation
+    scroll();
+  }
+
+  // ── wiring ──
+  function showPane(id) {
+    document.querySelectorAll(".ask-tab").forEach(b => b.classList.toggle("active", b.dataset.pane === id));
+    log.hidden = id !== "ask-log";
+    props.hidden = id !== "proposals";
+    form.hidden = id !== "ask-log";
+    if (id === "proposals") loadProposals();
+  }
+  document.querySelectorAll(".ask-tab").forEach(b => b.addEventListener("click", () => showPane(b.dataset.pane)));
+  btn.addEventListener("click", () => {
+    panel.classList.toggle("open");
+    if (panel.classList.contains("open")) { status(); loadProposals(); input.focus(); }
+  });
+  $("ask-close").addEventListener("click", () => panel.classList.remove("open"));
+  $("ask-new").addEventListener("click", () => {
+    if (controller) controller.abort();
+    history = []; log.replaceChildren();
+  });
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    if (controller) { controller.abort(); return; }
+    const q = input.value.trim();
+    if (!q || !available) return;
+    input.value = ""; input.style.height = "";
+    ask(q);
+  });
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); form.requestSubmit(); }
+  });
+  input.addEventListener("input", () => {
+    input.style.height = "";
+    input.style.height = Math.min(input.scrollHeight, 140) + "px";
+  });
+
+  status();
+  loadProposals();
+  setInterval(() => { status(); loadProposals(); }, 60000);
 })();
 </script>
 </body>
