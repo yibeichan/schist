@@ -409,6 +409,21 @@ class TestShapeContract:
             assert re.search(r'integrity="sha(256|384|512)-[A-Za-z0-9+/=]+"', tag), f"no integrity: {src}"
             assert 'crossorigin="anonymous"' in tag, f"no crossorigin: {src}"
 
+    def test_button_rows_reset_the_browser_button_look(self):
+        """Result and connection rows are <button>s. Without a reset they take
+        the browser's default button background and text colour, so on the
+        dark page each row is a white box with dark text."""
+        classes = set(re.findall(r'el\("button",\s*"([\w-]+)', self.PAGE))
+        assert {"result-item", "conn-item"} <= classes  # guards against a regex that matches nothing
+        css = re.sub(r"/\*.*?\*/", "", self.PAGE, flags=re.S)
+        rules = re.findall(r"([^{}]+)\{([^}]*)\}", css)
+        for cls in classes:
+            decls = " ".join(body for sel, body in rules
+                             if f".{cls}" in [s.strip() for s in sel.split(",")])
+            assert re.search(r"background:\s*(transparent|none)", decls), f".{cls} keeps the button background"
+            assert re.search(r"color:\s*inherit", decls), f".{cls} keeps the button text colour"
+            assert re.search(r"text-align:\s*left", decls), f".{cls} keeps centred button text"
+
     def test_page_reads_only_fields_the_builder_writes(self, vault_db):
         graph = build.build_graph(vault_db)
         search = build.build_search_index(vault_db)
