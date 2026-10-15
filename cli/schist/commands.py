@@ -676,6 +676,15 @@ def build(args, vault_path: str, db_path: str):
         raise SchemaConfigError(str(e)) from e
 
 
+def serve(args, vault_path: str, db_path: str):
+    """Serve the viewer with its rebuild, agent and proposal API (viewer/serve.py)."""
+    from .viewer.serve import serve as run
+
+    sqlite_query.get_db(vault_path, db_path).close()
+    run(vault_path, db_path, args.out, args.host, args.port,
+        args.model, args.ollama_url, args.no_agent)
+
+
 def context(args, vault_path: str, db_path: str):
     """Print vault context summary."""
     db = sqlite_query.get_db(vault_path, db_path)
