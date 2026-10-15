@@ -96,3 +96,98 @@ def test_unwritable_lock_file_still_locks(tmp_path):
         with pytest.raises(BlockingIOError):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         os.close(fd)
+
+
+# #745 — re-entry is per thread. A second thread of the same process must wait
+# for the first, not re-enter the lock without it.
+
+def _hold_in_thread(vault):
+    held, release = threading.Event(), threading.Event()
+    errors = []
+
+    def run():
+        try:
+            with git_ops.vault_write_lock(vault):
+                held.set()
+                release.wait(10)
+        except BaseException as e:  # surfaced by the caller
+            errors.append(e)
+            held.set()
+
+    t = threading.Thread(target=run)
+    t.start()
+    assert held.wait(10)
+    return t, release, errors
+
+
+def test_second_thread_waits_and_times_out(tmp_path):
+    import socket
+    t, release, errors = _hold_in_thread(str(tmp_path))
+    try:
+        with pytest.raises(git_ops.VaultLockTimeout) as ei:
+            with git_ops.vault_write_lock(str(tmp_path), timeout=0.3):
+                pass
+        assert ei.value.holder.startswith(f"{socket.gethostname()}:{os.getpid()}")
+    finally:
+        release.set(); t.join(10)
+    assert not errors
+    # Once the first thread lets go, this one gets it.
+    with git_ops.vault_write_lock(str(tmp_path), timeout=1):
+        pass
+
+
+def test_waiting_thread_never_opens_the_lock_file(tmp_path, monkeypatch):
+    # On NFS, closing any fd on write.lock drops the POSIX lock the holding
+    # thread has, so a thread waiting on the in-process lock must neither open
+    # the file nor read the holder note from it.
+    t, release, errors = _hold_in_thread(str(tmp_path))
+    opened = []
+    real_open = git_ops._open_lock_file
+    monkeypatch.setattr(git_ops, "_open_lock_file",
+                        lambda p: (opened.append(p), real_open(p))[1])
+    monkeypatch.setattr(git_ops, "read_holder",
+                        lambda v: pytest.fail("read_holder called while this process holds the lock"))
+    try:
+        with pytest.raises(git_ops.VaultLockTimeout):
+            with git_ops.vault_write_lock(str(tmp_path), timeout=0.3):
+                pass
+        assert opened == []
+        assert _flock_is_held(tmp_path / ".schist" / "write.lock")
+    finally:
+        release.set(); t.join(10)
+    assert not errors
+
+
+def test_threads_take_turns(tmp_path):
+    inside, overlaps, errors = [], [], []
+
+    def run():
+        try:
+            for _ in range(5):
+                with git_ops.vault_write_lock(str(tmp_path)):
+                    inside.append(1)
+                    if len(inside) > 1:
+                        overlaps.append(1)
+                    time.sleep(0.01)
+                    with git_ops.vault_write_lock(str(tmp_path), timeout=0.5):
+                        pass  # re-entry in the same thread still works
+                    inside.pop()
+        except BaseException as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=run) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert not errors
+    assert not overlaps
+    assert not _flock_is_held(tmp_path / ".schist" / "write.lock")
+
+
+@pytest.mark.parametrize("timeout", [1e10, float("inf")])
+def test_timeout_beyond_lock_acquire_range(tmp_path, timeout):
+    # threading.Lock.acquire raises OverflowError above TIMEOUT_MAX; the lock
+    # must still accept any timeout the flock wait does.
+    with git_ops.vault_write_lock(str(tmp_path), timeout=timeout):
+        pass

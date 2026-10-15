@@ -23,8 +23,13 @@ LOCK_FILENAME = "write.lock"
 # excluded from new writers. Remove after the next release.
 LEGACY_LOCK_FILENAME = "cli-write.lock"
 _LEGACY_HOLDER = "unknown (an older schist CLI holding .schist/cli-write.lock)"
-_held: dict = {}  # realpath -> re-entrancy depth, per process
-_held_guard = threading.Lock()
+# Re-entry is per thread (#745): a per-thread depth count, keyed by the vault's
+# realpath, plus one threading.Lock per key that a thread holds from before it
+# opens write.lock until after it closes it, so the threads of one process take
+# turns.
+_held = threading.local()  # .depth: realpath -> re-entrancy depth, this thread
+_thread_locks: dict = {}  # realpath -> threading.Lock
+_thread_locks_guard = threading.Lock()
 
 
 class VaultLockTimeout(Exception):
@@ -70,6 +75,36 @@ def _open_lock_file(lock_path: str) -> "tuple[int, bool]":
                 file=sys.stderr,
             )
             sys.exit(1)
+
+
+def _thread_lock(key: str) -> threading.Lock:
+    with _thread_locks_guard:
+        return _thread_locks.setdefault(key, threading.Lock())
+
+
+def _wait_for_thread_lock(lock: threading.Lock, timeout: "float | None", start: float) -> None:
+    """Take the in-process lock, with the same timeout and wait notice as
+    _wait_for_flock. Another thread of this process holds write.lock or is
+    waiting for it, and may get it at any moment, so the holder is named
+    without opening the file (see vault_write_lock)."""
+    import socket
+    import sys
+    import time
+
+    def holder():
+        return (f"{socket.gethostname()}:{os.getpid()} "
+                f"(another thread of this process, holding the lock or waiting for it)")
+
+    if timeout is not None:
+        # Lock.acquire raises OverflowError above TIMEOUT_MAX (about 292
+        # years), where the flock wait accepts any timeout.
+        left = min(max(0.0, timeout - (time.monotonic() - start)), threading.TIMEOUT_MAX)
+        if not lock.acquire(timeout=left):
+            raise VaultLockTimeout(holder())
+        return
+    if not lock.acquire(timeout=2):
+        print(f'waiting for vault write lock (held by {holder()})…', file=sys.stderr)
+        lock.acquire()
 
 
 def _wait_for_flock(fd: int, timeout: "float | None", start: float, holder) -> None:
@@ -122,9 +157,14 @@ def vault_write_lock(vault_path: str, timeout: "float | None" = None):
 
     Every writer takes this lock, the MCP server included (#724), so the
     CLI and MCP no longer race on read-modify-writes or on the git index.
-    The lock is re-entrant within a process (a per-process depth count keyed
+    The lock is re-entrant within a thread (a per-thread depth count keyed
     by the vault's realpath), because flock on a second fd of the same file
-    would deadlock against ourselves. With `timeout` (seconds) it raises
+    would deadlock against ourselves. Threads of one process take turns on a
+    per-key threading.Lock, taken before the lock file is opened and held
+    until it is closed (#745): on NFS the flock belongs to the process, so it
+    cannot keep two threads apart (see the NFS note below). Coroutines that share
+    a thread share its depth count, so none may hold the lock across an
+    await. With `timeout` (seconds) it raises
     VaultLockTimeout, carrying the holder note, instead of waiting forever.
     The holder ("host:pid") is written into the lock file for diagnostics.
 
@@ -137,29 +177,41 @@ def vault_write_lock(vault_path: str, timeout: "float | None" = None):
     the file drops them. Invariant: never open or close write.lock while
     holding it. The fd that holds the lock is the only one this process
     keeps on the file, and read_holder (which opens it) runs only while
-    waiting for the lock, never while holding it.
+    waiting for the lock, never while holding it. A thread waiting on the
+    in-process lock touches neither the file nor read_holder, since another
+    thread of this process holds the lock.
     """
-    import fcntl
-    import socket
     import time
 
     key = os.path.realpath(vault_path)
-    with _held_guard:
-        reentered = _held.get(key, 0) > 0
-        if reentered:
-            _held[key] += 1
-    if reentered:
+    depth = getattr(_held, 'depth', None)
+    if depth is None:
+        depth = _held.depth = {}
+    if depth.get(key, 0) > 0:
+        depth[key] += 1
         try:
             yield
         finally:
-            with _held_guard:
-                _held[key] -= 1
+            depth[key] -= 1
         return
+
+    start = time.monotonic()
+    thread_lock = _thread_lock(key)
+    _wait_for_thread_lock(thread_lock, timeout, start)
+    try:
+        yield from _hold_vault_flock(vault_path, key, depth, timeout, start)
+    finally:
+        thread_lock.release()
+
+
+def _hold_vault_flock(vault_path, key, depth, timeout, start):
+    """vault_write_lock's flock half, run while holding the in-process lock."""
+    import fcntl
+    import socket
 
     os.makedirs(os.path.join(vault_path, '.schist'), exist_ok=True)
     fd, writable = _open_lock_file(_lock_path(vault_path))
     try:
-        start = time.monotonic()
         _wait_for_flock(fd, timeout, start, lambda: read_holder(vault_path))
         try:
             if writable:
@@ -174,13 +226,11 @@ def vault_write_lock(vault_path: str, timeout: "float | None" = None):
             legacy_fd, _ = _open_lock_file(_lock_path(vault_path, LEGACY_LOCK_FILENAME))
             try:
                 _wait_for_flock(legacy_fd, timeout, start, lambda: _LEGACY_HOLDER)
-                with _held_guard:
-                    _held[key] = 1
+                depth[key] = 1
                 try:
                     yield
                 finally:
-                    with _held_guard:
-                        _held.pop(key, None)
+                    depth.pop(key, None)
                     fcntl.flock(legacy_fd, fcntl.LOCK_UN)
             finally:
                 os.close(legacy_fd)

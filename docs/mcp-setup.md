@@ -233,7 +233,8 @@ gives up waiting for the lock after that long, changes nothing, and exits 75;
 the server's pull before a read passes `--lock-timeout 1`, so a pull that
 cannot get the lock soon is skipped rather than killed mid-rebase by that
 pull's 5 s limit.
-The lock is re-entrant within a process.
+The lock is re-entrant within a thread; other threads of the same process
+wait for it like other processes do.
 
 Node has no portable `flock`, so the server holds the lock through a helper,
 `schist lock hold`, for the span of one write. Closing the helper's stdin
