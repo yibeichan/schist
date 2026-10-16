@@ -458,3 +458,144 @@ def test_binds_ipv6_loopback(vault, db_path):
         assert f'[::1]:{srv.server_address[1]}' in srv.allowed_hosts
     finally:
         srv.server_close()
+
+
+# ---------------------------------------------------------------------------
+# Pull before rebuild (a spoke)
+# ---------------------------------------------------------------------------
+
+class FakePull:
+    """Stands in for `schist sync pull`; records each command."""
+
+    def __init__(self, returncode=0, stderr='', raises=None, effect=None):
+        self.returncode, self.stderr, self.raises, self.effect = returncode, stderr, raises, effect
+        self.calls = []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append((cmd, kw))
+        if self.raises:
+            raise self.raises
+        if self.effect:
+            self.effect()
+        return subprocess.CompletedProcess(cmd, self.returncode, '', self.stderr)
+
+
+def _spoke_server(vault, db_path, runner, pull=True):
+    (vault / '.schist' / 'spoke.yaml').write_text('hub: x\nidentity: t\nscope: notes\n')
+    store = proposals_mod.ProposalStore(vault)
+    srv = serve_mod.ViewerServer(vault, db_path, vault / '.schist' / 'data', '127.0.0.1', 0,
+                                 None, store, TOKEN, pull=pull, runner=runner)
+    with srv.build_lock:
+        assert srv.rebuild()[0]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f'http://127.0.0.1:{srv.server_address[1]}'
+
+
+class TestPullBeforeRebuild:
+    H = {'X-Schist-Rebuild': '1'}
+
+    def _rebuild(self, base, timer=False):
+        code, body = _req(base + '/api/rebuild' + ('?if_changed=1' if timer else ''), 'POST', self.H)
+        return code, json.loads(body)
+
+    def test_runs_sync_pull_with_a_lock_timeout(self, vault, db_path):
+        fake = FakePull()
+        srv, base = _spoke_server(vault, db_path, fake)
+        try:
+            code, body = self._rebuild(base)
+            assert code == 200 and body['ok'] and body['pull']['ok']
+            cmd, kw = fake.calls[0]
+            assert cmd[-3:] == ['sync', 'pull', f'--lock-timeout={serve_mod.PULL_LOCK_TIMEOUT_S}']
+            assert kw['timeout'] == serve_mod.PULL_TIMEOUT_S and kw['stdin'] == subprocess.DEVNULL
+        finally:
+            srv.shutdown(); srv.server_close()
+
+    @pytest.mark.parametrize('fake,expect', [
+        (FakePull(returncode=75), 'pull skipped: the vault write lock is busy'),
+        (FakePull(returncode=1, stderr="Error: pull failed — fatal: 'origin' does not appear to be a git "
+                  "repository\nfatal: Could not read from remote repository.\n\nPlease make sure you "
+                  "have the correct access rights\nand the repository exists.\n"),
+         "pull failed: fatal: 'origin' does not appear to be a git repository"),
+        (FakePull(raises=subprocess.TimeoutExpired('pull', 60)), 'pull timed out after 60 s'),
+    ])
+    def test_a_failed_pull_still_rebuilds_and_is_reported(self, vault, db_path, fake, expect):
+        srv, base = _spoke_server(vault, db_path, fake)
+        try:
+            code, body = self._rebuild(base)
+            assert code == 200 and body['ok']
+            assert body['pull']['ok'] is False and body['pull']['message'].startswith(expect)
+            st = json.loads(_req(base + '/api/status')[1])
+            assert st['pulls'] is True and st['last_pull']['message'].startswith(expect)
+        finally:
+            srv.shutdown(); srv.server_close()
+
+    def test_timer_rebuilds_when_the_pull_brings_commits(self, vault, db_path):
+        # The unchanged check runs after the pull, so the hub's commits count.
+        def land_commit():
+            (vault / 'notes' / 'from-hub.md').write_text('---\ntitle: From hub\n---\n\nx\n')
+            _git(vault, 'add', '-A'); _git(vault, 'commit', '-qm', 'from hub')
+        srv, base = _spoke_server(vault, db_path, FakePull(effect=land_commit))
+        try:
+            code, body = self._rebuild(base, timer=True)
+            assert code == 200 and 'skipped' not in body
+            assert body['built_head'] == body['vault_head'] == _git(vault, 'rev-parse', 'HEAD')
+        finally:
+            srv.shutdown(); srv.server_close()
+
+    def test_no_pull_and_non_spokes_do_not_pull(self, vault, db_path, server):
+        fake = FakePull()
+        srv, base = _spoke_server(vault, db_path, fake, pull=False)
+        try:
+            code, body = self._rebuild(base)
+            assert code == 200 and body['pull'] is None and fake.calls == []
+            assert json.loads(_req(base + '/api/status')[1])['pulls'] is False
+        finally:
+            srv.shutdown(); srv.server_close()
+        (vault / '.schist' / 'spoke.yaml').unlink()        # no longer a spoke
+        _, plain = server
+        code, body = self._rebuild(plain)
+        assert code == 200 and body['pull'] is None
+
+
+@pytest.mark.integration
+def test_real_pull_from_a_hub(tmp_path, monkeypatch):
+    """`schist sync pull` for real, against a local bare hub."""
+    import sys
+    from types import SimpleNamespace
+    from schist.sync import init_hub
+
+    def cli(vault, *args, identity):
+        env = {**os.environ, 'SCHIST_IDENTITY': identity}
+        subprocess.run([sys.executable, '-m', 'schist', '--vault', str(vault), *args],
+                       check=True, capture_output=True, text=True, env=env)
+
+    hub = tmp_path / 'hub.git'
+    init_hub(SimpleNamespace(name='t', participant=['alpha', 'beta']), str(hub))
+    alpha, beta = tmp_path / 'alpha', tmp_path / 'beta'
+    for path, who in ((alpha, 'alpha'), (beta, 'beta')):
+        cli(path, 'init', '--spoke', '--hub', f'file://{hub}', '--scope', f'research/{who}',
+            '--identity', who, identity=who)
+        _git(path, 'config', 'user.email', f'{who}@t'); _git(path, 'config', 'user.name', who)
+    note = alpha / 'research' / 'alpha' / '2026-10-16-from-alpha.md'
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text('---\ntitle: from alpha\ndate: 2026-10-16\nstatus: draft\n---\n\nhi\n')
+    _git(alpha, 'add', '-A'); _git(alpha, 'commit', '-qm', 'alpha: add note')
+    cli(alpha, 'sync', 'push', identity='alpha')
+
+    monkeypatch.setenv('SCHIST_IDENTITY', 'beta')
+    db = beta / '.schist' / 'schist.db'
+    sqlite_query.get_db(str(beta), str(db)).close()
+    srv = serve_mod.ViewerServer(beta, db, beta / '.schist' / 'data', '127.0.0.1', 0, None,
+                                 proposals_mod.ProposalStore(beta), TOKEN)
+    try:
+        before = _git(beta, 'rev-parse', 'HEAD')
+        with srv.build_lock:
+            result = srv.pull()
+        assert result['ok'], result
+        assert result['message'].startswith('pulled ') and result['message'].endswith(('commit', 'commits'))
+        assert _git(beta, 'rev-parse', 'HEAD') != before
+        assert 'alpha: add note' in _git(beta, 'log', '--oneline')
+        with srv.build_lock:
+            assert srv.pull()['message'] == 'already up to date'
+    finally:
+        srv.server_close()

@@ -708,8 +708,10 @@
 <script>
 // ── Rebuild button ──────────────────────────────────────────────────────────
 // A local server may offer GET /api/status ({built_at, built_head, vault_head,
-// building}) and POST /api/rebuild, which needs the X-Schist-Rebuild header
-// (a cross-site form cannot send it). Served any other way — a plain static
+// building, pulls, last_pull}) and POST /api/rebuild, which needs the
+// X-Schist-Rebuild header (a cross-site form cannot send it). On a spoke
+// (`pulls`), a rebuild pulls from the hub first; last_pull {at, ok, message}
+// says how that went, and a failed pull still rebuilds from the local vault. Served any other way — a plain static
 // server, a copy of the site — /api/status fails and the bar stays hidden.
 // This runs apart from the graph script, so a rebuild can repair a site
 // whose data failed to load.
@@ -718,7 +720,7 @@
   const dot = document.getElementById("build-dot");
   const statusEl = document.getElementById("build-status");
   const btn = document.getElementById("rebuild-btn");
-  let busy = false;
+  let busy = false, pulls = false;
 
   function ago(epochSeconds) {
     const s = Math.max(0, Math.round(Date.now() / 1000 - epochSeconds));
@@ -740,10 +742,14 @@
     const stale = !!st.built_head && !!st.vault_head && st.built_head !== st.vault_head;
     dot.className = stale ? "stale" : "fresh";
     dot.title = stale ? "The vault has commits this build does not include" : "Built from the current vault commit";
-    statusEl.textContent = st.building ? "building…" : `built ${ago(st.built_at)}${stale ? " · stale" : ""}`;
+    pulls = !!st.pulls;
+    const lp = st.last_pull && typeof st.last_pull === "object" ? st.last_pull : null;
+    const lpNote = lp && !lp.ok ? (String(lp.message).startsWith("pull skipped") ? " · pull skipped" : " · pull failed") : "";
+    statusEl.textContent = st.building ? "building…" : `built ${ago(st.built_at)}${stale ? " · stale" : ""}${lpNote}`;
     statusEl.title = `built ${new Date(st.built_at * 1000).toLocaleString()}` +
       (st.built_head ? `, from ${String(st.built_head).slice(0, 7)}` : "") +
-      (st.vault_head ? `; vault at ${String(st.vault_head).slice(0, 7)}` : "");
+      (st.vault_head ? `; vault at ${String(st.vault_head).slice(0, 7)}` : "") +
+      (lp ? `\nlast pull (${ago(lp.at)}): ${lp.message}` : "");
     if (!busy) btn.disabled = !!st.building;
     bar.hidden = false;
   }
@@ -763,7 +769,7 @@
   btn.addEventListener("click", async () => {
     busy = true;
     btn.disabled = true;
-    statusEl.textContent = "rebuilding…";
+    statusEl.textContent = pulls ? "pulling, then rebuilding…" : "rebuilding…";
     statusEl.title = "";
     let r, body = {};
     try {
@@ -785,6 +791,7 @@
       // Kept until the next periodic refresh; the log tail is in the tooltip.
       statusEl.textContent = `rebuild failed (HTTP ${r.status})`;
       if (body.log) statusEl.title = String(body.log);
+      if (body.pull && body.pull.message) statusEl.title = `${body.pull.message}\n${statusEl.title}`;
     }
     busy = false;
     btn.disabled = false;

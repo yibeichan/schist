@@ -138,6 +138,8 @@ def main():
     p_serve.add_argument('--model', default=os.environ.get('SCHIST_AGENT_MODEL', 'qwen3.5:9b'), help='Ollama model for the agent')
     p_serve.add_argument('--ollama-url', default=os.environ.get('OLLAMA_HOST_URL', 'http://127.0.0.1:11434'), dest='ollama_url')
     p_serve.add_argument('--no-agent', action='store_true', dest='no_agent', help='Serve the site and rebuild endpoint only')
+    p_serve.add_argument('--no-pull', action='store_true', dest='no_pull',
+                         help='Rebuild from the local vault only; by default a spoke pulls from the hub first')
 
     # context
     p_context = sub.add_parser('context', help='Print vault context summary')

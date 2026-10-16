@@ -81,7 +81,8 @@ reach 127.0.0.1, so on a shared login node forward the port over SSH from a host
 you do not share instead.
 
 `schist serve` (`cli/schist/viewer/serve.py`) does that and adds a small API on
-the same port: `/api/status` and `/api/rebuild` (staged rebuild, single-flight,
+the same port: `/api/status` and `/api/rebuild` (on a spoke a pull from the hub
+first, unless `--no-pull`; then a staged rebuild, single-flight,
 cooldown), `/api/agent/*` (a local Ollama tool-calling agent, `agent.py`, whose
 read tools open the index with SQLite `mode=ro`) and `/api/proposals/*`
 (`proposals.py`: the agent's only write path is filing a proposal under

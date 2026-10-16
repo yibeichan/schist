@@ -1,7 +1,15 @@
 """`schist serve`: the viewer site plus its local API, on loopback.
 
-  GET  /api/status                  {built_at, built_head, vault_head, building}
-  POST /api/rebuild[?if_changed=1]  rebuild the site (niced); 409 busy, 429 cooldown
+  GET  /api/status                  {built_at, built_head, vault_head, building, pulls, last_pull}
+  POST /api/rebuild[?if_changed=1]  pull from the hub (a spoke), then rebuild the site
+                                    (niced); 409 busy, 429 cooldown
+
+On a spoke, a rebuild first runs `schist sync pull --lock-timeout 5`, so the
+site includes other spokes' notes; `--no-pull` turns that off. A pull that
+fails, times out or finds the write lock busy only means the rebuild uses what
+is local: its outcome is reported, as `last_pull` in the status, and never
+blocks the rebuild. A vault with uncommitted edits refuses to pull; it is not
+autostashed from here.
   GET  /api/agent/status            {available, model, reason?}
   POST /api/agent/chat              SSE stream of agent events (see agent.py)
   GET  /api/proposals               pending and failed proposals
@@ -39,10 +47,13 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from ..sync import PULL_LOCK_BUSY_EXIT
 from . import agent as agent_mod
 from . import proposals as proposals_mod
 
 COOLDOWN_S = 30
+PULL_TIMEOUT_S = 60
+PULL_LOCK_TIMEOUT_S = 5
 MAX_BODY_BYTES = 256 * 1024
 LOOPBACK_HOSTS = ('127.0.0.1', 'localhost', '[::1]')
 TOKEN_FILE = 'serve-token'
@@ -71,17 +82,33 @@ def load_or_create_token(vault: Path) -> str:
     return token
 
 
+def _pull_error(r: subprocess.CompletedProcess) -> str:
+    """The line that says why a pull failed. `schist sync pull` leads with its
+    own `Error: ...` line; git's output after it ends with advice ("and the
+    repository exists.") that names no cause."""
+    lines = [ln.strip() for ln in f'{r.stderr or ""}\n{r.stdout or ""}'.splitlines() if ln.strip()]
+    pick = (next((ln for ln in lines if ln.startswith('Error:')), None)
+            or next((ln for ln in lines if ln.startswith('fatal:')), None)
+            or (lines[-1] if lines else f'exit {r.returncode}'))
+    for prefix in ('Error: ', 'pull failed — ', 'pull failed: '):
+        pick = pick.removeprefix(prefix)
+    return pick[:300]
+
+
 class ViewerServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, vault: Path, db: Path, out: Path, host: str, port: int,
                  agent: agent_mod.Agent | None, store: proposals_mod.ProposalStore,
-                 token: str):
+                 token: str, pull: bool = True, runner=subprocess.run):
         self.vault, self.db, self.out = Path(vault), Path(db), Path(out)
         self.staging = self.out.with_name(self.out.name + '.staging')
         self.stamp = self.vault / '.schist' / 'viewer-built-head'
         self.agent, self.store = agent, store
         self.token = token
+        self.pull_enabled = pull
+        self.last_pull: dict | None = None
+        self._run = runner   # injectable for tests
         self.build_lock = threading.Lock()
         self.chat_lock = threading.Lock()   # one question at a time
         self.last_manual = 0.0
@@ -97,9 +124,43 @@ class ViewerServer(http.server.ThreadingHTTPServer):
     # -- site ---------------------------------------------------------------
 
     def vault_head(self) -> str:
-        r = subprocess.run(['git', '-C', str(self.vault), 'rev-parse', 'HEAD'],
-                           capture_output=True, text=True)
-        return r.stdout.strip()
+        return self._git('rev-parse', 'HEAD')
+
+    def _git(self, *args: str) -> str:
+        r = subprocess.run(['git', '-C', str(self.vault), *args], capture_output=True, text=True)
+        return r.stdout.strip() if r.returncode == 0 else ''
+
+    def pulls(self) -> bool:
+        return self.pull_enabled and (self.vault / '.schist' / 'spoke.yaml').exists()
+
+    def pull(self) -> dict | None:
+        """Pull from the hub before a rebuild. Never raises: the outcome is
+        returned and kept as last_pull. None when this vault does not pull
+        (not a spoke, or --no-pull). Caller holds build_lock."""
+        if not self.pulls():
+            return None
+        before = self.vault_head()
+        cmd = [sys.executable, '-m', 'schist', f'--vault={self.vault}', f'--db={self.db}',
+               'sync', 'pull', f'--lock-timeout={PULL_LOCK_TIMEOUT_S}']
+        try:
+            r = self._run(cmd, capture_output=True, text=True, timeout=PULL_TIMEOUT_S,
+                          stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            ok, message = False, f'pull timed out after {PULL_TIMEOUT_S} s; is the hub reachable?'
+        else:
+            if r.returncode == 0:
+                # Commits that came from the hub: the upstream's, not HEAD's,
+                # since a rebase also rewrites unpushed local commits.
+                new = self._git('rev-list', '--count', f'{before}..@{{upstream}}') if before else ''
+                n = int(new) if new.isdigit() else 0
+                ok = True
+                message = 'already up to date' if n == 0 else f'pulled {n} new commit{"s" if n != 1 else ""}'
+            elif r.returncode == PULL_LOCK_BUSY_EXIT:
+                ok, message = False, 'pull skipped: the vault write lock is busy'
+            else:
+                ok, message = False, f'pull failed: {_pull_error(r)}'
+        self.last_pull = {'at': time.time(), 'ok': ok, 'message': message}
+        return self.last_pull
 
     def status(self) -> dict:
         page = self.out / 'index.html'
@@ -108,6 +169,8 @@ class ViewerServer(http.server.ThreadingHTTPServer):
             'built_head': self.stamp.read_text().strip() if self.stamp.exists() else None,
             'vault_head': self.vault_head(),
             'building': self.build_lock.locked(),
+            'pulls': self.pulls(),
+            'last_pull': self.last_pull,
         }
 
     def rebuild(self) -> tuple[bool, str]:
@@ -272,19 +335,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not srv.build_lock.acquire(blocking=False):
             return self._json(409, {'ok': False, 'reason': 'rebuild already running'})
         try:
-            st = srv.status()
-            if timer and st['built_head'] == st['vault_head']:
-                return self._json(200, {'ok': True, 'skipped': 'unchanged', **st})
             if not timer and time.time() - srv.last_manual < COOLDOWN_S:
                 return self._json(429, {'ok': False, 'reason': f'cooldown {COOLDOWN_S}s'})
             if not timer:
                 srv.last_manual = time.time()
+            # Pull first, so the timer's unchanged check sees the hub's commits.
+            pulled = srv.pull()
+            st = srv.status()
+            if timer and st['built_head'] == st['vault_head']:
+                return self._json(200, {'ok': True, 'skipped': 'unchanged', 'pull': pulled, **st})
             t0 = time.time()
             ok, log = srv.rebuild()
         finally:
             srv.build_lock.release()
         return self._json(200 if ok else 500, {'ok': ok, 'seconds': round(time.time() - t0, 2),
-                                               'log': log, **srv.status()})
+                                               'log': log, 'pull': pulled, **srv.status()})
 
     def _chat(self):
         srv = self.server
@@ -328,13 +393,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 def serve(vault: str, db: str, out: str | None, host: str, port: int,
-          model: str, ollama_url: str, no_agent: bool) -> None:
+          model: str, ollama_url: str, no_agent: bool, no_pull: bool = False) -> None:
     vault_p = Path(vault).resolve()
     out_p = Path(out) if out else vault_p / '.schist' / 'data'
     store = proposals_mod.ProposalStore(vault_p, Path(db))
     agent = None if no_agent else agent_mod.Agent(Path(db), store, model=model, ollama_url=ollama_url)
     token = load_or_create_token(vault_p)
-    srv = ViewerServer(vault_p, Path(db), out_p, host, port, agent, store, token)
+    srv = ViewerServer(vault_p, Path(db), out_p, host, port, agent, store, token, pull=not no_pull)
     if not (out_p / 'index.html').exists():
         with srv.build_lock:
             ok, log = srv.rebuild()

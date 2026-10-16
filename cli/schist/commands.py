@@ -682,7 +682,7 @@ def serve(args, vault_path: str, db_path: str):
 
     sqlite_query.get_db(vault_path, db_path).close()
     run(vault_path, db_path, args.out, args.host, args.port,
-        args.model, args.ollama_url, args.no_agent)
+        args.model, args.ollama_url, args.no_agent, getattr(args, 'no_pull', False))
 
 
 def context(args, vault_path: str, db_path: str):
