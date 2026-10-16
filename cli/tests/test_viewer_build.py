@@ -503,6 +503,16 @@ class TestShapeContract:
         for tag in ("img", "iframe", "video", "audio", "object", "embed"):
             assert f'"{tag}"' in forbid, f"<{tag}> is not forbidden"
 
+    def test_agent_answers_have_no_clickable_links(self):
+        """An agent answer can be steered by a note it read; a link in it could
+        carry vault text to another host behind harmless link text. The
+        answer renderer must turn every <a> into plain text."""
+        fn = re.search(r"function renderAnswer\(.*?\n  \}\n", self.PAGE, re.S)
+        assert fn, "renderAnswer not found"
+        body = fn.group(0)
+        assert re.search(r'querySelectorAll\("a"\)', body)
+        assert re.search(r"\.replaceWith\(document\.createTextNode\(", body)
+
     def test_page_reads_only_fields_the_builder_writes(self, vault_db):
         graph = build.build_graph(vault_db)
         search = build.build_search_index(vault_db)

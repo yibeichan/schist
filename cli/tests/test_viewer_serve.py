@@ -10,6 +10,7 @@ import os
 import socket
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -98,6 +99,22 @@ class TestReadTools:
         import sqlite3
         with pytest.raises(sqlite3.OperationalError):
             ro.execute("DELETE FROM docs")
+
+    @pytest.mark.parametrize('name', ['a#b', 'a?b', 'a%20b', 'a b'])
+    def test_read_only_index_in_a_path_with_uri_characters(self, db_path, tmp_path, name):
+        import shutil
+        import sqlite3
+        d = tmp_path / name / '.schist'
+        d.mkdir(parents=True)
+        shutil.copy(db_path, d / 'schist.db')
+        db = agent_mod.connect_ro(d / 'schist.db')
+        try:
+            assert db.execute('SELECT count(*) FROM docs').fetchone()[0] > 0
+            with pytest.raises(sqlite3.OperationalError):
+                db.execute('DELETE FROM docs')
+        finally:
+            db.close()
+        assert sorted(p.name for p in tmp_path.iterdir()) == sorted(['vault', name])
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +420,22 @@ class TestServer:
         assert _req(base + '/api/rebuild', 'OPTIONS',
                     headers={'Origin': 'https://evil.example'})[0] >= 400
 
+    def test_rebuild_that_times_out_answers_500_and_frees_the_lock(self, server, monkeypatch):
+        srv, base = server
+        page = (srv.out / 'index.html').read_bytes()
+        real_run = subprocess.run
+
+        def slow_build(cmd, **kw):
+            if 'build' in cmd:
+                raise subprocess.TimeoutExpired(cmd, kw.get('timeout'))
+            return real_run(cmd, **kw)
+        monkeypatch.setattr(serve_mod.subprocess, 'run', slow_build)
+        code, body = _req(base + '/api/rebuild', 'POST', {'X-Schist-Rebuild': '1'})
+        out = json.loads(body)
+        assert code == 500 and out['ok'] is False and 'timed out' in out['log']
+        assert not srv.build_lock.locked() and not srv.staging.exists()
+        assert (srv.out / 'index.html').read_bytes() == page
+
     def test_rebuild_skip_and_cooldown(self, server):
         _, base = server
         h = {'X-Schist-Rebuild': '1'}
@@ -425,8 +458,27 @@ class TestServer:
         code, body = _req(base + '/api/proposals')
         assert [x['id'] for x in json.loads(body)] == [p['id']]
         assert _req(base + f'/api/proposals/{p["id"]}/approve', 'POST')[0] == 403
+        before = srv.status()['built_head']
         code, body = _req(base + f'/api/proposals/{p["id"]}/approve', 'POST', {'X-Schist-Agent': '1'})
-        assert code == 200 and json.loads(body)['status'] == 'approved'
+        out = json.loads(body)
+        assert code == 200 and out['status'] == 'approved' and out['rebuilding'] is True
+        # A background rebuild runs at the new commit. (Whether the site shows
+        # the note depends on the index, which a spoke's post-commit hook
+        # refreshes; this fixture vault has no hook.)
+        for _ in range(100):
+            st = srv.status()
+            if not st['building'] and st['built_head'] != before:
+                break
+            time.sleep(0.1)
+        assert st['built_head'] == st['vault_head'] != before
+
+    def test_approve_while_a_rebuild_runs_does_not_claim_a_rebuild(self, server, ro):
+        srv, base = server
+        p = srv.store.propose_note(ro, title='During a build', body='b', rationale='r')
+        with srv.build_lock:
+            code, body = _req(base + f'/api/proposals/{p["id"]}/approve', 'POST', {'X-Schist-Agent': '1'})
+        out = json.loads(body)
+        assert code == 200 and out['status'] == 'approved' and out['rebuilding'] is False
 
 
 class TestToken:

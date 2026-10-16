@@ -54,6 +54,7 @@ from . import proposals as proposals_mod
 COOLDOWN_S = 30
 PULL_TIMEOUT_S = 60
 PULL_LOCK_TIMEOUT_S = 5
+BUILD_TIMEOUT_S = 300
 MAX_BODY_BYTES = 256 * 1024
 LOOPBACK_HOSTS = ('127.0.0.1', 'localhost', '[::1]')
 TOKEN_FILE = 'serve-token'
@@ -183,14 +184,22 @@ class ViewerServer(http.server.ThreadingHTTPServer):
                'build', '--out', str(self.staging)]
         if shutil.which('nice'):
             cmd = ['nice', '-n', '10', *cmd]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=BUILD_TIMEOUT_S,
+                               stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            shutil.rmtree(self.staging, ignore_errors=True)
+            return False, f'schist build timed out after {BUILD_TIMEOUT_S} s; the site was not changed'
         if r.returncode != 0:
             return False, (r.stderr or r.stdout)[-2000:]
-        self.out.mkdir(parents=True, exist_ok=True)
-        for name in sorted((p.name for p in self.staging.iterdir()), key=lambda n: n == 'index.html'):
-            os.replace(self.staging / name, self.out / name)
-        self.staging.rmdir()
-        self.stamp.write_text(head + '\n')
+        try:
+            self.out.mkdir(parents=True, exist_ok=True)
+            for name in sorted((p.name for p in self.staging.iterdir()), key=lambda n: n == 'index.html'):
+                os.replace(self.staging / name, self.out / name)
+            self.staging.rmdir()
+            self.stamp.write_text(head + '\n')
+        except OSError as e:
+            return False, f'could not install the built site in {self.out}: {e}'
         return True, r.stdout[-2000:]
 
 
@@ -384,12 +393,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.close_connection = True
 
     def _decide(self, pid: str, action: str):
-        store = self.server.store
+        srv = self.server
         try:
-            p = store.approve(pid) if action == 'approve' else store.reject(pid)
+            p = srv.store.approve(pid) if action == 'approve' else srv.store.reject(pid)
         except proposals_mod.ProposalError as e:
             return self._json(400, {'ok': False, 'reason': str(e)})
-        return self._json(200, {'ok': p['status'] != proposals_mod.FAILED, **p})
+        # An approved proposal is a new commit: rebuild in the background so
+        # the site shows it. If a rebuild is already running it may have
+        # started before the commit, so the page asks for another instead.
+        rebuilding = p['status'] == proposals_mod.APPROVED and srv.build_lock.acquire(blocking=False)
+        if rebuilding:
+            def run():
+                try:
+                    srv.rebuild()
+                finally:
+                    srv.build_lock.release()
+            threading.Thread(target=run, daemon=True).start()
+        return self._json(200, {'ok': p['status'] != proposals_mod.FAILED, 'rebuilding': rebuilding, **p})
 
 
 def serve(vault: str, db: str, out: str | None, host: str, port: int,

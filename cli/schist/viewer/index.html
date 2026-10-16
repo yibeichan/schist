@@ -882,7 +882,9 @@
         const r = await fetch(`api/proposals/${encodeURIComponent(p.id)}/${action}`, { method: "POST", headers: HDR });
         const body = await r.json().catch(() => ({}));
         if (r.ok && body.ok) {
-          result.textContent = action === "approve" ? "approved and committed; the site rebuilds shortly" : "rejected";
+          result.textContent = action !== "approve" ? "rejected"
+            : body.rebuilding ? "approved and committed; rebuilding the site"
+            : "approved and committed; rebuild the site to see it";
           setTimeout(loadProposals, 1500);
           return;
         }
@@ -912,6 +914,15 @@
     const viewer = window.schistViewer;
     if (viewer) viewer.renderMarkdown(target, md);
     else { target.classList.add("plain"); target.textContent = md; }
+    // An answer is model output, and a note the model read can steer it, so
+    // a link in an answer could carry other notes' text in its URL behind
+    // innocent link text. Show links as plain text with the full address;
+    // citations ([[id]]) are the answer's only clickable references.
+    for (const a of [...target.querySelectorAll("a")]) {
+      const href = a.getAttribute("href") || "";
+      const text = a.textContent;
+      a.replaceWith(document.createTextNode(!href || text === href ? text : `${text} <${href}>`));
+    }
     const label = id => viewer?.label(id) || null;
     const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT);
     const hits = [];

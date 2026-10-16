@@ -116,7 +116,11 @@ def _with_tag(name: str) -> str:
 
 
 def connect_ro(db_path: Path) -> sqlite3.Connection:
-    db = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True, check_same_thread=False)
+    # as_uri() percent-encodes the path: pasted raw, a '#' or '?' in it ends
+    # the path early, and SQLite opens (creating it read-write) a different
+    # file with mode=ro lost.
+    uri = Path(db_path).absolute().as_uri() + '?mode=ro'
+    db = sqlite3.connect(uri, uri=True, check_same_thread=False)
     db.row_factory = sqlite3.Row
     return db
 
