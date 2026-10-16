@@ -132,7 +132,7 @@ def main():
 
     # serve
     p_serve = sub.add_parser('serve', help='Serve the viewer on loopback with rebuild, a local read-only agent and its proposal queue')
-    p_serve.add_argument('--host', default='127.0.0.1', help='Bind address (default 127.0.0.1; anything else exposes every note)')
+    p_serve.add_argument('--host', default='127.0.0.1', help='Bind address (default 127.0.0.1). Other users of this host can reach 127.0.0.1 too; every request needs the access token either way')
     p_serve.add_argument('--port', type=int, default=8420)
     p_serve.add_argument('--out', default=None, help='Site directory (default: <vault>/.schist/data/)')
     p_serve.add_argument('--model', default=os.environ.get('SCHIST_AGENT_MODEL', 'qwen3.5:9b'), help='Ollama model for the agent')

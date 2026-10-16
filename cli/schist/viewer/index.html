@@ -2,6 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <!-- Rendered note bodies and agent answers can carry markup that makes the
+       browser fetch a URL (and with it whatever text was put in the URL).
+       This policy confines every such fetch to this site; scripts and styles
+       are left unrestricted. -->
+  <meta http-equiv="Content-Security-Policy" content="img-src 'self' data:; media-src 'none'; frame-src 'none'; object-src 'none'; font-src 'self'; connect-src 'self'; base-uri 'none'" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>schist — knowledge graph</title>
   <link rel="icon" href="data:," />
@@ -245,6 +250,7 @@
     .proposal .p-actions button { padding: 4px 12px; border-radius: 4px; font: inherit; font-size: 12px; cursor: pointer; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
     .proposal .p-actions .p-approve { background: var(--bg); border-color: #4caf7d; color: #8fd19e; }
     .proposal .p-result { font-size: 11px; color: var(--muted); flex: 1; overflow-wrap: anywhere; }
+    .proposal .p-failed { font-size: 11px; color: #e57373; margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
@@ -403,15 +409,18 @@
     return e;
   }
 
-  // Note bodies are Markdown. They are the one place vault text becomes
-  // HTML, and only after DOMPurify sanitizes marked's output: no scripts,
-  // event handlers or javascript: URLs survive. Images, media and embeds are
-  // dropped so opening a note never fetches from a third-party host, and
-  // links open in a new tab without a referrer. If either library failed to
+  // Note bodies and agent answers are Markdown. They are the one place vault
+  // text becomes HTML, and only after DOMPurify sanitizes marked's output: no
+  // scripts, event handlers or javascript: URLs survive. Only HTML is kept
+  // (no SVG or MathML), and images, media, embeds and the legacy background
+  // attribute are dropped, so rendering never fetches from another host; the
+  // page's Content-Security-Policy blocks any such fetch that gets past this.
+  // Links open in a new tab without a referrer. If either library failed to
   // load, the body is shown as plain text.
   const SANITIZE = {
+    USE_PROFILES: { html: true },
     FORBID_TAGS: ["img", "picture", "source", "video", "audio", "iframe", "object", "embed", "style", "form", "input", "button"],
-    FORBID_ATTR: ["style", "srcset"],
+    FORBID_ATTR: ["style", "srcset", "background"],
   };
   if (window.DOMPurify) {
     DOMPurify.addHook("afterSanitizeAttributes", elem => {
@@ -851,8 +860,10 @@
     if (p.rationale) card.appendChild(el("div", "p-why", p.rationale));
     if (p.question) card.appendChild(el("div", "p-meta", `asked: “${p.question}”`));
     card.appendChild(el("pre", null, p.diff || ""));
+    const failed = p.status === "failed";
+    if (failed) card.appendChild(el("div", "p-failed", `last attempt failed: ${p.output || "no output"}`));
     const actions = el("div", "p-actions");
-    const ok = el("button", "p-approve", "Approve"), no = el("button", "p-reject", "Reject");
+    const ok = el("button", "p-approve", failed ? "Retry" : "Approve"), no = el("button", "p-reject", "Reject");
     ok.type = no.type = "button";
     const result = el("span", "p-result");
     actions.append(ok, no, result);
@@ -868,8 +879,9 @@
           setTimeout(loadProposals, 1500);
           return;
         }
-        result.textContent = `failed: ${body.reason || body.status || "HTTP " + r.status}`;
+        result.textContent = `failed: ${body.reason || body.output || body.status || "HTTP " + r.status}`;
         result.title = body.output || "";
+        if (action === "approve" && body.status === "failed") { setTimeout(loadProposals, 1500); return; }
       } catch { result.textContent = "failed: server unreachable"; }
       ok.disabled = no.disabled = false;
     }

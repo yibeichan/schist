@@ -5,7 +5,8 @@ file under <vault>/.schist/proposals/, which is gitignored, so filing one
 changes nothing in the vault. Approving a proposal runs the ordinary
 `schist add` / `schist link` command, which validates it, takes the vault
 write lock and commits; the spoke's usual sync then pushes it. Rejecting one
-only marks it.
+only marks it. A proposal whose command failed stays listed with the
+command's output, and can be approved again or rejected.
 """
 
 from __future__ import annotations
@@ -23,7 +24,9 @@ from .. import commands, markdown_io
 
 MAX_TITLE = 200
 MAX_BODY = 50_000
+APPROVE_TIMEOUT_S = 120
 PENDING, APPROVED, REJECTED, FAILED = 'pending', 'approved', 'rejected', 'failed'
+OPEN = (PENDING, FAILED)   # still awaiting a decision
 
 
 class ProposalError(Exception):
@@ -73,7 +76,9 @@ class ProposalStore:
             raise ProposalError(f'no proposal {pid}')
         return json.loads(path.read_text())
 
-    def list(self, status: str | None = PENDING) -> list[dict]:
+    def list(self, status: tuple | None = OPEN) -> list[dict]:
+        if isinstance(status, str):
+            status = (status,)
         if not self.dir.exists():
             return []
         out = []
@@ -82,7 +87,7 @@ class ProposalStore:
                 p = json.loads(f.read_text())
             except ValueError:
                 continue
-            if status is None or p.get('status') == status:
+            if status is None or p.get('status') in status:
                 out.append(p)
         return out
 
@@ -150,28 +155,40 @@ class ProposalStore:
     # -- review (called by the human, via the page) -------------------------
 
     def _command(self, p: dict) -> list[str]:
+        """Every value goes in `--opt=value` form: argparse reads a separate
+        argument that starts with '-' (a title "-draft", a body "--") as an
+        option and fails."""
         a = p['args']
-        base = [sys.executable, '-m', 'schist', '--vault', str(self.vault), '--db', str(self.db_path)]
+        base = [sys.executable, '-m', 'schist', f'--vault={self.vault}', f'--db={self.db_path}']
         if p['kind'] == 'create':
-            cmd = base + ['add', '--title', a['title'], '--body', a['body'], '--dir', a['directory']]
+            cmd = base + ['add', f'--title={a["title"]}', f'--body={a["body"]}', f'--dir={a["directory"]}']
             if a.get('tags'):
-                cmd += ['--tags', ','.join(a['tags'])]
+                cmd.append(f'--tags={",".join(a["tags"])}')
             if a.get('concepts'):
-                cmd += ['--concepts', ','.join(a['concepts'])]
+                cmd.append(f'--concepts={",".join(a["concepts"])}')
             return cmd
-        cmd = base + ['link', '--source', a['source'], '--target', a['target'], '--type', a['type']]
+        cmd = base + ['link', f'--source={a["source"]}', f'--target={a["target"]}', f'--type={a["type"]}']
         if a.get('context'):
-            cmd += ['--context', a['context']]
+            cmd.append(f'--context={a["context"]}')
         return cmd
 
     def approve(self, pid: str, runner=subprocess.run) -> dict:
         with self._lock:
             p = self.get(pid)
-            if p['status'] != PENDING:
+            if p['status'] not in OPEN:
                 raise ProposalError(f'proposal {pid} is already {p["status"]}')
-            r = runner(self._command(p), capture_output=True, text=True, timeout=120,
-                       stdin=subprocess.DEVNULL)
             p['decided_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
+            try:
+                r = runner(self._command(p), capture_output=True, text=True,
+                           timeout=APPROVE_TIMEOUT_S, stdin=subprocess.DEVNULL)
+            except subprocess.TimeoutExpired:
+                # The command was killed, possibly after it committed: say so,
+                # since approving again would then write the note twice.
+                p['status'] = FAILED
+                p['output'] = (f'timed out after {APPROVE_TIMEOUT_S} s (the vault write lock may '
+                               'be busy). The change may already be committed: check the vault '
+                               'before approving again.')
+                return self._save(p)
             p['output'] = ((r.stdout or '') + (r.stderr or ''))[-2000:]
             p['status'] = APPROVED if r.returncode == 0 else FAILED
             return self._save(p)
@@ -179,7 +196,7 @@ class ProposalStore:
     def reject(self, pid: str) -> dict:
         with self._lock:
             p = self.get(pid)
-            if p['status'] != PENDING:
+            if p['status'] not in OPEN:
                 raise ProposalError(f'proposal {pid} is already {p["status"]}')
             p['status'] = REJECTED
             p['decided_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')

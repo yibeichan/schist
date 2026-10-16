@@ -3,8 +3,11 @@ loop (against a fake Ollama), and the proposal queue end to end."""
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
+import os
+import socket
 import subprocess
 import threading
 import urllib.error
@@ -151,6 +154,35 @@ class TestProposals:
         assert store.reject(p['id'])['status'] == proposals_mod.REJECTED
         assert _git(vault, 'rev-parse', 'HEAD') == head
 
+    def test_values_starting_with_a_dash_are_not_options(self, vault, ro):
+        # Passed as separate arguments, argparse read "-draft" and "--" as
+        # options and the approve failed.
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='-draft', body='--', rationale='r')
+        done = store.approve(p['id'])
+        assert done['status'] == proposals_mod.APPROVED, done['output']
+        written = list((vault / 'notes').glob('*draft.md'))
+        assert len(written) == 1 and '--' in written[0].read_text()
+
+    def test_failed_proposal_stays_listed_and_can_be_retried(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='Retry me', body='b', rationale='r')
+        failed = store.approve(p['id'], runner=lambda *a, **k: subprocess.CompletedProcess(a, 1, '', 'boom'))
+        assert failed['status'] == proposals_mod.FAILED and 'boom' in failed['output']
+        assert [x['id'] for x in store.list()] == [p['id']]
+        assert store.approve(p['id'])['status'] == proposals_mod.APPROVED
+        assert store.list() == []
+
+    def test_approve_timeout_is_recorded_not_raised(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='Slow', body='b', rationale='r')
+
+        def hang(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, kw['timeout'])
+        done = store.approve(p['id'], runner=hang)
+        assert done['status'] == proposals_mod.FAILED
+        assert 'check the vault before approving again' in done['output']
+
     def test_bad_ids_cannot_escape_the_queue(self, vault):
         store = proposals_mod.ProposalStore(vault)
         for pid in ('../schist', 'a/b', ''):
@@ -240,6 +272,25 @@ class TestAgentLoop:
         events = list(agent.run([{'role': 'user', 'content': 'hi'}]))
         assert events == [{'type': 'error', 'message': 'model not pulled: run `ollama pull qwen3.5:9b`'}]
 
+    def test_untagged_model_matches_latest(self, vault, db_path):
+        store = proposals_mod.ProposalStore(vault)
+        fake = FakeOllama([], models=('llama3:latest', 'reg.example:5000/ns/m:latest'))
+        assert agent_mod.Agent(db_path, store, model='llama3', opener=fake).status()['available']
+        assert agent_mod.Agent(db_path, store, model='reg.example:5000/ns/m', opener=fake).status()['available']
+        assert not agent_mod.Agent(db_path, store, model='llama3:8b', opener=fake).status()['available']
+
+    def test_bad_tool_arguments_go_back_to_the_model(self, vault, db_path):
+        bad_limit = _call('search_notes', query='lock', limit='five')
+        not_a_dict = [{'message': {'role': 'assistant', 'content': '',
+                                   'tool_calls': [{'function': {'name': 'read_note', 'arguments': '[1]'}}]}}]
+        broken = _call('propose_note', title='T', body='b', rationale='r', tags=5)  # TypeError
+        fake = FakeOllama([bad_limit, not_a_dict, broken, _say('Answer.')])
+        agent, _ = self._agent(vault, db_path, fake)
+        events = list(agent.run([{'role': 'user', 'content': 'q'}]))
+        assert events[-1] == {'type': 'done'}
+        tool_msgs = [m for m in fake.requests[-1]['messages'] if m['role'] == 'tool']
+        assert len(tool_msgs) == 3 and 'propose_note failed' in tool_msgs[2]['content']
+
     def test_ollama_down(self, vault, db_path):
         def down(req, timeout=None):
             raise urllib.error.URLError('refused')
@@ -257,9 +308,8 @@ def server(vault, db_path):
     fake = FakeOllama([_say('hello ', '[[notes/lock.md]]')])
     agent = agent_mod.Agent(db_path, store, opener=fake)
     srv = serve_mod.ViewerServer(vault, db_path, vault / '.schist' / 'data', '127.0.0.1', 0,
-                                 agent, store)
+                                 agent, store, TOKEN)
     port = srv.server_address[1]
-    srv.allowed_hosts = {f'127.0.0.1:{port}', f'localhost:{port}'}
     with srv.build_lock:
         assert srv.rebuild()[0]
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -269,9 +319,16 @@ def server(vault, db_path):
     srv.server_close()
 
 
-def _req(url, method='GET', headers=None, body=None):
+TOKEN = 'test-token-' + 'x' * 32
+
+
+def _req(url, method='GET', headers=None, body=None, token=TOKEN):
+    """A request carrying the access token unless token=None."""
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+    headers = dict(headers or {})
+    if token is not None:
+        headers.setdefault('X-Schist-Token', token)
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             return r.status, r.read()
@@ -290,6 +347,52 @@ class TestServer:
     def test_bad_host_rejected(self, server):
         _, base = server
         assert _req(base + '/', headers={'Host': 'evil.example:8420'})[0] == 403
+
+    def test_every_request_needs_the_token(self, server, ro):
+        # Binding to 127.0.0.1 does not keep out other users of the host.
+        srv, base = server
+        p = srv.store.propose_note(ro, title='Not yours', body='b', rationale='r')
+        agent_h = {'X-Schist-Agent': '1'}
+        for token in (None, 'wrong'):
+            assert _req(base + '/', token=token)[0] == 401
+            assert _req(base + '/graph.json', token=token)[0] == 401
+            assert _req(base + '/api/proposals', token=token)[0] == 401
+            assert _req(base + f'/api/proposals/{p["id"]}/approve', 'POST', agent_h, token=token)[0] == 401
+        assert srv.store.get(p['id'])['status'] == proposals_mod.PENDING
+
+    def test_token_url_sets_a_cookie_the_page_then_uses(self, server):
+        srv, base = server
+        host, port = base.removeprefix('http://').split(':')
+        conn = http.client.HTTPConnection(host, int(port), timeout=10)
+        conn.request('GET', '/?token=wrong')
+        r = conn.getresponse(); r.read()
+        assert r.status == 401
+        conn.request('GET', f'/?token={TOKEN}')
+        r = conn.getresponse(); r.read()
+        cookie = r.getheader('Set-Cookie')
+        assert r.status == 303 and r.getheader('Location') == '/'
+        assert cookie.startswith(f'schist_token_{port}={TOKEN};')
+        assert 'HttpOnly' in cookie and 'SameSite=Strict' in cookie
+        jar = cookie.split(';')[0]
+        assert _req(base + '/api/status', headers={'Cookie': jar}, token=None)[0] == 200
+        assert _req(base + '/api/status', headers={'Cookie': f'schist_token_{port}=nope'}, token=None)[0] == 401
+
+    def test_rebinding_host_cannot_post(self, server, ro):
+        # A page that rebinds its own name to 127.0.0.1 is same-origin, so it
+        # can send the custom header; only the Host check stops it.
+        srv, base = server
+        p = srv.store.propose_note(ro, title='Rebound', body='b', rationale='r')
+        evil = {'Host': 'evil.example:' + base.rsplit(':', 1)[1], 'X-Schist-Agent': '1'}
+        assert _req(base + f'/api/proposals/{p["id"]}/approve', 'POST', evil)[0] == 403
+        assert _req(base + '/api/agent/chat', 'POST', evil,
+                    {'messages': [{'role': 'user', 'content': 'x'}]})[0] == 403
+        assert srv.store.get(p['id'])['status'] == proposals_mod.PENDING
+
+    def test_chat_rejects_malformed_bodies(self, server):
+        _, base = server
+        h = {'X-Schist-Agent': '1'}
+        for body in ([1, 2], {'messages': ['hi']}, {'messages': [{'role': 'user', 'content': 3}]}):
+            assert _req(base + '/api/agent/chat', 'POST', h, body)[0] == 400
 
     def test_posts_need_custom_headers(self, server):
         _, base = server
@@ -324,3 +427,34 @@ class TestServer:
         assert _req(base + f'/api/proposals/{p["id"]}/approve', 'POST')[0] == 403
         code, body = _req(base + f'/api/proposals/{p["id"]}/approve', 'POST', {'X-Schist-Agent': '1'})
         assert code == 200 and json.loads(body)['status'] == 'approved'
+
+
+class TestToken:
+    def test_created_private_and_reused(self, tmp_path):
+        token = serve_mod.load_or_create_token(tmp_path)
+        path = tmp_path / '.schist' / serve_mod.TOKEN_FILE
+        assert len(token) >= 32 and path.stat().st_mode & 0o777 == 0o600
+        assert serve_mod.load_or_create_token(tmp_path) == token
+
+    def test_readable_by_others_is_replaced(self, tmp_path):
+        token = serve_mod.load_or_create_token(tmp_path)
+        path = tmp_path / '.schist' / serve_mod.TOKEN_FILE
+        os.chmod(path, 0o644)
+        fresh = serve_mod.load_or_create_token(tmp_path)
+        assert fresh != token and path.stat().st_mode & 0o777 == 0o600
+
+
+def test_binds_ipv6_loopback(vault, db_path):
+    try:
+        with socket.socket(socket.AF_INET6) as probe:
+            probe.bind(('::1', 0))
+    except OSError:
+        pytest.skip('no IPv6 loopback on this host')
+    store = proposals_mod.ProposalStore(vault)
+    srv = serve_mod.ViewerServer(vault, db_path, vault / '.schist' / 'data', '::1', 0,
+                                 None, store, TOKEN)
+    try:
+        assert srv.address_family == socket.AF_INET6
+        assert f'[::1]:{srv.server_address[1]}' in srv.allowed_hosts
+    finally:
+        srv.server_close()

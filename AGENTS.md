@@ -86,8 +86,12 @@ cooldown), `/api/agent/*` (a local Ollama tool-calling agent, `agent.py`, whose
 read tools open the index with SQLite `mode=ro`) and `/api/proposals/*`
 (`proposals.py`: the agent's only write path is filing a proposal under
 `<vault>/.schist/proposals/`; approving one runs `schist add` / `schist link`).
-Every request must carry a loopback `Host`, and every POST an `X-Schist-Rebuild`
-or `X-Schist-Agent: 1` header, so other sites in the browser cannot drive it.
+Every request needs the access token in `<vault>/.schist/serve-token` (a
+cookie set by opening the printed `/?token=` URL, or an `X-Schist-Token`
+header): other users of a shared host can reach 127.0.0.1, so binding to it
+keeps out only other hosts. Every request must also carry a loopback `Host`,
+and every POST an `X-Schist-Rebuild` or `X-Schist-Agent: 1` header, so other
+sites in the browser cannot drive it.
 
 ## Architecture
 

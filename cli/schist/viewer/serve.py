@@ -4,12 +4,18 @@
   POST /api/rebuild[?if_changed=1]  rebuild the site (niced); 409 busy, 429 cooldown
   GET  /api/agent/status            {available, model, reason?}
   POST /api/agent/chat              SSE stream of agent events (see agent.py)
-  GET  /api/proposals               pending proposals
+  GET  /api/proposals               pending and failed proposals
   POST /api/proposals/<id>/approve  write it through `schist add` / `schist link`
   POST /api/proposals/<id>/reject
 
 The site holds the full text of every note, and approve writes to the vault,
 so the server binds 127.0.0.1 by default and guards every request:
+  * every request needs the access token, kept in <vault>/.schist/serve-token
+    (mode 0600). Binding to 127.0.0.1 keeps other hosts out but not other
+    users of this host, who can connect to its loopback ports. Opening the URL
+    the server prints (`/?token=...`) sets an HttpOnly, SameSite=Strict cookie
+    for the page; scripts send an `X-Schist-Token` header instead. Delete the
+    file and restart to issue a new token;
   * the Host header must name this server on a loopback address (DNS rebinding);
   * every POST needs an `X-Schist-Rebuild: 1` or `X-Schist-Agent: 1` header. A
     custom header forces a CORS preflight, which this server never approves,
@@ -18,10 +24,14 @@ so the server binds 127.0.0.1 by default and guards every request:
 
 from __future__ import annotations
 
+import hmac
+import http.cookies
 import http.server
 import json
 import os
+import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -35,22 +45,54 @@ from . import proposals as proposals_mod
 COOLDOWN_S = 30
 MAX_BODY_BYTES = 256 * 1024
 LOOPBACK_HOSTS = ('127.0.0.1', 'localhost', '[::1]')
+TOKEN_FILE = 'serve-token'
+
+
+def load_or_create_token(vault: Path) -> str:
+    """The access token in <vault>/.schist/serve-token, created on first use.
+    A token file that other users can read is replaced, since they could
+    already have read it."""
+    path = Path(vault) / '.schist' / TOKEN_FILE
+    try:
+        if path.stat().st_mode & 0o077 == 0:
+            token = path.read_text(encoding='utf-8').strip()
+            if len(token) >= 32:
+                return token
+    except FileNotFoundError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_urlsafe(32)
+    tmp = path.with_name(TOKEN_FILE + '.tmp')
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.write(token + '\n')
+    os.replace(tmp, path)
+    return token
 
 
 class ViewerServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, vault: Path, db: Path, out: Path, host: str, port: int,
-                 agent: agent_mod.Agent | None, store: proposals_mod.ProposalStore):
+                 agent: agent_mod.Agent | None, store: proposals_mod.ProposalStore,
+                 token: str):
         self.vault, self.db, self.out = Path(vault), Path(db), Path(out)
         self.staging = self.out.with_name(self.out.name + '.staging')
         self.stamp = self.vault / '.schist' / 'viewer-built-head'
         self.agent, self.store = agent, store
+        self.token = token
         self.build_lock = threading.Lock()
         self.chat_lock = threading.Lock()   # one question at a time
         self.last_manual = 0.0
-        self.allowed_hosts = {f'{h}:{port}' for h in LOOPBACK_HOSTS} | {f'{host}:{port}'}
+        if ':' in host:
+            self.address_family = socket.AF_INET6
         super().__init__((host, port), Handler)
+        port = self.server_address[1]
+        named = f'[{host}]' if ':' in host else host
+        self.allowed_hosts = {f'{h}:{port}' for h in LOOPBACK_HOSTS} | {f'{named}:{port}'}
+        # Cookies are not scoped by port, so the name carries it.
+        self.cookie_name = f'schist_token_{port}'
 
     # -- site ---------------------------------------------------------------
 
@@ -103,6 +145,44 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return False
         return True
 
+    def _token_ok(self) -> bool:
+        """The request carries the access token, as a header or the cookie."""
+        given = self.headers.get('X-Schist-Token')
+        if given is None:
+            jar = http.cookies.SimpleCookie()
+            try:
+                jar.load(self.headers.get('Cookie') or '')
+            except http.cookies.CookieError:
+                pass
+            morsel = jar.get(self.server.cookie_name)
+            given = morsel.value if morsel else None
+        if given is not None and hmac.compare_digest(given.encode(), self.server.token.encode()):
+            return True
+        self.send_error(401, 'missing or wrong access token',
+                        'Open the URL `schist serve` printed, or send an X-Schist-Token '
+                        'header with the token in <vault>/.schist/serve-token.')
+        return False
+
+    def _guard(self) -> bool:
+        return self._host_ok() and self._token_ok()
+
+    def _login(self, url) -> bool:
+        """`?token=<t>` on a GET: set the cookie and redirect to the bare path.
+        Returns False when the query carries no token."""
+        given = parse_qs(url.query).get('token')
+        if not given:
+            return False
+        if not hmac.compare_digest(given[0].encode(), self.server.token.encode()):
+            self.send_error(401, 'wrong access token')
+            return True
+        self.send_response(303)
+        self.send_header('Location', url.path or '/')
+        self.send_header('Set-Cookie', f'{self.server.cookie_name}={self.server.token}; Path=/; '
+                                       'HttpOnly; SameSite=Strict; Max-Age=31536000')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+        return True
+
     def _json(self, code: int, body):
         data = json.dumps(body).encode()
         self.send_response(code)
@@ -113,15 +193,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(data)
 
     def _body(self) -> dict | None:
-        n = int(self.headers.get('Content-Length') or 0)
+        try:
+            n = int(self.headers.get('Content-Length') or 0)
+        except ValueError:
+            n = -1
+        if n < 0:
+            self._json(400, {'ok': False, 'reason': 'bad Content-Length'})
+            return None
         if n > MAX_BODY_BYTES:
             self._json(413, {'ok': False, 'reason': 'request too large'})
             return None
         try:
-            return json.loads(self.rfile.read(n) or b'{}')
+            body = json.loads(self.rfile.read(n) or b'{}')
         except ValueError:
-            self._json(400, {'ok': False, 'reason': 'body is not JSON'})
+            body = None
+        if not isinstance(body, dict):
+            self._json(400, {'ok': False, 'reason': 'body is not a JSON object'})
             return None
+        return body
 
     def end_headers(self):
         if not self.path.startswith('/api/'):
@@ -135,13 +224,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     # -- GET ----------------------------------------------------------------
 
     def do_HEAD(self):
-        if self._host_ok():
+        if self._guard():
             super().do_HEAD()
 
     def do_GET(self):
         if not self._host_ok():
             return
-        path = urlsplit(self.path).path
+        url = urlsplit(self.path)
+        if self._login(url) or not self._token_ok():
+            return
+        path = url.path
         if path == '/api/status':
             return self._json(200, self.server.status())
         if path == '/api/agent/status':
@@ -158,7 +250,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     # -- POST ---------------------------------------------------------------
 
     def do_POST(self):
-        if not self._host_ok():
+        if not self._guard():
             return
         url = urlsplit(self.path)
         path = url.path
@@ -202,8 +294,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if srv.agent is None:
             return self._json(404, {'ok': False, 'reason': 'agent disabled (--no-agent)'})
         messages = body.get('messages')
-        if not isinstance(messages, list) or not messages or messages[-1].get('role') != 'user':
-            return self._json(400, {'ok': False, 'reason': 'messages must end with a user message'})
+        if (not isinstance(messages, list) or not messages
+                or not all(isinstance(m, dict) and isinstance(m.get('content'), str) for m in messages)
+                or messages[-1].get('role') != 'user'):
+            return self._json(400, {'ok': False, 'reason': 'messages must be {role, content} objects '
+                                                           'ending with a user message'})
         if not srv.chat_lock.acquire(blocking=False):
             return self._json(409, {'ok': False, 'reason': 'the agent is answering another question'})
         try:
@@ -238,7 +333,8 @@ def serve(vault: str, db: str, out: str | None, host: str, port: int,
     out_p = Path(out) if out else vault_p / '.schist' / 'data'
     store = proposals_mod.ProposalStore(vault_p, Path(db))
     agent = None if no_agent else agent_mod.Agent(Path(db), store, model=model, ollama_url=ollama_url)
-    srv = ViewerServer(vault_p, Path(db), out_p, host, port, agent, store)
+    token = load_or_create_token(vault_p)
+    srv = ViewerServer(vault_p, Path(db), out_p, host, port, agent, store, token)
     if not (out_p / 'index.html').exists():
         with srv.build_lock:
             ok, log = srv.rebuild()
@@ -246,10 +342,13 @@ def serve(vault: str, db: str, out: str | None, host: str, port: int,
             print(f'Error: initial build failed:\n{log}', file=sys.stderr)
             sys.exit(1)
     if host not in ('127.0.0.1', 'localhost', '::1'):
-        print(f'Warning: serving on {host}: every note is readable, and proposals can be '
-              'approved, by anyone who can reach this address.', file=sys.stderr)
-    print(f'schist viewer on http://{host}:{port}/ (agent: '
-          f'{"off" if agent is None else model})', flush=True)
+        print(f'Warning: serving on {host}: anyone who can reach this address and has the '
+              'access token can read every note and approve proposals; the token travels '
+              'over plain HTTP.', file=sys.stderr)
+    named = f'[{host}]' if ':' in host else host
+    print(f'schist viewer on http://{named}:{srv.server_address[1]}/?token={token} (agent: '
+          f'{"off" if agent is None else model}; token also in {vault_p / ".schist" / TOKEN_FILE})',
+          flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

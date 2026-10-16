@@ -473,6 +473,22 @@ class TestShapeContract:
             assert re.search(r"background:", decls), f".{cls} keeps the button background"
             assert re.search(r"(?<![-\w])color:", decls), f".{cls} keeps the button text colour"
 
+    def test_rendering_cannot_fetch_other_hosts(self):
+        """Rendered notes and agent answers can carry markup that fetches a URL
+        with text in it. The sanitizer keeps HTML only and drops the legacy
+        background attribute (DOMPurify's defaults keep <table background>
+        and <svg><image href>), and the CSP confines what gets past it."""
+        csp = re.search(r'http-equiv="Content-Security-Policy" content="([^"]+)"', self.PAGE)
+        assert csp, "the page declares no Content-Security-Policy"
+        policy = {d.split()[0]: d.split()[1:] for d in csp.group(1).split(";") if d.strip()}
+        assert policy["img-src"] == ["'self'", "data:"]
+        assert policy["connect-src"] == ["'self'"]
+        for directive in ("media-src", "frame-src", "object-src"):
+            assert policy[directive] == ["'none'"], directive
+        assert re.search(r"USE_PROFILES:\s*\{\s*html:\s*true\s*\}", self.PAGE)
+        forbid_attr = re.search(r"FORBID_ATTR:\s*\[([^\]]*)\]", self.PAGE).group(1)
+        assert '"background"' in forbid_attr
+
     def test_vault_html_only_through_dompurify(self):
         """Note bodies are rendered as Markdown into innerHTML. Every innerHTML
         write must be DOMPurify.sanitize(...) output, so a note cannot inject

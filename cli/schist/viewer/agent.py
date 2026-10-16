@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
+import traceback
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -107,6 +109,12 @@ class AgentUnavailable(Exception):
     """Ollama is not running or the model is not pulled."""
 
 
+def _with_tag(name: str) -> str:
+    """Ollama lists an untagged model as `<name>:latest`. The tag is the part
+    after a colon in the last path segment, so a registry port is not one."""
+    return name if ':' in name.rsplit('/', 1)[-1] else f'{name}:latest'
+
+
 def connect_ro(db_path: Path) -> sqlite3.Connection:
     db = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True, check_same_thread=False)
     db.row_factory = sqlite3.Row
@@ -130,8 +138,11 @@ def _fts(db: sqlite3.Connection, tokens: list[str], joiner: str, limit: int) -> 
 
 def search_notes(db: sqlite3.Connection, query: str, limit: int = 8) -> dict:
     """Every word first; when that finds nothing, any word (ranked)."""
-    limit = max(1, min(int(limit or 8), 20))
-    tokens = _TOKEN_RE.findall(query or '')[:12]
+    try:
+        limit = max(1, min(int(limit or 8), 20))
+    except (TypeError, ValueError):
+        limit = 8
+    tokens = _TOKEN_RE.findall(str(query or ''))[:12]
     if not tokens:
         return {'results': [], 'note': 'empty query'}
     results = _fts(db, tokens, 'AND', limit)
@@ -216,7 +227,7 @@ class Agent:
         except (urllib.error.URLError, OSError, ValueError):
             return {'available': False, 'model': self.model,
                     'reason': f'Ollama is not running at {self.ollama_url}'}
-        if self.model not in names:
+        if _with_tag(self.model) not in {_with_tag(n) for n in names if n}:
             return {'available': False, 'model': self.model,
                     'reason': f'model not pulled: run `ollama pull {self.model}`'}
         return {'available': True, 'model': self.model}
@@ -279,7 +290,11 @@ class Agent:
             yield {'type': 'error', 'message': st['reason']}
             return
         yield {'type': 'step', 'text': 'thinking'}
-        db = connect_ro(self.db_path)
+        try:
+            db = connect_ro(self.db_path)
+        except sqlite3.Error as e:
+            yield {'type': 'error', 'message': f'cannot open the index: {e}'}
+            return
         try:
             for _ in range(MAX_ROUNDS):
                 content, calls = [], []
@@ -311,7 +326,13 @@ class Agent:
                             args = json.loads(args)
                         except ValueError:
                             args = {}
-                    result, event = self._run_tool(db, fn.get('name', ''), args, question)
+                    if not isinstance(args, dict):
+                        args = {}
+                    try:
+                        result, event = self._run_tool(db, fn.get('name', ''), args, question)
+                    except Exception as e:  # a bad argument must not end the answer
+                        result = {'error': f'{fn.get("name", "")} failed: {e}'}
+                        event = {'type': 'step', 'text': f'tool failed: {e}'}
                     if event:
                         yield event
                     text = json.dumps(result, ensure_ascii=False, default=str)
@@ -320,6 +341,9 @@ class Agent:
             yield {'type': 'error', 'message': f'stopped after {MAX_ROUNDS} tool rounds without an answer'}
         except (urllib.error.URLError, OSError) as e:
             yield {'type': 'error', 'message': f'Ollama request failed: {e}'}
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            yield {'type': 'error', 'message': f'the agent failed: {e}'}
         finally:
             db.close()
 
