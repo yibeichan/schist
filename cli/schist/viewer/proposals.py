@@ -7,6 +7,13 @@ changes nothing in the vault. Approving a proposal runs the ordinary
 write lock and commits; the spoke's usual sync then pushes it. Rejecting one
 only marks it. A proposal whose command failed stays listed with the
 command's output, and can be approved again or rejected.
+
+On a spoke, a proposal may only target a path this spoke's identity can
+write under vault.yaml, by the hub's own scope rule (pre_receive.derive_scope
+and VaultACL.can_write), checked when it is filed and again when it is
+approved: a commit the hub refuses would block every later push from the
+spoke. Without a spoke identity or a parseable vault.yaml no check applies;
+the hub stays the authority either way.
 """
 
 from __future__ import annotations
@@ -20,7 +27,12 @@ import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import yaml
+
 from .. import commands, markdown_io
+from ..acl import ACLError, parse_vault_yaml
+from ..pre_receive import derive_scope
+from ..spoke_config import is_spoke, load_spoke_config
 
 MAX_TITLE = 200
 MAX_BODY = 50_000
@@ -55,6 +67,38 @@ class ProposalStore:
         self.db_path = Path(db_path) if db_path else self.vault / '.schist' / 'schist.db'
         self.dir = self.vault / '.schist' / 'proposals'
         self._lock = threading.Lock()
+
+    # -- hub ACL --------------------------------------------------------------
+
+    def check_writable(self, relpath: str) -> None:
+        """Raise ProposalError for a path the hub would refuse from this
+        spoke. The identity is spoke.yaml's, the one `schist sync push` pushes
+        as (and `schist doctor` checks). Falls open when there is no spoke
+        identity or vault.yaml cannot be read, as the MCP server's check does."""
+        acl_path = self.vault / 'vault.yaml'
+        if not is_spoke(str(self.vault)) or not acl_path.is_file():
+            return
+        try:
+            identity = load_spoke_config(str(self.vault)).identity
+            acl = parse_vault_yaml(acl_path)
+        except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError, ACLError):
+            return
+        scope = derive_scope(relpath)
+        if scope == '':   # a root-level file: only wildcard writers (pre_receive)
+            entry = acl.access.get(identity)
+            ok = entry is not None and '*' in entry.write
+        else:
+            ok = acl.can_write(identity, scope)
+        if not ok:
+            raise ProposalError(f'spoke {identity!r} may not write {scope or "the vault root"!r} '
+                                'under vault.yaml, so the hub would refuse this commit')
+
+    def _writable_dir(self, directory: str) -> bool:
+        try:
+            self.check_writable(f'{directory}/x.md')
+        except ProposalError:
+            return False
+        return True
 
     # -- storage ------------------------------------------------------------
 
@@ -108,9 +152,10 @@ class ProposalStore:
         if not body.strip() or len(body) > MAX_BODY:
             raise ProposalError(f'body must be 1-{MAX_BODY} characters')
         directory = str(directory or 'notes').strip().strip('/')
-        allowed = [d for d in commands._directories(str(self.vault)) if d != 'concepts']
+        allowed = [d for d in commands._directories(str(self.vault))
+                   if d != 'concepts' and self._writable_dir(d)]
         if directory not in allowed:
-            raise ProposalError(f'directory must be one of: {", ".join(allowed)}')
+            raise ProposalError(f'directory must be one of: {", ".join(allowed) or "(none this spoke can write)"}')
         tags = _clean_list(tags, 'tag')
         concepts = _clean_list(concepts, 'concept')
         known = {r[0] for r in db.execute('SELECT slug FROM concepts')}
@@ -144,6 +189,7 @@ class ProposalStore:
             raise ProposalError(f'type must be one of: {", ".join(types)}')
         if any(markdown_io.contains_line_boundary(x) for x in (source, target)):
             raise ProposalError('ids may not contain line breaks')
+        self.check_writable(source)   # `schist link` rewrites and commits the source note
         context = markdown_io.sanitize_context(context) if context else None
         line = f'- {link_type}: {target}' + (f' "{context}"' if context else '')
         return self._new('link', target=source, title=f'{src[0]} —{link_type}→ {tgt[0]}',
@@ -156,12 +202,14 @@ class ProposalStore:
 
     def _command(self, p: dict) -> list[str]:
         """Every value goes in `--opt=value` form: argparse reads a separate
-        argument that starts with '-' (a title "-draft", a body "--") as an
-        option and fails."""
+        argument that starts with '-' (a title "-draft") as an option and
+        fails. A note's body goes on stdin, which `schist add` reads when
+        --body is absent: Linux caps one argument at 128 KiB, and MAX_BODY
+        characters of UTF-8 can exceed that."""
         a = p['args']
         base = [sys.executable, '-m', 'schist', f'--vault={self.vault}', f'--db={self.db_path}']
         if p['kind'] == 'create':
-            cmd = base + ['add', f'--title={a["title"]}', f'--body={a["body"]}', f'--dir={a["directory"]}']
+            cmd = base + ['add', f'--title={a["title"]}', f'--dir={a["directory"]}']
             if a.get('tags'):
                 cmd.append(f'--tags={",".join(a["tags"])}')
             if a.get('concepts'):
@@ -177,10 +225,17 @@ class ProposalStore:
             p = self.get(pid)
             if p['status'] not in OPEN:
                 raise ProposalError(f'proposal {pid} is already {p["status"]}')
+            # vault.yaml may have changed since the proposal was filed.
+            self.check_writable(p['args']['source'] if p['kind'] == 'link' else p['target'])
             p['decided_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
+            body = p['args']['body'] if p['kind'] == 'create' else ''
             try:
-                r = runner(self._command(p), capture_output=True, text=True,
-                           timeout=APPROVE_TIMEOUT_S, stdin=subprocess.DEVNULL)
+                r = runner(self._command(p), input=body, capture_output=True, text=True,
+                           timeout=APPROVE_TIMEOUT_S)
+            except OSError as e:
+                p['status'] = FAILED
+                p['output'] = f'could not run schist: {e}'
+                return self._save(p)
             except subprocess.TimeoutExpired:
                 # The command was killed, possibly after it committed: say so,
                 # since approving again would then write the note twice.
