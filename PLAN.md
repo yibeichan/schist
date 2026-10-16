@@ -74,7 +74,8 @@ schist/
 ├── viewer/
 │   └── build.py                  # Shim for `python viewer/build.py`; the viewer
 │                                 # ships in cli/schist/viewer/ (build.py: SQLite →
-│                                 # graph.json + search-index.json; index.html: D3 + lunr)
+│                                 # graph.json + search-index.json; index.html: D3 + lunr;
+│                                 # serve.py + agent.py + proposals.py: `schist serve`)
 ├── cli/
 │   ├── schist/
 │   │   ├── __init__.py
@@ -412,6 +413,12 @@ Raw SQL against the SQLite DB. SELECT only.
 schist --vault ~/vaults/research build --out ./site
 ```
 Reads the SQLite index and writes `graph.json`, `search-index.json` and `index.html` (default output: `<vault>/.schist/data/`). The site holds the full text of every note in the index, whatever its scope.
+
+### `schist serve`
+```
+schist --vault ~/vaults/research serve [--port 8420] [--model qwen3.5:9b] [--no-agent] [--no-pull]
+```
+Serves the built site on 127.0.0.1 with a local API: rebuild (`/api/rebuild`), a read-only "ask the vault" agent backed by a local Ollama model (`/api/agent/chat`, server-sent events), and the agent's proposal queue (`/api/proposals`). The agent cannot write; it files proposals for a new note or connection, and approving one in the page runs `schist add` / `schist link`. Every request needs the access token in `<vault>/.schist/serve-token` (mode 0600): open the URL the server prints, which sets a cookie, or send the token in an `X-Schist-Token` header from scripts such as a rebuild timer. Binding to 127.0.0.1 keeps out other hosts, not other users of the same host. On a spoke, each rebuild (the button, or a timer's `?if_changed=1`) first runs `schist sync pull --lock-timeout 5`, so the site includes other spokes' notes; a pull that fails or finds the write lock busy is reported in the page and the rebuild uses the local vault. `--no-pull` turns this off. See `cli/schist/viewer/serve.py` for the request guards.
 
 ### `schist context`
 ```

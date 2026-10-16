@@ -197,6 +197,7 @@ This gives the agent a snapshot of graph stats, recent notes, and hot concepts.
 | `schist search` | Full-text search |
 | `schist query` | Raw SQL query |
 | `schist build` | Build the static viewer site (`graph.json`, `search-index.json`, `index.html`) |
+| `schist serve` | Serve the viewer on 127.0.0.1 with a rebuild button, a local read-only agent (Ollama) and its proposal queue |
 | `schist context` | Dump session context |
 | `schist schema` | Print or validate schema |
 
@@ -232,7 +233,9 @@ Full architecture: [PLAN.md](./PLAN.md). Schema: [schema/SCHEMA.md](./schema/SCH
 - Hub pre-receive hook enforces vault.yaml ACLs per-scope and per-agent
 - No delete, no force-push, no history rewrite via MCP
 - Pre-commit hook rejects commits containing secrets/API keys
-- Web viewer is static only — no server-side execution
+- Web viewer is static; the optional `schist serve` binds 127.0.0.1 and requires an access token on every request
+  (other users of a shared host can reach 127.0.0.1) and a custom header on every POST. Its local agent reads the
+  index read-only and can only file proposals, which a human approves before anything is written
 - Write authorization enforced against `SCHIST_AGENT_ID` / `SCHIST_ALLOWED_AGENTS`
 - `query_graph` rejects non-SELECT SQL
 

@@ -413,7 +413,10 @@ class TestShapeContract:
         """Result and connection rows are <button>s. Without a reset they take
         the browser's default button background and text colour, so on the
         dark page each row is a white box with dark text."""
-        classes = set(re.findall(r'el\("button",\s*"([\w-]+)', self.PAGE))
+        # The graph script's buttons are rows; the Ask panel's are styled
+        # buttons, checked in test_ask_buttons_are_styled.
+        main = self.PAGE[:self.PAGE.index("// ── Ask the vault")]
+        classes = set(re.findall(r'el\("button",\s*"([\w-]+)', main))
         assert {"result-item", "conn-item"} <= classes  # guards against a regex that matches nothing
         css = re.sub(r"/\*.*?\*/", "", self.PAGE, flags=re.S)
         rules = re.findall(r"([^{}]+)\{([^}]*)\}", css)
@@ -436,6 +439,56 @@ class TestShapeContract:
         assert 'method: "POST"' in post.group(1)
         assert '"X-Schist-Rebuild": "1"' in post.group(1)
 
+    def test_ask_panel_is_hidden_unless_the_server_has_an_agent(self):
+        """The Ask button needs `schist serve`; served as plain static files the
+        page must look as before. Every agent POST (chat, approve, reject)
+        carries the X-Schist-Agent header the server requires."""
+        assert re.search(r'<button id="ask-btn" type="button" hidden>', self.PAGE)
+        assert 'fetch("api/agent/status"' in self.PAGE
+        assert re.search(r'const HDR = \{[^}]*"X-Schist-Agent": "1"', self.PAGE)
+        chat = re.search(r'fetch\("api/agent/chat",\s*\{([^}]*)\}', self.PAGE)
+        assert chat and 'method: "POST"' in chat.group(1) and "headers: HDR" in chat.group(1)
+        decide = re.search(r'fetch\(`api/proposals/\$\{encodeURIComponent\(p\.id\)\}/\$\{action\}`,\s*\{([^}]*)\}', self.PAGE)
+        assert decide and 'method: "POST"' in decide.group(1) and "headers: HDR" in decide.group(1)
+
+    def test_ask_answers_render_through_the_sanitized_renderer(self):
+        """Agent answers quote vault text, so they render through renderBody
+        (DOMPurify) and citations are added as DOM nodes, never as HTML."""
+        assert "renderMarkdown: renderBody" in self.PAGE
+        ask = self.PAGE[self.PAGE.index("// ── Ask the vault"):]
+        assert "viewer.renderMarkdown(target, md)" in ask
+        assert "innerHTML" not in ask and "insertAdjacentHTML" not in ask
+
+    def test_ask_buttons_are_styled(self):
+        """Every button the Ask panel builds sets its own background and colour,
+        so none renders as a default white button on the dark page."""
+        ask = self.PAGE[self.PAGE.index("// ── Ask the vault"):]
+        classes = {c.split()[0] for c in re.findall(r'el\("button",\s*"([\w -]+)', ask)}
+        assert {"cite", "src", "proposal-chip", "p-approve", "p-reject"} <= classes
+        css = re.sub(r"/\*.*?\*/", "", self.PAGE, flags=re.S)
+        rules = re.findall(r"([^{}]+)\{([^}]*)\}", css)
+        for cls in classes:
+            decls = " ".join(body for sel, body in rules
+                             if any(re.search(rf"\.{cls}(?![\w-])", part) for part in sel.split(",")))
+            assert re.search(r"background:", decls), f".{cls} keeps the button background"
+            assert re.search(r"(?<![-\w])color:", decls), f".{cls} keeps the button text colour"
+
+    def test_rendering_cannot_fetch_other_hosts(self):
+        """Rendered notes and agent answers can carry markup that fetches a URL
+        with text in it. The sanitizer keeps HTML only and drops the legacy
+        background attribute (DOMPurify's defaults keep <table background>
+        and <svg><image href>), and the CSP confines what gets past it."""
+        csp = re.search(r'http-equiv="Content-Security-Policy" content="([^"]+)"', self.PAGE)
+        assert csp, "the page declares no Content-Security-Policy"
+        policy = {d.split()[0]: d.split()[1:] for d in csp.group(1).split(";") if d.strip()}
+        assert policy["img-src"] == ["'self'", "data:"]
+        assert policy["connect-src"] == ["'self'"]
+        for directive in ("media-src", "frame-src", "object-src"):
+            assert policy[directive] == ["'none'"], directive
+        assert re.search(r"USE_PROFILES:\s*\{\s*html:\s*true\s*\}", self.PAGE)
+        forbid_attr = re.search(r"FORBID_ATTR:\s*\[([^\]]*)\]", self.PAGE).group(1)
+        assert '"background"' in forbid_attr
+
     def test_vault_html_only_through_dompurify(self):
         """Note bodies are rendered as Markdown into innerHTML. Every innerHTML
         write must be DOMPurify.sanitize(...) output, so a note cannot inject
@@ -449,6 +502,16 @@ class TestShapeContract:
         forbid = re.search(r"FORBID_TAGS:\s*\[([^\]]*)\]", self.PAGE).group(1)
         for tag in ("img", "iframe", "video", "audio", "object", "embed"):
             assert f'"{tag}"' in forbid, f"<{tag}> is not forbidden"
+
+    def test_agent_answers_have_no_clickable_links(self):
+        """An agent answer can be steered by a note it read; a link in it could
+        carry vault text to another host behind harmless link text. The
+        answer renderer must turn every <a> into plain text."""
+        fn = re.search(r"function renderAnswer\(.*?\n  \}\n", self.PAGE, re.S)
+        assert fn, "renderAnswer not found"
+        body = fn.group(0)
+        assert re.search(r'querySelectorAll\("a"\)', body)
+        assert re.search(r"\.replaceWith\(document\.createTextNode\(", body)
 
     def test_page_reads_only_fields_the_builder_writes(self, vault_db):
         graph = build.build_graph(vault_db)

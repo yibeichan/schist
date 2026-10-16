@@ -130,6 +130,17 @@ def main():
     p_build = sub.add_parser('build', help='Build the static viewer site (graph, search index, page); it holds the full text of every note')
     p_build.add_argument('--out', default=None, help='Output directory (default: <vault>/.schist/data/)')
 
+    # serve
+    p_serve = sub.add_parser('serve', help='Serve the viewer on loopback with rebuild, a local read-only agent and its proposal queue')
+    p_serve.add_argument('--host', default='127.0.0.1', help='Bind address (default 127.0.0.1). Other users of this host can reach 127.0.0.1 too; every request needs the access token either way')
+    p_serve.add_argument('--port', type=int, default=8420)
+    p_serve.add_argument('--out', default=None, help='Site directory (default: <vault>/.schist/data/)')
+    p_serve.add_argument('--model', default=os.environ.get('SCHIST_AGENT_MODEL', 'qwen3.5:9b'), help='Ollama model for the agent')
+    p_serve.add_argument('--ollama-url', default=os.environ.get('OLLAMA_HOST_URL', 'http://127.0.0.1:11434'), dest='ollama_url')
+    p_serve.add_argument('--no-agent', action='store_true', dest='no_agent', help='Serve the site and rebuild endpoint only')
+    p_serve.add_argument('--no-pull', action='store_true', dest='no_pull',
+                         help='Rebuild from the local vault only; by default a spoke pulls from the hub first')
+
     # context
     p_context = sub.add_parser('context', help='Print vault context summary')
     p_context.add_argument('--depth', choices=['minimal', 'standard', 'full'], default='standard')
@@ -412,6 +423,7 @@ def main():
         'search': commands.search,
         'query': commands.query,
         'build': commands.build,
+        'serve': commands.serve,
         'context': commands.context,
         'schema': commands.schema,
     }

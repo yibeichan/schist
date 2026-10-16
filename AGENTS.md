@@ -80,6 +80,20 @@ To view it, serve the directory on the loopback interface only
 reach 127.0.0.1, so on a shared login node forward the port over SSH from a host
 you do not share instead.
 
+`schist serve` (`cli/schist/viewer/serve.py`) does that and adds a small API on
+the same port: `/api/status` and `/api/rebuild` (on a spoke a pull from the hub
+first, unless `--no-pull`; then a staged rebuild, single-flight,
+cooldown), `/api/agent/*` (a local Ollama tool-calling agent, `agent.py`, whose
+read tools open the index with SQLite `mode=ro`) and `/api/proposals/*`
+(`proposals.py`: the agent's only write path is filing a proposal under
+`<vault>/.schist/proposals/`; approving one runs `schist add` / `schist link`).
+Every request needs the access token in `<vault>/.schist/serve-token` (a
+cookie set by opening the printed `/?token=` URL, or an `X-Schist-Token`
+header): other users of a shared host can reach 127.0.0.1, so binding to it
+keeps out only other hosts. Every request must also carry a loopback `Host`,
+and every POST an `X-Schist-Rebuild` or `X-Schist-Agent: 1` header, so other
+sites in the browser cannot drive it.
+
 ## Architecture
 
 Three-layer design: **Agent Layer** (MCP clients, CLI) → **MCP Server** (tool router) → **Storage** (git vault + SQLite).
