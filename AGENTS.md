@@ -86,7 +86,13 @@ first, unless `--no-pull`; then a staged rebuild, single-flight,
 cooldown), `/api/agent/*` (a local Ollama tool-calling agent, `agent.py`, whose
 read tools open the index with SQLite `mode=ro`) and `/api/proposals/*`
 (`proposals.py`: the agent's only write path is filing a proposal under
-`<vault>/.schist/proposals/`; approving one runs `schist add` / `schist link`).
+`<vault>/.schist/proposals/`; approving one runs `schist add` / `schist link`,
+and on a spoke a proposal must target a path the spoke's identity can write
+under `vault.yaml`, checked at filing and again at approval). A site is stale
+when the vault moved past its build or when other viewer code built it
+(`.schist/viewer-built-version`, a hash of `build.py` + `index.html`); the
+server rebuilds such a site at startup and the `if_changed` timer does not
+skip it.
 Every request needs the access token in `<vault>/.schist/serve-token` (a
 cookie set by opening the printed `/?token=` URL, or an `X-Schist-Token`
 header): other users of a shared host can reach 127.0.0.1, so binding to it

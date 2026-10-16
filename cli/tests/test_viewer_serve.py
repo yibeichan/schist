@@ -8,6 +8,7 @@ import io
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import threading
 import time
@@ -214,15 +215,19 @@ class TestProposals:
 class FakeOllama:
     """Replays scripted /api/chat rounds; records what the agent sent."""
 
-    def __init__(self, rounds, models=('qwen3.5:9b',)):
+    def __init__(self, rounds, models=('qwen3.5:9b',), capabilities=('completion', 'tools')):
         self.rounds = list(rounds)
         self.models = models
+        self.capabilities = capabilities   # None: an Ollama whose /api/show has none
         self.requests = []
 
     def __call__(self, req, timeout=None):
         url = req if isinstance(req, str) else req.full_url
         if url.endswith('/api/tags'):
             return io.BytesIO(json.dumps({'models': [{'name': m} for m in self.models]}).encode())
+        if url.endswith('/api/show'):
+            info = {} if self.capabilities is None else {'capabilities': list(self.capabilities)}
+            return io.BytesIO(json.dumps(info).encode())
         self.requests.append(json.loads(req.data))
         chunks = self.rounds.pop(0)
         return io.BytesIO(b''.join(json.dumps(c).encode() + b'\n' for c in chunks))
@@ -651,3 +656,236 @@ def test_real_pull_from_a_hub(tmp_path, monkeypatch):
             assert srv.pull()['message'] == 'already up to date'
     finally:
         srv.server_close()
+
+
+# ---------------------------------------------------------------------------
+# Search tokens, reindex wait, Ollama capability and refusal messages
+# ---------------------------------------------------------------------------
+
+class TestAgentRobustness:
+    def test_punctuation_tokens_do_not_sink_an_all_words_search(self, ro):
+        # '-' is an empty FTS phrase: AND-ed in, it matched nothing and the
+        # search fell back to any-word ranking.
+        res = agent_mod.search_notes(ro, 'write - lock')
+        assert res['match'] == 'all words'
+        assert [r['id'] for r in res['results']] == ['notes/lock.md']
+        assert agent_mod.search_notes(ro, '- _ --')['note'] == 'empty query'
+
+    def test_tools_wait_out_a_reindex(self, vault, db_path, monkeypatch):
+        rw = sqlite3.connect(db_path, check_same_thread=False)
+        version = rw.execute('PRAGMA user_version').fetchone()[0]
+        assert version != 0
+        rw.execute('PRAGMA user_version = 0')   # what a reindex in flight looks like
+        rw.commit()
+        monkeypatch.setattr(agent_mod, 'INDEX_WAIT_S', 0.3)
+        fake = FakeOllama([_call('search_notes', query='lock'), _say('Answer.')])
+        agent = agent_mod.Agent(db_path, proposals_mod.ProposalStore(vault), opener=fake)
+        events = list(agent.run([{'role': 'user', 'content': 'q'}]))
+        assert any(e.get('text') == 'the index is still rebuilding' for e in events)
+        tool = [m for m in fake.requests[-1]['messages'] if m['role'] == 'tool']
+        assert 'being rebuilt' in tool[0]['content'] and 'Vault write lock' not in tool[0]['content']
+        # Once the version is stamped back, a waiting tool proceeds.
+        ro = agent_mod.connect_ro(db_path)
+        threading.Timer(0.2, lambda: (rw.execute(f'PRAGMA user_version = {version}'), rw.commit())).start()
+        try:
+            assert agent_mod.wait_for_index(ro, 5) is True
+        finally:
+            ro.close()
+            time.sleep(0.05)
+            rw.close()
+
+    def test_a_model_without_tool_calling_is_unavailable(self, vault, db_path):
+        store = proposals_mod.ProposalStore(vault)
+        no_tools = FakeOllama([], capabilities=('completion',))
+        st = agent_mod.Agent(db_path, store, opener=no_tools).status()
+        assert st['available'] is False and 'cannot call tools' in st['reason']
+        # An Ollama that reports no capabilities is left to the chat call.
+        legacy = FakeOllama([], capabilities=None)
+        assert agent_mod.Agent(db_path, store, opener=legacy).status()['available'] is True
+
+    def test_ollama_refusal_reports_its_reason(self, vault, db_path):
+        fake = FakeOllama([])
+
+        def refusing(req, timeout=None):
+            url = req if isinstance(req, str) else req.full_url
+            if url.endswith('/api/chat'):
+                raise urllib.error.HTTPError(url, 400, 'Bad Request', {},
+                                             io.BytesIO(b'{"error": "model does not support tools"}'))
+            return fake(req, timeout)
+        agent = agent_mod.Agent(db_path, proposals_mod.ProposalStore(vault), opener=refusing)
+        events = list(agent.run([{'role': 'user', 'content': 'q'}]))
+        assert events[-1] == {'type': 'error',
+                              'message': 'Ollama refused the request: model does not support tools'}
+
+
+# ---------------------------------------------------------------------------
+# Proposals: hub ACL, body on stdin, a runner that cannot start
+# ---------------------------------------------------------------------------
+
+def _acl(vault: Path, write, identity='alice'):
+    (vault / '.schist').mkdir(exist_ok=True)
+    (vault / '.schist' / 'spoke.yaml').write_text(
+        f'hub: file:///nonexistent\nidentity: {identity}\nscope: notes\n', encoding='utf-8')
+    (vault / 'vault.yaml').write_text(
+        'vault_version: 1\nname: t\nscope_convention: subdirectory\n'
+        'participants:\n  - name: alice\n    type: spoke\n    default_scope: global\n'
+        f'access:\n  alice:\n    read: ["*"]\n    write: {json.dumps(write)}\n', encoding='utf-8')
+
+
+def _never(*a, **k):
+    raise AssertionError('schist must not run')
+
+
+class TestProposalACL:
+    def test_out_of_scope_note_and_link_are_refused(self, vault, ro):
+        _acl(vault, ['papers'])
+        store = proposals_mod.ProposalStore(vault)
+        with pytest.raises(proposals_mod.ProposalError, match='directory must be one of: papers$'):
+            store.propose_note(ro, title='T', body='b', rationale='r')
+        _acl(vault, ['elsewhere'])
+        with pytest.raises(proposals_mod.ProposalError, match='none this spoke can write'):
+            store.propose_note(ro, title='T', body='b', rationale='r')
+        with pytest.raises(proposals_mod.ProposalError, match="may not write 'notes'"):
+            store.propose_link(ro, source='notes/sync.md', target='locking', type='supports', rationale='r')
+        assert store.list() == []
+
+    def test_in_scope_proposals_are_filed(self, vault, ro):
+        _acl(vault, ['notes'])
+        store = proposals_mod.ProposalStore(vault)
+        store.propose_note(ro, title='T', body='b', rationale='r')
+        store.propose_link(ro, source='notes/sync.md', target='locking', type='supports', rationale='r')
+        assert len(store.list()) == 2
+
+    def test_approve_rechecks_a_changed_vault_yaml(self, vault, ro):
+        _acl(vault, ['notes'])
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='T', body='b', rationale='r')
+        _acl(vault, ['papers'])
+        with pytest.raises(proposals_mod.ProposalError, match='hub would refuse'):
+            store.approve(p['id'], runner=_never)
+        assert store.get(p['id'])['status'] == proposals_mod.PENDING
+
+    def test_root_files_need_a_wildcard_grant(self, vault):
+        store = proposals_mod.ProposalStore(vault)
+        _acl(vault, ['notes'])
+        with pytest.raises(proposals_mod.ProposalError, match='the vault root'):
+            store.check_writable('README.md')
+        _acl(vault, ['*'])
+        store.check_writable('README.md')
+
+    def test_no_spoke_identity_or_a_broken_vault_yaml_falls_open(self, vault, ro):
+        _acl(vault, ['papers'])
+        (vault / '.schist' / 'spoke.yaml').unlink()
+        store = proposals_mod.ProposalStore(vault)
+        store.propose_note(ro, title='Standalone', body='b', rationale='r')
+        _acl(vault, ['papers'])
+        (vault / 'vault.yaml').write_text('access: [unbalanced\n', encoding='utf-8')
+        store.propose_note(ro, title='Broken', body='b', rationale='r')
+        assert len(store.list()) == 2
+
+
+class TestApproveCommand:
+    def test_note_body_goes_on_stdin_not_argv(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        # 150 KB of UTF-8: more than Linux allows in one argument (128 KiB).
+        body = '€' * proposals_mod.MAX_BODY
+        p = store.propose_note(ro, title='Big', body=body, rationale='r')
+        seen = {}
+
+        def record(cmd, **kw):
+            seen['cmd'], seen['kw'] = cmd, kw
+            return subprocess.CompletedProcess(cmd, 0, '', '')
+        assert store.approve(p['id'], runner=record)['status'] == proposals_mod.APPROVED
+        assert not any(body in arg for arg in seen['cmd'])
+        assert not any(arg.startswith('--body') for arg in seen['cmd'])
+        assert seen['kw']['input'] == body and 'stdin' not in seen['kw']
+
+    def test_link_gets_empty_stdin(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_link(ro, source='notes/sync.md', target='locking', type='supports', rationale='r')
+        seen = {}
+
+        def record(cmd, **kw):
+            seen['kw'] = kw
+            return subprocess.CompletedProcess(cmd, 0, '', '')
+        store.approve(p['id'], runner=record)
+        assert seen['kw']['input'] == ''
+
+    def test_a_runner_that_cannot_start_is_recorded(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='T', body='b', rationale='r')
+
+        def missing(cmd, **kw):
+            raise FileNotFoundError(2, 'No such file or directory', cmd[0])
+        done = store.approve(p['id'], runner=missing)
+        assert done['status'] == proposals_mod.FAILED and 'could not run schist' in done['output']
+        assert [x['id'] for x in store.list()] == [p['id']]
+
+
+# ---------------------------------------------------------------------------
+# A site built by other viewer code is stale
+# ---------------------------------------------------------------------------
+
+class TestViewerFingerprint:
+    def test_status_tracks_the_viewer_code(self, server):
+        srv, base = server
+        st = json.loads(_req(base + '/api/status')[1])
+        assert st['viewer_current'] is True and srv.up_to_date(st)
+        # The head stamp stays a bare commit id, as older servers read it.
+        assert srv.stamp.read_text().strip() == st['vault_head']
+        srv.viewer_stamp.write_text('0' * 16 + '\n')
+        st = json.loads(_req(base + '/api/status')[1])
+        assert st['viewer_current'] is False and not srv.up_to_date(st)
+        srv.viewer_stamp.unlink()
+        assert srv.status()['viewer_current'] is False
+
+    def test_timer_rebuilds_a_site_from_other_viewer_code(self, server):
+        srv, base = server
+        h = {'X-Schist-Rebuild': '1'}
+        srv.viewer_stamp.unlink()
+        code, body = _req(base + '/api/rebuild?if_changed=1', 'POST', h)
+        out = json.loads(body)
+        assert code == 200 and 'skipped' not in out and out['viewer_current'] is True
+        code, body = _req(base + '/api/rebuild?if_changed=1', 'POST', h)
+        assert json.loads(body)['skipped'] == 'unchanged'
+
+    def test_fingerprint_covers_the_builder_and_the_page(self, monkeypatch, tmp_path):
+        here = Path(serve_mod.__file__).parent
+        for name in ('build.py', 'index.html'):
+            (tmp_path / name).write_bytes((here / name).read_bytes())
+        (tmp_path / 'serve.py').write_text('')
+        monkeypatch.setattr(serve_mod, '__file__', str(tmp_path / 'serve.py'))
+        base = serve_mod.viewer_fingerprint()
+        for name in ('build.py', 'index.html'):
+            original = (tmp_path / name).read_bytes()
+            (tmp_path / name).write_bytes(original + b'\n')
+            assert serve_mod.viewer_fingerprint() != base, name
+            (tmp_path / name).write_bytes(original)
+
+
+def _startup(vault, db_path, monkeypatch, capsys, rebuild):
+    monkeypatch.setattr(serve_mod.ViewerServer, 'serve_forever', lambda self: None)
+    monkeypatch.setattr(serve_mod.ViewerServer, 'rebuild', rebuild)
+    serve_mod.serve(str(vault), str(db_path), None, '127.0.0.1', 0, 'm', 'http://127.0.0.1:1', True)
+    return capsys.readouterr()
+
+
+class TestStartupBuild:
+    def test_rebuilds_a_site_from_other_viewer_code(self, server, monkeypatch, capsys):
+        srv, _ = server
+        calls = []
+        _startup(srv.vault, srv.db, monkeypatch, capsys, lambda self: calls.append(1) or (True, ''))
+        assert calls == []                      # current: no build
+        srv.viewer_stamp.unlink()
+        _startup(srv.vault, srv.db, monkeypatch, capsys, lambda self: calls.append(1) or (True, ''))
+        assert calls == [1]
+
+    def test_a_failed_upgrade_rebuild_still_serves_the_old_site(self, server, monkeypatch, capsys):
+        srv, _ = server
+        srv.viewer_stamp.unlink()
+        out = _startup(srv.vault, srv.db, monkeypatch, capsys, lambda self: (False, 'boom'))
+        assert 'serving the existing site' in out.err and 'boom' in out.err
+
+    def test_no_site_and_a_failed_build_exits(self, vault, db_path, monkeypatch, capsys):
+        with pytest.raises(SystemExit):
+            _startup(vault, db_path, monkeypatch, capsys, lambda self: (False, 'boom'))

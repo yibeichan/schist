@@ -1,6 +1,7 @@
 """`schist serve`: the viewer site plus its local API, on loopback.
 
-  GET  /api/status                  {built_at, built_head, vault_head, building, pulls, last_pull}
+  GET  /api/status                  {built_at, built_head, vault_head, viewer_current,
+                                     building, pulls, last_pull}
   POST /api/rebuild[?if_changed=1]  pull from the hub (a spoke), then rebuild the site
                                     (niced); 409 busy, 429 cooldown
 
@@ -10,6 +11,11 @@ fails, times out or finds the write lock busy only means the rebuild uses what
 is local: its outcome is reported, as `last_pull` in the status, and never
 blocks the rebuild. A vault with uncommitted edits refuses to pull; it is not
 autostashed from here.
+
+A site is stale when the vault has moved past the commit it was built from,
+or when it was built by different viewer code (`viewer_current` false: the
+CLI was upgraded). The server rebuilds such a site when it starts, and the
+timer's `if_changed` rebuild does not skip it.
   GET  /api/agent/status            {available, model, reason?}
   POST /api/agent/chat              SSE stream of agent events (see agent.py)
   GET  /api/proposals               pending and failed proposals
@@ -32,6 +38,7 @@ so the server binds 127.0.0.1 by default and guards every request:
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import http.cookies
 import http.server
@@ -58,6 +65,21 @@ BUILD_TIMEOUT_S = 300
 MAX_BODY_BYTES = 256 * 1024
 LOOPBACK_HOSTS = ('127.0.0.1', 'localhost', '[::1]')
 TOKEN_FILE = 'serve-token'
+# The commit a site was built from, and a fingerprint of the viewer code that
+# built it. Two files, so a server that predates the fingerprint still reads
+# the head file as it always has.
+HEAD_STAMP = 'viewer-built-head'
+VIEWER_STAMP = 'viewer-built-version'
+
+
+def viewer_fingerprint() -> str:
+    """Hash of the files that decide what a build produces (the builder and
+    the page it copies): a site built by other viewer code is stale even
+    when the vault has not moved."""
+    h = hashlib.sha256()
+    for name in ('build.py', 'index.html'):
+        h.update(Path(__file__).with_name(name).read_bytes())
+    return h.hexdigest()[:16]
 
 
 def load_or_create_token(vault: Path) -> str:
@@ -104,7 +126,9 @@ class ViewerServer(http.server.ThreadingHTTPServer):
                  token: str, pull: bool = True, runner=subprocess.run):
         self.vault, self.db, self.out = Path(vault), Path(db), Path(out)
         self.staging = self.out.with_name(self.out.name + '.staging')
-        self.stamp = self.vault / '.schist' / 'viewer-built-head'
+        self.stamp = self.vault / '.schist' / HEAD_STAMP
+        self.viewer_stamp = self.vault / '.schist' / VIEWER_STAMP
+        self.fingerprint = viewer_fingerprint()
         self.agent, self.store = agent, store
         self.token = token
         self.pull_enabled = pull
@@ -169,10 +193,32 @@ class ViewerServer(http.server.ThreadingHTTPServer):
             'built_at': page.stat().st_mtime if page.exists() else None,
             'built_head': self.stamp.read_text().strip() if self.stamp.exists() else None,
             'vault_head': self.vault_head(),
+            'viewer_current': self._read(self.viewer_stamp) == self.fingerprint,
             'building': self.build_lock.locked(),
             'pulls': self.pulls(),
             'last_pull': self.last_pull,
         }
+
+    @staticmethod
+    def _read(path: Path) -> str | None:
+        try:
+            return path.read_text(encoding='utf-8').strip()
+        except OSError:
+            return None
+
+    def up_to_date(self, st: dict | None = None) -> bool:
+        """Built from the vault's current commit by this viewer code."""
+        st = st or self.status()
+        return bool(st['built_head']) and st['built_head'] == st['vault_head'] and st['viewer_current']
+
+    def build_if_needed(self) -> tuple[bool, str] | None:
+        """At startup: build when there is no site, or when other viewer code
+        built it (an upgraded CLI), which no vault-keyed trigger would
+        otherwise notice. None when the site needed no build."""
+        if (self.out / 'index.html').exists() and self.status()['viewer_current']:
+            return None
+        with self.build_lock:
+            return self.rebuild()
 
     def rebuild(self) -> tuple[bool, str]:
         """Build into a staging dir, then swap files in, page last, so a load
@@ -198,6 +244,7 @@ class ViewerServer(http.server.ThreadingHTTPServer):
                 os.replace(self.staging / name, self.out / name)
             self.staging.rmdir()
             self.stamp.write_text(head + '\n')
+            self.viewer_stamp.write_text(self.fingerprint + '\n')
         except OSError as e:
             return False, f'could not install the built site in {self.out}: {e}'
         return True, r.stdout[-2000:]
@@ -351,7 +398,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # Pull first, so the timer's unchanged check sees the hub's commits.
             pulled = srv.pull()
             st = srv.status()
-            if timer and st['built_head'] == st['vault_head']:
+            if timer and srv.up_to_date(st):
                 return self._json(200, {'ok': True, 'skipped': 'unchanged', 'pull': pulled, **st})
             t0 = time.time()
             ok, log = srv.rebuild()
@@ -420,12 +467,13 @@ def serve(vault: str, db: str, out: str | None, host: str, port: int,
     agent = None if no_agent else agent_mod.Agent(Path(db), store, model=model, ollama_url=ollama_url)
     token = load_or_create_token(vault_p)
     srv = ViewerServer(vault_p, Path(db), out_p, host, port, agent, store, token, pull=not no_pull)
-    if not (out_p / 'index.html').exists():
-        with srv.build_lock:
-            ok, log = srv.rebuild()
-        if not ok:
-            print(f'Error: initial build failed:\n{log}', file=sys.stderr)
+    built = srv.build_if_needed()
+    if built is not None and not built[0]:
+        if not (out_p / 'index.html').exists():
+            print(f'Error: initial build failed:\n{built[1]}', file=sys.stderr)
             sys.exit(1)
+        print(f'Warning: rebuilding the site for this viewer version failed; serving the '
+              f'existing site:\n{built[1]}', file=sys.stderr)
     if host not in ('127.0.0.1', 'localhost', '::1'):
         print(f'Warning: serving on {host}: anyone who can reach this address and has the '
               'access token can read every note and approve proposals; the token travels '
