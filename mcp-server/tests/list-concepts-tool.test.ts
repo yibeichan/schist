@@ -486,13 +486,11 @@ describe("list_concepts tool — JSDoc smoke", () => {
       "utf-8",
     );
     // Find the list_concepts function definition. The doc block lives in
-    // the preceding lines — assert both the function header and the Spec:
-    // reference appear nearby.
+    // the preceding lines — assert the function header appears nearby.
     const fnIdx = src.indexOf("export async function list_concepts(");
     expect(fnIdx).toBeGreaterThan(0);
     // Look backwards ~1500 chars for the JSDoc.
     const head = src.slice(Math.max(0, fnIdx - 1500), fnIdx);
     expect(head).toMatch(/list_concepts tool handler/);
-    expect(head).toMatch(/Spec:\s*docs\/superpowers\/specs\//);
   });
 });

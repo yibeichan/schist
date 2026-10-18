@@ -4,8 +4,7 @@
  * Usage (from repo root, via mcp-server's npm script):
  *   cd mcp-server && npm run audit -- --vault <path>
  *
- * Output: JSON report on stdout. Convert to a markdown table in
- * docs/superpowers/specs/audit-2026-05-04-mcp-response-sizes.md.
+ * Output: JSON report on stdout.
  *
  * Tokens are counted via gpt-tokenizer (o200k_base, GPT-4o's BPE).
  * Anthropic's tokenizer isn't available as a local library; o200k_base
