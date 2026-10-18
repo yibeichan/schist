@@ -13,12 +13,14 @@ worst a hostile note can do is get a proposal filed, which a human reviews.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import sys
 import time
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
@@ -233,6 +235,39 @@ def find_concepts(db: sqlite3.Connection, query: str) -> dict:
 # Loop
 # ---------------------------------------------------------------------------
 
+PROC_NET = ('/proc/net/tcp', '/proc/net/tcp6')
+LOOPBACK_NAMES = ('127.0.0.1', 'localhost', '::1')
+# /proc/net/tcp* addresses as the kernel prints them (each 32-bit word in host
+# byte order): IPv4 loopback ends in 7F (127.x.x.x), then the wildcard, ::1,
+# ::, and IPv4-mapped 127.0.0.1.
+_LOOPBACK_HEX = ('00000000', '00000000000000000000000001000000',
+                 '00000000000000000000000000000000', '0000000000000000FFFF00000100007F')
+
+
+def listener_uids(port: int, tables=PROC_NET) -> set[int] | None:
+    """uids owning a listening socket on `port` at a loopback or wildcard
+    address, from /proc/net/tcp and tcp6. None when the tables do not exist
+    (macOS), where the check does not apply."""
+    uids: set[int] = set()
+    found = False
+    for table in tables:
+        try:
+            lines = Path(table).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        found = True
+        for line in lines:
+            f = line.split()
+            if len(f) < 8 or f[3] != '0A':                  # 0A: LISTEN
+                continue
+            addr, _, port_hex = f[1].partition(':')
+            if int(port_hex, 16) != port:
+                continue
+            if addr in _LOOPBACK_HEX or (len(addr) == 8 and addr.endswith('7F')):
+                uids.add(int(f[7]))
+    return uids if found else None
+
+
 class Agent:
     def __init__(self, db_path: Path, store: proposals_mod.ProposalStore,
                  model: str = DEFAULT_MODEL, ollama_url: str = DEFAULT_OLLAMA_URL,
@@ -242,10 +277,32 @@ class Agent:
         self.model = model
         self.ollama_url = ollama_url.rstrip('/')
         self._open = opener  # injectable for tests
+        self.proc_net = PROC_NET
 
     # -- availability -------------------------------------------------------
 
+    def foreign_listener(self) -> str | None:
+        """Why the Ollama endpoint cannot be trusted, or None. Other users of
+        a shared host can reach loopback, and one listening on the Ollama port
+        first would receive every question and the note text tools return."""
+        url = urllib.parse.urlsplit(self.ollama_url)
+        if url.hostname not in LOOPBACK_NAMES:
+            return None
+        try:
+            port = url.port or 11434
+        except ValueError:
+            return None
+        uids = listener_uids(port, self.proc_net)
+        others = sorted(u for u in (uids or ()) if u != os.getuid())
+        if not others:
+            return None
+        return (f'the process listening on {url.hostname}:{port} belongs to another user '
+                f'(uid {others[0]}); start your own Ollama on another port and pass --ollama-url')
+
     def status(self) -> dict:
+        reason = self.foreign_listener()
+        if reason is not None:
+            return {'available': False, 'model': self.model, 'reason': reason}
         try:
             with self._open(f'{self.ollama_url}/api/tags', timeout=3) as r:
                 names = {m.get('name') for m in json.load(r).get('models', [])}

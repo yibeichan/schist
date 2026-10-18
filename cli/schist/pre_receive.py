@@ -256,6 +256,104 @@ def get_changed_files(oldrev: str, newrev: str) -> list[str]:
     return list(dict.fromkeys(changed_files))
 
 
+FRONTMATTER_SCOPE = "(note must open with a plain --- line)"
+_BOM = "﻿".encode("utf-8")
+
+
+def served_branch() -> str:
+    """The branch this hub serves: the target of the bare repo's HEAD, or
+    refs/heads/main when HEAD cannot be read. A non-bare repo's HEAD is
+    whatever is checked out there, so only a bare repo's counts."""
+    try:
+        bare = subprocess.run(["git", "rev-parse", "--is-bare-repository"],
+                              capture_output=True, text=True, timeout=10)
+        if bare.stdout.strip() != "true":
+            return "refs/heads/main"
+        r = subprocess.run(["git", "symbolic-ref", "-q", "HEAD"],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return "refs/heads/main"
+    ref = r.stdout.strip()
+    return ref if r.returncode == 0 and ref.startswith("refs/heads/") else "refs/heads/main"
+
+
+def ref_rejection(identity: str, acl: VaultACL, newrev: str, refname: str,
+                  branch: str) -> str | None:
+    """Why this ref update is refused, or None. Only `*` writers may touch a
+    ref other than the served branch or delete one: the scope check covers
+    the commits a push adds, not how other refs (a tag named `main`) could
+    shadow the branch every spoke reads."""
+    entry = acl.access.get(identity)
+    if entry is not None and "*" in entry.write:
+        return None
+    if newrev == ZERO_SHA:
+        return f"{refname}: only a '*' writer may delete a ref"
+    if refname != branch:
+        return f"{refname}: '{identity}' may only push {branch}"
+    return None
+
+
+def _bad_opener(data: bytes) -> bool:
+    """True when gray-matter (the MCP server's parser) would read a language
+    name after the opening `---`: the rest of that line, trimmed, is not
+    empty, and the fourth character is not another `-`. It strips a BOM
+    first. Only YAML frontmatter is accepted, since its `javascript` engine
+    evaluates the block."""
+    if data.startswith(_BOM):
+        data = data[len(_BOM):]
+    if not data.startswith(b"---") or data[3:4] == b"-":
+        return False
+    rest = data[3:].split(b"\n", 1)[0]
+    return rest.strip() != b""
+
+
+def find_bad_frontmatter(oldrev: str, newrev: str, changed_files: list[str]) -> list[str]:
+    """Markdown paths whose content, at any commit this push adds, opens with
+    `---` plus a language name. Every pushed version is read, not only the
+    tip, as get_changed_files lists every path any commit touched."""
+    paths = [f for f in changed_files
+             if f.lower().endswith(".md") and not _has_undecodable_bytes(f)]
+    if newrev == ZERO_SHA or not paths:
+        return []
+    rng = [newrev, "--not", "--all"] if oldrev == ZERO_SHA else [f"{oldrev}..{newrev}"]
+    commits = subprocess.run(["git", "rev-list", *rng], capture_output=True, text=True,
+                             check=True, timeout=30).stdout.split()
+    bad: list[str] = []
+    # `cat-file --batch` reads one object name per line, so a path holding a
+    # line break is read on its own instead of being split into two queries.
+    batched = [p for p in paths if "\n" not in p and "\r" not in p]
+    for path in paths:
+        if path in batched:
+            continue
+        for c in commits:
+            r = subprocess.run(["git", "cat-file", "blob", f"{c}:{path}"],
+                               capture_output=True, timeout=30)
+            if r.returncode == 0 and _bad_opener(r.stdout):
+                bad.append(path)
+                break
+    if not batched or not commits:
+        return list(dict.fromkeys(bad))
+    queries = [(c, p) for c in commits for p in batched]
+    out = subprocess.run(["git", "cat-file", "--batch"],
+                         input="".join(f"{c}:{p}\n" for c, p in queries).encode("utf-8"),
+                         capture_output=True, check=True, timeout=60).stdout
+    pos = 0
+    for _c, path in queries:
+        end = out.index(b"\n", pos)
+        line = out[pos:end]
+        pos = end + 1
+        # "<name> missing" (the path is not in that commit) echoes the name,
+        # which may hold spaces; a found object is "<sha> <type> <size>".
+        if line.endswith((b" missing", b" ambiguous")):
+            continue
+        _sha, kind, size_s = line.split(b" ")
+        size = int(size_s)
+        if kind == b"blob" and _bad_opener(out[pos:pos + size]):
+            bad.append(path)
+        pos += size + 1
+    return list(dict.fromkeys(bad))
+
+
 def check_push(
     identity: str,
     changed_files: list[str],
@@ -321,7 +419,13 @@ def format_rejection(violations: list[Violation]) -> str:
             "vault.yaml change helps: rename the file (bytes are shown as \\xNN), "
             "then `git reset --soft` the unpushed commit and recommit."
         )
-    if any(v.scope != NON_UTF8_SCOPE for v in violations):
+    if any(v.scope == FRONTMATTER_SCOPE for v in violations):
+        lines.append(
+            "Notes must open with a plain `---` line (YAML frontmatter), for every "
+            "identity. Fix the first line, then `git reset --soft origin/main` and "
+            "recommit, so no unpushed commit keeps the old version."
+        )
+    if any(v.scope not in (NON_UTF8_SCOPE, FRONTMATTER_SCOPE) for v in violations):
         lines.append("Check vault.yaml access rules for your identity.")
     return "\n".join(lines)
 
@@ -504,6 +608,8 @@ def main(
 
     all_violations: list[Violation] = []
     all_changed_files: list[str] = []
+    ref_reasons: list[str] = []
+    branch = served_branch()
 
     for line in stdin:
         line = line.strip()
@@ -516,8 +622,14 @@ def main(
 
         oldrev, newrev, refname = parts[0], parts[1], parts[2]
 
+        reason = ref_rejection(identity, acl, newrev, refname, branch)
+        if reason is not None:
+            ref_reasons.append(reason)
+            continue
+
         try:
             changed_files = get_changed_files(oldrev, newrev)
+            bad_frontmatter = find_bad_frontmatter(oldrev, newrev, changed_files)
         except subprocess.TimeoutExpired:
             # get_changed_files runs `git log` with timeout=30. On a slow hub
             # (large repo, NFS) that can expire, raising TimeoutExpired — NOT a
@@ -538,6 +650,15 @@ def main(
         all_changed_files.extend(changed_files)
         violations = check_push(identity, changed_files, acl, refname)
         all_violations.extend(violations)
+        all_violations.extend(Violation(identity=identity, filepath=path,
+                                        scope=FRONTMATTER_SCOPE, refname=refname)
+                              for path in bad_frontmatter)
+
+    if ref_reasons:
+        print("REJECTED: push updates refs this identity may not change", file=sys.stderr)
+        for reason in ref_reasons:
+            print(f"  - {_sanitize_log_field(reason)}", file=sys.stderr)
+        return 1
 
     if all_violations:
         msg = format_rejection(all_violations)

@@ -62,4 +62,5 @@ schist = ["*.sql", "default.yaml", "acl-fixtures/*.yaml", "acl-fixtures/*.json",
 [tool.pytest.ini_options]
 markers = [
     "integration: slow tests that spawn real git subprocesses",
+    "reads_blobs: pre-receive tests that let the hook read pushed file content",
 ]

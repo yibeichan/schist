@@ -367,15 +367,16 @@ class TestMain:
         assert rc == 0
 
     def test_multiple_refs(self, acl, tmp_path):
-        """Multiple ref updates in a single push."""
+        """Multiple ref updates in a single push: a '*' writer may update a
+        second branch; a scoped writer may update only the served one."""
         stdin = [
             "aaa bbb refs/heads/main",
             "ccc ddd refs/heads/feature",
         ]
         # Both refs change only in-scope files
         with patch("schist.pre_receive.get_changed_files", return_value=["research/mario/note.md"]):
-            rc = main(stdin=stdin, acl=acl, identity="cluster-mario")
-        assert rc == 0
+            assert main(stdin=stdin, acl=acl, identity="admin") == 0
+            assert main(stdin=stdin, acl=acl, identity="cluster-mario") == 1
 
     def test_multiple_refs_one_bad(self, acl, tmp_path, capsys):
         """One ref is fine, another has out-of-scope files."""
@@ -399,13 +400,13 @@ class TestMain:
             rc = main(stdin=stdin, acl=acl, identity="cluster-mario", log_path=log_path)
         assert rc == 1
 
-    def test_deleted_branch_allowed(self, acl):
-        """Deleting a branch (newrev=0*40) should always be allowed."""
+    def test_deleted_branch_needs_a_wildcard_writer(self, acl):
+        """Deleting a branch (newrev=0*40) is allowed for a '*' writer only."""
         zero = "0" * 40
         stdin = [f"abc123 {zero} refs/heads/old-branch"]
         with patch("schist.pre_receive.get_changed_files", return_value=[]):
-            rc = main(stdin=stdin, acl=acl, identity="cluster-mario")
-        assert rc == 0
+            assert main(stdin=stdin, acl=acl, identity="admin") == 0
+            assert main(stdin=stdin, acl=acl, identity="cluster-mario") == 1
 
     def test_admin_can_push_anything(self, acl):
         stdin = ["abc def refs/heads/main"]
@@ -1319,3 +1320,124 @@ def test_get_changed_files_decodes_as_utf8_whatever_the_locale(tmp_path, monkeyp
     monkeypatch.setattr(os, "fsdecode", lambda b: b.decode("latin-1") if isinstance(b, bytes) else b)
     (name,) = get_changed_files(old, new)
     assert name == "research/caf\udce9.md"
+
+
+# ── Frontmatter openers and ref policy ──────────────────────────────────────
+
+def _bare_repo_with(tmp_path, commits):
+    """A bare repo whose `main` gets one commit per entry of `commits`, each a
+    dict path -> bytes (None deletes). Returns (repo, [sha per commit])."""
+    repo = tmp_path / "hub.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(repo)], check=True)
+    stream = b""
+    for i, files in enumerate(commits):
+        stream += (b"commit refs/heads/main\n"
+                   b"committer t <t@example.com> %d +0000\n" % (1700000000 + i)
+                   + b"data 2\nc\n")
+        for path, data in files.items():
+            if data is None:
+                stream += b"D " + path.encode() + b"\n"
+            else:
+                stream += (b"M 100644 inline " + path.encode() + b"\n"
+                           + b"data %d\n" % len(data) + data + b"\n")
+        stream += b"\n"
+    subprocess.run(["git", "fast-import", "--quiet"], cwd=repo, input=stream, check=True)
+    shas = subprocess.run(["git", "rev-list", "--reverse", "main"], cwd=repo,
+                          capture_output=True, text=True, check=True).stdout.split()
+    return repo, shas
+
+
+@pytest.fixture(autouse=True)
+def _skip_blob_reads(request, monkeypatch):
+    """Most tests here feed main() made-up revisions with a patched file list;
+    the frontmatter check reads real blobs, so it runs only where marked."""
+    if request.node.get_closest_marker("reads_blobs") is None:
+        monkeypatch.setattr("schist.pre_receive.find_bad_frontmatter", lambda *a, **k: [])
+
+
+SEED = {"research/mario/seed.md": b"---\ntitle: seed\n---\n"}
+
+
+@pytest.mark.reads_blobs
+class TestFrontmatterOpeners:
+    @pytest.mark.parametrize("opener", [
+        b"---js", b"---javascript", b"--- js", b"---JS", b"\xef\xbb\xbf---js", b"---coffee", b"---json",
+        b"---yaml",   # harmless to gray-matter, but notes open with a plain --- line
+    ])
+    def test_a_non_yaml_opener_is_found(self, tmp_path, monkeypatch, opener):
+        from schist.pre_receive import find_bad_frontmatter, get_changed_files
+        repo, (old, new) = _bare_repo_with(tmp_path, [SEED, {
+            "research/mario/x.md": opener + b"\n{ title: 'x' }\n---\nbody\n"}])
+        monkeypatch.chdir(repo)
+        assert find_bad_frontmatter(old, new, get_changed_files(old, new)) == ["research/mario/x.md"]
+
+    @pytest.mark.parametrize("content", [
+        b"---\ntitle: ok\n---\n", b"---   \ntitle: ok\n---\n",
+        b"----\nnot frontmatter\n", b"plain text\n", b"",
+    ])
+    def test_yaml_and_plain_notes_pass(self, tmp_path, monkeypatch, content):
+        from schist.pre_receive import find_bad_frontmatter, get_changed_files
+        repo, (old, new) = _bare_repo_with(tmp_path, [SEED, {"research/mario/x.md": content}])
+        monkeypatch.chdir(repo)
+        assert find_bad_frontmatter(old, new, get_changed_files(old, new)) == []
+
+    def test_a_note_added_then_removed_inside_the_push_is_still_found(self, tmp_path, monkeypatch):
+        from schist.pre_receive import find_bad_frontmatter, get_changed_files
+        repo, (old, _mid, new) = _bare_repo_with(tmp_path, [
+            SEED, {"research/mario/x.md": b"---js\n{}\n---\n"}, {"research/mario/x.md": None}])
+        monkeypatch.chdir(repo)
+        assert find_bad_frontmatter(old, new, get_changed_files(old, new)) == ["research/mario/x.md"]
+
+    def test_non_markdown_files_are_not_read(self, tmp_path, monkeypatch):
+        from schist.pre_receive import find_bad_frontmatter, get_changed_files
+        repo, (old, new) = _bare_repo_with(tmp_path, [SEED, {"research/mario/x.txt": b"---js\n"}])
+        monkeypatch.chdir(repo)
+        assert find_bad_frontmatter(old, new, get_changed_files(old, new)) == []
+
+    def test_main_rejects_the_push_for_every_identity(self, acl, tmp_path, monkeypatch, capsys):
+        repo, (old, new) = _bare_repo_with(tmp_path, [SEED, {
+            "research/mario/x.md": b"---js\n{ title: 'x' }\n---\n"}])
+        monkeypatch.chdir(repo)
+        for identity in ("cluster-mario", "admin"):
+            rc = main(stdin=[f"{old} {new} refs/heads/main"], acl=acl, identity=identity,
+                      log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
+            assert rc == 1, identity
+            assert "research/mario/x.md" in capsys.readouterr().err
+
+
+class TestRefPolicy:
+    @pytest.fixture(autouse=True)
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GIT_DIR", str(tmp_path))   # not a repo: HEAD falls back to main
+
+    def _run(self, acl, identity, line, tmp_path):
+        with patch("schist.pre_receive.get_changed_files", return_value=["research/mario/n.md"]):
+            return main(stdin=[line], acl=acl, identity=identity,
+                        log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
+
+    @pytest.mark.parametrize("ref", ["refs/heads/feature", "refs/tags/main", "refs/tags/v1"])
+    def test_a_scoped_writer_may_only_push_the_served_branch(self, acl, tmp_path, capsys, ref):
+        assert self._run(acl, "cluster-mario", f"aaa bbb {ref}", tmp_path) == 1
+        err = capsys.readouterr().err
+        assert ref in err and "refs/heads/main" in err
+
+    def test_a_scoped_writer_may_not_delete_a_ref(self, acl, tmp_path, capsys):
+        zero = "0" * 40
+        assert self._run(acl, "cluster-mario", f"abc {zero} refs/heads/old", tmp_path) == 1
+        assert "delete" in capsys.readouterr().err
+
+    def test_the_served_branch_is_still_accepted(self, acl, tmp_path):
+        assert self._run(acl, "cluster-mario", "aaa bbb refs/heads/main", tmp_path) == 0
+
+    def test_a_wildcard_writer_may_push_and_delete_other_refs(self, acl, tmp_path):
+        zero = "0" * 40
+        assert self._run(acl, "admin", "aaa bbb refs/tags/v1", tmp_path) == 0
+        assert self._run(acl, "admin", f"abc {zero} refs/heads/old", tmp_path) == 0
+
+    def test_the_served_branch_follows_the_hub_head(self, acl, tmp_path, monkeypatch, capsys):
+        monkeypatch.delenv("GIT_DIR")
+        repo, _ = _bare_repo_with(tmp_path, [SEED])
+        subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/trunk"], cwd=repo, check=True)
+        monkeypatch.chdir(repo)
+        assert self._run(acl, "cluster-mario", "aaa bbb refs/heads/trunk", tmp_path) == 0
+        assert self._run(acl, "cluster-mario", "aaa bbb refs/heads/main", tmp_path) == 1
