@@ -16,6 +16,7 @@ import json
 import re
 import sqlite3
 import sys
+import time
 import traceback
 import urllib.error
 import urllib.request
@@ -30,6 +31,7 @@ MAX_ROUNDS = 8            # tool-call rounds per question
 MAX_NOTE_CHARS = 6000     # body text one read_note returns
 MAX_TOOL_CHARS = 12000    # any one tool result sent back to the model
 KEEP_ALIVE = '5m'         # Ollama unloads the model after this much idle time
+INDEX_WAIT_S = 15         # how long a tool waits for a reindex to finish
 
 SYSTEM_PROMPT = """You answer questions about the user's schist knowledge vault: \
 their research notes, project logs, decisions, papers and concepts.
@@ -125,6 +127,22 @@ def connect_ro(db_path: Path) -> sqlite3.Connection:
     return db
 
 
+def wait_for_index(db: sqlite3.Connection, timeout: float = INDEX_WAIT_S) -> bool:
+    """True once the index is complete. A reindex commits its emptied tables
+    with user_version 0 and stamps the version back with the data (see
+    index_contract), so a reader in between would see an empty vault and
+    answer from it as if the notes did not exist. Version 0 with rows is an
+    index built before ingest stamped a version: complete, as get_db and the
+    MCP reader treat it."""
+    deadline = time.monotonic() + timeout
+    while (db.execute('PRAGMA user_version').fetchone()[0] == 0
+           and not db.execute('SELECT EXISTS(SELECT 1 FROM docs)').fetchone()[0]):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.2)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Read tools
 # ---------------------------------------------------------------------------
@@ -146,7 +164,10 @@ def search_notes(db: sqlite3.Connection, query: str, limit: int = 8) -> dict:
         limit = max(1, min(int(limit or 8), 20))
     except (TypeError, ValueError):
         limit = 8
-    tokens = _TOKEN_RE.findall(str(query or ''))[:12]
+    # A token with no letter or digit ('-', '_') is an empty FTS phrase, which
+    # matches nothing and would sink every all-words query it is part of.
+    tokens = [t for t in _TOKEN_RE.findall(str(query or ''))
+              if any(c.isalnum() for c in t)][:12]
     if not tokens:
         return {'results': [], 'note': 'empty query'}
     results = _fts(db, tokens, 'AND', limit)
@@ -234,6 +255,20 @@ class Agent:
         if _with_tag(self.model) not in {_with_tag(n) for n in names if n}:
             return {'available': False, 'model': self.model,
                     'reason': f'model not pulled: run `ollama pull {self.model}`'}
+        # Every answer needs tool calls; a model without them fails each chat
+        # with an Ollama 400. Ollama lists a model's capabilities in
+        # /api/show; an older Ollama that does not is left to the chat call.
+        try:
+            req = urllib.request.Request(f'{self.ollama_url}/api/show',
+                                         data=json.dumps({'model': self.model}).encode(),
+                                         headers={'Content-Type': 'application/json'})
+            with self._open(req, timeout=3) as r:
+                caps = json.load(r).get('capabilities')
+        except (urllib.error.URLError, OSError, ValueError, AttributeError):
+            caps = None
+        if isinstance(caps, list) and 'tools' not in caps:
+            return {'available': False, 'model': self.model,
+                    'reason': f'{self.model} cannot call tools; choose another --model'}
         return {'available': True, 'model': self.model}
 
     # -- tools --------------------------------------------------------------
@@ -322,6 +357,13 @@ class Agent:
                     # Text before a tool call is the model narrating its plan,
                     # not the answer: the page moves it out of the answer.
                     yield {'type': 'interim'}
+                # Once per round, and the answer ends on a timeout: handed to
+                # the model as a tool result, "try again" made it retry every
+                # round, each retry waiting INDEX_WAIT_S again.
+                if not wait_for_index(db, INDEX_WAIT_S):
+                    yield {'type': 'error', 'message': 'the vault index is being rebuilt or is '
+                                                       'incomplete; ask again in a minute'}
+                    return
                 for call in calls:
                     fn = call.get('function') or {}
                     args = fn.get('arguments') or {}
@@ -343,6 +385,8 @@ class Agent:
                     msgs.append({'role': 'tool', 'tool_name': fn.get('name', ''),
                                  'content': text[:MAX_TOOL_CHARS]})
             yield {'type': 'error', 'message': f'stopped after {MAX_ROUNDS} tool rounds without an answer'}
+        except urllib.error.HTTPError as e:
+            yield {'type': 'error', 'message': f'Ollama refused the request: {_ollama_error(e)}'}
         except (urllib.error.URLError, OSError) as e:
             yield {'type': 'error', 'message': f'Ollama request failed: {e}'}
         except Exception as e:
@@ -350,6 +394,15 @@ class Agent:
             yield {'type': 'error', 'message': f'the agent failed: {e}'}
         finally:
             db.close()
+
+
+def _ollama_error(e: urllib.error.HTTPError) -> str:
+    """Ollama explains a refusal in a JSON body ({"error": ...}); the status
+    line alone ("400 Bad Request") does not say what to fix."""
+    try:
+        return str(json.loads(e.read()).get('error') or e)[:500]
+    except (ValueError, OSError, AttributeError, TypeError):
+        return str(e)
 
 
 def _pick(args: dict, keys: tuple) -> dict:

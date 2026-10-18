@@ -708,7 +708,7 @@
 <script>
 // ── Rebuild button ──────────────────────────────────────────────────────────
 // A local server may offer GET /api/status ({built_at, built_head, vault_head,
-// building, pulls, last_pull}) and POST /api/rebuild, which needs the
+// viewer_current, building, pulls, last_pull}) and POST /api/rebuild, which needs the
 // X-Schist-Rebuild header (a cross-site form cannot send it). On a spoke
 // (`pulls`), a rebuild pulls from the hub first; last_pull {at, ok, message}
 // says how that went, and a failed pull still rebuilds from the local vault. Served any other way — a plain static
@@ -739,9 +739,13 @@
   }
 
   function show(st) {
-    const stale = !!st.built_head && !!st.vault_head && st.built_head !== st.vault_head;
+    const behind = !!st.built_head && !!st.vault_head && st.built_head !== st.vault_head;
+    const oldViewer = st.viewer_current === false;   // absent from servers that predate it
+    const stale = behind || oldViewer;
     dot.className = stale ? "stale" : "fresh";
-    dot.title = stale ? "The vault has commits this build does not include" : "Built from the current vault commit";
+    dot.title = behind ? "The vault has commits this build does not include"
+      : oldViewer ? "Built by an older version of the viewer; rebuild to update the page"
+      : "Built from the current vault commit";
     pulls = !!st.pulls;
     const lp = st.last_pull && typeof st.last_pull === "object" ? st.last_pull : null;
     const lpNote = lp && !lp.ok ? (String(lp.message).startsWith("pull skipped") ? " · pull skipped" : " · pull failed") : "";

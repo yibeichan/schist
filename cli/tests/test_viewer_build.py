@@ -439,6 +439,12 @@ class TestShapeContract:
         assert 'method: "POST"' in post.group(1)
         assert '"X-Schist-Rebuild": "1"' in post.group(1)
 
+    def test_a_site_from_older_viewer_code_shows_stale(self):
+        """`viewer_current: false` marks the site stale; a server that
+        predates the field (undefined) must not."""
+        assert re.search(r'const oldViewer = st\.viewer_current === false;', self.PAGE)
+        assert re.search(r'const stale = behind \|\| oldViewer;', self.PAGE)
+
     def test_ask_panel_is_hidden_unless_the_server_has_an_agent(self):
         """The Ask button needs `schist serve`; served as plain static files the
         page must look as before. Every agent POST (chat, approve, reject)
