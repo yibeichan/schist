@@ -1,7 +1,6 @@
 """Hub-side ACL administration: edit a bare hub's vault.yaml in place.
 
-Admin authority is filesystem access to the bare repo — see
-docs/superpowers/specs/2026-05-28-hub-admin-cli-design.md. Mutations are
+Admin authority is filesystem access to the bare repo. Mutations are
 committed directly via git plumbing (no receive-pack), so the pre-receive hook
 never fires. '*' write grants are refused so no participant ever holds the
 ACL-edit power that '*' implies on the hub.

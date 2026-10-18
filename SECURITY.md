@@ -4,6 +4,14 @@ schist is designed for first-party agents operating on a vault that belongs to
 one human operator or one trusted team. The MCP server is not a sandbox and is
 not a multi-tenant authorization layer.
 
+## Reporting a Vulnerability
+
+Report security problems privately through GitHub: on the repository's
+**Security** tab, choose **Report a vulnerability**. Do not open a public
+issue or pull request for a problem that can be exploited, and do not
+describe it in a commit message, until a fix is released. Fixes go into the
+latest release only.
+
 ## Trust Boundary
 
 Any process that can call the schist MCP server is treated as trusted with read
