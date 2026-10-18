@@ -2287,8 +2287,6 @@ export async function sync_retry(
  * No verbose mode — per spec, full bodies are obtained via `get_note`, which
  * is already an explicit two-step protocol. The FTS5 `snippet()` column on
  * each row is fixed-size and adequate for the search-result surface.
- *
- * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
  */
 export async function search_notes(
   vaultRoot: string,
@@ -3768,8 +3766,6 @@ export async function update_note(
  *
  * No verbose mode — per spec, list_* tools are excluded from verbose.
  * queryHash binds to (tags?, search?, limit, owner).
- *
- * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
  */
 export async function list_concepts(
   vaultRoot: string,
@@ -3858,8 +3854,6 @@ export async function list_concepts(
  * No verbose mode — per spec, `query_graph`'s response shape is the natural
  * unit; "verbose mode" doesn't apply. Concurrent-ingest caveat from the
  * spec's "Concurrent-ingest limitation" subsection applies.
- *
- * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
  */
 export async function query_graph(
   vaultRoot: string,
@@ -4128,8 +4122,6 @@ const RECENT_MEMORY_SNIPPET_CODE_POINTS = 100;
  *     parseVerbose rejects type/length misuse identically; no per-depth bypass.
  *   - depth!="full" + valid verbose → verbose validated for type only; ignored
  *     semantically (no logVerbose). Matches search_memory's "validate first" pattern.
- *
- * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
  */
 export async function get_context(
   vaultRoot: string,
@@ -4277,8 +4269,6 @@ export async function get_context(
  * inline. This handler is the prototype for the cursor-adopting tools:
  * search_notes (landed in PR 4) and query_graph (landed in PR 5 — both
  * defined above), then list_concepts, get_context.
- *
- * Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md
  */
 export async function search_memory(
   // Was `_vaultRoot` (underscore-unused) — now consumed as a refusal-LRU key

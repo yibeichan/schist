@@ -665,6 +665,5 @@ describe("get_context tool — JSDoc smoke", () => {
     expect(fnIdx).toBeGreaterThan(0);
     const head = src.slice(Math.max(0, fnIdx - 1500), fnIdx);
     expect(head).toMatch(/get_context tool handler/);
-    expect(head).toMatch(/Spec:\s*docs\/superpowers\/specs\//);
   });
 });

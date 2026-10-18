@@ -67,7 +67,6 @@ agent ergonomics and the actual authorization model. Removed in #72.
 
 ## Cursor pagination protocol
 
-<!-- Spec: docs/superpowers/specs/2026-05-04-mcp-context-efficiency.md -->
 <!-- Implementation: mcp-server/src/protocol/cursor.ts -->
 
 Read tools that can return many rows use **cursor pagination** to cap response

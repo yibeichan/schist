@@ -10,9 +10,7 @@
  * in cli/schist/acl-fixtures/, loaded by both
  * mcp-server/tests/vault-acl.test.ts and cli/tests/test_acl_parity.py.
  *
- * See docs/superpowers/specs/2026-05-28-mcp-hub-acl-intersection-design.md
- * and docs/superpowers/specs/2026-05-30-mcp-acl-participants-parity-design.md
- * (the participant-identity gates added for #160).
+ * The participant-identity gates were added for #160.
  */
 
 import { readFileSync } from "fs";
