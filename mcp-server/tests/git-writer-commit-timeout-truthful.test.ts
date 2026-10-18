@@ -39,8 +39,8 @@ process.env.SCHIST_GIT_COMMIT_TIMEOUT_MS = String(COMMIT_TIMEOUT_MS);
 // tools.ts write handlers reject with CONFIG_ERROR unless an identity is set.
 process.env.SCHIST_AGENT_ID = TEST_AGENT;
 // The slow post-commit hook stands in for ingest here. The tool handler's own
-// detached ingester can recreate .schist while afterAll removes the temp
-// vault, intermittently failing cleanup with ENOTEMPTY.
+// un-awaited ingester could write into .schist while afterAll removes the
+// temp vault; teardown is seconds later, so this is defensive.
 const savedIngestBin = process.env.SCHIST_INGEST_BIN;
 process.env.SCHIST_INGEST_BIN = "true";
 

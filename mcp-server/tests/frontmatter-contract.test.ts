@@ -95,9 +95,9 @@ async function makeTempVault(): Promise<string> {
 beforeAll(() => {
   envSnapshot.SCHIST_AGENT_ID = process.env.SCHIST_AGENT_ID;
   process.env.SCHIST_AGENT_ID = TEST_AGENT;
-  // This suite checks frontmatter fields, not ingestion. The real ingester is
-  // detached and can recreate .schist while afterAll removes the temp vault,
-  // intermittently failing cleanup with ENOTEMPTY.
+  // This suite checks frontmatter fields, not ingestion. The real ingester
+  // runs un-awaited and can write into .schist while afterAll removes the temp
+  // vault, intermittently failing cleanup with ENOTEMPTY.
   envSnapshot.SCHIST_INGEST_BIN = process.env.SCHIST_INGEST_BIN;
   process.env.SCHIST_INGEST_BIN = "true";
 });
