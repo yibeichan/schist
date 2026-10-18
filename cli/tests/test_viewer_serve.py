@@ -671,19 +671,23 @@ class TestAgentRobustness:
         assert [r['id'] for r in res['results']] == ['notes/lock.md']
         assert agent_mod.search_notes(ro, '- _ --')['note'] == 'empty query'
 
-    def test_tools_wait_out_a_reindex(self, vault, db_path, monkeypatch):
+    def test_a_reindex_in_flight_ends_the_answer(self, vault, db_path, monkeypatch):
         rw = sqlite3.connect(db_path, check_same_thread=False)
         version = rw.execute('PRAGMA user_version').fetchone()[0]
         assert version != 0
-        rw.execute('PRAGMA user_version = 0')   # what a reindex in flight looks like
+        # What a reindex in flight looks like: emptied tables, version cleared.
+        rw.execute('DELETE FROM docs')
+        rw.execute('PRAGMA user_version = 0')
         rw.commit()
         monkeypatch.setattr(agent_mod, 'INDEX_WAIT_S', 0.3)
-        fake = FakeOllama([_call('search_notes', query='lock'), _say('Answer.')])
+        # A model told to try again would retry every round; the answer must
+        # end at the first timeout instead, saying why.
+        fake = FakeOllama([_call('search_notes', query='lock')] * agent_mod.MAX_ROUNDS)
         agent = agent_mod.Agent(db_path, proposals_mod.ProposalStore(vault), opener=fake)
         events = list(agent.run([{'role': 'user', 'content': 'q'}]))
-        assert any(e.get('text') == 'the index is still rebuilding' for e in events)
-        tool = [m for m in fake.requests[-1]['messages'] if m['role'] == 'tool']
-        assert 'being rebuilt' in tool[0]['content'] and 'Vault write lock' not in tool[0]['content']
+        assert len(fake.requests) == 1
+        assert events[-1]['type'] == 'error' and 'index' in events[-1]['message']
+        assert 'tool rounds' not in events[-1]['message']
         # Once the version is stamped back, a waiting tool proceeds.
         ro = agent_mod.connect_ro(db_path)
         threading.Timer(0.2, lambda: (rw.execute(f'PRAGMA user_version = {version}'), rw.commit())).start()
@@ -693,6 +697,21 @@ class TestAgentRobustness:
             ro.close()
             time.sleep(0.05)
             rw.close()
+
+    def test_a_populated_index_without_a_version_is_complete(self, vault, db_path, monkeypatch):
+        """An index built before ingest stamped user_version keeps 0 with its
+        rows; get_db and the MCP reader accept it, so the agent must too."""
+        rw = sqlite3.connect(db_path)
+        rw.execute('PRAGMA user_version = 0')
+        rw.commit()
+        rw.close()
+        monkeypatch.setattr(agent_mod, 'INDEX_WAIT_S', 0.3)
+        fake = FakeOllama([_call('search_notes', query='lock'), _say('Answer.')])
+        agent = agent_mod.Agent(db_path, proposals_mod.ProposalStore(vault), opener=fake)
+        events = list(agent.run([{'role': 'user', 'content': 'q'}]))
+        assert events[-1] == {'type': 'done'}
+        tool = [m for m in fake.requests[-1]['messages'] if m['role'] == 'tool']
+        assert 'Vault write lock' in tool[0]['content']
 
     def test_a_model_without_tool_calling_is_unavailable(self, vault, db_path):
         store = proposals_mod.ProposalStore(vault)

@@ -131,9 +131,12 @@ def wait_for_index(db: sqlite3.Connection, timeout: float = INDEX_WAIT_S) -> boo
     """True once the index is complete. A reindex commits its emptied tables
     with user_version 0 and stamps the version back with the data (see
     index_contract), so a reader in between would see an empty vault and
-    answer from it as if the notes did not exist."""
+    answer from it as if the notes did not exist. Version 0 with rows is an
+    index built before ingest stamped a version: complete, as get_db and the
+    MCP reader treat it."""
     deadline = time.monotonic() + timeout
-    while db.execute('PRAGMA user_version').fetchone()[0] == 0:
+    while (db.execute('PRAGMA user_version').fetchone()[0] == 0
+           and not db.execute('SELECT EXISTS(SELECT 1 FROM docs)').fetchone()[0]):
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.2)
@@ -354,6 +357,13 @@ class Agent:
                     # Text before a tool call is the model narrating its plan,
                     # not the answer: the page moves it out of the answer.
                     yield {'type': 'interim'}
+                # Once per round, and the answer ends on a timeout: handed to
+                # the model as a tool result, "try again" made it retry every
+                # round, each retry waiting INDEX_WAIT_S again.
+                if not wait_for_index(db, INDEX_WAIT_S):
+                    yield {'type': 'error', 'message': 'the vault index is being rebuilt or is '
+                                                       'incomplete; ask again in a minute'}
+                    return
                 for call in calls:
                     fn = call.get('function') or {}
                     args = fn.get('arguments') or {}
@@ -365,12 +375,7 @@ class Agent:
                     if not isinstance(args, dict):
                         args = {}
                     try:
-                        if not wait_for_index(db, INDEX_WAIT_S):
-                            result = {'error': 'the vault index is being rebuilt or is incomplete; '
-                                               'try again shortly'}
-                            event = {'type': 'step', 'text': 'the index is still rebuilding'}
-                        else:
-                            result, event = self._run_tool(db, fn.get('name', ''), args, question)
+                        result, event = self._run_tool(db, fn.get('name', ''), args, question)
                     except Exception as e:  # a bad argument must not end the answer
                         result = {'error': f'{fn.get("name", "")} failed: {e}'}
                         event = {'type': 'step', 'text': f'tool failed: {e}'}
