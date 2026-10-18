@@ -60,9 +60,9 @@ describe("#63 vault-write identity enforcement", () => {
   });
 
   beforeEach(() => {
-    // This suite tests identity and attribution, not ingestion. Using the real
-    // detached ingester lets it recreate .schist while afterAll removes the
-    // temp vault, intermittently failing cleanup with ENOTEMPTY.
+    // This suite tests identity and attribution, not ingestion. The real
+    // ingester runs un-awaited and can write into .schist while afterAll
+    // removes the temp vault, intermittently failing cleanup with ENOTEMPTY.
     process.env.SCHIST_INGEST_BIN = "true";
     delete process.env.SCHIST_AGENT_ID;
     delete process.env.SCHIST_ALLOWED_AGENTS;
