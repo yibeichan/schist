@@ -43,7 +43,7 @@ jobs:
         run: python -m build cli/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
         with:
           packages-dir: cli/dist
 
@@ -53,6 +53,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+      id-token: write   # npm Trusted Publishing (OIDC); no long-lived token
     environment: npm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -75,16 +76,10 @@ jobs:
       - name: Copy LICENSE to mcp-server (included in published tarball)
         run: cp LICENSE mcp-server/
 
+      # Trusted Publishing needs npm 11.5.1 or later; Node 22 ships npm 10.
+      - name: Upgrade npm
+        run: npm install -g npm@11.5.1
+
       - name: Publish to npm
         working-directory: mcp-server
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      # TODO(post-v0.1.0): Migrate to OIDC Trusted Publishing for npm.
-      # First publish requires NPM_TOKEN because @schist/mcp-server package doesn't
-      # exist yet to configure OIDC against. After v0.1.0 is on npm:
-      # 1. Go to https://www.npmjs.com/package/@schist/mcp-server/access
-      # 2. Enable "Trusted Publishing with GitHub (OIDC)"
-      # 3. Configure: yibeichan/schist, release.yml, npm environment
-      # 4. Add 'id-token: write' permission, remove NODE_AUTH_TOKEN, add --provenance
+        run: npm publish --access public --provenance
