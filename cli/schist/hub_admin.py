@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 """Hub-side ACL administration: edit a bare hub's vault.yaml in place.
 
 Admin authority is filesystem access to the bare repo. Mutations are

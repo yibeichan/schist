@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for vault.yaml ACL parser and scope resolution."""
 
 import copy

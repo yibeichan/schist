@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 """Forced-command SSH shell that pins SCHIST_IDENTITY to an authorized key.
 
 Installed per key in the hub user's authorized_keys:

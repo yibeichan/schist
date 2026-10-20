@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """schist ingestion — parse markdown vault into SQLite."""
 
 import argparse

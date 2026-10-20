@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 """`schist serve`: the viewer site plus its local API, on loopback.
 
   GET  /api/status                  {built_at, built_head, vault_head, viewer_current,

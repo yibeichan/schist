@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Sliding-window rate limiting for the pre-receive hook.
 
 Enforces ``git_syncs_per_hour`` and ``notes_per_sync`` from vault.yaml.

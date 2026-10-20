@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for authorized_keys identity pinning (hub_keys.py, #502)."""
 
 from __future__ import annotations

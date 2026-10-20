@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { describe, expect, it } from "@jest/globals";
 import { snippetContent, SNIPPET_MAX_CODE_POINTS } from "../../src/protocol/snippet.js";
 

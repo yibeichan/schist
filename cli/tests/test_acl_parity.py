@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Parity fixtures: assert VaultACL.can_write matches the cases.json contract."""
 
 from __future__ import annotations

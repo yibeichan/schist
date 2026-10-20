@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { execFile as execFileCb, spawn } from "child_process";
 import { promisify } from "util";
 import { Mutex, withTimeout } from "async-mutex";

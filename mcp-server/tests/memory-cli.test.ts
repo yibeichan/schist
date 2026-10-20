@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 /**
  * Tests for schist-memory CLI commands
  * Uses a temp DB for isolation.

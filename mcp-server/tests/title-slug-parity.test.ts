@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 /**
  * TS titleSlug (tools.ts slugify/rawSlug core) and Python markdown_io.slugify
  * must produce byte-identical slugs — the slug is embedded in the note id

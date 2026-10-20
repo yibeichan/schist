@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for `schist init` standalone mode and the unified init dispatch."""
 
 from __future__ import annotations

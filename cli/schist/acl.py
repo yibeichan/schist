@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """vault.yaml ACL parser and scope resolution."""
 
 from __future__ import annotations

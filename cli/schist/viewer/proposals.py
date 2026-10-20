@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 """Proposal queue for the viewer agent: the vault's equivalent of a PR.
 
 The agent files proposals (a new note, or a new connection); each is a JSON

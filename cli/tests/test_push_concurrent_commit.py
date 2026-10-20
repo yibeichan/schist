@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """`sync push` racing a concurrent commit on the same index.
 
 The MCP server does not take the CLI's vault_write_lock, and both writers end

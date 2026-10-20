@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for spoke configuration read/write."""
 
 from schist.spoke_config import SpokeConfig, is_spoke, load_spoke_config, save_spoke_config

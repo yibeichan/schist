@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import * as fs from "fs/promises";
 import { readFileSync } from "node:fs";
 import * as fsSync from "node:fs";

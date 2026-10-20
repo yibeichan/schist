@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: DCO
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  dco:
+    name: DCO sign-off
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Outside contributors only: the maintainer's own PRs and bot PRs
+    # (Dependabot) are not checked. Gate on the PR's author, not
+    # github.actor, which is whoever triggered this run.
+    if: >-
+      github.event.pull_request.user.login != github.repository_owner &&
+      github.event.pull_request.user.type != 'Bot'
+    steps:
+      # No checkout: the PR's code is never run. Commit messages are
+      # untrusted input, so they are only ever handled inside jq.
+      - name: Every commit has a Signed-off-by line matching its author
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh api --paginate "repos/$REPO/pulls/$PR/commits" > commits.json
+          jq -s -r -f /dev/stdin commits.json > unsigned.txt <<'JQ'
+          add | .[]
+          | (.commit.author.email | ascii_downcase) as $email
+          | select(
+              [ .commit.message | split("\n")[]
+                | capture("^Signed-off-by: .+ <(?<e>[^>]+)>\\s*$")?
+                | .e | ascii_downcase ]
+              | index($email) | not)
+          | "\(.sha[0:12]) \(.commit.author.name) <\(.commit.author.email)>"
+          JQ
+          if [ -s unsigned.txt ]; then
+            echo "::error::These commits have no Signed-off-by line matching their author's email:"
+            cat unsigned.txt
+            echo "Sign off with 'git commit -s' (or 'git commit --amend -s' / 'git rebase --signoff main'), then push again. See CONTRIBUTING.md."
+            exit 1
+          fi
+          echo "All $(jq -s 'add | length' commits.json) commits are signed off."

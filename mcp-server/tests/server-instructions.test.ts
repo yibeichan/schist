@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { readFileSync } from "fs";
 import path from "path";
 import { SERVER_INSTRUCTIONS } from "../src/server-instructions.js";

@@ -98,7 +98,7 @@ schist/
 ├── PLAN.md                        # This file
 ├── README.md                      # Project overview + quickstart
 ├── .gitignore
-└── LICENSE                        # MIT
+└── LICENSE                        # AGPL-3.0-or-later + Apache-2.0 (see LICENSES/)
 ```
 
 ## SQLite Schema

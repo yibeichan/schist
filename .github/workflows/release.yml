@@ -73,8 +73,14 @@ jobs:
           npm ci
           npm run build
 
-      - name: Copy LICENSE to mcp-server (included in published tarball)
-        run: cp LICENSE mcp-server/
+      # mcp-server/LICENSE is tracked and holds the AGPL text the package
+      # declares; the root LICENSE is a summary of the repository's licenses. Refuse to publish
+      # a tarball whose LICENSE is anything else.
+      - name: Check the packed LICENSE is the AGPL text
+        working-directory: mcp-server
+        run: |
+          npm pack --dry-run --json | jq -e 'any(.[0].files[]; .path == "LICENSE")' > /dev/null
+          head -1 LICENSE | grep -qx 'GNU AFFERO GENERAL PUBLIC LICENSE'
 
       # Trusted Publishing needs npm 11.5.1 or later; Node 22 ships npm 10.
       - name: Upgrade npm

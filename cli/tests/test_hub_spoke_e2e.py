@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """End-to-end hub+spoke smoke test using a local file:// bare hub.
 
 Creates a bare hub with init_hub, clones two spokes, writes a note on one,

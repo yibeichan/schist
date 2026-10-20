@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for `schist serve`: the request guards, rebuild, the agent's tools and
 loop (against a fake Ollama), and the proposal queue end to end."""
 

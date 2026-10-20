@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 /**
  * Agent-identity policy — shared by tools.ts (MCP tool guard) and
  * sqlite-reader.ts (DB write guard). Both layers must agree, so the

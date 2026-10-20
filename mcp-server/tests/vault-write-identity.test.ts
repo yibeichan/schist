@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 /**
  * #63 — vault-write tools (create_note, add_connection) must call
  * validateOwner on each call AND stamp the validated identity onto

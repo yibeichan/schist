@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 /**
  * TS normalizeConceptSlug and Python _normalize_concept_slug must produce
  * byte-identical slugs — the index stores Python's output, delete_note's

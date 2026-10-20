@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 /**
  * deleteNote must give `git commit` the GIT_COMMIT_TIMEOUT_MS ceiling, not the
  * 30s GIT_OP_TIMEOUT_MS default — commit runs the synchronous post-commit

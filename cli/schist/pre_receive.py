@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 """Git pre-receive hook for enforcing vault.yaml ACL on pushes.
 
 Validates that each pushed file is within the pusher's write scope.

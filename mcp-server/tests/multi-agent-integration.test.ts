@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 /**
  * Multi-agent integration test — regression guard for the original gap that
  * let PR #61 ship as a no-op.

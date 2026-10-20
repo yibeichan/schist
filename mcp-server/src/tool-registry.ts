@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import type { VaultConfig } from "./types.js";
 import { OUTPUT_SCHEMAS } from "./output-contract.js";
 

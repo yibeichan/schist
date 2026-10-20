@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use schist in your work, please cite it as below."
+title: "schist"
+abstract: "Agent-first knowledge graph: git is truth, SQLite is query, humans just watch."
+type: software
+authors:
+  - family-names: Chen
+    given-names: Yibei
+    orcid: "https://orcid.org/0000-0003-2882-0900"
+repository-code: "https://github.com/yibeichan/schist"
+keywords:
+  - knowledge-graph
+  - agents
+  - mcp
+  - markdown
+  - sqlite

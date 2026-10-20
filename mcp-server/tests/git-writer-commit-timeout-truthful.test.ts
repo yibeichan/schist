@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 /**
  * #336 — `git commit` updates the ref BEFORE running the post-commit hook
  * (schist-ingest). When GIT_COMMIT_TIMEOUT_MS expired during the hook, the

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the strict env_flag helper (#311 item 1).
 
 Plain truthiness (`if os.environ.get(NAME)`) treats NAME=0 / NAME=false as
