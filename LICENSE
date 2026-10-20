@@ -1,5 +1,6 @@
-schist is licensed under two licenses. Each file states its own license in an
-SPDX header, or through REUSE.toml for files that cannot carry one.
+schist's own code is licensed under two licenses, AGPL-3.0-or-later and
+Apache-2.0. Each file states its own license in an SPDX header, or through
+REUSE.toml for files that cannot carry one.
 
   AGPL-3.0-or-later  The MCP server (mcp-server/), the RAG service (rag/), the
                      hub's pre-receive hook (hooks/pre-receive), and the hub
@@ -13,10 +14,11 @@ SPDX header, or through REUSE.toml for files that cannot carry one.
   Apache-2.0         Everything else, including the rest of the CLI and library.
                      Full text: LICENSES/Apache-2.0.txt
 
-  MIT                .claude/skills/, adapted from gstack
-                     (Copyright (c) 2026 Garry Tan). Full text: LICENSES/MIT.txt
-
 Copyright (c) 2026 Yibei Chen
+
+Third-party code: .claude/skills/ is adapted from gstack
+(https://github.com/garrytan/gstack), Copyright (c) 2026 Garry Tan, and stays
+under the MIT License. Full text: LICENSES/MIT.txt
 
 Code published before this change, including release v0.2.0, was published
 under the MIT License and remains available under it:

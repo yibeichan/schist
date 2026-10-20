@@ -134,7 +134,7 @@ See [PLAN.md](./PLAN.md) for the full architecture.
 
 ## License
 
-Contributions are licensed under the license of the file they change: AGPL-3.0-or-later or Apache-2.0, as named in each file's SPDX header or in [`REUSE.toml`](./REUSE.toml) (see [`LICENSE`](./LICENSE)). A new code file takes an SPDX header with the license of the component it belongs to; `cli/tests/test_licensing.py` fails when a code file has none, or names a license other than its component's.
+Contributions are licensed under the license of the file they change (AGPL-3.0-or-later or Apache-2.0; MIT under `.claude/skills/`, which is adapted from gstack), as named in each file's SPDX header or in [`REUSE.toml`](./REUSE.toml) (see [`LICENSE`](./LICENSE)). A new code file takes an SPDX header with the license of the component it belongs to; `cli/tests/test_licensing.py` fails when a code file has none, or names a license other than its component's.
 
 ### Developer Certificate of Origin
 

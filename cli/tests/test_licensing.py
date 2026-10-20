@@ -22,7 +22,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Built from parts so this file does not itself declare these as its licenses.
 TAG = "SPDX-" + "License-Identifier"
-TAG_RE = re.compile(rf"^\W*{TAG}:\s*(\S+)", re.MULTILINE)
+# The whole expression, so `AGPL-3.0-or-later OR Apache-2.0` is not read as AGPL.
+TAG_RE = re.compile(rf"^\W*{TAG}:\s*(.*?)\s*(?:-->|\*/)?\s*$", re.MULTILINE)
 
 AGPL = "AGPL-3.0-or-later"
 APACHE = "Apache-2.0"
@@ -42,7 +43,7 @@ AGPL_FILES = {
 # Covered by REUSE.toml instead of a header: the hooks must match sync.py's
 # constants byte for byte, and .claude/skills is third-party (MIT).
 HEADERLESS_FILES = {"hooks/post-commit", "hooks/pre-commit"}
-HEADERLESS_DIRS = (".claude/",)
+HEADERLESS_DIRS = (".claude/skills/",)
 
 
 def _tracked() -> list[str]:

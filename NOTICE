@@ -4,3 +4,6 @@ Copyright (c) 2026 Yibei Chen
 This product is licensed under the Apache License 2.0 and the GNU Affero
 General Public License v3.0 or later; see LICENSE for which files are under
 which license.
+
+.claude/skills/ is adapted from gstack (https://github.com/garrytan/gstack),
+Copyright (c) 2026 Garry Tan, under the MIT License.

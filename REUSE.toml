@@ -3,9 +3,10 @@ version = 1
 # Files that cannot carry an SPDX header (docs, data, lockfiles, fixtures,
 # config, and hooks/post-commit and hooks/pre-commit, which tests require to
 # match the hook text in cli/schist/sync.py byte for byte). Code files carry
-# their own header, which takes precedence; cli/tests/test_licensing.py checks
-# that every code file has one. When several annotations match a path, the
-# last one wins.
+# their own header, which takes precedence, except under .claude/skills/,
+# where the MIT annotation overrides it; cli/tests/test_licensing.py checks
+# that every other code file has one. When several annotations match a path,
+# the last one wins.
 
 [[annotations]]
 path = "**"
