@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 /**
  * TS insertConnectionLine (markdown-parser.ts) and Python
  * markdown_io.insert_connection_line must produce byte-identical output —

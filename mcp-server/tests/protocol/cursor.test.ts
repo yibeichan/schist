@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { describe, it, expect, beforeEach, jest } from "@jest/globals";
 import { canonicalizeQueryHash } from "../../src/protocol/cursor.js";
 import {

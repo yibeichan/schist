@@ -8,9 +8,10 @@ version = "0.2.0"
 description = "Agent-first knowledge graph: git is truth, SQLite is query, humans just watch"
 readme = "README.md"
 requires-python = ">=3.12"
-license = "MIT"
+license = "Apache-2.0 AND AGPL-3.0-or-later"
+license-files = ["LICENSE.*"]
 authors = [
-    { name = "schist contributors" }
+    { name = "Yibei Chen" }
 ]
 keywords = ["knowledge-graph", "agents", "mcp", "markdown", "sqlite"]
 classifiers = [

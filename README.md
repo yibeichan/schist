@@ -254,4 +254,13 @@ Full platform-specific setup guide: [`docs/getting-started.md`](./docs/getting-s
 
 ## License
 
-MIT
+schist is licensed under two licenses:
+
+- **AGPL-3.0-or-later** for the MCP server (`mcp-server/`), the RAG service (`rag/`), the hub's pre-receive hook and the hub and server modules of the CLI (`hub_admin`, `hub_keys`, `hub_shell`, `pre_receive`, and `viewer/serve`, `viewer/agent`, `viewer/proposals`).
+- **Apache-2.0** for everything else, including the rest of the CLI and library.
+
+Every file names its license in an SPDX header or in [`REUSE.toml`](./REUSE.toml); see [`LICENSE`](./LICENSE) for the summary and [`LICENSES/`](./LICENSES) for the full texts. Copyright (c) 2026 Yibei Chen. Releases up to and including v0.2.0 were published under the MIT License and remain available under it.
+
+## Cite
+
+If you use schist in your work, please cite it using [`CITATION.cff`](./CITATION.cff) (GitHub's "Cite this repository" button reads it).

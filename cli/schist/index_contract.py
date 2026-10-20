@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Vault-index contract — single-sourced from ``schema/index-contract.json``.
 
 The vault index (``.schist/schist.db``) is disposable and rebuilt from

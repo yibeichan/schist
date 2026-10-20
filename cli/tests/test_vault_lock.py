@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 import errno, fcntl, os, subprocess, sys, threading, time
 import pytest
 from schist import git_ops

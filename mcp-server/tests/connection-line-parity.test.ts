@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 /**
  * TS CONNECTION_RE + parseConnections (markdown-parser.ts) and Python
  * CONNECTION_RE + parse_connections (ingest.py) must agree at BOTH levels:

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 export const SNIPPET_MAX_CODE_POINTS = 200;
 const ELLIPSIS = "…"; // U+2026 HORIZONTAL ELLIPSIS
 

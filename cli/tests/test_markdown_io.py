@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for markdown_io — title slugify cross-language parity (#338).
 
 Python markdown_io.slugify and TS titleSlug (mcp-server/src/tools.ts) must

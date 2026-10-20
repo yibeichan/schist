@@ -1,3 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: Apache-2.0
+
 """Local "ask the vault" agent behind `schist serve` (POST /api/agent/chat).
 
 A tool-calling loop against a local Ollama model. The agent cannot write: its

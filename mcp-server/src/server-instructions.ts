@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 export const SERVER_INSTRUCTIONS =
   "schist is the knowledge-vault server. When searching or recalling vault content " +
   "(notes, memory entries, concepts, papers), prefer search_notes, search_memory, " +

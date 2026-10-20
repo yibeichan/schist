@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Corpus tests for the pre-commit secret-detection regex (issue #103).
 
 The hook ships as a shell template baked into `cli/schist/sync.py`. These tests

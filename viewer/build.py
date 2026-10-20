@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Compatibility entry point for ``python viewer/build.py --db ... --out ...``.
 
 The builder lives in the CLI package as ``schist.viewer.build``; prefer

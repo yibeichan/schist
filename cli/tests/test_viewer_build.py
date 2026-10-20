@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for schist.viewer.build — the static graph + search index builder.
 
 These tests exercise the pure functions (`normalize_endpoint`, `build_graph`,

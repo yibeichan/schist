@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """`schist lock hold`: hold the vault write lock for another process (#724).
 
 The MCP server cannot flock from Node, so it spawns this helper and keeps its

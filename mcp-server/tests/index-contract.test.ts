@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 /**
  * schema/index-contract.json is the single source for the vault-index table
  * contract (#130 D3) — tables, required tables/columns, rebuild survivors,

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 
 type OutputSchema = NonNullable<Tool["outputSchema"]>;

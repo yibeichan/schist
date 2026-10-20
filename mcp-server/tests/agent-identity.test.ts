@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { validateOwner } from "../src/agent-identity.js";
 
 // Helper: capture both message and error code in one assertion

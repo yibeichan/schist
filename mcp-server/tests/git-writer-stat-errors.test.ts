@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { afterAll, afterEach, describe, expect, jest, test } from "@jest/globals";
 import { execFile as execFileCb } from "child_process";
 import * as realFs from "fs/promises";

@@ -1,3 +1,25 @@
+schist is licensed under two licenses. Each file states its own license in an
+SPDX header, or through REUSE.toml for files that cannot carry one.
+
+  AGPL-3.0-or-later  The MCP server (mcp-server/), the RAG service (rag/), the
+                     hub's pre-receive hook (hooks/pre-receive), and the hub
+                     and server modules of the CLI:
+                       cli/schist/hub_admin.py      cli/schist/viewer/agent.py
+                       cli/schist/hub_keys.py       cli/schist/viewer/proposals.py
+                       cli/schist/hub_shell.py      cli/schist/viewer/serve.py
+                       cli/schist/pre_receive.py
+                     Full text: LICENSES/AGPL-3.0-or-later.txt
+
+  Apache-2.0         Everything else, including the rest of the CLI and library.
+                     Full text: LICENSES/Apache-2.0.txt
+
+Copyright (c) 2026 Yibei Chen
+
+Releases up to and including v0.2.0 were published under the MIT License, and
+remain available under it:
+
+----------------------------------------------------------------------------
+
 MIT License
 
 Copyright (c) 2026 schist contributors

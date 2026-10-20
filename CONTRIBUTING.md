@@ -134,7 +134,15 @@ See [PLAN.md](./PLAN.md) for the full architecture.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [MIT License](./LICENSE).
+Contributions are licensed under the license of the file they change: AGPL-3.0-or-later or Apache-2.0, as named in each file's SPDX header or in [`REUSE.toml`](./REUSE.toml) (see [`LICENSE`](./LICENSE)). A new file takes an SPDX header with the license of the component it belongs to; `reuse lint` in CI checks that every file has one.
+
+### Developer Certificate of Origin
+
+Every commit must be signed off under the [Developer Certificate of Origin 1.1](https://developercertificate.org/), which certifies that you wrote the change or otherwise have the right to submit it under the project's licenses. Add the sign-off with `git commit -s`, which appends a line with your name and email:
+
+```
+Signed-off-by: Your Name <you@example.com>
+```
 
 ## Questions?
 

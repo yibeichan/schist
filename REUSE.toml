@@ -1,0 +1,16 @@
+version = 1
+
+# Files that cannot carry an SPDX header (docs, data, lockfiles, fixtures,
+# config, and hooks/, which must match the hook text in cli/schist/sync.py
+# byte for byte). Code files carry their own header, which takes precedence.
+# When several annotations match a path, the last one wins.
+
+[[annotations]]
+path = "**"
+SPDX-FileCopyrightText = "2026 Yibei Chen"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = ["mcp-server/**", "rag/**", "hooks/pre-receive"]
+SPDX-FileCopyrightText = "2026 Yibei Chen"
+SPDX-License-Identifier = "AGPL-3.0-or-later"

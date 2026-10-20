@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """`sync push --no-commit`: push existing commits, never touch the index (#724).
 
 The MCP server commits every write itself, then spawns a background push. When

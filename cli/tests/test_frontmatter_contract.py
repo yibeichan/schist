@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """schema/frontmatter-contract.json conformance — Python side (#130 slice A).
 
 The frontmatter field lists used to live independently in create_note's and

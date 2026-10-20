@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for schist.git_ops.
 
 Focused on the subprocess-timeout hardening (#256) and its #364 refinement:

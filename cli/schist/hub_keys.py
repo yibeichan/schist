@@ -1,3 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: Apache-2.0
+
 """authorized_keys management: pin hub SSH keys to schist identities.
 
 Each spoke key gets a forced-command entry so the SSH credential — not a

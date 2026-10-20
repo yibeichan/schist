@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Alias resolution on the read paths (#489): listConcepts aliasOf/aliases,
 // getContext hotConcepts aliasOf, getNote alias_of/aliases on concept notes.
 // Fixtures build the index tables by hand (same style as

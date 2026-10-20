@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { listAllTools, REMOVED_TOOLS } from "../src/tool-registry.js";
 import type { VaultConfig } from "../src/types.js";
 

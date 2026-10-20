@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for schist.commands.add and schist.commands.link.
 
 These CLI write paths had zero coverage, which let three disk/DB parity gaps

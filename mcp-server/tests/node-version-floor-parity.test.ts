@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Yibei Chen
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 /**
  * The declared Node floor lives in mcp-server/package.json `engines.node`, but
  * it is also WRITTEN OUT in prose, in a requirements table, in two NodeSource
