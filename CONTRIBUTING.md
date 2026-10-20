@@ -144,6 +144,8 @@ Every commit must be signed off under the [Developer Certificate of Origin 1.1](
 Signed-off-by: Your Name <you@example.com>
 ```
 
+The email must match the commit's author email. A DCO check on each pull request lists any commit without a matching sign-off; fix them with `git rebase --signoff main` and force-push the branch.
+
 ## Questions?
 
 Open an issue with the `question` label, or start a [Discussion](https://github.com/yibeichan/schist/discussions) if those are enabled.
