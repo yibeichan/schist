@@ -271,12 +271,35 @@ function patchFrontmatterFlowHashtags(content: string): string {
   return patched ? patchedLines.join("\n") : content;
 }
 
+// gray-matter reads the text after the opening `---` as a language name, and
+// its built-in `javascript` engine evaluates the block. Note content arrives
+// from every participant through the hub, so only YAML is parsed: the other
+// built-in engines throw (gray-matter maps js/JS/javascript to `javascript`
+// and coffee/cson to `coffee`; any other name is already unregistered).
+function refuseLanguage(name: string) {
+  return {
+    parse(): never {
+      throw new Error(
+        `note frontmatter must be YAML; a '---${name}' opening line is not supported`,
+      );
+    },
+  };
+}
+
+const YAML_ONLY = {
+  engines: {
+    javascript: refuseLanguage("javascript"),
+    coffee: refuseLanguage("coffee"),
+    json: refuseLanguage("json"),
+  },
+};
+
 export function parseNote(content: string): {
   metadata: Record<string, unknown>;
   body: string;
   connections: Connection[];
 } {
-  const parsed = matter(patchFrontmatterFlowHashtags(content));
+  const parsed = matter(patchFrontmatterFlowHashtags(content), YAML_ONLY);
   const connections = parseConnections(parsed.content);
   return {
     metadata: parsed.data as Record<string, unknown>,

@@ -908,3 +908,58 @@ class TestStartupBuild:
     def test_no_site_and_a_failed_build_exits(self, vault, db_path, monkeypatch, capsys):
         with pytest.raises(SystemExit):
             _startup(vault, db_path, monkeypatch, capsys, lambda self: (False, 'boom'))
+
+
+# ---------------------------------------------------------------------------
+# Who owns the Ollama port
+# ---------------------------------------------------------------------------
+
+def _proc_table(path, rows):
+    """A /proc/net/tcp-shaped file: rows of (hex local address, port, state, uid)."""
+    lines = ['  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode']
+    for i, (addr, port, state, uid) in enumerate(rows):
+        lines.append(f'{i:4d}: {addr}:{port:04X} 00000000:0000 {state} 00000000:00000000 '
+                     f'00:00000000 00000000 {uid:5d}        0 {1000 + i} 1 0 100 0 0 10 0')
+    path.write_text('\n'.join(lines) + '\n')
+    return str(path)
+
+
+class TestOllamaPortOwner:
+    """On a shared host another user can listen on 127.0.0.1:11434 first and
+    receive every question and the note text the tools return."""
+
+    def _agent(self, vault, db_path, tmp_path, v4_rows=(), v6_rows=(), url=None):
+        kw = {'ollama_url': url} if url else {}
+        agent = agent_mod.Agent(db_path, proposals_mod.ProposalStore(vault), opener=FakeOllama([]), **kw)
+        agent.proc_net = (_proc_table(tmp_path / 'tcp', v4_rows), _proc_table(tmp_path / 'tcp6', v6_rows))
+        return agent
+
+    def test_another_users_listener_is_refused(self, vault, db_path, tmp_path):
+        other = os.getuid() + 1
+        st = self._agent(vault, db_path, tmp_path, v4_rows=[('0100007F', 11434, '0A', other)]).status()
+        assert st['available'] is False
+        assert f'uid {other}' in st['reason'] and '--ollama-url' in st['reason']
+
+    @pytest.mark.parametrize('addr', ['00000000000000000000000001000000', '00000000000000000000000000000000',
+                                      '0000000000000000FFFF00000100007F'])
+    def test_ipv6_loopback_and_wildcard_listeners_count(self, vault, db_path, tmp_path, addr):
+        st = self._agent(vault, db_path, tmp_path, v6_rows=[(addr, 11434, '0A', os.getuid() + 1)]).status()
+        assert st['available'] is False
+
+    def test_the_owners_listener_is_accepted(self, vault, db_path, tmp_path):
+        rows = [('00000000', 11434, '0A', os.getuid()), ('0100007F', 11434, '01', os.getuid() + 1)]
+        assert self._agent(vault, db_path, tmp_path, v4_rows=rows).status()['available'] is True
+
+    def test_other_ports_and_addresses_are_ignored(self, vault, db_path, tmp_path):
+        rows = [('0100007F', 8080, '0A', os.getuid() + 1), ('0A00000A', 11434, '0A', os.getuid() + 1)]
+        assert self._agent(vault, db_path, tmp_path, v4_rows=rows).status()['available'] is True
+
+    def test_no_proc_table_means_no_check(self, vault, db_path, tmp_path):
+        agent = agent_mod.Agent(db_path, proposals_mod.ProposalStore(vault), opener=FakeOllama([]))
+        agent.proc_net = (str(tmp_path / 'absent'), str(tmp_path / 'absent6'))
+        assert agent.status()['available'] is True
+
+    def test_a_non_loopback_url_is_not_checked(self, vault, db_path, tmp_path):
+        st = self._agent(vault, db_path, tmp_path, v4_rows=[('0100007F', 11434, '0A', os.getuid() + 1)],
+                         url='http://gpu-node.example:11434').status()
+        assert st['available'] is True
