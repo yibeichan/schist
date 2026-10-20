@@ -40,10 +40,9 @@ AGPL_FILES = {
     "cli/schist/viewer/proposals.py",
     "cli/schist/viewer/serve.py",
 }
-# Covered by REUSE.toml instead of a header: the hooks must match sync.py's
-# constants byte for byte, and .claude/skills is third-party (MIT).
+# Covered by REUSE.toml instead of a header: these hooks must match sync.py's
+# constants byte for byte.
 HEADERLESS_FILES = {"hooks/post-commit", "hooks/pre-commit"}
-HEADERLESS_DIRS = (".claude/skills/",)
 
 
 def _tracked() -> list[str]:
@@ -57,7 +56,7 @@ def _tracked() -> list[str]:
 def _code_files() -> list[str]:
     files = []
     for path in _tracked():
-        if path in HEADERLESS_FILES or path.startswith(HEADERLESS_DIRS):
+        if path in HEADERLESS_FILES:
             continue
         if Path(path).suffix in CODE_SUFFIXES or path == "hooks/pre-receive":
             files.append(path)

@@ -259,7 +259,7 @@ schist is licensed under two licenses:
 - **AGPL-3.0-or-later** for the MCP server (`mcp-server/`), the RAG service (`rag/`), the hub's pre-receive hook and the hub and server modules of the CLI (`hub_admin`, `hub_keys`, `hub_shell`, `pre_receive`, and `viewer/serve`, `viewer/agent`, `viewer/proposals`).
 - **Apache-2.0** for everything else, including the rest of the CLI and library.
 
-Every file names its license in an SPDX header or in [`REUSE.toml`](./REUSE.toml); see [`LICENSE`](./LICENSE) for the summary and [`LICENSES/`](./LICENSES) for the full texts. Copyright (c) 2026 Yibei Chen. Code published before this change, including release v0.2.0, remains available under the MIT License. `.claude/skills/` is adapted from [gstack](https://github.com/garrytan/gstack) and stays under its MIT License.
+Every file names its license in an SPDX header or in [`REUSE.toml`](./REUSE.toml); see [`LICENSE`](./LICENSE) for the summary and [`LICENSES/`](./LICENSES) for the full texts. Copyright (c) 2026 Yibei Chen. Code published before this change, including release v0.2.0, remains available under the MIT License.
 
 ## Cite
 
