@@ -1,9 +1,11 @@
 version = 1
 
 # Files that cannot carry an SPDX header (docs, data, lockfiles, fixtures,
-# config, and hooks/, which must match the hook text in cli/schist/sync.py
-# byte for byte). Code files carry their own header, which takes precedence.
-# When several annotations match a path, the last one wins.
+# config, and hooks/post-commit and hooks/pre-commit, which tests require to
+# match the hook text in cli/schist/sync.py byte for byte). Code files carry
+# their own header, which takes precedence; cli/tests/test_licensing.py checks
+# that every code file has one. When several annotations match a path, the
+# last one wins.
 
 [[annotations]]
 path = "**"
@@ -14,3 +16,10 @@ SPDX-License-Identifier = "Apache-2.0"
 path = ["mcp-server/**", "rag/**", "hooks/pre-receive"]
 SPDX-FileCopyrightText = "2026 Yibei Chen"
 SPDX-License-Identifier = "AGPL-3.0-or-later"
+
+# Skills adapted from gstack (https://github.com/garrytan/gstack), MIT.
+[[annotations]]
+path = ".claude/skills/**"
+precedence = "override"
+SPDX-FileCopyrightText = ["2026 Garry Tan", "2026 Yibei Chen"]
+SPDX-License-Identifier = "MIT"

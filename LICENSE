@@ -13,10 +13,13 @@ SPDX header, or through REUSE.toml for files that cannot carry one.
   Apache-2.0         Everything else, including the rest of the CLI and library.
                      Full text: LICENSES/Apache-2.0.txt
 
+  MIT                .claude/skills/, adapted from gstack
+                     (Copyright (c) 2026 Garry Tan). Full text: LICENSES/MIT.txt
+
 Copyright (c) 2026 Yibei Chen
 
-Releases up to and including v0.2.0 were published under the MIT License, and
-remain available under it:
+Code published before this change, including release v0.2.0, was published
+under the MIT License and remains available under it:
 
 ----------------------------------------------------------------------------
 

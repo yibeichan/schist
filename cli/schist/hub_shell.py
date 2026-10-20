@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Yibei Chen
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# SPDX-License-Identifier: Apache-2.0
 
 """Forced-command SSH shell that pins SCHIST_IDENTITY to an authorized key.
 

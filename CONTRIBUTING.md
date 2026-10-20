@@ -134,7 +134,7 @@ See [PLAN.md](./PLAN.md) for the full architecture.
 
 ## License
 
-Contributions are licensed under the license of the file they change: AGPL-3.0-or-later or Apache-2.0, as named in each file's SPDX header or in [`REUSE.toml`](./REUSE.toml) (see [`LICENSE`](./LICENSE)). A new file takes an SPDX header with the license of the component it belongs to; `reuse lint` in CI checks that every file has one.
+Contributions are licensed under the license of the file they change: AGPL-3.0-or-later or Apache-2.0, as named in each file's SPDX header or in [`REUSE.toml`](./REUSE.toml) (see [`LICENSE`](./LICENSE)). A new code file takes an SPDX header with the license of the component it belongs to; `cli/tests/test_licensing.py` fails when a code file has none, or names a license other than its component's.
 
 ### Developer Certificate of Origin
 
@@ -144,7 +144,7 @@ Every commit must be signed off under the [Developer Certificate of Origin 1.1](
 Signed-off-by: Your Name <you@example.com>
 ```
 
-The email must match the commit's author email. A DCO check on each pull request lists any commit without a matching sign-off; fix them with `git rebase --signoff main` and force-push the branch.
+The email must match the commit's author email. A DCO check on each pull request lists any commit without a matching sign-off; fix them with `git rebase --signoff main` and force-push the branch. The sign-off uses your current `git config user.email`, so it must be the email the commits were authored with.
 
 ## Questions?
 

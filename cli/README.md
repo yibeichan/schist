@@ -70,4 +70,4 @@ See the [full README](https://github.com/yibeichan/schist#readme) for architectu
 
 ## License
 
-Apache-2.0, except the hub and server modules (`hub_admin`, `hub_keys`, `hub_shell`, `pre_receive`, `viewer/serve`, `viewer/agent`, `viewer/proposals`), which are AGPL-3.0-or-later. Each file names its license in an SPDX header. Copyright (c) 2026 Yibei Chen. Versions up to and including 0.2.0 were released under the MIT License.
+Apache-2.0, except the hub and server modules (`hub_admin`, `hub_keys`, `hub_shell`, `pre_receive`, `viewer/serve`, `viewer/agent`, `viewer/proposals`), which are AGPL-3.0-or-later. Each file names its license in an SPDX header. Copyright (c) 2026 Yibei Chen. Code published before this change, including version 0.2.0, remains available under the MIT License.

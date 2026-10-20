@@ -8,9 +8,6 @@ authors:
     given-names: Yibei
     orcid: "https://orcid.org/0000-0003-2882-0900"
 repository-code: "https://github.com/yibeichan/schist"
-license:
-  - AGPL-3.0-or-later
-  - Apache-2.0
 keywords:
   - knowledge-graph
   - agents
