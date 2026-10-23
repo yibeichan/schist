@@ -629,7 +629,9 @@ def setup_sparse_checkout(vault_path: str, scope: str) -> tuple[bool, str]:
     """Enable sparse-checkout cone mode and set scope directories.
 
     Cone mode includes all root-level files automatically, so vault.yaml
-    and other root configs are always available.
+    and other root configs are always available. `global` is a logical
+    scope, not a directory: it expands to every content directory, or the
+    cone would be a single nonexistent global/ and check out no notes (#786).
     """
     try:
         # All three are local index/worktree operations, but each can hang
@@ -642,7 +644,7 @@ def setup_sparse_checkout(vault_path: str, scope: str) -> tuple[bool, str]:
             timeout=30,
         )
         subprocess.run(
-            ['git', 'sparse-checkout', 'set', scope],
+            ['git', 'sparse-checkout', 'set', *scope_dirs(scope)],
             cwd=vault_path, check=True, capture_output=True, **_GIT_TEXT,
             timeout=30,
         )
@@ -1214,6 +1216,14 @@ def stage_scope_files(vault_path: str, scope: str) -> tuple[bool, str]:
         return False, (e.stdout or '') + (e.stderr or '')
 
 
+def scope_dirs(scope: str) -> list[str]:
+    """The directories a scope names: the content directories for `global`,
+    else the scope path itself. No trailing slash."""
+    if scope == "global":
+        return _global_scope_dirs()
+    return [scope.rstrip('/')]
+
+
 def _scope_targets(vault_path: str, scope: str) -> list[str]:
     """Pathspecs a scope stages — shared by staging and the ignore guard so
     the two can't drift apart."""
@@ -1236,10 +1246,7 @@ def paths_outside_scope(vault_path: str, scope: str, paths: list[str]) -> list[s
     dir that is empty on disk and untracked, which would misreport a staged
     deletion of its last file as out of scope.
     """
-    if scope == "global":
-        dirs = [d.rstrip('/') + '/' for d in _global_scope_dirs()]
-    else:
-        dirs = [scope.rstrip('/') + '/']
+    dirs = [d + '/' for d in scope_dirs(scope)]
     return [p for p in paths if not any(p.startswith(d) for d in dirs)]
 
 
