@@ -170,7 +170,7 @@ def main():
                         help='(standalone) Path to new vault (default: current dir)')
     p_init.add_argument('--spoke', action='store_true', help='Initialize as spoke vault')
     p_init.add_argument('--hub', help='(spoke) Hub repository URL')
-    p_init.add_argument('--scope', help='(spoke) Scope to sync (directory path)')
+    p_init.add_argument('--scope', help='(spoke) Scope to sync: a directory path, or "global" for every content directory')
     p_init.add_argument('--identity', default=os.environ.get('SCHIST_IDENTITY'),
                         help='(spoke/standalone) Identity name (or set SCHIST_IDENTITY)')
     p_init.add_argument('--hub-path', dest='hub_path',
