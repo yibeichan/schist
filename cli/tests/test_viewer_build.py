@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -421,15 +422,20 @@ class TestShapeContract:
         # buttons, checked in test_ask_buttons_are_styled.
         main = self.PAGE[:self.PAGE.index("// ── Ask the vault")]
         classes = set(re.findall(r'el\("button",\s*"([\w-]+)', main))
-        assert {"result-item", "conn-item"} <= classes  # guards against a regex that matches nothing
+        rows = {"result-item", "conn-item"}
+        assert rows <= classes  # guards against a regex that matches nothing
         css = re.sub(r"/\*.*?\*/", "", self.PAGE, flags=re.S)
         rules = re.findall(r"([^{}]+)\{([^}]*)\}", css)
         for cls in classes:
             decls = " ".join(body for sel, body in rules
                              if f".{cls}" in [s.strip() for s in sel.split(",")])
             assert re.search(r"background:\s*(transparent|none)", decls), f".{cls} keeps the button background"
-            assert re.search(r"color:\s*inherit", decls), f".{cls} keeps the button text colour"
-            assert re.search(r"text-align:\s*left", decls), f".{cls} keeps centred button text"
+            if cls in rows:
+                assert re.search(r"color:\s*inherit", decls), f".{cls} keeps the button text colour"
+                assert re.search(r"text-align:\s*left", decls), f".{cls} keeps centred button text"
+            else:
+                # Chips are styled buttons, not rows: they set their own colour.
+                assert re.search(r"(?<![-\w])color:\s*\S", decls), f".{cls} keeps the button text colour"
 
     def test_rebuild_bar_is_hidden_unless_the_server_answers(self):
         """The Rebuild button needs a server with /api/status; served as plain
@@ -522,6 +528,67 @@ class TestShapeContract:
         body = fn.group(0)
         assert re.search(r'querySelectorAll\("a"\)', body)
         assert re.search(r"\.replaceWith\(document\.createTextNode\(", body)
+
+    def test_list_filters_by_type_status_and_tags(self):
+        """The list filters by vault directory (a note's type), status and
+        tags: values within a facet are alternatives, facets combine, every
+        tag must match, and a facet's own counts ignore that facet."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node not installed")
+        fns = []
+        for name in ("nodeKind", "filtersOn", "matchesFilters", "facetCounts"):
+            m = re.search(rf"function {name}\(.*?\n  \}}\n", self.PAGE, re.S)
+            assert m, f"{name} not found"
+            fns.append(m.group(0))
+        script = "\n".join(fns) + """
+const nodes = [
+  { id: "ops/a.md", type: "note", status: "active", tags: ["security", "hub"] },
+  { id: "ops/b.md", type: "note", status: "final", tags: ["security"] },
+  { id: "decisions/c.md", type: "note", status: "active", tags: ["hub"] },
+  { id: "papers/d.md", type: "note", status: "final", tags: [] },
+  { id: "top.md", type: "note", status: "draft", tags: [] },
+  { id: "locking", type: "concept" },
+];
+const F = (type = [], status = [], tag = []) => ({ type: new Set(type), status: new Set(status), tag: new Set(tag) });
+const ids = f => nodes.filter(n => matchesFilters(n, f)).map(n => n.id);
+const counts = (f, facet, fn) => Object.fromEntries(facetCounts(nodes, f, facet, fn));
+process.stdout.write(JSON.stringify({
+  kinds: nodes.map(nodeKind),
+  none: ids(F()), on: [filtersOn(F()), filtersOn(F([], [], ["hub"]))],
+  orWithin: ids(F(["ops", "decisions"])),
+  andAcross: ids(F(["ops"], ["active"])),
+  allTags: ids(F([], [], ["security", "hub"])),
+  concepts: ids(F(["concepts"])),
+  conceptsHaveNoStatus: ids(F(["concepts"], ["active"])),
+  typeCounts: counts(F(["ops"], ["active"]), "type", nodeKind),
+  statusCounts: counts(F(["ops"], ["active"]), "status", n => n.status),
+}));
+"""
+        res = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+        assert res.returncode == 0, res.stderr
+        out = json.loads(res.stdout)
+        assert out["kinds"] == ["ops", "ops", "decisions", "papers", "notes", "concepts"]
+        assert len(out["none"]) == 6 and out["on"] == [False, True]
+        assert out["orWithin"] == ["ops/a.md", "ops/b.md", "decisions/c.md"]
+        assert out["andAcross"] == ["ops/a.md"]
+        assert out["allTags"] == ["ops/a.md"]
+        assert out["concepts"] == ["locking"]
+        assert out["conceptsHaveNoStatus"] == []
+        # Type counts apply the status filter but not the type filter, and
+        # status counts the reverse, so each chip shows what selecting it gives.
+        assert out["typeCounts"] == {"ops": 1, "decisions": 1}
+        assert out["statusCounts"] == {"active": 1, "final": 1}
+
+    def test_filter_controls_are_accessible_and_restored_from_the_url(self):
+        assert 'b.setAttribute("aria-pressed"' in self.PAGE
+        assert 'role="group" aria-labelledby="type-label"' in self.PAGE
+        assert 'x.setAttribute("aria-label", `Remove tag filter ${t}`)' in self.PAGE
+        assert '<label for="tag-input">' in self.PAGE
+        # Filters round-trip through the hash, and only known values come back.
+        assert re.search(r"function readHash\(\)", self.PAGE) and re.search(r"function writeHash\(\)", self.PAGE)
+        assert "history.replaceState(" in self.PAGE
+        assert re.search(r"facet === \"tag\" \? tagCounts\.has\(v\)", self.PAGE)
 
     def test_page_reads_only_fields_the_builder_writes(self, vault_db):
         graph = build.build_graph(vault_db)
