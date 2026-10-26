@@ -237,3 +237,39 @@ def test_non_executable_pre_receive_is_a_total_acl_bypass(tmp_path):
     res = check_hub_pre_receive_hook(str(hub))
     assert res.status == "FAIL"
     assert "not executable" in res.message
+
+
+def test_global_scope_spoke_checks_out_content_dirs(tmp_path, monkeypatch, capsys):
+    """#786: `--scope global` names every content directory, not a directory
+    called global/. Init used to pass the word straight to
+    `git sparse-checkout set`, so a new global spoke checked out no notes."""
+    from schist import git_ops
+    from schist.sync import init_spoke
+
+    src = tmp_path / "src"
+    src.mkdir()
+    _run(["git", "init", "-q"], cwd=src)
+    _run(["git", "config", "user.email", "t@test"], cwd=src)
+    _run(["git", "config", "user.name", "t"], cwd=src)
+    (src / "vault.yaml").write_text("name: e2e\n")
+    for rel in ("notes/a.md", "concepts/b.md"):
+        (src / rel).parent.mkdir()
+        (src / rel).write_text("---\ntitle: x\n---\n")
+    _run(["git", "add", "-A"], cwd=src)
+    _run(["git", "commit", "-q", "-m", "seed"], cwd=src)
+
+    # The index rebuild needs a full schist vault; this test is about the checkout.
+    monkeypatch.setattr("schist.sync._rebuild_index", lambda *a, **k: None)
+    spoke = tmp_path / "spoke"
+    init_spoke(
+        SimpleNamespace(hub=f"file://{src}", scope="global", identity="gamma"),
+        str(spoke),
+        str(tmp_path / "db.sqlite"),
+    )
+
+    assert (spoke / "notes" / "a.md").exists()
+    assert (spoke / "concepts" / "b.md").exists()
+    cone = _run(["git", "sparse-checkout", "list"], cwd=spoke).stdout.split()
+    assert "global" not in cone
+    assert set(cone) == set(git_ops._global_scope_dirs())
+    assert "scope=global (2 files)" in capsys.readouterr().out
