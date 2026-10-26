@@ -393,10 +393,12 @@ def check_vault_location(vault_path: Optional[str]) -> CheckResult:
              "spoke, run `schist sync push` first so no commit is left only "
              "in the synced copy; a fresh `schist init --spoke` clone is then "
              "the safest move." if path == paths[0] else
-             "Move the git directory out of the synced folder: on a spoke, "
+             "Move the git directory out of the synced folder. On a spoke, "
              "run `schist sync push`, then make a fresh `schist init --spoke` "
              "clone in a folder that is not synced and point "
-             "SCHIST_VAULT_PATH and your MCP config at it."),
+             "SCHIST_VAULT_PATH and your MCP config at it. Otherwise, move "
+             "the git directory next to the vault's files (replace the .git "
+             "link or gitdir file with the directory itself)."),
         )
     if macos:
         hit = _folder_holding(paths, _ICLOUD_OPTIONAL_ROOTS, True)

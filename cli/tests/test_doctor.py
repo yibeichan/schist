@@ -409,6 +409,53 @@ class TestCheckVaultLocation:
         r = check_vault_location(str(home / "Dropbox" / ".." / "schist-vault"))
         assert r.status == "PASS", r
 
+    def test_fail_fix_says_to_move_the_vault(self, home):
+        vault = home / "Dropbox" / "vault"
+        vault.mkdir(parents=True)
+        fix = check_vault_location(str(vault)).fix
+        assert fix.startswith("Move the vault to a folder that is not synced")
+
+    def test_git_dir_fix_covers_a_vault_that_is_not_a_spoke(self, home):
+        gitdir = home / "Dropbox" / "vault.git"
+        gitdir.mkdir(parents=True)
+        vault = home / "schist-vault"
+        vault.mkdir()
+        (vault / ".git").symlink_to(gitdir)
+        assert "Otherwise, move the git directory" in check_vault_location(
+            str(vault)).fix
+
+    def test_gitdir_file_is_read_only_at_its_start(self, home, monkeypatch):
+        import builtins
+        gitdir = home / "Dropbox" / "vault.git"
+        gitdir.mkdir(parents=True)
+        vault = home / "schist-vault"
+        vault.mkdir()
+        (vault / ".git").write_text(f"gitdir: {gitdir}\n" + "x" * 100000)
+        sizes = []
+        real_open = builtins.open
+
+        def spy(file, mode="r", *a, **k):
+            f = real_open(file, mode, *a, **k)
+            if str(file).endswith(".git") and "b" in mode:
+                real_read = f.read
+
+                class F:
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *e):
+                        f.close()
+
+                    def read(self, n=-1):
+                        sizes.append(n)
+                        return real_read(n)
+                return F()
+            return f
+
+        monkeypatch.setattr(builtins, "open", spy)
+        assert check_vault_location(str(vault)).status == "FAIL"
+        assert sizes and all(0 < n <= 4096 for n in sizes)
+
     def test_fail_fix_says_to_push_first(self, home):
         vault = home / "Dropbox" / "vault"
         vault.mkdir(parents=True)
