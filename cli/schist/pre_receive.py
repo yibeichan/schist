@@ -166,7 +166,7 @@ def log_pinning_rejection(identity: str, log_path: Path | None = None) -> None:
 
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "a") as f:
+        with open(log_path, "a", encoding="utf-8") as f:
             f.write(entry)
     except OSError as e:
         logger.warning("Failed to write pinning rejection log: %s", e)
@@ -425,12 +425,12 @@ def format_rejection(violations: list[Violation], branch: str = "refs/heads/main
         header = "REJECTED: push contains out-of-scope writes"
     lines = [
         header,
-        f"Identity: {violations[0].identity}",
+        f"Identity: {_sanitize_log_field(violations[0].identity)}",
         "",
         "Violations:",
     ]
     for v in violations:
-        lines.append(f"  - {_sanitize_log_field(v.filepath)} (scope: {v.scope})")
+        lines.append(f"  - {_sanitize_log_field(v.filepath)} (scope: {_sanitize_log_field(v.scope)})")
     lines.append("")
     if any(v.scope == NON_UTF8_SCOPE for v in violations):
         lines.append(
@@ -532,7 +532,7 @@ def log_rate_limit_rejection(
 
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "a") as f:
+        with open(log_path, "a", encoding="utf-8") as f:
             f.write(entry)
     except OSError as e:
         logger.warning("Failed to write rate-limit rejection log: %s", e)
@@ -650,7 +650,7 @@ def main(
     # Verify identity is a known participant
     if acl.get_participant(identity) is None:
         print(
-            f"REJECTED: unknown identity '{identity}' — "
+            f"REJECTED: unknown identity '{_sanitize_log_field(identity)}' — "
             "not listed in vault.yaml participants",
             file=sys.stderr,
         )

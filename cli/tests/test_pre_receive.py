@@ -1564,8 +1564,8 @@ class TestLineSeparatorsAndRefLog:
     def _isolate(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GIT_DIR", str(tmp_path))   # not a repo: HEAD falls back to main
 
-    FORGED = ("security/a remote: REJECTED: rate limit exceeded "
-              "(git_syncs_per_hour: 9 of 9) remote: Retry after: 5 seconds\x85.md")
+    FORGED = ("security/a\u2028remote: REJECTED: rate limit exceeded "
+              "(git_syncs_per_hour: 9 of 9)\u2029remote: Retry after: 5 seconds\x85.md")
 
     def test_line_and_paragraph_separators_and_c1_controls_are_escaped(self):
         from schist.pre_receive import _sanitize_log_field
@@ -1580,7 +1580,7 @@ class TestLineSeparatorsAndRefLog:
                       log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
         assert rc == 1
         err = capsys.readouterr().err
-        assert not any(c in err for c in "  \x85")
+        assert not any(c in err for c in "\u2028\u2029\x85")
         rejected = [line for line in err.split("\n") if line.startswith("REJECTED:")]
         assert rejected == ["REJECTED: push contains out-of-scope writes"]
 
@@ -1604,3 +1604,37 @@ class TestLineSeparatorsAndRefLog:
         assert len(lines) == 2
         assert "ref=refs/heads/main files=[security/a.md]" in lines[0]
         assert "ref=refs/heads/feature files=[security/b.md]" in lines[1]
+
+    @pytest.mark.parametrize("sep", ["\u2028", "\u2029", "\n"])
+    def test_a_refused_directory_name_cannot_forge_a_line(self, acl, tmp_path, capsys, sep):
+        """The scope printed beside each path is the path's directory, which
+        the pusher chooses too, so it is escaped like the path."""
+        path = (f"security/x{sep}remote: REJECTED: rate limit exceeded "
+                f"(git_syncs_per_hour: 9 of 9){sep}remote: Retry after: 5 seconds/n.md")
+        with patch("schist.pre_receive.get_changed_files", return_value=[path]):
+            rc = main(stdin=["aaa bbb refs/heads/main"], acl=acl, identity="cluster-mario",
+                      log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "\u2028" not in err and "\u2029" not in err
+        assert [line for line in err.split("\n") if line.startswith(("REJECTED:", "Retry after"))] \
+            == ["REJECTED: push contains out-of-scope writes"]
+
+    def test_ref_refusals_are_logged_when_a_later_diff_times_out(self, acl, tmp_path):
+        log = tmp_path / "rejected.log"
+
+        def diff(old, new):
+            if new == "ddd":
+                raise subprocess.TimeoutExpired("git log", 30)
+            return []
+        with patch("schist.pre_receive.get_changed_files", side_effect=diff):
+            rc = main(stdin=["aaa bbb refs/heads/feature", "ccc ddd refs/heads/main"],
+                      acl=acl, identity="cluster-mario",
+                      log_path=log, db_path=tmp_path / "rl.sqlite")
+        assert rc == 1
+        assert "REF_REJECTED identity=cluster-mario" in log.read_text(encoding="utf-8")
+
+    def test_spoke_side_display_path_escapes_line_separators(self):
+        from schist.git_ops import _display_path
+        assert _display_path("a\u2028b\u2029c.md") == "a\\u2028b\\u2029c.md"
+        assert _display_path("naïve.md") == "naïve.md"

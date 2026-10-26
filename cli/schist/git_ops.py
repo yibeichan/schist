@@ -1154,7 +1154,7 @@ def _display_path(path: str) -> str:
     escaping git's quoting used to give: a newline would split the message and
     an ESC would reach the terminal and the last-sync-error text agents read.
     Control characters, and the surrogates standing for bytes that are not
-    UTF-8, are shown as \\xNN.
+    UTF-8, are shown as \\xNN; U+2028 and U+2029 as \\uXXXX.
     """
     out = []
     for c in path:
@@ -1163,6 +1163,10 @@ def _display_path(path: str) -> str:
             out.append("\\x%02x" % (o - 0xDC00))
         elif o < 0x20 or o == 0x7F or 0x80 <= o <= 0x9F:
             out.append("\\x%02x" % o)
+        elif o in (0x2028, 0x2029):
+            # Line breaks for JavaScript's `^` under `m`, which the MCP
+            # server's failure classifiers read this text with (#813).
+            out.append("\\u%04x" % o)
         else:
             out.append(c)
     return "".join(out)
