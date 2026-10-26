@@ -554,8 +554,8 @@ function syncDirtyRemedy(cls: PushFailureClass | null, ageClause: string): strin
   switch (cls) {
     case "acl-rejected":
       return "The hub refused this content, and retrying pushes the same rejection. The " +
-        "REJECTED: lines say why: a path outside the directories your identity may write " +
-        "(move the note; see vault.yaml), a note that does not open with a plain `---` line, " +
+        "REJECTED: lines say why: a path out of scope for your identity (move the note under " +
+        "a directory it may write; see vault.yaml), a note that does not open with a plain `---` line, " +
         "or a path that is not valid UTF-8 (fix the file). Then run `sync_retry`.";
     case "rate-limited":
       return "The hub rate-limited the push. It will accept a retry once the window resets; " +
