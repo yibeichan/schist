@@ -241,29 +241,11 @@ def _name_matches(name: str, want: str, fold: bool) -> bool:
     return name == want
 
 
-def _root_containing(path: Path, home: Path, roots: tuple[str, ...],
-                     fold: bool) -> Optional[Path]:
-    """The folder under `home` named by one of `roots` that holds `path`
-    (or is `path`), or None. `fold` compares names case-insensitively, as
-    the default macOS filesystem does."""
-    try:
-        rel = path.relative_to(home)
-    except ValueError:
-        return None
-    for root in roots:
-        want = root.split("/")
-        if len(rel.parts) < len(want):
-            continue
-        if all(_name_matches(p, w, fold) for p, w in zip(rel.parts, want)):
-            return home.joinpath(*rel.parts[:len(want)])
-    return None
-
-
 def _existing_roots(home: Path, roots: tuple[str, ...],
                     fold: bool) -> list[tuple[Path, Path]]:
     """(folder, folder with symlinks resolved) for each folder under `home`
-    that one of `roots` names, so a sync folder that is a symlink to its
-    real location is matched by that location too."""
+    that one of `roots` names. `fold` compares names case-insensitively, as
+    the default macOS filesystem does."""
     found: list[tuple[Path, Path]] = []
     for root in roots:
         parts = root.split("/")
@@ -281,12 +263,9 @@ def _existing_roots(home: Path, roots: tuple[str, ...],
 
 
 def _vault_location_paths(given: Path) -> list[Path]:
-    """The vault as given (unless it has a `..`, which only resolving can
-    interpret), with symlinks resolved, and its git directory when `.git`
-    is a symlink or a `gitdir:` file pointing elsewhere."""
+    """The vault with symlinks and `..` resolved, and its git directory
+    when `.git` is a symlink or a `gitdir:` file pointing elsewhere."""
     paths = [given.resolve()]
-    if ".." not in given.parts:
-        paths.insert(0, given)
     dotgit = given / ".git"
     try:
         if dotgit.is_symlink():
@@ -302,17 +281,13 @@ def _vault_location_paths(given: Path) -> list[Path]:
 
 def _folder_holding(paths: list[Path], roots: tuple[str, ...],
                     fold: bool) -> Optional[tuple[Path, Path]]:
-    """(folder, path) for the first of `paths` inside a folder named by
-    `roots`, checked against both spellings of $HOME and against each
-    existing folder's resolved location."""
-    home = Path.home()
-    homes = [home, home.resolve()]
-    existing = _existing_roots(home, roots, fold)
+    """(folder, path) for the first of `paths` that is, or is inside, an
+    existing folder under $HOME named by `roots`. Folders compare by their
+    resolved location, and `paths` always holds the vault's resolved path,
+    so either spelling of a symlinked $HOME and a sync folder moved and
+    linked back both match."""
+    existing = _existing_roots(Path.home(), roots, fold)
     for path in paths:
-        for h in homes:
-            root = _root_containing(path, h, roots, fold)
-            if root is not None:
-                return root, path
         for folder, real in existing:
             if path == real or real in path.parents:
                 return folder, path
@@ -324,11 +299,12 @@ def check_vault_location(vault_path: Optional[str]) -> CheckResult:
 
     Sync clients rewrite files under .git while git holds them, upload
     half-written objects, and leave conflict copies such as `index (1)`, so
-    a synced vault corrupts sooner or later. The vault is checked as given,
-    with symlinks resolved, and through its git directory when that lives
-    elsewhere; each against both spellings of $HOME and against the real
-    location of a sync folder that is a symlink. On macOS, names compare
-    case-insensitively, and a vault in ~/Documents or ~/Desktop WARNs.
+    a synced vault corrupts sooner or later. The vault's resolved path, and
+    its git directory when that lives elsewhere, are compared with the
+    resolved location of each sync folder that exists under $HOME, so
+    symlinks on either side and either spelling of $HOME are covered. On
+    macOS, names compare case-insensitively, and a vault in ~/Documents or
+    ~/Desktop WARNs.
     """
     label = "Vault location"
     if not vault_path:
@@ -340,7 +316,7 @@ def check_vault_location(vault_path: Optional[str]) -> CheckResult:
     paths = _vault_location_paths(given)
 
     def where(path: Path) -> str:
-        if path in (given, given.resolve()):
+        if path == paths[0]:
             return str(given)
         return f"the git directory of {given} ({path})"
 

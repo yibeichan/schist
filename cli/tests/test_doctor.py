@@ -249,6 +249,10 @@ class TestCheckVaultLocation:
         assert ".git" in r.message
         assert r.fix
 
+    def test_vault_that_is_the_sync_folder_itself_fails(self, home):
+        (home / "Dropbox").mkdir()
+        assert check_vault_location(str(home / "Dropbox")).status == "FAIL"
+
     def test_sync_folder_name_deeper_down_passes(self, home):
         # Only folders at the sync client's own location count; a project
         # folder that happens to be called "Box" does not.
