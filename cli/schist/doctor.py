@@ -312,7 +312,9 @@ def _vault_location_paths(given: Path) -> list[Path]:
         if dotgit.is_symlink():
             paths.append(dotgit.resolve())
         elif dotgit.is_file():
-            m = re.match(r"gitdir:\s*(.+)", dotgit.read_text(errors="replace"))
+            with open(dotgit, "rb") as f:
+                head = f.read(4096).decode("utf-8", errors="replace")
+            m = re.match(r"gitdir:\s*(.+)", head)
             if m:
                 paths.append((given / m.group(1).strip()).resolve())
     except (OSError, RuntimeError, ValueError):
@@ -369,7 +371,13 @@ def check_vault_location(vault_path: Optional[str]) -> CheckResult:
         return f"the git directory of {given} ({path})"
 
     def folder_name(folder: Path, real: Path) -> str:
-        return str(folder) if real == folder else f"{folder} (a link to {real})"
+        # Only a folder that is itself a link; a symlinked $HOME (as on
+        # ORCD) also makes `real` differ from `folder`.
+        try:
+            linked = folder.is_symlink()
+        except OSError:
+            linked = False
+        return f"{folder} (a link to {real})" if linked else str(folder)
 
     hit = _folder_holding(paths, _SYNC_ROOTS, macos)
     if hit is not None:
@@ -380,11 +388,15 @@ def check_vault_location(vault_path: Optional[str]) -> CheckResult:
             f"{folder_name(folder, real)}; sync "
             "clients rewrite files under .git and leave conflict copies, "
             "which corrupts the repository",
-            "Move the vault to a folder that is not synced and point "
-            "SCHIST_VAULT_PATH and your MCP config at the new path. On a "
-            "spoke, run `schist sync push` first so no commit is left only "
-            "in the synced copy; a fresh `schist init --spoke` clone is then "
-            "the safest move.",
+            ("Move the vault to a folder that is not synced and point "
+             "SCHIST_VAULT_PATH and your MCP config at the new path. On a "
+             "spoke, run `schist sync push` first so no commit is left only "
+             "in the synced copy; a fresh `schist init --spoke` clone is then "
+             "the safest move." if path == paths[0] else
+             "Move the git directory out of the synced folder: on a spoke, "
+             "run `schist sync push`, then make a fresh `schist init --spoke` "
+             "clone in a folder that is not synced and point "
+             "SCHIST_VAULT_PATH and your MCP config at it."),
         )
     if macos:
         hit = _folder_holding(paths, _ICLOUD_OPTIONAL_ROOTS, True)

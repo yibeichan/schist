@@ -456,6 +456,63 @@ class TestCheckVaultLocation:
         assert check_vault_location(str(vault)).status == "FAIL"
         assert check_vault_location(str(home / "schist-vault")).status == "PASS"
 
+    def test_folder_holding_folds_the_typed_case(self, home):
+        # On a case-insensitive disk the vault's path keeps the case the
+        # user typed; _folder_holding must match it against ~/Dropbox.
+        from schist.doctor import _SYNC_ROOTS, _folder_holding
+        (home / "Dropbox").mkdir()
+        typed = home / "dropbox" / "vault"
+        assert _folder_holding([typed], _SYNC_ROOTS, True) is not None
+        assert _folder_holding([typed], _SYNC_ROOTS, False) is None
+
+    def _unlistable_home(self, home, monkeypatch):
+        real_iterdir = Path.iterdir
+
+        def iterdir(self):
+            if self in (home, home.resolve()):
+                raise PermissionError("no listing")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", iterdir)
+
+    def test_unlistable_home_fallback_folds_case(self, home, monkeypatch):
+        from schist.doctor import _SYNC_ROOTS, _folder_holding
+        self._unlistable_home(home, monkeypatch)
+        typed = home / "dropbox" / "vault"
+        assert _folder_holding([typed], _SYNC_ROOTS, True) is not None
+        assert _folder_holding([typed], _SYNC_ROOTS, False) is None
+
+    def test_unlistable_symlinked_home_fallback_uses_the_real_home(
+            self, tmp_path, monkeypatch):
+        from schist.doctor import _SYNC_ROOTS, _folder_holding
+        real = tmp_path / "real-home"
+        (real / "Dropbox" / "vault").mkdir(parents=True)
+        link = tmp_path / "home"
+        link.symlink_to(real)
+        monkeypatch.setattr("pathlib.Path.home", lambda: link)
+        self._unlistable_home(link, monkeypatch)
+        hit = _folder_holding([real / "Dropbox" / "vault"], _SYNC_ROOTS, False)
+        assert hit is not None
+
+    def test_symlinked_home_is_not_called_a_link(self, tmp_path, monkeypatch):
+        real = tmp_path / "real-home"
+        (real / "Dropbox" / "vault").mkdir(parents=True)
+        link = tmp_path / "home"
+        link.symlink_to(real)
+        monkeypatch.setattr("pathlib.Path.home", lambda: link)
+        r = check_vault_location(str(link / "Dropbox" / "vault"))
+        assert r.status == "FAIL"
+        assert "a link to" not in r.message
+
+    def test_git_dir_fail_says_to_move_the_git_directory(self, home):
+        gitdir = home / "Dropbox" / "vault.git"
+        gitdir.mkdir(parents=True)
+        vault = home / "schist-vault"
+        vault.mkdir()
+        (vault / ".git").symlink_to(gitdir)
+        r = check_vault_location(str(vault))
+        assert r.fix.startswith("Move the git directory")
+
     def test_home_is_listed_once(self, home, monkeypatch):
         (home / "schist-vault").mkdir()
         calls = []
