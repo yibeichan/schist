@@ -1781,10 +1781,12 @@ def _schist_evidence(cfg: dict) -> Optional[bool]:
                            and a.endswith(_SCRIPT_SUFFIXES)), None)
             if script is not None:
                 evidence = _script_evidence(script)
-                if evidence is not None or script.endswith(
+                if evidence is None and not script.endswith(
                         "mcp-server/dist/index.js"):
-                    return evidence
-        if script is None:
+                    # A launcher running some other script that cannot be
+                    # identified here (inside a container image, say).
+                    return False
+                return evidence
             # No script at all. It may be a wrapper that starts schist (a
             # shell script, one named for schist, or one given schist's
             # env); otherwise it is another program, such as an installed
@@ -1861,8 +1863,9 @@ def _all_mcp_servers(
       as Claude Code loads them, minus `disabledMcpjsonServers`;
     - `${CODEX_HOME:-~/.codex}/config.toml`, and `.codex/config.toml` in
       projects Codex trusts; servers with `enabled = false` are skipped;
-    - `.cursor/mcp.json` in each project folder.
-    Projects are the vault and every project Claude Code or Codex lists.
+    - `.cursor/mcp.json` in the vault and each project Claude Code lists.
+    Projects for .mcp.json are the vault and every project Claude Code
+    lists; for .codex/config.toml, every project Codex trusts.
     Every level is shape-guarded, as in _discover_mcp_schist_entries (#437,
     #441).
     """
@@ -1870,11 +1873,15 @@ def _all_mcp_servers(
     unreadable: list[str] = []
     parsed: dict[str, Any] = {}
 
-    def load(path: Path) -> Any:
+    counted: set[str] = set()
+
+    def load(path: Path, count: bool = True) -> Any:
         try:
             key = str(path.resolve())
         except (OSError, RuntimeError, ValueError):
             return None
+        if count:
+            counted.add(key)
         if key in parsed:
             return parsed[key]
         parsed[key] = None
@@ -1970,19 +1977,22 @@ def _all_mcp_servers(
     if vault is not None:
         claude_projects.setdefault(real(vault), frozenset())
 
-    def settings_disabled(folder: Path) -> frozenset:
+    def settings_disabled(settings_dir: Path) -> frozenset:
         names: set[str] = set()
-        for f in (folder / ".claude" / "settings.json",
-                  folder / ".claude" / "settings.local.json"):
-            data = load(f)
+        for f in (settings_dir / "settings.json",
+                  settings_dir / "settings.local.json"):
+            data = load(f, count=False)
             off = data.get("disabledMcpjsonServers") if isinstance(data, dict) else None
             if isinstance(off, list):
                 names |= {str(n) for n in off}
         return frozenset(names)
 
-    user_disabled = settings_disabled(Path.home())
+    claude_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    user_settings = (as_path(claude_dir) if claude_dir else None) or (
+        Path.home() / ".claude")
+    user_disabled = settings_disabled(user_settings)
     for root, disabled in claude_projects.items():
-        disabled = disabled | user_disabled | settings_disabled(root)
+        disabled = disabled | user_disabled | settings_disabled(root / ".claude")
         for folder in (root, *root.parents):
             f = folder / ".mcp.json"
             data = load(f)
@@ -1997,7 +2007,7 @@ def _all_mcp_servers(
         data = load(f)
         if isinstance(data, dict):
             add_map(str(f), data.get("mcp_servers"), root)
-    n_read = sum(1 for v in parsed.values() if v is not None)
+    n_read = sum(1 for k, v in parsed.items() if v is not None and k in counted)
     return servers, n_read, unreadable
 
 
@@ -2106,6 +2116,15 @@ class _ScanBudget:
         # ancestor .mcp.json is read once per project below it), so only
         # new paths cost budget.
         self.resolved: dict[Path, Path] = {}
+        self.existing: dict[Path, bool] = {}
+
+    def exists(self, candidate: Path) -> bool:
+        if candidate not in self.existing:
+            if self.left <= 0:
+                raise _ScanBudgetExceeded
+            self.left -= 1
+            self.existing[candidate] = candidate.exists()
+        return self.existing[candidate]
 
     def resolve(self, candidate: Path) -> Path:
         if candidate not in self.resolved:
@@ -2165,7 +2184,7 @@ def _paths_named(s: str, base: Optional[Path], budget: _ScanBudget,
                 candidate = base / piece
             elif (base is not None and (positional and i == 0 or "/" in piece)
                     and not piece.startswith(("-", "@")) and "://" not in piece
-                    and (base / piece).exists()):
+                    and budget.exists(base / piece)):
                 candidate = base / piece
             else:
                 continue
@@ -2290,7 +2309,7 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
     allowed_hits: list[str] = []
     url_only: list[str] = []
     budget = _ScanBudget()
-    too_much = False
+    too_much: Optional[str] = None
     for s in servers:
         cfg = s.cfg
         if _is_schist_server(s.name, cfg):
@@ -2373,7 +2392,7 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
                 scan("env_vars", [(str(n), _getenv(n)) for n in forwarded
                                   if isinstance(n, str)], base)
         except _ScanBudgetExceeded:
-            too_much = True
+            too_much = f"{_printable(s.where)}: {_printable(s.name)}"
             break
         if not isinstance(command, str) and isinstance(cfg.get("url"), str):
             url_only.append(_printable(s.name))
@@ -2390,8 +2409,9 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
     offenders = list(dict.fromkeys(offenders))
     unsure = list(dict.fromkeys(unsure))
     unparsed = list(unreadable)
-    limits = (["the MCP configs hold more path-like values than doctor "
-               "checks; the rest were not checked"] if too_much else [])
+    limits = ([f"the MCP configs hold more path-like values than doctor "
+               f"checks; it stopped at {too_much} and did not check the "
+               f"servers after it"] if too_much else [])
     unchecked = unparsed + limits + unsure + allow_problems
     also = f"; also could not check: {'; '.join(unchecked)}" if unchecked else ""
     if offenders:
@@ -2415,9 +2435,11 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
         fixes = []
         if any(u.endswith("(cannot be parsed)") for u in unparsed):
             fixes.append("fix the config files that cannot be parsed")
-        if any(u.endswith("(too large to check)") for u in unparsed) or limits:
-            fixes.append("check the servers in the files doctor skipped by "
-                         "hand")
+        if any(u.endswith("(too large to check)") for u in unparsed):
+            fixes.append("check the servers in the files too large to check "
+                         "by hand")
+        if limits:
+            fixes.append("check the servers doctor did not reach by hand")
         if unsure:
             fixes.append("make sure each server named does not reach the "
                          "vault (set the variable in the shell that runs "

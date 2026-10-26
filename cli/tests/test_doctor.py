@@ -4741,14 +4741,40 @@ class TestCheckVaultAccess:
         assert "by hand" in r.fix
 
     @pytest.mark.parametrize("where", ["user", "project"])
+    @pytest.mark.parametrize("fname", ["settings.json", "settings.local.json"])
     def test_disabled_list_in_claude_settings_is_honored(self, home, vault,
-                                                         where):
+                                                         where, fname):
         self._write(vault / ".mcp.json",
                     json.dumps({"mcpServers": {"fs": self._fs(".")}}))
         folder = home if where == "user" else vault
-        self._write(folder / ".claude" / "settings.json",
+        self._write(folder / ".claude" / fname,
                     json.dumps({"disabledMcpjsonServers": ["fs"]}))
         assert check_vault_access(str(vault)).status == "PASS"
+
+    def test_user_settings_follow_claude_config_dir(self, home, vault,
+                                                    tmp_path, monkeypatch):
+        self._write(vault / ".mcp.json",
+                    json.dumps({"mcpServers": {"fs": self._fs(".")}}))
+        # A stale ~/.claude/settings.json is not the one Claude Code reads.
+        self._write(home / ".claude" / "settings.json",
+                    json.dumps({"disabledMcpjsonServers": ["fs"]}))
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+        assert check_vault_access(str(vault)).status == "FAIL"
+        self._write(cfg / "settings.json",
+                    json.dumps({"disabledMcpjsonServers": ["fs"]}))
+        assert check_vault_access(str(vault)).status == "PASS"
+
+    def test_project_settings_files_are_not_counted_as_mcp_configs(
+            self, home, vault):
+        # A project's .claude/settings*.json is read only for its disabled
+        # list, so it is not one of the MCP config files counted.
+        code = home / "code"
+        self._write(code / ".claude" / "settings.json", "{}")
+        self._claude_json(home, {}, projects={str(code): {}})
+        r = check_vault_access(str(vault))
+        assert "(1 config file(s) read)" in r.message, r
 
     @pytest.mark.parametrize("command,env,kept", [
         ("/opt/bin/run-schist", None, True),
@@ -4789,6 +4815,57 @@ class TestCheckVaultAccess:
         monkeypatch.setenv("NODE_BIN", "/usr/local/bin/node")
         self._claude_json(home, {"kb": {
             "command": "${NODE_BIN}", "args": [str(schist_js)],
+            "env": {"SCHIST_VAULT_PATH": str(vault)}}})
+        assert check_vault_access(str(vault)).status == "PASS"
+
+    # --- round-5 review cases ----------------------------------------
+
+    def test_launcher_running_an_unidentified_script_is_not_schist(
+            self, home, vault):
+        from schist.doctor import _discover_mcp_schist_entries
+        self._claude_json(home, {"notes": {
+            "command": "singularity",
+            "args": ["exec", "--bind", f"{vault}:/vault", "fs.sif", "node",
+                     "/app/dist/index.js"]}})
+        assert _discover_mcp_schist_entries(None) == []
+
+    def test_launcher_running_a_missing_schist_build_can_still_be_schist(
+            self, home, vault):
+        from schist.doctor import _discover_mcp_schist_entries
+        self._claude_json(home, {"schist": {
+            "command": "singularity",
+            "args": ["exec", "schist.sif", "node",
+                     "/opt/schist/mcp-server/dist/index.js"]}})
+        assert [n for _c, n, _e in _discover_mcp_schist_entries(None)] == [
+            "schist"]
+
+    def test_existence_probes_count_against_the_budget(self, home, vault,
+                                                       monkeypatch):
+        import schist.doctor as d
+        real = d._ScanBudget
+        monkeypatch.setattr(d, "_ScanBudget", lambda: real(3))
+        self._claude_json(home, {}, projects={str(vault): {"mcpServers": {
+            "srv": {"command": "srv",
+                    "args": [f"--x=no/such/{i}" for i in range(10)]}}}})
+        r = check_vault_access(str(vault))
+        assert r.status == "WARN", r
+        assert "it stopped at" in r.message and "srv" in r.message
+        assert "did not reach" in r.fix
+
+    def test_parse_fix_only_for_files_that_cannot_be_parsed(
+            self, home, vault, monkeypatch):
+        import schist.doctor as d
+        monkeypatch.setattr(d, "_MCP_CONFIG_MAX", 100)
+        self._claude_json(home, {"a": {"command": "x" * 200}})
+        r = check_vault_access(str(vault))
+        assert "cannot be parsed" not in r.fix
+        assert "too large to check by hand" in r.fix
+
+    def test_variable_in_npx_command_names_the_runner(self, home, vault,
+                                                      monkeypatch):
+        monkeypatch.setenv("NPX_BIN", "/usr/local/bin/npx")
+        self._claude_json(home, {"kb": {
+            "command": "${NPX_BIN}", "args": ["-y", "@schist/mcp-server"],
             "env": {"SCHIST_VAULT_PATH": str(vault)}}})
         assert check_vault_access(str(vault)).status == "PASS"
 
