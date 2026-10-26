@@ -27,6 +27,13 @@ from .spoke_config import is_spoke, load_spoke_config
 MIN_PYTHON = (3, 12)
 MIN_NODE = (22, 0, 0)
 _NODE_FIX = f"Install Node.js {MIN_NODE[0]}+ from nodejs.org or via nvm."
+# mcp-server/package.json `devEngines` refuses every npm command below this
+# version, and Node 22 bundles npm 10, so rebuild advice has to say so.
+MIN_NPM = (11, 11)
+_NPM_BUILD_NOTE = (
+    f"(The build needs npm >= {MIN_NPM[0]}.{MIN_NPM[1]}; if `npm -v` is older, "
+    "run `npm install -g npm@latest` first.) "
+)
 MIN_GIT = (2, 30)
 
 
@@ -2153,6 +2160,7 @@ def check_mcp_schema_alignment(vault_path: Optional[str]) -> CheckResult:
             "Rebuild the MCP server dist to align with the installed schist-ingest: "
             f"`cd <schist>/mcp-server && npm run build`, then restart Claude Code / "
             "Claude Desktop so they reload the new dist. "
+            + _NPM_BUILD_NOTE +
             "(The skew direction makes the runtime error from `ensureSchemaCurrent` "
             "misleading — it always blames `schist-ingest`.)"
         ),
@@ -2301,6 +2309,7 @@ def check_mcp_vocab_alignment(vault_path: Optional[str]) -> CheckResult:
             "(#403/#414). Rebuild the MCP dist from the same checkout as the "
             "CLI: `cd <schist>/mcp-server && npm run build`, then restart "
             "Claude Code / Claude Desktop — or reinstall the older side. "
+            + _NPM_BUILD_NOTE +
             "Vaults with an explicit `connection_types:`/`statuses:` key in "
             "schist.yaml are unaffected."
         ),
@@ -2564,7 +2573,8 @@ def check_index_schema_version(vault_path: Optional[str],
             )
             fixes.append(
                 "Rebuild the MCP server dist: `cd <schist>/mcp-server && npm run "
-                "build`, then restart Claude Code / Claude Desktop."
+                "build`, then restart Claude Code / Claude Desktop. "
+                + _NPM_BUILD_NOTE.rstrip()
             )
 
     if warnings:

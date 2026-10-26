@@ -27,7 +27,7 @@ Summarize changes since the last release in Keep a Changelog format:
 
 Ensure all CI checks pass on `main`:
 - [ ] CLI tests (`python -m pytest cli/tests`)
-- [ ] MCP server tests (`npm test` in `mcp-server/`)
+- [ ] MCP server tests (`npm test` in `mcp-server/`, with npm >= 11.11)
 - [ ] Type-check passes (`npm run build` completes cleanly)
 
 ### 4. GitHub Environments
