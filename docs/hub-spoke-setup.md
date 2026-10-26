@@ -243,13 +243,15 @@ them. Each violation says why:
 
 - `(note must open with a plain --- line)`: the note's first line names a
   frontmatter language (`---js`, `---yaml`). Make it a bare `---`, then
-  `git reset --soft origin/<branch>` (the message names the hub's branch) and
+  `git reset --soft origin/<branch>` (the message names the branch the note
+  was pushed to) and
   recommit, so no unpushed commit keeps the old first line.
 - `(path is not valid UTF-8)`: rename the file, then reset and recommit the
   same way.
 
-A push can also be refused for its refs and its files at once; the message
-then lists both, under separate `REJECTED:` lines.
+A push can also be refused for its refs and its files at once, including
+files on the refused ref itself; the message then lists both, under
+separate `REJECTED:` lines.
 
 ### "REJECTED: cannot determine push identity"
 

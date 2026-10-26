@@ -431,16 +431,29 @@ def format_rejection(violations: list[Violation], branch: str = "refs/heads/main
             "vault.yaml change helps: rename the file (bytes are shown as \\xNN), "
             "then `git reset --soft` the unpushed commit and recommit."
         )
-    if any(v.scope == FRONTMATTER_SCOPE for v in violations):
+    bad_refs = {v.refname for v in violations if v.scope == FRONTMATTER_SCOPE}
+    if bad_refs:
+        # Reset to the ref that carried the note, so the hint never squashes
+        # one branch's commits onto another (#791).
+        ref = next(iter(bad_refs))
+        if len(bad_refs) > 1 or not ref.startswith('refs/heads/'):
+            ref = branch
         lines.append(
             "Notes must open with a plain `---` line (YAML frontmatter), for every "
             "identity. Fix the first line, then "
-            f"`git reset --soft origin/{branch.removeprefix('refs/heads/')}` and "
+            f"`git reset --soft origin/{_sanitize_log_field(ref.removeprefix('refs/heads/'))}` and "
             "recommit, so no unpushed commit keeps the old version."
         )
     if any(v.scope not in content_only for v in violations):
         lines.append("Check vault.yaml access rules for your identity.")
     return "\n".join(lines)
+
+
+def _print_ref_reasons(ref_reasons: list[str]) -> None:
+    if ref_reasons:
+        print("REJECTED: push updates refs this identity may not change", file=sys.stderr)
+        for reason in ref_reasons:
+            print(f"  - {_sanitize_log_field(reason)}", file=sys.stderr)
 
 
 def log_rejection(
@@ -638,7 +651,11 @@ def main(
         reason = ref_rejection(identity, acl, newrev, refname, branch)
         if reason is not None:
             ref_reasons.append(reason)
-            continue
+            # Still scan what the ref carries (a deletion carries nothing):
+            # the pusher would otherwise move the commits to the served
+            # branch and be refused again for the files (#790).
+            if newrev == ZERO_SHA:
+                continue
 
         try:
             changed_files = get_changed_files(oldrev, newrev)
@@ -650,6 +667,7 @@ def main(
             # and dump a raw traceback (internal paths, stack frames) onto the
             # pusher's terminal. Reject fail-safe with a human-readable message
             # instead (#243).
+            _print_ref_reasons(ref_reasons)
             print(
                 f"ERROR: timed out diffing {oldrev}..{newrev} — the hub may be "
                 f"under load; please retry the push.",
@@ -657,6 +675,7 @@ def main(
             )
             return 1
         except subprocess.CalledProcessError as e:
+            _print_ref_reasons(ref_reasons)
             print(f"ERROR: failed to diff {oldrev}..{newrev}: {e}", file=sys.stderr)
             return 1
 
@@ -667,10 +686,7 @@ def main(
                                         scope=FRONTMATTER_SCOPE, refname=refname)
                               for path in bad_frontmatter)
 
-    if ref_reasons:
-        print("REJECTED: push updates refs this identity may not change", file=sys.stderr)
-        for reason in ref_reasons:
-            print(f"  - {_sanitize_log_field(reason)}", file=sys.stderr)
+    _print_ref_reasons(ref_reasons)
 
     # Reported even after a ref refusal: the push is refused either way, and a
     # pusher told only about the ref would fix it and be refused again for

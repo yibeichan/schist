@@ -1476,7 +1476,38 @@ class TestRejectionMessages:
         v = [Violation("x", "research/mario/x.md", FRONTMATTER_SCOPE, "refs/heads/trunk")]
         msg = format_rejection(v, branch="refs/heads/trunk")
         assert "git reset --soft origin/trunk" in msg and "origin/main" not in msg
-        assert "git reset --soft origin/main" in format_rejection(v)
+
+    def test_frontmatter_hint_names_the_ref_that_carried_the_note(self):
+        """A '*' writer pushing another branch is told to reset to that
+        branch, not the served one, which would squash its history."""
+        v = [Violation("x", "research/mario/x.md", FRONTMATTER_SCOPE, "refs/heads/feature")]
+        assert "git reset --soft origin/feature" in format_rejection(v, branch="refs/heads/trunk")
+        tag = [Violation("x", "research/mario/x.md", FRONTMATTER_SCOPE, "refs/tags/v1")]
+        assert "git reset --soft origin/trunk" in format_rejection(tag, branch="refs/heads/trunk")
+
+    def test_files_on_a_refused_ref_are_reported_too(self, acl, tmp_path, capsys):
+        """#790's usual form: one ref the identity may not push, carrying a
+        file it may not write. Both are reported, so moving the commits to
+        the served branch is not refused a second time."""
+        with patch("schist.pre_receive.get_changed_files", return_value=["security/out.md"]):
+            rc = main(stdin=["aaa bbb refs/heads/feature"], acl=acl, identity="cluster-mario",
+                      log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "refs/heads/feature" in err and "security/out.md" in err
+
+    def test_a_ref_refusal_is_still_reported_when_a_later_diff_times_out(self, acl, tmp_path, capsys):
+        def diff(old, new):
+            if new == "ddd":
+                raise subprocess.TimeoutExpired("git log", 30)
+            return []
+        with patch("schist.pre_receive.get_changed_files", side_effect=diff):
+            rc = main(stdin=["aaa bbb refs/heads/feature", "ccc ddd refs/heads/main"],
+                      acl=acl, identity="cluster-mario",
+                      log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "REJECTED: push updates refs" in err and "timed out" in err
 
     def test_main_passes_the_served_branch_to_the_hint(self, acl, tmp_path, monkeypatch, capsys):
         monkeypatch.setattr("schist.pre_receive.served_branch", lambda: "refs/heads/trunk")
