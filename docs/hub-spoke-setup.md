@@ -236,6 +236,21 @@ identity's write scope. Check:
   `vault.yaml`. Parent scopes grant child access (`write: [research]` covers
   `research/laptop/note.md`).
 
+### "REJECTED: push contains files the hub refuses for every identity"
+
+No vault.yaml change helps here: the hub refuses these files whoever pushes
+them. Each violation says why:
+
+- `(note must open with a plain --- line)`: the note's first line names a
+  frontmatter language (`---js`, `---yaml`). Make it a bare `---`, then
+  `git reset --soft origin/<branch>` (the message names the hub's branch) and
+  recommit, so no unpushed commit keeps the old first line.
+- `(path is not valid UTF-8)`: rename the file, then reset and recommit the
+  same way.
+
+A push can also be refused for its refs and its files at once; the message
+then lists both, under separate `REJECTED:` lines.
+
 ### "REJECTED: cannot determine push identity"
 
 `SCHIST_IDENTITY` (or `GL_USER` for gitolite) is not set in the environment
