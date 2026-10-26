@@ -120,9 +120,11 @@ schist --vault ~/vault init --spoke \
 
 Repeat on each spoke with `--identity <spoke-name> --scope research` (or whichever
 content-axis dir the spoke should sparse-checkout). `--scope global` checks out every
-content directory in the packaged default list (`notes`, `papers`, `concepts`,
-`research`, `decisions`, `ops`, `projects`, `logs`); add any other vault directory with
-`git sparse-checkout add <dir>`. Authorship is recorded in the
+content directory the vault's `schist.yaml` lists under `directories`, or the packaged
+default list (`notes`, `papers`, `concepts`, `research`, `decisions`, `ops`, `projects`,
+`logs`) when it lists none, and `schist sync push` stages the same directories. When a
+directory is added to `schist.yaml` after a spoke was set up, run
+`git sparse-checkout add <dir>` on that spoke to check it out. Authorship is recorded in the
 auto-filled `source_agent` frontmatter, not via directory placement.
 
 **`SCHIST_IDENTITY` must be set in the shell profile** (`.bashrc`, `.zshrc`,
