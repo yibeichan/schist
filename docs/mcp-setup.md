@@ -20,7 +20,7 @@ Alternatively, pass `--vault /path/to/vault` as a CLI argument.
 
 ```bash
 cd mcp-server
-npm run build
+npm run build   # needs npm >= 11.11; Node 22 bundles npm 10 (npm install -g npm@latest)
 SCHIST_VAULT_PATH=/path/to/vault node dist/index.js
 ```
 

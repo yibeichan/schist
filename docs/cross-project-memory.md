@@ -316,7 +316,8 @@ If an agent cannot speak MCP (e.g. a shell script running outside any
 Claude host), use the compiled CLI that ships with the MCP server. It
 registers as `schist-memory` via the package `bin`, but the binary is
 only on `$PATH` if you install the package globally — run
-`npm install -g` inside `mcp-server/` (after `npm run build`), or invoke
+`npm install -g` inside `mcp-server/` (after `npm run build`, which needs
+npm >= 11.11), or invoke
 `node dist/cli/memory-cli.js` directly:
 
 ```bash

@@ -33,6 +33,7 @@ Agent-first knowledge graph. Git is truth, SQLite is query, humans just watch. A
 
 ### MCP Server (TypeScript, in `mcp-server/`)
 ```bash
+# npm >= 11.11 required (devEngines); Node 22 bundles npm 10: npm install -g npm@latest
 cd mcp-server && npm install        # install deps
 npm run build                        # compile TS → dist/
 npm run dev                          # watch mode
@@ -170,6 +171,7 @@ Memory DB (`~/.schist/memory/agent-state.db` by default — an existing pre-#565
 
 ## Requirements
 - Node.js >= 22, Python >= 3.12, SQLite >= 3.39 (FTS5), Git >= 2.30
+- npm >= 11.11 for any npm command in `mcp-server/` (enforced through `devEngines`)
 
 ## Environment
 - `SCHIST_VAULT_PATH` — path to the vault directory (required by MCP server)

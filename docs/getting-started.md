@@ -8,6 +8,7 @@ Linear setup guide. Each stage ends with `schist doctor` verification.
 |-----------|---------|
 | Python    | >=3.12  |
 | Node.js   | >=22    |
+| npm       | >=11.11 (only to build `mcp-server/` from source; Node 22 bundles npm 10) |
 | Git       | >=2.30  |
 | SQLite    | >=3.39 (with FTS5) |
 
@@ -106,6 +107,7 @@ git clone https://github.com/yibeichan/schist.git
 cd schist
 
 uv pip install --system -e ./cli   # or:  pip install -e ./cli
+npm install -g npm@latest           # mcp-server/ needs npm >= 11.11; Node 22 bundles npm 10
 cd mcp-server && npm install && npm run build && cd ..
 ```
 
