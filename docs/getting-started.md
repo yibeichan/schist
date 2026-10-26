@@ -357,3 +357,16 @@ cat ~/my-vault/.schist/spoke.yaml
 ```
 
 Common causes: SSH key not loaded, hub URL wrong, or firewall blocking the connection.
+
+### 9. `Vault access: MCP servers other than schist can read the vault`
+
+A server whose command, arguments or environment name the vault, a folder inside it, or a folder that contains it (for example a filesystem server rooted at `~`) reads notes directly, without schist's scope and ACL checks. `schist doctor` scans Claude Code (user and project scope), Claude Desktop, Cursor, Claude Science and Codex configs, and names each server and field, never the value.
+
+Remove the vault path, or the folder that contains it, from that server. If a server should read the vault, list it by name in the vault's `schist.yaml`:
+
+```yaml
+vault_access:
+  allowed_mcp_servers: [obsidian]
+```
+
+The check then passes and names the allowed servers.

@@ -3723,6 +3723,28 @@ class TestCheckVaultAccess:
         })
         assert check_vault_access(str(vault)).status == "FAIL"
 
+    def test_other_name_running_an_mcp_server_dist_is_not_exempt(
+            self, home, vault):
+        # Many third-party servers live in a folder called *mcp-server*; the
+        # name is what separates schist from them.
+        self._claude_json(home, {
+            "notes": {"command": "node",
+                      "args": ["/opt/notes-mcp-server/dist/index.js",
+                               str(vault)]},
+        })
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL"
+        assert "notes (args)" in r.message
+
+    def test_symlink_into_the_vault_fails(self, home, vault):
+        (vault / "notes").mkdir()
+        link = home / "notes-link"
+        link.symlink_to(vault / "notes")
+        self._claude_json(home, {
+            "fs": {"command": "npx", "args": [str(link)]},
+        })
+        assert check_vault_access(str(vault)).status == "FAIL"
+
     def test_second_schist_entry_is_exempt(self, home, vault):
         self._claude_json(home, {"schist-work": self._schist_entry(vault)})
         assert check_vault_access(str(vault)).status == "PASS"
