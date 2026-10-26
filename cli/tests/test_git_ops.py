@@ -18,6 +18,7 @@ import os
 import signal
 import subprocess
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -1030,3 +1031,78 @@ def test_current_branch_keeps_a_non_utf8_name_so_it_can_go_back_to_git(tmp_path,
     _fake_git_printing(tmp_path, monkeypatch, "printf 'caf\\351\\n'")
     name = git_ops.current_branch(str(tmp_path))
     assert os.fsencode(name) == b"caf\xe9"
+
+
+class TestGlobalScopeReadsVaultConfig:
+    """#734 — `global` scope took its directory list from the packaged
+    default.yaml only, so a directory the vault's own schist.yaml adds (a
+    `tools/` axis) was never staged: `sync push` said "Nothing to push" and
+    `paths_outside_scope` refused the path the hub ACL allows."""
+
+    @staticmethod
+    def _vault(tmp_path, schist_yaml=None):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        if schist_yaml is not None:
+            (vault / "schist.yaml").write_text(schist_yaml, encoding="utf-8")
+        return str(vault)
+
+    def test_vault_directories_list_decides(self, tmp_path):
+        from schist import git_ops
+
+        vault = self._vault(tmp_path, "directories:\n  - notes\n  - tools/\n")
+        assert git_ops._global_scope_dirs(vault) == ["notes", "tools"]
+        assert git_ops.scope_dirs("global", vault) == ["notes", "tools"]
+
+    @pytest.mark.parametrize("text, why", [
+        (None, "no schist.yaml"),
+        ("name: x\n", "no directories key"),
+        ("directories:\n  a: notes\n", "a mapping, which only default.yaml uses"),
+        ("directories: []\n", "an empty list must not make global stage nothing"),
+        ("directories: [\n", "unparseable YAML"),
+        ("- notes\n", "top level is not a mapping"),
+        ('directories: [".", "..", "/etc", ".schist", "a/../b", ""]\n',
+         "every entry unsafe as a pathspec"),
+    ])
+    def test_unusable_vault_config_falls_back_to_packaged(self, tmp_path, text, why):
+        from schist import git_ops
+
+        vault = self._vault(tmp_path, text)
+        assert git_ops._global_scope_dirs(vault) == git_ops._global_scope_dirs(), why
+
+    def test_unsafe_entries_dropped_and_duplicates_merged(self, tmp_path):
+        from schist import git_ops
+
+        vault = self._vault(
+            tmp_path, 'directories: [notes, ".", "/abs", .git, tools, "tools/"]\n')
+        assert git_ops._global_scope_dirs(vault) == ["notes", "tools"]
+
+    def test_paths_outside_scope_uses_vault_directories(self, tmp_path):
+        from schist import git_ops
+
+        vault = self._vault(tmp_path, "directories: [notes, tools]\n")
+        assert git_ops.paths_outside_scope(
+            vault, "global", ["tools/a.md", "notes/b.md", "vault.yaml"]) == ["vault.yaml"]
+
+    def test_sync_push_stages_an_edit_in_a_vault_added_directory(self, tmp_path):
+        """The reported symptom, end to end against real git: an edit under a
+        directory only the vault configures is staged by a `global` push."""
+        from schist import git_ops
+
+        vault = self._vault(tmp_path, "directories: [notes, tools]\n")
+        for d in ("notes", "tools"):
+            (Path(vault) / d).mkdir()
+            (Path(vault) / d / "x.md").write_text("one\n", encoding="utf-8")
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "-A"],
+                    ["git", "commit", "-q", "-m", "init"]):
+            subprocess.run(cmd, cwd=vault, check=True, env=env)
+        (Path(vault) / "tools" / "x.md").write_text("two\n", encoding="utf-8")
+
+        ok, msg = git_ops.stage_scope_files(vault, "global")
+        assert ok, msg
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"], cwd=vault,
+            capture_output=True, text=True, check=True).stdout.split()
+        assert staged == ["tools/x.md"]

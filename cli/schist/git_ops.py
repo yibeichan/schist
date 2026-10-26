@@ -644,7 +644,7 @@ def setup_sparse_checkout(vault_path: str, scope: str) -> tuple[bool, str]:
             timeout=30,
         )
         subprocess.run(
-            ['git', 'sparse-checkout', 'set', *scope_dirs(scope)],
+            ['git', 'sparse-checkout', 'set', *scope_dirs(scope, vault_path)],
             cwd=vault_path, check=True, capture_output=True, **_GIT_TEXT,
             timeout=30,
         )
@@ -1216,11 +1216,12 @@ def stage_scope_files(vault_path: str, scope: str) -> tuple[bool, str]:
         return False, (e.stdout or '') + (e.stderr or '')
 
 
-def scope_dirs(scope: str) -> list[str]:
+def scope_dirs(scope: str, vault_path: str | None = None) -> list[str]:
     """The directories a scope names: the content directories for `global`,
-    else the scope path itself. No trailing slash."""
+    else the scope path itself. No trailing slash. Pass `vault_path` so
+    `global` reads the vault's own `schist.yaml` (#734)."""
     if scope == "global":
-        return _global_scope_dirs()
+        return _global_scope_dirs(vault_path)
     return [scope.rstrip('/')]
 
 
@@ -1246,7 +1247,7 @@ def paths_outside_scope(vault_path: str, scope: str, paths: list[str]) -> list[s
     dir that is empty on disk and untracked, which would misreport a staged
     deletion of its last file as out of scope.
     """
-    dirs = [d + '/' for d in scope_dirs(scope)]
+    dirs = [d + '/' for d in scope_dirs(scope, vault_path)]
     return [p for p in paths if not any(p.startswith(d) for d in dirs)]
 
 
@@ -1325,8 +1326,54 @@ def ignored_scope_files(vault_path: str, scope: str) -> tuple[list[str], list[st
     return blocking, junk
 
 
-def _global_scope_dirs() -> list[str]:
-    """Return canonical content directories for logical `global` scope."""
+def _vault_scope_dirs(vault_path: str) -> list[str] | None:
+    """The `directories` list in the vault's own schist.yaml, or None when the
+    file is absent, unreadable, not a mapping, or has no `directories` list.
+
+    Only a list counts, as in ingest's `_configured_content_roots` and the MCP
+    server's loadVaultConfig, so `global` stages exactly the directories the
+    index treats as content. An entry that is not a plain relative directory
+    (`.`, `..`, absolute, or dot-prefixed such as `.schist`) is dropped: as a
+    pathspec it would stage the whole vault or its private state.
+    """
+    vault_yaml = Path(vault_path) / "schist.yaml"
+    try:
+        import yaml  # lazily: `schist lock hold` imports this module on every MCP write
+        raw = yaml.safe_load(vault_yaml.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception:
+        # Ingest refuses a corrupt schist.yaml outright; here the packaged list
+        # is the safer failure, since a push that stages the defaults still
+        # syncs every standard directory.
+        return None
+    dirs = raw.get("directories") if isinstance(raw, dict) else None
+    if not isinstance(dirs, list):
+        return None
+    kept: list[str] = []
+    for entry in dirs:
+        d = str(entry).strip().rstrip("/")
+        parts = d.split("/")
+        if not d or d.startswith("/") or d.startswith(".") or ".." in parts or "." in parts:
+            continue
+        if d not in kept:
+            kept.append(d)
+    return kept
+
+
+def _global_scope_dirs(vault_path: str | None = None) -> list[str]:
+    """Return the content directories for logical `global` scope.
+
+    With `vault_path`, a `directories` list in the vault's schist.yaml decides
+    (#734): a directory the vault adds, such as `tools/`, was otherwise never
+    staged, and `sync push` reported "Nothing to push" for edits in it. The
+    packaged default.yaml is the fallback, and an empty vault list also falls
+    back, for the reason given below.
+    """
+    if vault_path is not None:
+        configured = _vault_scope_dirs(vault_path)
+        if configured:
+            return configured
     default_yaml = Path(__file__).resolve().parent / "default.yaml"
     resolved: list[str] = []
     try:
@@ -1360,7 +1407,7 @@ def _global_scope_dirs() -> list[str]:
 
 def _global_scope_targets(vault_path: str) -> list[str]:
     targets: list[str] = []
-    for d in _global_scope_dirs():
+    for d in _global_scope_dirs(vault_path):
         target = f"{d}/"
         if (Path(vault_path) / d).exists():
             targets.append(target)

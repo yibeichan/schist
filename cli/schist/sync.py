@@ -350,7 +350,7 @@ def init_spoke(args, vault_path: str, db_path: str) -> None:
     _rebuild_index(str(target), db_path)
 
     file_count = sum(
-        1 for d in git_ops.scope_dirs(scope) for _ in (target / d).rglob("*.md")
+        1 for d in git_ops.scope_dirs(scope, str(target)) for _ in (target / d).rglob("*.md")
     )
     print(f"Spoke initialized: identity={identity} scope={scope} ({file_count} files)")
 
