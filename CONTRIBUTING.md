@@ -39,6 +39,7 @@ schist doctor --vault /tmp/test-vault
 
 - Python ≥ 3.12
 - Node.js ≥ 22
+- npm ≥ 11.11 for work in `mcp-server/` (Node 22 bundles npm 10; run `npm install -g npm@latest`). `mcp-server/package.json` enforces this through `devEngines`, because npm before 11.11 rewrites `package-lock.json` without the `libc` fields that select glibc or musl builds of native dev dependencies.
 - Git ≥ 2.30
 - SQLite ≥ 3.39 (with FTS5 support)
 

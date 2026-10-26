@@ -250,7 +250,7 @@ schist includes a shared memory subsystem scoped by agent identity. Any project 
 
 Full platform-specific setup guide: [`docs/getting-started.md`](./docs/getting-started.md)
 
-**Requirements:** Node.js ≥ 22, Python ≥ 3.12, SQLite ≥ 3.39 (FTS5), Git ≥ 2.30
+**Requirements:** Node.js ≥ 22, Python ≥ 3.12, SQLite ≥ 3.39 (FTS5), Git ≥ 2.30. Building the MCP server from source also needs npm ≥ 11.11 (Node 22 bundles npm 10; `npm install -g npm@latest`).
 
 ## License
 

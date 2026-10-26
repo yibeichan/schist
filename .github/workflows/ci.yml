@@ -125,6 +125,12 @@ jobs:
           git config --global user.name "schist-ci"
           git config --global init.defaultBranch main
 
+      # Node 22 ships npm 10; mcp-server/package.json requires npm >=11.11.0
+      # through devEngines, so npm ci refuses to run under the bundled npm.
+      - name: Upgrade npm
+        working-directory: ${{ github.workspace }}
+        run: npm install -g npm@11.17.0
+
       - name: Install deps
         run: npm ci
 

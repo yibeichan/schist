@@ -27,14 +27,14 @@ Summarize changes since the last release in Keep a Changelog format:
 
 Ensure all CI checks pass on `main`:
 - [ ] CLI tests (`python -m pytest cli/tests`)
-- [ ] MCP server tests (`npm test` in `mcp-server/`)
+- [ ] MCP server tests (`npm test` in `mcp-server/`, with npm >= 11.11)
 - [ ] Type-check passes (`npm run build` completes cleanly)
 
 ### 4. GitHub Environments
 
 Verify these environments exist in the repository (Settings → Environments):
 - `pypi` — for PyPI Trusted Publishing (OIDC)
-- `npm` — for npm publish with `NPM_TOKEN` secret
+- `npm` — for npm Trusted Publishing (OIDC). It needs no secret: on npmjs.com, `@schist/mcp-server` lists this repository's `release.yml` and the `npm` environment as its trusted publisher.
 
 Optionally enable "Require reviewers" for manual approval before publish.
 
@@ -66,7 +66,7 @@ git push origin vX.Y.Z
 
 The `release.yml` workflow will:
 1. Build CLI wheel and publish to PyPI via Trusted Publishing (OIDC)
-2. Build MCP server tarball and publish to npm via `NPM_TOKEN`
+2. Build the MCP server tarball and publish it to npm via Trusted Publishing (OIDC), with provenance
 
 Both jobs run in parallel. If one fails, the other may still have succeeded — check
 PyPI (`https://pypi.org/project/schist/`) and npm (`https://www.npmjs.com/package/@schist/mcp-server`).
@@ -90,7 +90,6 @@ Create a GitHub Release at <https://github.com/yibeichan/schist/releases/new>:
 ### 3. Post-Release Cleanup Tasks
 
 Items tracked for future releases:
-- [ ] Migrate npm publish from `NPM_TOKEN` to OIDC Trusted Publishing (post-v0.1.0)
 - [ ] Add `list_concepts` alias inclusion (separate small PR)
 - [ ] Cross-project memory migration pass (separate session)
 
