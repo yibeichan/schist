@@ -350,7 +350,7 @@ def init_spoke(args, vault_path: str, db_path: str) -> None:
     _rebuild_index(str(target), db_path)
 
     file_count = sum(
-        1 for d in git_ops.scope_dirs(scope) for _ in (target / d).rglob("*.md")
+        1 for d in git_ops.scope_dirs(scope, str(target)) for _ in (target / d).rglob("*.md")
     )
     print(f"Spoke initialized: identity={identity} scope={scope} ({file_count} files)")
 
@@ -1314,10 +1314,12 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
             if not ok:
                 print(f"Error: failed to stage scope '{config.scope}': {output}", file=sys.stderr)
                 sys.exit(1)
-            if output.startswith(git_ops.JUNK_SKIP_WARNING_PREFIX):
-                # Junk-allowlisted ignored files were skipped (#388) — surface
-                # the one-line warning but keep syncing.
-                print(f"Warning: {output}", file=sys.stderr)
+            for line in output.splitlines():
+                if line.startswith(git_ops.STAGE_WARNING_PREFIXES):
+                    # Junk-allowlisted ignored files (#388), or a directory
+                    # outside the sparse cone, were skipped: surface each
+                    # one-line warning but keep syncing.
+                    print(f"Warning: {line}", file=sys.stderr)
 
             # Count staged files
             import subprocess
