@@ -16,6 +16,7 @@ import pytest
 
 from schist.acl import VaultACL, parse_vault_data
 from schist.pre_receive import (
+    FRONTMATTER_SCOPE,
     Violation,
     check_push,
     derive_scope,
@@ -1445,3 +1446,60 @@ class TestRefPolicy:
         monkeypatch.chdir(repo)
         assert self._run(acl, "cluster-mario", "aaa bbb refs/heads/trunk", tmp_path) == 0
         assert self._run(acl, "cluster-mario", "aaa bbb refs/heads/main", tmp_path) == 1
+
+
+# ── Rejection message follow-ups to #781 ─────────────────────────────────────
+
+class TestRejectionMessages:
+    @pytest.fixture(autouse=True)
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GIT_DIR", str(tmp_path))   # not a repo: HEAD falls back to main
+
+    def test_acl_violations_are_reported_alongside_a_ref_refusal(self, acl, tmp_path, capsys):
+        """#790: a push that broke the ref rule on one ref returned before the
+        ACL violations found on its other refs were printed or logged, so the
+        pusher fixed one problem only to be refused again for the other."""
+        files = {"bbb": ["research/mario/n.md"], "ddd": ["security/out.md"]}
+        with patch("schist.pre_receive.get_changed_files",
+                   side_effect=lambda old, new: files[new]):
+            rc = main(stdin=["aaa bbb refs/heads/feature", "ccc ddd refs/heads/main"],
+                      acl=acl, identity="cluster-mario",
+                      log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "refs/heads/feature" in err and "security/out.md" in err
+        assert "security/out.md" in (tmp_path / "rejected.log").read_text(encoding="utf-8")
+
+    def test_frontmatter_hint_names_the_served_branch(self):
+        """#791: the reset hint said origin/main on a hub that serves another
+        branch."""
+        v = [Violation("x", "research/mario/x.md", FRONTMATTER_SCOPE, "refs/heads/trunk")]
+        msg = format_rejection(v, branch="refs/heads/trunk")
+        assert "git reset --soft origin/trunk" in msg and "origin/main" not in msg
+        assert "git reset --soft origin/main" in format_rejection(v)
+
+    def test_main_passes_the_served_branch_to_the_hint(self, acl, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr("schist.pre_receive.served_branch", lambda: "refs/heads/trunk")
+        monkeypatch.setattr("schist.pre_receive.find_bad_frontmatter",
+                            lambda *a, **k: ["research/mario/x.md"])
+        with patch("schist.pre_receive.get_changed_files", return_value=["research/mario/x.md"]):
+            rc = main(stdin=["aaa bbb refs/heads/trunk"], acl=acl, identity="cluster-mario",
+                      log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
+        assert rc == 1
+        assert "origin/trunk" in capsys.readouterr().err
+
+    def test_header_does_not_claim_out_of_scope_for_content_only_refusals(self):
+        """#795: a frontmatter-only (or bad-path-only) refusal is not a scope
+        problem, so the header must not send the operator to vault.yaml. It
+        keeps the `REJECTED:` prefix both spoke-side classifiers match."""
+        from schist.pre_receive import NON_UTF8_SCOPE
+
+        for scope in (FRONTMATTER_SCOPE, NON_UTF8_SCOPE):
+            msg = format_rejection([Violation("x", "research/mario/x.md", scope, "refs/heads/main")])
+            header = msg.splitlines()[0]
+            assert header.startswith("REJECTED:") and "out-of-scope" not in header, scope
+        mixed = format_rejection([
+            Violation("x", "research/mario/x.md", FRONTMATTER_SCOPE, "refs/heads/main"),
+            Violation("x", "security/x.md", "security", "refs/heads/main"),
+        ])
+        assert mixed.splitlines()[0] == "REJECTED: push contains out-of-scope writes"

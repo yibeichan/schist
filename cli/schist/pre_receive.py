@@ -406,10 +406,18 @@ def check_push(
     return violations
 
 
-def format_rejection(violations: list[Violation]) -> str:
-    """Format a human-readable rejection message."""
+def format_rejection(violations: list[Violation], branch: str = "refs/heads/main") -> str:
+    """Format a human-readable rejection message. `branch` is the served
+    branch, which the frontmatter hint tells the pusher to reset to."""
+    content_only = (NON_UTF8_SCOPE, FRONTMATTER_SCOPE)
+    # Both spoke-side classifiers key on the `REJECTED:` prefix, not on the
+    # words after it, so the header may say what was refused (#795).
+    if all(v.scope in content_only for v in violations):
+        header = "REJECTED: push contains files the hub refuses for every identity"
+    else:
+        header = "REJECTED: push contains out-of-scope writes"
     lines = [
-        "REJECTED: push contains out-of-scope writes",
+        header,
         f"Identity: {violations[0].identity}",
         "",
         "Violations:",
@@ -426,10 +434,11 @@ def format_rejection(violations: list[Violation]) -> str:
     if any(v.scope == FRONTMATTER_SCOPE for v in violations):
         lines.append(
             "Notes must open with a plain `---` line (YAML frontmatter), for every "
-            "identity. Fix the first line, then `git reset --soft origin/main` and "
+            "identity. Fix the first line, then "
+            f"`git reset --soft origin/{branch.removeprefix('refs/heads/')}` and "
             "recommit, so no unpushed commit keeps the old version."
         )
-    if any(v.scope not in (NON_UTF8_SCOPE, FRONTMATTER_SCOPE) for v in violations):
+    if any(v.scope not in content_only for v in violations):
         lines.append("Check vault.yaml access rules for your identity.")
     return "\n".join(lines)
 
@@ -662,12 +671,18 @@ def main(
         print("REJECTED: push updates refs this identity may not change", file=sys.stderr)
         for reason in ref_reasons:
             print(f"  - {_sanitize_log_field(reason)}", file=sys.stderr)
-        return 1
 
+    # Reported even after a ref refusal: the push is refused either way, and a
+    # pusher told only about the ref would fix it and be refused again for
+    # these (#790).
     if all_violations:
-        msg = format_rejection(all_violations)
+        if ref_reasons:
+            print("", file=sys.stderr)
+        msg = format_rejection(all_violations, branch=branch)
         print(msg, file=sys.stderr)
         log_rejection(all_violations, log_path=log_path)
+
+    if ref_reasons or all_violations:
         return 1
 
     # ACL passed — enforce rate limits. Runs after ACL so that rejected
