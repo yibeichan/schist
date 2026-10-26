@@ -308,7 +308,9 @@ SPDX-License-Identifier: Apache-2.0
       <div class="facet-label" id="type-label">Type</div>
       <div class="facet" id="type-facet" role="group" aria-labelledby="type-label"></div>
       <details id="more-filters">
-        <summary>Status &amp; tags <span id="filter-count"></span></summary>
+        <summary>Project, status &amp; tags <span id="filter-count"></span></summary>
+        <div class="facet-label" id="project-label">Project</div>
+        <div class="facet" id="project-facet" role="group" aria-labelledby="project-label"></div>
         <div class="facet-label" id="status-label">Status</div>
         <div class="facet" id="status-facet" role="group" aria-labelledby="status-label"></div>
         <div class="facet-label"><label for="tag-input">Tags</label></div>
@@ -442,7 +444,7 @@ SPDX-License-Identifier: Apache-2.0
   // Filters: a value set per facet. Values within a facet are alternatives
   // (OR); facets combine with AND; every tag in `tag` must be on the node.
   // An empty set means the facet is off.
-  const filters = { type: new Set(), status: new Set(), tag: new Set() };
+  const filters = { type: new Set(), project: new Set(), status: new Set(), tag: new Set() };
   let visibleIds = null;   // ids the list shows, when any filter or search is on
   let graphReady = false;  // set once the graph's elements exist
 
@@ -544,13 +546,19 @@ SPDX-License-Identifier: Apache-2.0
     return i > 0 ? n.id.slice(0, i) : "notes";
   }
 
+  // A note's projects are its `project:<repo>` tags; a note can have several.
+  function nodeProjects(n) {
+    return (n.tags || []).filter(t => t.startsWith("project:")).map(t => t.slice(8));
+  }
+
   function filtersOn(f) {
-    return f.type.size > 0 || f.status.size > 0 || f.tag.size > 0;
+    return f.type.size > 0 || f.project.size > 0 || f.status.size > 0 || f.tag.size > 0;
   }
 
   // `skip` names a facet to ignore, for that facet's own counts.
   function matchesFilters(n, f, skip = null) {
     if (skip !== "type" && f.type.size && !f.type.has(nodeKind(n))) return false;
+    if (skip !== "project" && f.project.size && !nodeProjects(n).some(p => f.project.has(p))) return false;
     if (skip !== "status" && f.status.size && !f.status.has(n.status)) return false;
     if (skip !== "tag" && f.tag.size) {
       const tags = n.tags || [];
@@ -560,13 +568,14 @@ SPDX-License-Identifier: Apache-2.0
   }
 
   // Each chip's count is what the list would hold with that value selected:
-  // the other facets and the search apply, this facet does not.
+  // the other facets and the search apply, this facet does not. `valueOf`
+  // returns one value or a list (a note in two projects counts for both).
   function facetCounts(pool, f, facet, valueOf) {
     const counts = new Map();
     for (const n of pool) {
       if (!matchesFilters(n, f, facet)) continue;
       const v = valueOf(n);
-      if (v) counts.set(v, (counts.get(v) || 0) + 1);
+      for (const x of Array.isArray(v) ? v : [v]) if (x) counts.set(x, (counts.get(x) || 0) + 1);
     }
     return counts;
   }
@@ -577,6 +586,8 @@ SPDX-License-Identifier: Apache-2.0
     .sort((a, b) => (a[0] === "concepts") - (b[0] === "concepts") || b[1] - a[1]).map(e => e[0]);
   const statusOrder = [...facetCounts(nodes.filter(n => n.type === "note"), filters, "status", n => n.status)]
     .sort((a, b) => b[1] - a[1]).map(e => e[0]);
+  const projectOrder = [...facetCounts(nodes, filters, "project", nodeProjects)]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(e => e[0]);
   const tagCounts = new Map();
   for (const n of nodes) for (const t of (n.tags || [])) tagCounts.set(t, (tagCounts.get(t) || 0) + 1);
   const tagByLower = new Map([...tagCounts.keys()].map(t => [t.toLowerCase(), t]));
@@ -627,6 +638,14 @@ SPDX-License-Identifier: Apache-2.0
     }
     document.getElementById("type-facet").replaceChildren(typeFrag);
 
+    const projects = facetCounts(pool, filters, "project", nodeProjects);
+    const projectFrag = document.createDocumentFragment();
+    for (const p of projectOrder) {
+      projectFrag.appendChild(chip(p, projects.get(p) || 0, filters.project.has(p), () => toggle("project", p),
+        `Notes tagged project:${p}`));
+    }
+    document.getElementById("project-facet").replaceChildren(projectFrag);
+
     const statuses = facetCounts(pool, filters, "status", n => n.status);
     const statusFrag = document.createDocumentFragment();
     for (const s of statusOrder) {
@@ -649,7 +668,7 @@ SPDX-License-Identifier: Apache-2.0
     }
     document.getElementById("active-tags").replaceChildren(tagFrag);
 
-    const folded = filters.status.size + filters.tag.size;
+    const folded = filters.project.size + filters.status.size + filters.tag.size;
     document.getElementById("filter-count").textContent = folded ? `· ${folded} active` : "";
     document.getElementById("clear-filters").hidden = !filtersOn(filters);
   }
@@ -682,12 +701,14 @@ SPDX-License-Identifier: Apache-2.0
     try { params = new URLSearchParams(location.hash.slice(1)); } catch { return; }
     for (const facet of Object.keys(filters)) {
       for (const v of params.getAll(facet)) {
-        if (facet === "tag" ? tagCounts.has(v) : facet === "type" ? typeOrder.includes(v) : statusOrder.includes(v)) {
+        const known = { tag: tagCounts.has(v), type: typeOrder.includes(v),
+                        project: projectOrder.includes(v), status: statusOrder.includes(v) };
+        if (known[facet]) {
           filters[facet].add(v);
         }
       }
     }
-    if (filters.status.size || filters.tag.size) document.getElementById("more-filters").open = true;
+    if (filters.project.size || filters.status.size || filters.tag.size) document.getElementById("more-filters").open = true;
   }
   function writeHash() {
     const params = new URLSearchParams();

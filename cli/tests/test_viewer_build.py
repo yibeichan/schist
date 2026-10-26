@@ -537,20 +537,21 @@ class TestShapeContract:
         if node is None:
             pytest.skip("node not installed")
         fns = []
-        for name in ("nodeKind", "filtersOn", "matchesFilters", "facetCounts"):
+        for name in ("nodeKind", "nodeProjects", "filtersOn", "matchesFilters", "facetCounts"):
             m = re.search(rf"function {name}\(.*?\n  \}}\n", self.PAGE, re.S)
             assert m, f"{name} not found"
             fns.append(m.group(0))
         script = "\n".join(fns) + """
 const nodes = [
-  { id: "ops/a.md", type: "note", status: "active", tags: ["security", "hub"] },
-  { id: "ops/b.md", type: "note", status: "final", tags: ["security"] },
-  { id: "decisions/c.md", type: "note", status: "active", tags: ["hub"] },
+  { id: "ops/a.md", type: "note", status: "active", tags: ["security", "hub", "project:alpha"] },
+  { id: "ops/b.md", type: "note", status: "final", tags: ["security", "project:beta"] },
+  { id: "decisions/c.md", type: "note", status: "active", tags: ["hub", "project:alpha", "project:beta"] },
   { id: "papers/d.md", type: "note", status: "final", tags: [] },
   { id: "top.md", type: "note", status: "draft", tags: [] },
   { id: "locking", type: "concept" },
 ];
-const F = (type = [], status = [], tag = []) => ({ type: new Set(type), status: new Set(status), tag: new Set(tag) });
+const F = (type = [], status = [], tag = [], project = []) =>
+  ({ type: new Set(type), project: new Set(project), status: new Set(status), tag: new Set(tag) });
 const ids = f => nodes.filter(n => matchesFilters(n, f)).map(n => n.id);
 const counts = (f, facet, fn) => Object.fromEntries(facetCounts(nodes, f, facet, fn));
 process.stdout.write(JSON.stringify({
@@ -563,6 +564,11 @@ process.stdout.write(JSON.stringify({
   conceptsHaveNoStatus: ids(F(["concepts"], ["active"])),
   typeCounts: counts(F(["ops"], ["active"]), "type", nodeKind),
   statusCounts: counts(F(["ops"], ["active"]), "status", n => n.status),
+  projects: nodes.map(nodeProjects),
+  projectOr: ids(F([], [], [], ["alpha"])),
+  projectAndType: ids(F(["ops"], [], [], ["beta"])),
+  projectOn: filtersOn(F([], [], [], ["alpha"])),
+  projectCounts: counts(F([], ["active"], [], ["alpha"]), "project", nodeProjects),
 }));
 """
         res = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
@@ -579,6 +585,13 @@ process.stdout.write(JSON.stringify({
         # status counts the reverse, so each chip shows what selecting it gives.
         assert out["typeCounts"] == {"ops": 1, "decisions": 1}
         assert out["statusCounts"] == {"active": 1, "final": 1}
+        # Projects come from project:<repo> tags; a note can be in several.
+        assert out["projects"] == [["alpha"], ["beta"], ["alpha", "beta"], [], [], []]
+        assert out["projectOr"] == ["ops/a.md", "decisions/c.md"]
+        assert out["projectAndType"] == ["ops/b.md"]
+        assert out["projectOn"] is True
+        # A note in two projects counts for both; the project filter itself is skipped.
+        assert out["projectCounts"] == {"alpha": 2, "beta": 1}
 
     def test_filter_controls_are_accessible_and_restored_from_the_url(self):
         assert 'b.setAttribute("aria-pressed"' in self.PAGE
@@ -588,7 +601,12 @@ process.stdout.write(JSON.stringify({
         # Filters round-trip through the hash, and only known values come back.
         assert re.search(r"function readHash\(\)", self.PAGE) and re.search(r"function writeHash\(\)", self.PAGE)
         assert "history.replaceState(" in self.PAGE
-        assert re.search(r"facet === \"tag\" \? tagCounts\.has\(v\)", self.PAGE)
+        known = re.search(r"const known = \{(.*?)\};", self.PAGE, re.S)
+        assert known, "readHash validation not found"
+        for check in ("tag: tagCounts.has(v)", "type: typeOrder.includes(v)",
+                      "project: projectOrder.includes(v)", "status: statusOrder.includes(v)"):
+            assert check in known.group(1), check
+        assert 'role="group" aria-labelledby="project-label"' in self.PAGE
 
     def test_page_reads_only_fields_the_builder_writes(self, vault_db):
         graph = build.build_graph(vault_db)
