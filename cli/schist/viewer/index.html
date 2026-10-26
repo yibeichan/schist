@@ -222,6 +222,8 @@ SPDX-License-Identifier: Apache-2.0
     }
     .cite:hover { text-decoration: underline; }
     .cite.unknown, .src.unknown { color: var(--muted); text-decoration: line-through; cursor: help; }
+    .cite.newer, .src.newer, .cite.pending, .src.pending { color: var(--muted); cursor: help; }
+    .cite.newer:hover, .cite.pending:hover { text-decoration: none; }
     .msg-sources { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); font-size: 11px; }
     .msg-sources:empty { display: none; }
     .src {
@@ -911,9 +913,24 @@ SPDX-License-Identifier: Apache-2.0
 
   // ── rendering an answer ──
   // Citations become numbered footnotes ([1], [2] …, one number per note)
-  // with a Sources list under the answer. An id that is not in the graph is
-  // struck through: the model invented it.
-  function renderAnswer(target, sources, text) {
+  // with a Sources list under the answer. The page's graph can be older than
+  // the index the agent reads, so an id missing from the graph is checked
+  // against the server's `cited` map (id → title, or null) sent before
+  // `done`: a title means the note is newer than this page; null, or no map
+  // from an older server, means no note has the id, and it is struck through.
+  // While the answer streams, ids not in the graph are only greyed.
+  function citeState(id, label, cited, final) {
+    const name = label(id);
+    if (name) return { cls: "", name, open: true, tip: name };
+    const newer = cited && typeof cited[id] === "string" ? cited[id] : null;
+    if (newer) return { cls: " newer", name: newer, open: false,
+      tip: `${newer} — in the vault but not in this page, which was built before it; rebuild the site and reload to open it` };
+    if (!final) return { cls: " pending", name: null, open: false, tip: id };
+    return { cls: " unknown", name: null, open: false,
+      tip: `${id} — no note has this id; the model may have invented it` };
+  }
+
+  function renderAnswer(target, sources, text, cited = null, final = false) {
     const ids = [];
     const md = text.replace(CITE, (_, id) => {
       id = id.trim();
@@ -942,24 +959,24 @@ SPDX-License-Identifier: Apache-2.0
       const frag = document.createDocumentFragment();
       parts.forEach((part, i) => {
         if (i % 2 === 0) { if (part) frag.appendChild(document.createTextNode(part)); return; }
-        const n = Number(part), id = ids[n], name = label(id);
-        const b = el("button", "cite" + (name ? "" : " unknown"), `[${n + 1}]`);
+        const n = Number(part), id = ids[n], s = citeState(id, label, cited, final);
+        const b = el("button", "cite" + s.cls, `[${n + 1}]`);
         b.type = "button";
-        b.title = name || `${id} — no note has this id; the model may have invented it`;
-        if (name) b.addEventListener("click", () => viewer.open(id));
+        b.title = s.tip;
+        if (s.open) b.addEventListener("click", () => viewer.open(id));
         frag.appendChild(b);
       });
       tn.replaceWith(frag);
     }
     const list = document.createDocumentFragment();
     ids.forEach((id, n) => {
-      const name = label(id);
-      const row = el("button", "src" + (name ? "" : " unknown"));
+      const s = citeState(id, label, cited, final);
+      const row = el("button", "src" + s.cls);
       row.type = "button";
       row.appendChild(el("b", null, `[${n + 1}]`));
-      row.appendChild(document.createTextNode(name || id));
-      row.title = name ? id : "No note has this id; the model may have invented it";
-      if (name) row.addEventListener("click", () => viewer.open(id));
+      row.appendChild(document.createTextNode(s.name || id));
+      row.title = s.open ? id : s.tip;
+      if (s.open) row.addEventListener("click", () => viewer.open(id));
       list.appendChild(row);
     });
     sources.replaceChildren(list);
@@ -984,7 +1001,7 @@ SPDX-License-Identifier: Apache-2.0
   async function ask(question) {
     history.push({ role: "user", content: question });
     const t = addTurn(question);
-    let text = "", pending = false, live = null, nsteps = 0;
+    let text = "", pending = false, live = null, nsteps = 0, cited = null;
     const step = s => {
       if (live) live.classList.remove("live");
       live = el("div", "live", s);
@@ -1034,6 +1051,8 @@ SPDX-License-Identifier: Apache-2.0
             chip.addEventListener("click", () => showPane("proposals"));
             t.turn.insertBefore(chip, t.answer);
             loadProposals();
+          } else if (kind === "cited") {
+            cited = ev.ids && typeof ev.ids === "object" ? ev.ids : null;
           } else if (kind === "error") failed = ev.message;
           else if (kind === "done") finished = true;
         }
@@ -1044,7 +1063,7 @@ SPDX-License-Identifier: Apache-2.0
     controller = null;
     send.textContent = "Ask"; send.classList.remove("stop"); send.disabled = !available;
     if (live) live.classList.remove("live");
-    renderAnswer(t.answer, t.sources, text);
+    renderAnswer(t.answer, t.sources, text, cited, true);
     t.steps.firstChild.textContent = `${nsteps} step${nsteps === 1 ? "" : "s"}`;
     t.steps.open = false;
     if (failed || !finished) t.turn.appendChild(el("div", "msg-error", failed || "the answer was cut off"));

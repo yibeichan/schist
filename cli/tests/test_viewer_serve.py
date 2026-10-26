@@ -87,6 +87,28 @@ class TestReadTools:
         assert fallback['match'] == 'any word'
         assert {r['id'] for r in fallback['results']} == {'notes/lock.md', 'notes/sync.md'}
 
+    @pytest.mark.parametrize('query', ['notes/lock.md', 'notes/lock', '[[notes/lock.md]]',
+                                       '  notes/lock.md  '])
+    def test_search_finds_a_note_by_its_id(self, ro, query):
+        # A word search on an id matches its path words ('notes', 'lock', 'md'),
+        # which can rank other notes first; an id is looked up exactly.
+        hit = agent_mod.search_notes(ro, query)
+        assert hit['match'] == 'id'
+        assert [r['id'] for r in hit['results']] == ['notes/lock.md']
+        assert hit['results'][0]['title'] == 'Vault write lock'
+
+    def test_search_on_an_unknown_id_falls_back_to_words(self, ro):
+        assert agent_mod.search_notes(ro, 'notes/nope.md')['match'] != 'id'
+        # Words with a slash are not ids unless one matches.
+        assert agent_mod.search_notes(ro, 'lock and/or sync')['match'] != 'id'
+
+    def test_cited_titles(self, ro):
+        out = agent_mod.cited_titles(
+            ro, 'A [[notes/lock.md]], B [[ locking ]], C [[notes/made-up.md]], again [[notes/lock.md]].')
+        assert out == {'notes/lock.md': 'Vault write lock', 'locking': 'Locking',
+                       'notes/made-up.md': None}
+        assert agent_mod.cited_titles(ro, 'no citations') == {}
+
     def test_search_ignores_fts_syntax(self, ro):
         assert agent_mod.search_notes(ro, 'lock" OR NEAR(') ['results']
 
@@ -262,6 +284,8 @@ class TestAgentLoop:
         assert ''.join(e['text'] for e in events if e['type'] == 'token') == \
             'It serializes writes [[notes/lock.md]].'
         assert any('reading Vault write lock' in e.get('text', '') for e in events)
+        # Before done, the page is told which cited ids the index knows.
+        assert events[-2] == {'type': 'cited', 'ids': {'notes/lock.md': 'Vault write lock'}}
         # The tool result went back to the model as a tool message.
         last = fake.requests[-1]['messages']
         assert last[-1]['role'] == 'tool' and 'serializes the CLI' in last[-1]['content']
@@ -460,6 +484,7 @@ class TestServer:
         events = [json.loads(line[6:]) for line in body.decode().split('\n\n') if line.startswith('data: ')]
         assert code == 200 and events[-1] == {'type': 'done'}
         assert ''.join(e['text'] for e in events if e['type'] == 'token') == 'hello [[notes/lock.md]]'
+        assert {'type': 'cited', 'ids': {'notes/lock.md': 'Vault write lock'}} in events
 
     def test_proposal_approve_over_http(self, server, ro):
         srv, base = server

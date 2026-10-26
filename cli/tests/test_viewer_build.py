@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -522,6 +523,40 @@ class TestShapeContract:
         body = fn.group(0)
         assert re.search(r'querySelectorAll\("a"\)', body)
         assert re.search(r"\.replaceWith\(document\.createTextNode\(", body)
+
+    def test_citations_newer_than_the_page_are_not_struck_through(self):
+        """The page's graph can predate notes the agent read from the index.
+        An id the server's `cited` map knows must not be marked invented; only
+        an id neither knows is, and only once the answer is final."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node not installed")
+        fn = re.search(r"function citeState\(.*?\n  \}\n", self.PAGE, re.S)
+        assert fn, "citeState not found"
+        script = fn.group(0) + """
+const label = id => ({ "notes/old.md": "Old note" })[id] || null;
+const cited = { "notes/old.md": "Old note", "notes/new.md": "New note", "notes/fake.md": null };
+const out = {};
+for (const id of ["notes/old.md", "notes/new.md", "notes/fake.md"]) {
+  out[id] = { final: citeState(id, label, cited, true), streaming: citeState(id, label, null, false),
+              oldServer: citeState(id, label, null, true) };
+}
+process.stdout.write(JSON.stringify(out));
+"""
+        res = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+        assert res.returncode == 0, res.stderr
+        out = json.loads(res.stdout)
+        assert out["notes/old.md"]["final"]["cls"] == "" and out["notes/old.md"]["final"]["open"]
+        assert out["notes/new.md"]["final"]["cls"] == " newer"
+        assert "rebuild the site and reload" in out["notes/new.md"]["final"]["tip"]
+        assert out["notes/fake.md"]["final"]["cls"] == " unknown"
+        # Mid-stream nothing is struck through yet.
+        assert out["notes/new.md"]["streaming"]["cls"] == " pending"
+        # A server that sends no map keeps the old behaviour.
+        assert out["notes/new.md"]["oldServer"]["cls"] == " unknown"
+        # The final render passes the server's map; the stream handles the event.
+        assert re.search(r"renderAnswer\(t\.answer, t\.sources, text, cited, true\)", self.PAGE)
+        assert 'kind === "cited"' in self.PAGE
 
     def test_page_reads_only_fields_the_builder_writes(self, vault_db):
         graph = build.build_graph(vault_db)
