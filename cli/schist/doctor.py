@@ -1867,7 +1867,7 @@ def _paths_named(s: str, base: Optional[Path]) -> tuple[list[Path], bool]:
     unresolvable = False
     for piece in [s, *_MCP_PATH_SPLIT.split(s)]:
         piece = piece.strip("'\"")
-        if not piece or piece.startswith("//"):
+        if not piece:
             continue
         p = os.path.expanduser(piece)
         if os.path.isabs(p):

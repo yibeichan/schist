@@ -3730,6 +3730,15 @@ class TestCheckVaultAccess:
         assert r.status == "FAIL", r
         assert "box (args)" in r.message
 
+    def test_quoted_path_in_a_shell_command_fails(self, home, vault):
+        self._claude_json(home, {"sh": {
+            "command": "sh", "args": ["-c", f"exec srv --root='{vault}'"]}})
+        assert check_vault_access(str(vault)).status == "FAIL"
+
+    def test_file_url_fails(self, home, vault):
+        self._claude_json(home, {"fs": self._fs(f"file://{vault}")})
+        assert check_vault_access(str(vault)).status == "FAIL"
+
     def test_path_list_in_env_fails(self, home, vault):
         self._claude_json(home, {
             "idx": {"command": "idx", "env": {"ROOTS": f"/srv:{vault}"}}})
@@ -3818,6 +3827,17 @@ class TestCheckVaultAccess:
         r = check_vault_access(str(vault))
         assert r.status == "FAIL", r
         assert "fs (args)" in r.message
+
+    def test_relative_cwd_resolves_against_the_project(self, home, vault):
+        code = home / "code"
+        self._write(code / ".codex" / "config.toml",
+                    '[mcp_servers.fs]\ncommand = "npx"\n'
+                    'args = ["."]\ncwd = "../schist-vault"\n')
+        self._write(home / ".codex" / "config.toml",
+                    f'[projects."{code}"]\ntrust_level = "trusted"\n')
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+        assert "fs (cwd, args)" in r.message
 
     def test_relative_arg_outside_the_vault_passes(self, home, vault):
         self._write(home / ".codex" / "config.toml",
@@ -4087,6 +4107,14 @@ class TestCheckVaultAccess:
         r = check_vault_access(str(vault))
         assert r.status == "PASS", r
         assert "reached by URL, not checked: remote" in r.message
+
+    def test_url_server_in_several_projects_is_named_once(self, home, vault):
+        remote = {"type": "http", "url": "http://localhost:9000/mcp"}
+        self._claude_json(home, {}, projects={
+            "/p1": {"mcpServers": {"remote": remote}},
+            "/p2": {"mcpServers": {"remote": remote}}})
+        r = check_vault_access(str(vault))
+        assert r.message.count("remote") == 1, r
 
     def test_symlinked_vault_is_matched(self, home, tmp_path):
         real = tmp_path / "real-vault"
