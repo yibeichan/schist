@@ -1645,57 +1645,135 @@ def _discover_mcp_schist_entries(
     return found
 
 
+_SCHIST_PACKAGE = "@schist/mcp-server"
+_SCHIST_NPM_SPEC = re.compile(r"@schist/mcp-server(@[^/\s]+)?")
 _SCHIST_ENTRY_NAME = re.compile(r"schist([-_].*)?")
 
 
-def _is_schist_server(name: str, cfg: dict) -> bool:
-    """A schist entry by name AND by what it runs.
-
-    _looks_like_schist_entry is too loose here: it accepts any arg containing
-    "schist", which a vault path such as ~/schist-vault does, so a
-    filesystem server named "schist" would be exempted.
-    """
-    if not _SCHIST_ENTRY_NAME.fullmatch(name):
-        return False
-    args = cfg.get("args")
-    if not isinstance(args, list):
-        return False
-    return any(
-        isinstance(a, str) and (
-            a.startswith("@schist/mcp-server")
-            or (a.endswith("dist/index.js")
-                and ("mcp-server" in a or "@schist" in a)))
-        for a in args)
-
-
-def _all_mcp_servers(vault_path: Optional[str]) -> list[tuple[str, str, dict]]:
-    """Every MCP server entry in every known client config.
-
-    Returns (where, name, entry) tuples. `where` names the config file, plus
-    the project for Claude Code project-scope servers. Covers the
-    `{"mcpServers": {...}}` and `{"servers": [...]}` shapes of
-    _mcp_config_candidates, Claude Code's `projects.<path>.mcpServers` in
-    ~/.claude.json, and `[mcp_servers.*]` in ~/.codex/config.toml. Every level
-    is shape-guarded, as in _discover_mcp_schist_entries (#437, #441).
-    """
-    found: list[tuple[str, str, dict]] = []
-
-    def add_map(where: str, servers: Any) -> None:
-        if isinstance(servers, dict):
-            for name, cfg in servers.items():
-                if isinstance(cfg, dict):
-                    found.append((where, str(name), cfg))
-
-    for c in _mcp_config_candidates(vault_path):
+def _package_name_above(script: Path) -> Optional[str]:
+    """`name` from the nearest package.json above `script` that has one."""
+    for d in list(script.parents)[:4]:
         try:
-            if not c.exists():
-                continue
-            data = json.loads(c.read_text())
-        except Exception:
+            data = json.loads((d / "package.json").read_text())
+        except (OSError, ValueError):
             continue
+        if isinstance(data, dict) and isinstance(data.get("name"), str):
+            return data["name"]
+    return None
+
+
+def _is_schist_server(name: str, cfg: dict) -> bool:
+    """Whether an MCP entry runs schist's own server, judged by what it runs.
+
+    It does if it runs the `@schist/mcp-server` npm package, or a script
+    whose package.json names that package, whatever the entry is called.
+    Only when the script is missing from this machine (a config copied from
+    elsewhere) does the name decide: `schist`, `schist-*` or `schist_*`
+    running a `mcp-server/dist/index.js`. _looks_like_schist_entry is too
+    loose here: it accepts any arg containing "schist", which a vault path
+    such as ~/schist-vault does.
+    """
+    strings = [cfg.get("command")]
+    args = cfg.get("args")
+    if isinstance(args, list):
+        strings += args
+    strings = [s for s in strings if isinstance(s, str)]
+    if any(_SCHIST_NPM_SPEC.fullmatch(s) for s in strings):
+        return True
+    for s in strings:
+        if not s.endswith(".js"):
+            continue
+        script = Path(os.path.expanduser(s))
+        try:
+            if script.is_file():
+                if _package_name_above(script.resolve()) == _SCHIST_PACKAGE:
+                    return True
+                continue
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if (_SCHIST_ENTRY_NAME.fullmatch(name)
+                and s.endswith("mcp-server/dist/index.js")):
+            return True
+    return False
+
+
+@dataclass
+class _McpServer:
+    where: str
+    name: str
+    cfg: dict
+    # The folder the client starts this server in, when the config says
+    # (a project's own config file, or Claude Code local scope).
+    project: Optional[Path]
+
+
+def _read_mcp_config(path: Path, unreadable: list[str]) -> Any:
+    """The parsed JSON or TOML at `path`, or None when it is absent. A file
+    that exists but cannot be read or parsed goes into `unreadable`."""
+    try:
+        if not path.is_file():
+            return None
+        text = path.read_bytes().decode("utf-8")
+        if path.suffix == ".toml":
+            import tomllib
+            return tomllib.loads(text)
+        return json.loads(text)
+    except Exception:
+        unreadable.append(str(path))
+        return None
+
+
+def _all_mcp_servers(
+    vault_path: Optional[str],
+) -> tuple[list[_McpServer], int, list[str]]:
+    """Every MCP server entry in every client config doctor knows of.
+
+    Returns (servers, number of config files read, files that exist but
+    could not be parsed). Read, in addition to _mcp_config_candidates:
+    `$CLAUDE_CONFIG_DIR/.claude.json`; Claude Code local scope
+    (`projects.<path>.mcpServers`); `${CODEX_HOME:-~/.codex}/config.toml`;
+    and, for the vault and every project Claude Code or Codex lists, the
+    project's `.mcp.json` (Claude Code project scope), `.cursor/mcp.json`
+    and `.codex/config.toml`. Every level is shape-guarded, as in
+    _discover_mcp_schist_entries (#437, #441).
+    """
+    servers: list[_McpServer] = []
+    unreadable: list[str] = []
+    seen: set[str] = set()
+    n_read = 0
+    projects: dict[str, None] = {}
+
+    def load(path: Path) -> Any:
+        nonlocal n_read
+        try:
+            key = str(path.resolve())
+        except (OSError, RuntimeError, ValueError):
+            key = str(path)
+        if key in seen:
+            return None
+        seen.add(key)
+        data = _read_mcp_config(path, unreadable)
+        if data is not None:
+            n_read += 1
+        return data
+
+    def add_map(where: str, block: Any, project: Optional[Path]) -> None:
+        if isinstance(block, dict):
+            for name, cfg in block.items():
+                if isinstance(cfg, dict):
+                    servers.append(_McpServer(where, str(name), cfg, project))
+
+    vault = Path(os.path.expanduser(vault_path)) if vault_path else None
+    candidates = _mcp_config_candidates(vault_path)
+    claude_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if claude_dir:
+        candidates.insert(0, Path(os.path.expanduser(claude_dir)) / ".claude.json")
+    for c in candidates:
+        data = load(c)
         if not isinstance(data, dict):
             continue
-        add_map(str(c), data.get("mcpServers"))
+        project = vault if vault is not None and c.parent == vault / ".claude" else None
+        add_map(str(c), data.get("mcpServers"), project)
         server_list = data.get("servers")
         if isinstance(server_list, list):
             for cfg in server_list:
@@ -1703,47 +1781,122 @@ def _all_mcp_servers(vault_path: Optional[str]) -> list[tuple[str, str, dict]]:
                     continue
                 name = cfg.get("name")
                 name = str(name) if isinstance(name, (str, int)) else "(unnamed)"
-                found.append((str(c), name, cfg))
-        projects = data.get("projects")
-        if isinstance(projects, dict):
-            for proj, pcfg in projects.items():
+                servers.append(_McpServer(str(c), name, cfg, project))
+        local = data.get("projects")
+        if isinstance(local, dict):
+            for key, pcfg in local.items():
+                if not isinstance(key, str):
+                    continue
+                projects.setdefault(key)
                 if isinstance(pcfg, dict):
-                    add_map(f"{c} (project {proj})", pcfg.get("mcpServers"))
+                    add_map(f"{c} (local scope, project {key})",
+                            pcfg.get("mcpServers"), Path(key))
 
-    codex = Path.home() / ".codex" / "config.toml"
-    try:
-        import tomllib
-        with open(codex, "rb") as f:
-            data = tomllib.load(f)
-    except Exception:
-        data = None
+    codex_home = os.environ.get("CODEX_HOME")
+    codex = (Path(os.path.expanduser(codex_home)) if codex_home
+             else Path.home() / ".codex") / "config.toml"
+    data = load(codex)
     if isinstance(data, dict):
-        add_map(str(codex), data.get("mcp_servers"))
-    return found
+        add_map(str(codex), data.get("mcp_servers"), None)
+        trusted = data.get("projects")
+        if isinstance(trusted, dict):
+            for key in trusted:
+                if isinstance(key, str):
+                    projects.setdefault(key)
+
+    if vault is not None:
+        projects.setdefault(str(vault))
+    for key in projects:
+        root = Path(os.path.expanduser(key))
+        for rel, block in ((".mcp.json", "mcpServers"),
+                           (".cursor/mcp.json", "mcpServers"),
+                           (".codex/config.toml", "mcp_servers")):
+            f = root / rel
+            data = load(f)
+            if isinstance(data, dict):
+                add_map(str(f), data.get(block), root)
+    return servers, n_read, unreadable
 
 
-def _abs_path_variants(s: str) -> list[Path]:
-    """`s` (or the value after `--flag=`) as an absolute path, as given and
-    with symlinks resolved. Relative strings and non-paths give []."""
-    out: list[Path] = []
-    pieces = [s]
-    if "=" in s:
-        pieces.append(s.split("=", 1)[1])
-    for piece in pieces:
-        p = os.path.expanduser(piece)
-        if not os.path.isabs(p):
+# ${VAR}, ${VAR:-default}, ${env:VAR} (Cursor), ${userHome} and
+# ${workspaceFolder} (Cursor), ${CLAUDE_PROJECT_DIR} (Claude Code), $VAR.
+_MCP_VAR = re.compile(r"\$\{([^}]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _expand_mcp_vars(s: str, project: Optional[Path]) -> tuple[str, list[str]]:
+    """`s` with the variables MCP clients expand replaced, and the names it
+    could not expand. Environment variables come from doctor's own
+    environment, which may differ from the client's, so an unset one is
+    reported rather than treated as empty."""
+    missing: list[str] = []
+
+    def sub(m: "re.Match[str]") -> str:
+        name = m.group(1) if m.group(1) is not None else m.group(2)
+        if name == "userHome":
+            return str(Path.home())
+        if name in ("workspaceFolder", "CLAUDE_PROJECT_DIR"):
+            if project is not None:
+                return str(project)
+            missing.append(name)
+            return m.group(0)
+        if name.startswith("env:"):
+            name = name[4:]
+        default = None
+        if ":-" in name:
+            name, default = name.split(":-", 1)
+        value = os.environ.get(name)
+        if value:
+            return value
+        if default is not None:
+            return default
+        missing.append(name)
+        return m.group(0)
+
+    return _MCP_VAR.sub(sub, s), missing
+
+
+# A string is also checked piece by piece, so `--root=<p>`, `src=<p>,dst=..`,
+# `-v <p>:/data`, `a,<p>` and `sh -c "cat <p>"` are all seen.
+_MCP_PATH_SPLIT = re.compile(r"[=,:;\s]+")
+
+
+def _paths_named(s: str, base: Optional[Path]) -> tuple[list[Path], bool]:
+    """Resolved paths that `s` names, and whether it holds a relative path
+    (`.`, `..`, `./x`, `../x`) with no `base` to resolve it against."""
+    found: list[Path] = []
+    unresolvable = False
+    for piece in [s, *_MCP_PATH_SPLIT.split(s)]:
+        piece = piece.strip("'\"")
+        if not piece or piece.startswith("//"):
             continue
-        out.append(Path(p))
+        p = os.path.expanduser(piece)
+        if os.path.isabs(p):
+            candidate = Path(p)
+        elif piece in (".", "..") or piece.startswith(("./", "../")):
+            if base is None:
+                unresolvable = True
+                continue
+            candidate = base / piece
+        else:
+            continue
         try:
-            out.append(Path(p).resolve())
-        except (OSError, RuntimeError):
+            found.append(candidate.resolve())
+        except (OSError, RuntimeError, ValueError):
             pass
-    return out
+    return found, unresolvable
 
 
 def _reaches(p: Path, vaults: list[Path]) -> bool:
     """`p` is a vault, inside one, or a folder that contains one."""
     return any(p == v or v in p.parents or p in v.parents for v in vaults)
+
+
+# Every process inherits these from its parent, so a value that names the
+# home folder or / gives a server nothing it would not have anyway.
+_INHERITED_ENV = frozenset({
+    "HOME", "USERPROFILE", "PWD", "OLDPWD", "TMPDIR", "TMP", "TEMP", "PATH",
+    "SHELL",
+})
 
 
 def _allowed_mcp_servers(vault: Path) -> set[str]:
@@ -1763,14 +1916,22 @@ def _allowed_mcp_servers(vault: Path) -> set[str]:
 def check_vault_access(vault_path: Optional[str]) -> CheckResult:
     """FAIL when an MCP server other than schist can read the vault.
 
-    A server whose command, args or env values name the vault, a folder
+    A server whose command, args, cwd or env values name the vault, a folder
     inside it, or a folder that contains it (a filesystem server rooted at
-    `~`) reads notes without schist's scope and ACL checks. The schist entry
-    is recognized by its name (`schist`, `schist-*`) together with the
-    mcp-server it runs; name or args alone would exempt a look-alike.
-    Offenders are listed by config file, server name and field, never the
-    field's value, since env values can hold tokens. An intended exception goes in schist.yaml
-    `vault_access.allowed_mcp_servers`.
+    `~`) reads notes without schist's scope and ACL checks. Strings are
+    checked whole and piece by piece, after expanding the variables MCP
+    clients expand; relative paths resolve against the entry's `cwd` or
+    the project it belongs to. A server is not counted for merely being
+    started inside the vault's project, since clients start every server in
+    the project folder. schist's own entry is recognized by what it runs.
+
+    Offenders are listed by config file, server name and field, never by
+    value, since env values can hold tokens. What the check cannot decide
+    (a config file it cannot parse, a variable it cannot expand, a relative
+    path with no known start folder) makes it WARN. Servers reached by URL
+    have no local paths to check, so the PASS message names them. Servers
+    listed under `vault_access.allowed_mcp_servers` in schist.yaml are
+    reported in the PASS message instead.
     """
     label = "Vault access"
     if not vault_path:
@@ -1778,51 +1939,100 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
     given = Path(os.path.expanduser(vault_path)).absolute()
     if not given.is_dir():
         return CheckResult("SKIP", label, "skipped (vault does not exist)")
-    vaults = [given, given.resolve()]
+    try:
+        vaults = [given.resolve()]
+    except (OSError, RuntimeError, ValueError):
+        return CheckResult("SKIP", label, "skipped (vault path unresolvable)")
     allowed = _allowed_mcp_servers(given)
+    servers, n_read, unreadable = _all_mcp_servers(vault_path)
 
     offenders: list[str] = []
+    unsure: list[str] = []
     allowed_hits: list[str] = []
-    for where, name, cfg in _all_mcp_servers(vault_path):
-        if _is_schist_server(name, cfg):
+    url_only: list[str] = []
+    for s in servers:
+        cfg = s.cfg
+        if _is_schist_server(s.name, cfg):
             continue
         fields: list[str] = []
-        command = cfg.get("command")
-        if isinstance(command, str) and any(
-                _reaches(p, vaults) for p in _abs_path_variants(command)):
-            fields.append("command")
-        args = cfg.get("args")
-        if isinstance(args, list) and any(
-                _reaches(p, vaults)
-                for a in args if isinstance(a, str)
-                for p in _abs_path_variants(a)):
-            fields.append("args")
-        env = cfg.get("env")
-        if isinstance(env, dict) and any(
-                _reaches(p, vaults)
-                for v in env.values() if isinstance(v, str)
-                for p in _abs_path_variants(v)):
-            fields.append("env")
-        if not fields:
-            continue
-        entry = f"{where}: {name} ({', '.join(fields)})"
-        (allowed_hits if name in allowed else offenders).append(entry)
+        doubts: list[str] = []
+        base = s.project
 
+        def scan(field: str, values: list[Any], start: Optional[Path]) -> None:
+            hit = False
+            for v in values:
+                if not isinstance(v, str):
+                    continue
+                text, missing = _expand_mcp_vars(v, s.project)
+                for name in missing:
+                    doubts.append(f"{field}: cannot expand ${{{name}}}")
+                paths, unresolvable = _paths_named(text, start)
+                if unresolvable:
+                    doubts.append(f"{field}: relative path with no known "
+                                  "start folder")
+                hit = hit or any(_reaches(p, vaults) for p in paths)
+            if hit:
+                fields.append(field)
+
+        cwd = cfg.get("cwd")
+        if isinstance(cwd, str):
+            scan("cwd", [cwd], s.project)
+            text, _ = _expand_mcp_vars(cwd, s.project)
+            text = os.path.expanduser(text)
+            if os.path.isabs(text):
+                base = Path(text)
+            elif s.project is not None:
+                base = s.project / text
+        scan("command", [cfg.get("command")], base)
+        args = cfg.get("args")
+        scan("args", args if isinstance(args, list) else [], base)
+        env = cfg.get("env")
+        if isinstance(env, dict):
+            scan("env", [v for k, v in env.items()
+                         if str(k) not in _INHERITED_ENV], base)
+        if (not isinstance(cfg.get("command"), str)
+                and isinstance(cfg.get("url"), str)):
+            url_only.append(s.name)
+
+        entry = f"{s.where}: {s.name}"
+        if s.name in allowed:
+            if fields or doubts:
+                allowed_hits.append(entry)
+            continue
+        if fields:
+            offenders.append(f"{entry} ({', '.join(fields)})")
+        unsure += [f"{entry} ({d})" for d in dict.fromkeys(doubts)]
+
+    unchecked = [f"{f} (cannot be parsed)" for f in unreadable] + unsure
+    also = f"; also could not check: {'; '.join(unchecked)}" if unchecked else ""
     if offenders:
         return CheckResult(
             "FAIL", label,
             "MCP servers other than schist can read the vault, bypassing its "
-            "scope and ACL checks: " + "; ".join(offenders),
-            "Remove the vault path (or a folder that contains it, such as ~) "
-            "from those servers. If a server should read the vault, list its "
-            "name under `vault_access: allowed_mcp_servers:` in schist.yaml.",
+            "scope and ACL checks: " + "; ".join(offenders) + also,
+            "Remove the vault path, or a folder that contains it such as ~, "
+            "from those servers. If one of them should read the vault, add "
+            "its name to `allowed_mcp_servers` in a `vault_access` section "
+            "of the vault's schist.yaml. On a spoke, schist.yaml comes from "
+            "the hub: a participant who can write the vault root changes it "
+            "there, since an edit on the spoke stops its sync.",
         )
-    if allowed_hits:
+    if unchecked:
         return CheckResult(
-            "PASS", label,
-            "only schist and servers allowed in schist.yaml: "
-            + "; ".join(allowed_hits))
-    return CheckResult("PASS", label, "no other MCP server names the vault")
+            "WARN", label,
+            "could not check every MCP server for vault access: "
+            + "; ".join(unchecked),
+            "Fix or remove the config files that cannot be parsed, and make "
+            "sure each server named above does not reach the vault.",
+        )
+    parts = [f"no other MCP server names the vault by path "
+             f"({n_read} config file(s) read)"]
+    if allowed_hits:
+        parts.append("allowed in schist.yaml: " + "; ".join(allowed_hits))
+    if url_only:
+        parts.append("reached by URL, not checked: "
+                     + ", ".join(dict.fromkeys(url_only)))
+    return CheckResult("PASS", label, "; ".join(parts))
 
 
 def check_mcp_config(vault_path: Optional[str]) -> CheckResult:
