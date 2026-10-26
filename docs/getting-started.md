@@ -360,7 +360,16 @@ Common causes: SSH key not loaded, hub URL wrong, or firewall blocking the conne
 
 ### 9. `Vault access: MCP servers other than schist can read the vault`
 
-A server whose command, arguments or environment name the vault, a folder inside it, or a folder that contains it (for example a filesystem server rooted at `~`) reads notes directly, without schist's scope and ACL checks. `schist doctor` scans Claude Code (user and project scope), Claude Desktop, Cursor, Claude Science and Codex configs, and names each server and field, never the value.
+A server whose command, arguments, working directory or environment name the vault, a folder inside it, or a folder that contains it (for example a filesystem server rooted at `~`) reads notes directly, without schist's scope and ACL checks. `schist doctor` reads:
+
+- Claude Code: user and local scope in `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`), and project scope in `.mcp.json`;
+- Codex: `${CODEX_HOME:-~/.codex}/config.toml`, and `.codex/config.toml` in trusted projects;
+- Cursor: `~/.cursor/mcp.json`, and `.cursor/mcp.json` in projects;
+- Claude Desktop and Claude Science configs.
+
+Project files are read in the vault and in every project Claude Code or Codex lists. Paths are found inside longer strings too (`--root=<path>`, `src=<path>,dst=...`, `-v <path>:/data`), after expanding the variables these clients expand (`${HOME}`, `${env:NAME}`, `${userHome}`, `${workspaceFolder}`); relative paths count against the server's `cwd` or its project folder. The result names each server and field, never the value.
+
+The check WARNs when it cannot decide: a config file it cannot parse, a variable that is not set in the shell running `doctor`, or a relative path with no known start folder. Servers reached by URL have no local paths to check; the PASS message names them. The schist server itself is recognized by the `@schist/mcp-server` package it runs, whatever its entry is called.
 
 Remove the vault path, or the folder that contains it, from that server. If a server should read the vault, list it by name in the vault's `schist.yaml`:
 
@@ -369,4 +378,4 @@ vault_access:
   allowed_mcp_servers: [obsidian]
 ```
 
-The check then passes and names the allowed servers.
+The check then passes and names the allowed servers. On a spoke, `schist.yaml` comes from the hub, and an edit on the spoke stops it from pulling: a participant who can write the vault root makes the change, and every spoke gets it with its next `schist sync pull`. The allowlist then applies to servers of that name on every machine.
