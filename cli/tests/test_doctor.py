@@ -40,6 +40,7 @@ from schist.doctor import (
     check_uv,
     check_vault_exists,
     check_vault_is_git,
+    check_vault_location,
     run_doctor,
 )
 from schist.sync import HOOK_VERSION, POST_COMMIT_HOOK, PRE_COMMIT_HOOK
@@ -192,6 +193,74 @@ class TestCheckVaultIsGit:
     def test_not_git(self, tmp_path):
         r = check_vault_is_git(str(tmp_path))
         assert r.status == "FAIL"
+
+
+class TestCheckVaultLocation:
+    """A vault inside a cloud-sync folder FAILs: sync clients rewrite files
+    under .git and leave conflict copies, which corrupts the repository."""
+
+    @pytest.fixture
+    def home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        return home
+
+    def test_no_path(self):
+        assert check_vault_location(None).status == "SKIP"
+
+    def test_missing_vault_skips(self, home):
+        assert check_vault_location(str(home / "nope")).status == "SKIP"
+
+    def test_plain_home_folder_passes(self, home):
+        vault = home / "schist-vault"
+        vault.mkdir()
+        assert check_vault_location(str(vault)).status == "PASS"
+
+    @pytest.mark.parametrize("root", [
+        "Dropbox",
+        "Dropbox (Personal)",
+        "OneDrive",
+        "OneDrive - MIT",
+        "Google Drive",
+        "My Drive",
+        "Box",
+        "pCloud Drive",
+        "Library/Mobile Documents/com~apple~CloudDocs",
+        "Library/CloudStorage/GoogleDrive-me@example.org/My Drive",
+    ])
+    def test_vault_in_sync_folder_fails(self, home, root):
+        vault = home / root / "notes" / "vault"
+        vault.mkdir(parents=True)
+        r = check_vault_location(str(vault))
+        assert r.status == "FAIL", r
+        assert ".git" in r.message
+        assert r.fix
+
+    def test_sync_folder_name_deeper_down_passes(self, home):
+        # Only folders at the sync client's own location count; a project
+        # folder that happens to be called "Box" does not.
+        vault = home / "code" / "Box" / "vault"
+        vault.mkdir(parents=True)
+        assert check_vault_location(str(vault)).status == "PASS"
+
+    def test_symlink_into_sync_folder_fails(self, home):
+        target = home / "Dropbox" / "vault"
+        target.mkdir(parents=True)
+        link = home / "schist-vault"
+        link.symlink_to(target)
+        assert check_vault_location(str(link)).status == "FAIL"
+
+    def test_tilde_path_is_expanded(self, home, monkeypatch):
+        (home / "Dropbox" / "vault").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        assert check_vault_location("~/Dropbox/vault").status == "FAIL"
+
+    def test_run_doctor_includes_the_check(self, home, capsys):
+        vault = home / "Dropbox" / "vault"
+        vault.mkdir(parents=True)
+        labels = {r.label: r.status for r in run_doctor(str(vault), None)}
+        assert labels.get("Vault location") == "FAIL"
 
 
 class TestCheckSchistYaml:

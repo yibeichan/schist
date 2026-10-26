@@ -217,6 +217,71 @@ def check_vault_is_git(vault_path: Optional[str]) -> CheckResult:
                        f"Run `cd {vault_path} && git init`.")
 
 
+# Folders that sync clients own, relative to $HOME. A trailing "*" matches
+# the suffixes clients add for a second account ("Dropbox (Work)",
+# "OneDrive - Org"). Library/CloudStorage holds every macOS File Provider
+# client (Dropbox, Google Drive, OneDrive, Box); Mobile Documents is iCloud.
+_SYNC_ROOTS = (
+    "Dropbox", "Dropbox (*", "OneDrive", "OneDrive - *", "Google Drive",
+    "My Drive", "Box", "Box Sync", "pCloud Drive", "iCloudDrive",
+    "Library/Mobile Documents", "Library/CloudStorage",
+)
+
+
+def _sync_root_containing(path: Path, home: Path) -> Optional[Path]:
+    """The sync-client folder under `home` that holds `path`, or None."""
+    try:
+        rel = path.relative_to(home)
+    except ValueError:
+        return None
+    for root in _SYNC_ROOTS:
+        n = root.count("/") + 1
+        if len(rel.parts) < n:
+            continue
+        head = rel.parts[:n]
+        want = root.split("/")
+        if head[:-1] != tuple(want[:-1]):
+            continue
+        last = want[-1]
+        if (head[-1] == last or
+                (last.endswith("*") and head[-1].startswith(last[:-1]))):
+            return home.joinpath(*head)
+    return None
+
+
+def check_vault_location(vault_path: Optional[str]) -> CheckResult:
+    """FAIL when the vault sits inside a cloud-sync folder.
+
+    Sync clients rewrite files under .git while git holds them, upload
+    half-written objects, and leave conflict copies such as `index (1)`, so
+    a synced vault corrupts sooner or later. The path is checked both as
+    given and with symlinks resolved, so a link into a synced folder is
+    caught, and against both spellings of $HOME.
+    """
+    label = "Vault location"
+    if not vault_path:
+        return CheckResult("SKIP", label, "skipped (no vault)")
+    given = Path(os.path.expanduser(vault_path)).absolute()
+    if not given.is_dir():
+        return CheckResult("SKIP", label, "skipped (vault does not exist)")
+    home = Path.home()
+    for path in (given, given.resolve()):
+        for h in (home, home.resolve()):
+            root = _sync_root_containing(path, h)
+            if root is not None:
+                return CheckResult(
+                    "FAIL", label,
+                    f"{given} is inside the cloud-sync folder {root}; sync "
+                    "clients rewrite files under .git and leave conflict "
+                    "copies, which corrupts the repository",
+                    "Move the vault to a folder that is not synced and point "
+                    "SCHIST_VAULT_PATH and your MCP config at the new path. "
+                    "On a spoke, a fresh `schist init --spoke` clone is the "
+                    "safest move.",
+                )
+    return CheckResult("PASS", label, "not inside a cloud-sync folder")
+
+
 def check_schist_yaml(vault_path: Optional[str]) -> CheckResult:
     if not vault_path:
         return CheckResult("SKIP", "schist.yaml", "skipped (no vault)")
@@ -2659,6 +2724,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_git(),
         check_vault_exists(vault_path),
         check_vault_is_git(vault_path),
+        check_vault_location(vault_path),
         check_schist_yaml(vault_path),
         check_sqlite(vault_path, db_path),
         check_post_commit_hook(vault_path),
