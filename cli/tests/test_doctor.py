@@ -226,6 +226,18 @@ class TestCheckVaultLocation:
         "My Drive",
         "Box",
         "pCloud Drive",
+        "pCloudDrive",
+        "Box Sync",
+        "iCloudDrive",
+        "Sync",
+        "Nextcloud",
+        "ownCloud",
+        "Seafile",
+        "MEGA",
+        "MEGAsync",
+        "Insync",
+        "SynologyDrive",
+        "Tresorit",
         "Library/Mobile Documents/com~apple~CloudDocs",
         "Library/CloudStorage/GoogleDrive-me@example.org/My Drive",
     ])
@@ -302,6 +314,106 @@ class TestCheckVaultLocation:
         link = home / "schist-vault"
         link.symlink_to(target)
         assert check_vault_location(str(link)).status == "WARN"
+
+    def test_macos_vault_at_documents_itself_warns(self, home, monkeypatch):
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        (home / "Documents").mkdir()
+        assert check_vault_location(str(home / "Documents")).status == "WARN"
+
+    def test_macos_documents_via_symlinked_home_warns(
+            self, tmp_path, monkeypatch):
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        real = tmp_path / "real-home"
+        (real / "Documents" / "vault").mkdir(parents=True)
+        link = tmp_path / "home"
+        link.symlink_to(real)
+        monkeypatch.setattr("pathlib.Path.home", lambda: link)
+        r = check_vault_location(str(real / "Documents" / "vault"))
+        assert r.status == "WARN"
+
+    def test_macos_documents_link_into_sync_folder_fails(
+            self, home, monkeypatch):
+        # The FAIL for the sync folder wins over the WARN for Documents.
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        target = home / "Dropbox" / "real"
+        target.mkdir(parents=True)
+        (home / "Documents").mkdir()
+        link = home / "Documents" / "vault"
+        link.symlink_to(target)
+        assert check_vault_location(str(link)).status == "FAIL"
+
+    @pytest.mark.parametrize("folder,expect", [
+        ("dropbox", "FAIL"), ("documents", "WARN"), ("DESKTOP", "WARN"),
+    ])
+    def test_macos_names_compare_case_insensitively(
+            self, home, monkeypatch, folder, expect):
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        vault = home / folder / "vault"
+        vault.mkdir(parents=True)
+        assert check_vault_location(str(vault)).status == expect
+
+    def test_linux_names_compare_case_sensitively(self, home, monkeypatch):
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "linux")
+        vault = home / "dropbox" / "vault"
+        vault.mkdir(parents=True)
+        assert check_vault_location(str(vault)).status == "PASS"
+
+    def test_git_dir_symlinked_into_sync_folder_fails(self, home):
+        gitdir = home / "Dropbox" / "vault.git"
+        gitdir.mkdir(parents=True)
+        vault = home / "schist-vault"
+        vault.mkdir()
+        (vault / ".git").symlink_to(gitdir)
+        r = check_vault_location(str(vault))
+        assert r.status == "FAIL"
+        assert "git directory" in r.message
+
+    def test_gitdir_file_into_sync_folder_fails(self, home):
+        gitdir = home / "Dropbox" / "vault.git"
+        gitdir.mkdir(parents=True)
+        vault = home / "schist-vault"
+        vault.mkdir()
+        (vault / ".git").write_text(f"gitdir: {gitdir}\n")
+        assert check_vault_location(str(vault)).status == "FAIL"
+
+    def test_relative_gitdir_file_is_resolved_from_the_vault(self, home):
+        (home / "Dropbox" / "vault.git").mkdir(parents=True)
+        vault = home / "schist-vault"
+        vault.mkdir()
+        (vault / ".git").write_text("gitdir: ../Dropbox/vault.git\n")
+        assert check_vault_location(str(vault)).status == "FAIL"
+
+    def test_sync_folder_that_is_a_symlink_matches_its_target(
+            self, home, tmp_path):
+        # ~/Dropbox moved to another disk and linked back; the vault is
+        # given by its real path.
+        moved = tmp_path / "disk" / "Dropbox"
+        (moved / "vault").mkdir(parents=True)
+        (home / "Dropbox").symlink_to(moved)
+        r = check_vault_location(str(moved / "vault"))
+        assert r.status == "FAIL"
+        assert str(home / "Dropbox") in r.message
+
+    def test_dotdot_in_vault_path_is_resolved(self, home):
+        (home / "Dropbox").mkdir()
+        (home / "schist-vault").mkdir()
+        r = check_vault_location(str(home / "Dropbox" / ".." / "schist-vault"))
+        assert r.status == "PASS", r
+
+    def test_fail_fix_says_to_push_first(self, home):
+        vault = home / "Dropbox" / "vault"
+        vault.mkdir(parents=True)
+        assert "schist sync push" in check_vault_location(str(vault)).fix
+
+    def test_pass_message_is_limited_to_known_folders(self, home):
+        vault = home / "schist-vault"
+        vault.mkdir()
+        assert "known" in check_vault_location(str(vault)).message
 
     def test_tilde_path_is_expanded(self, home, monkeypatch):
         (home / "Dropbox" / "vault").mkdir(parents=True)

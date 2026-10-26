@@ -221,31 +221,101 @@ def check_vault_is_git(vault_path: Optional[str]) -> CheckResult:
 # the suffixes clients add for a second account ("Dropbox (Work)",
 # "OneDrive - Org"). Library/CloudStorage holds every macOS File Provider
 # client (Dropbox, Google Drive, OneDrive, Box); Mobile Documents is iCloud.
+# "Sync" is the default folder of both Sync.com and Syncthing.
 _SYNC_ROOTS = (
     "Dropbox", "Dropbox (*", "OneDrive", "OneDrive - *", "Google Drive",
-    "My Drive", "Box", "Box Sync", "pCloud Drive", "iCloudDrive",
+    "My Drive", "Box", "Box Sync", "pCloud Drive", "pCloudDrive",
+    "iCloudDrive", "Sync", "Nextcloud", "ownCloud", "Seafile", "MEGA",
+    "MEGAsync", "Insync", "SynologyDrive", "Tresorit",
     "Library/Mobile Documents", "Library/CloudStorage",
 )
+# iCloud syncs these only when "Desktop & Documents Folders" is on.
+_ICLOUD_OPTIONAL_ROOTS = ("Documents", "Desktop")
 
 
-def _sync_root_containing(path: Path, home: Path) -> Optional[Path]:
-    """The sync-client folder under `home` that holds `path`, or None."""
+def _name_matches(name: str, want: str, fold: bool) -> bool:
+    if fold:
+        name, want = name.casefold(), want.casefold()
+    if want.endswith("*"):
+        return name.startswith(want[:-1])
+    return name == want
+
+
+def _root_containing(path: Path, home: Path, roots: tuple[str, ...],
+                     fold: bool) -> Optional[Path]:
+    """The folder under `home` named by one of `roots` that holds `path`
+    (or is `path`), or None. `fold` compares names case-insensitively, as
+    the default macOS filesystem does."""
     try:
         rel = path.relative_to(home)
     except ValueError:
         return None
-    for root in _SYNC_ROOTS:
-        n = root.count("/") + 1
-        if len(rel.parts) < n:
-            continue
-        head = rel.parts[:n]
+    for root in roots:
         want = root.split("/")
-        if head[:-1] != tuple(want[:-1]):
+        if len(rel.parts) < len(want):
             continue
-        last = want[-1]
-        if (head[-1] == last or
-                (last.endswith("*") and head[-1].startswith(last[:-1]))):
-            return home.joinpath(*head)
+        if all(_name_matches(p, w, fold) for p, w in zip(rel.parts, want)):
+            return home.joinpath(*rel.parts[:len(want)])
+    return None
+
+
+def _existing_roots(home: Path, roots: tuple[str, ...],
+                    fold: bool) -> list[tuple[Path, Path]]:
+    """(folder, folder with symlinks resolved) for each folder under `home`
+    that one of `roots` names, so a sync folder that is a symlink to its
+    real location is matched by that location too."""
+    found: list[tuple[Path, Path]] = []
+    for root in roots:
+        parts = root.split("/")
+        try:
+            entries = list(home.joinpath(*parts[:-1]).iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if _name_matches(entry.name, parts[-1], fold):
+                try:
+                    found.append((entry, entry.resolve()))
+                except (OSError, RuntimeError, ValueError):
+                    pass
+    return found
+
+
+def _vault_location_paths(given: Path) -> list[Path]:
+    """The vault as given (unless it has a `..`, which only resolving can
+    interpret), with symlinks resolved, and its git directory when `.git`
+    is a symlink or a `gitdir:` file pointing elsewhere."""
+    paths = [given.resolve()]
+    if ".." not in given.parts:
+        paths.insert(0, given)
+    dotgit = given / ".git"
+    try:
+        if dotgit.is_symlink():
+            paths.append(dotgit.resolve())
+        elif dotgit.is_file():
+            m = re.match(r"gitdir:\s*(.+)", dotgit.read_text(errors="replace"))
+            if m:
+                paths.append((given / m.group(1).strip()).resolve())
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return paths
+
+
+def _folder_holding(paths: list[Path], roots: tuple[str, ...],
+                    fold: bool) -> Optional[tuple[Path, Path]]:
+    """(folder, path) for the first of `paths` inside a folder named by
+    `roots`, checked against both spellings of $HOME and against each
+    existing folder's resolved location."""
+    home = Path.home()
+    homes = [home, home.resolve()]
+    existing = _existing_roots(home, roots, fold)
+    for path in paths:
+        for h in homes:
+            root = _root_containing(path, h, roots, fold)
+            if root is not None:
+                return root, path
+        for folder, real in existing:
+            if path == real or real in path.parents:
+                return folder, path
     return None
 
 
@@ -254,9 +324,11 @@ def check_vault_location(vault_path: Optional[str]) -> CheckResult:
 
     Sync clients rewrite files under .git while git holds them, upload
     half-written objects, and leave conflict copies such as `index (1)`, so
-    a synced vault corrupts sooner or later. The path is checked both as
-    given and with symlinks resolved, so a link into a synced folder is
-    caught, and against both spellings of $HOME.
+    a synced vault corrupts sooner or later. The vault is checked as given,
+    with symlinks resolved, and through its git directory when that lives
+    elsewhere; each against both spellings of $HOME and against the real
+    location of a sync folder that is a symlink. On macOS, names compare
+    case-insensitively, and a vault in ~/Documents or ~/Desktop WARNs.
     """
     label = "Vault location"
     if not vault_path:
@@ -264,41 +336,42 @@ def check_vault_location(vault_path: Optional[str]) -> CheckResult:
     given = Path(os.path.expanduser(vault_path)).absolute()
     if not given.is_dir():
         return CheckResult("SKIP", label, "skipped (vault does not exist)")
-    home = Path.home()
-    for path in (given, given.resolve()):
-        for h in (home, home.resolve()):
-            root = _sync_root_containing(path, h)
-            if root is not None:
-                return CheckResult(
-                    "FAIL", label,
-                    f"{given} is inside the cloud-sync folder {root}; sync "
-                    "clients rewrite files under .git and leave conflict "
-                    "copies, which corrupts the repository",
-                    "Move the vault to a folder that is not synced and point "
-                    "SCHIST_VAULT_PATH and your MCP config at the new path. "
-                    "On a spoke, a fresh `schist init --spoke` clone is the "
-                    "safest move.",
-                )
-    # iCloud syncs ~/Documents and ~/Desktop only when "Desktop & Documents
-    # Folders" is on, a setting doctor cannot read reliably, so WARN.
-    if sys.platform == "darwin":
-        for path in (given, given.resolve()):
-            for h in (home, home.resolve()):
-                for name in ("Documents", "Desktop"):
-                    folder = h / name
-                    if path == folder or folder in path.parents:
-                        return CheckResult(
-                            "WARN", label,
-                            f"{given} is inside {folder}, which iCloud syncs "
-                            "when \"Desktop & Documents Folders\" is on; a "
-                            "synced vault gets corrupted .git files and "
-                            "conflict copies",
-                            "If that iCloud setting is on, move the vault to "
-                            "a folder outside ~/Documents and ~/Desktop and "
-                            "point SCHIST_VAULT_PATH and your MCP config at "
-                            "the new path.",
-                        )
-    return CheckResult("PASS", label, "not inside a cloud-sync folder")
+    macos = sys.platform == "darwin"
+    paths = _vault_location_paths(given)
+
+    def where(path: Path) -> str:
+        if path in (given, given.resolve()):
+            return str(given)
+        return f"the git directory of {given} ({path})"
+
+    hit = _folder_holding(paths, _SYNC_ROOTS, macos)
+    if hit is not None:
+        root, path = hit
+        return CheckResult(
+            "FAIL", label,
+            f"{where(path)} is inside the cloud-sync folder {root}; sync "
+            "clients rewrite files under .git and leave conflict copies, "
+            "which corrupts the repository",
+            "Move the vault to a folder that is not synced and point "
+            "SCHIST_VAULT_PATH and your MCP config at the new path. On a "
+            "spoke, run `schist sync push` first so no commit is left only "
+            "in the synced copy; a fresh `schist init --spoke` clone is then "
+            "the safest move.",
+        )
+    if macos:
+        hit = _folder_holding(paths, _ICLOUD_OPTIONAL_ROOTS, True)
+        if hit is not None:
+            root, path = hit
+            return CheckResult(
+                "WARN", label,
+                f"{where(path)} is inside {root}, which iCloud syncs when "
+                "\"Desktop & Documents Folders\" is on; a synced vault gets "
+                "corrupted .git files and conflict copies",
+                "If that iCloud setting is on, move the vault to a folder "
+                "outside ~/Documents and ~/Desktop and point "
+                "SCHIST_VAULT_PATH and your MCP config at the new path.",
+            )
+    return CheckResult("PASS", label, "not inside a known cloud-sync folder")
 
 
 def check_schist_yaml(vault_path: Optional[str]) -> CheckResult:
