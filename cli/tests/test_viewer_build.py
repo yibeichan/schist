@@ -566,6 +566,7 @@ process.stdout.write(JSON.stringify({
   statusCounts: counts(F(["ops"], ["active"]), "status", n => n.status),
   projects: nodes.map(nodeProjects),
   projectOr: ids(F([], [], [], ["alpha"])),
+  projectTwo: ids(F([], [], [], ["alpha", "beta"])),
   projectAndType: ids(F(["ops"], [], [], ["beta"])),
   projectOn: filtersOn(F([], [], [], ["alpha"])),
   projectCounts: counts(F([], ["active"], [], ["alpha"]), "project", nodeProjects),
@@ -588,6 +589,8 @@ process.stdout.write(JSON.stringify({
         # Projects come from project:<repo> tags; a note can be in several.
         assert out["projects"] == [["alpha"], ["beta"], ["alpha", "beta"], [], [], []]
         assert out["projectOr"] == ["ops/a.md", "decisions/c.md"]
+        # Two projects selected: a note in either one matches, not only one in both.
+        assert out["projectTwo"] == ["ops/a.md", "ops/b.md", "decisions/c.md"]
         assert out["projectAndType"] == ["ops/b.md"]
         assert out["projectOn"] is True
         # A note in two projects counts for both; the project filter itself is skipped.
