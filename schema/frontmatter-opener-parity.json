@@ -1,0 +1,150 @@
+{
+  "description": "Pins the frontmatter first-line check across cli/schist/pre_receive.py _bad_opener (the hub's refusal) and mcp-server/src/markdown-parser.ts hasNonYamlOpener (the MCP server's mirror, used before a write that keeps a note's first line). `refused` is true when the hub refuses a pushed .md file with this content. Python reads `text` encoded as UTF-8; TS reads the string. Non-ASCII codepoints are stored as uXXXX escapes on purpose (ensure_ascii JSON); keep it that way. Consumed by cli/tests/test_pre_receive.py and mcp-server/tests/frontmatter-opener-parity.test.ts.",
+  "cases": [
+    {
+      "name": "javascript short name",
+      "text": "---js\n{ title: 'x' }\n---\nbody\n",
+      "refused": true
+    },
+    {
+      "name": "javascript long name",
+      "text": "---javascript\n{}\n---\n",
+      "refused": true
+    },
+    {
+      "name": "space before the name",
+      "text": "--- js\n{}\n---\n",
+      "refused": true
+    },
+    {
+      "name": "upper-case name",
+      "text": "---JS\n{}\n---\n",
+      "refused": true
+    },
+    {
+      "name": "BOM then a name",
+      "text": "\ufeff---js\n{}\n---\n",
+      "refused": true
+    },
+    {
+      "name": "coffee",
+      "text": "---coffee\n{}\n---\n",
+      "refused": true
+    },
+    {
+      "name": "json",
+      "text": "---json\n{}\n---\n",
+      "refused": true
+    },
+    {
+      "name": "yaml alias, which gray-matter reads as YAML",
+      "text": "---yaml\ntitle: x\n---\n",
+      "refused": true
+    },
+    {
+      "name": "upper-case yml alias",
+      "text": "---YML\ntitle: x\n---\n",
+      "refused": true
+    },
+    {
+      "name": "space then yaml alias",
+      "text": "--- yaml\ntitle: x\n---\n",
+      "refused": true
+    },
+    {
+      "name": "name with CRLF ending",
+      "text": "---js\r\n{}\r\n---\r\n",
+      "refused": true
+    },
+    {
+      "name": "name and no newline",
+      "text": "---js",
+      "refused": true
+    },
+    {
+      "name": "NBSP after the dashes: not Python whitespace, though JS trim() strips it",
+      "text": "---\u00a0\ntitle: x\n---\n",
+      "refused": true
+    },
+    {
+      "name": "BOM after the dashes: JS trim() strips it, Python does not",
+      "text": "---\ufeff\ntitle: x\n---\n",
+      "refused": true
+    },
+    {
+      "name": "line separator after the dashes: the line ends at newline only",
+      "text": "---\u2028js\ntitle: x\n---\n",
+      "refused": true
+    },
+    {
+      "name": "file separator after the dashes",
+      "text": "---\u001c\ntitle: x\n---\n",
+      "refused": true
+    },
+    {
+      "name": "plain opener",
+      "text": "---\ntitle: ok\n---\n",
+      "refused": false
+    },
+    {
+      "name": "trailing spaces",
+      "text": "---   \ntitle: ok\n---\n",
+      "refused": false
+    },
+    {
+      "name": "trailing tab, vertical tab and form feed",
+      "text": "---\t\u000b\f\ntitle: ok\n---\n",
+      "refused": false
+    },
+    {
+      "name": "CRLF opener",
+      "text": "---\r\ntitle: ok\r\n---\r\n",
+      "refused": false
+    },
+    {
+      "name": "BOM then plain opener",
+      "text": "\ufeff---\ntitle: ok\n---\n",
+      "refused": false
+    },
+    {
+      "name": "dashes alone, no newline",
+      "text": "---",
+      "refused": false
+    },
+    {
+      "name": "four dashes are not an opener",
+      "text": "----\nnot frontmatter\n",
+      "refused": false
+    },
+    {
+      "name": "four dashes then a name",
+      "text": "----js\n",
+      "refused": false
+    },
+    {
+      "name": "two BOMs: only one is stripped",
+      "text": "\ufeff\ufeff---js\n",
+      "refused": false
+    },
+    {
+      "name": "opener not on the first line",
+      "text": "\n---js\n{}\n---\n",
+      "refused": false
+    },
+    {
+      "name": "leading space",
+      "text": "  ---js\n",
+      "refused": false
+    },
+    {
+      "name": "no frontmatter",
+      "text": "plain text\n",
+      "refused": false
+    },
+    {
+      "name": "empty file",
+      "text": "",
+      "refused": false
+    }
+  ]
+}

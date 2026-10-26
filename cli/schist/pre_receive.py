@@ -302,7 +302,8 @@ def _bad_opener(data: bytes) -> bool:
     name after the opening `---`: the rest of that line, trimmed, is not
     empty, and the fourth character is not another `-`. It strips a BOM
     first. Only YAML frontmatter is accepted, since its `javascript` engine
-    evaluates the block."""
+    evaluates the block. The MCP server mirrors this as hasNonYamlOpener;
+    schema/frontmatter-opener-parity.json pins the two."""
     if data.startswith(_BOM):
         data = data[len(_BOM):]
     if not data.startswith(b"---") or data[3:4] == b"-":

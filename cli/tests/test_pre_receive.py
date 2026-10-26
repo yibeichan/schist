@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -1360,6 +1361,25 @@ def _skip_blob_reads(request, monkeypatch):
 
 
 SEED = {"research/mario/seed.md": b"---\ntitle: seed\n---\n"}
+
+
+def _opener_parity_cases() -> list[dict]:
+    fixture = Path(__file__).resolve().parents[2] / "schema" / "frontmatter-opener-parity.json"
+    return json.loads(fixture.read_text(encoding="utf-8"))["cases"]
+
+
+@pytest.mark.parametrize("case", _opener_parity_cases(), ids=lambda c: c["name"])
+def test_bad_opener_matches_the_shared_corpus(case):
+    """schema/frontmatter-opener-parity.json pins _bad_opener against the MCP
+    server's hasNonYamlOpener, which mirrors it."""
+    from schist.pre_receive import _bad_opener
+    assert _bad_opener(case["text"].encode("utf-8")) is case["refused"]
+
+
+def test_opener_corpus_covers_both_verdicts():
+    cases = _opener_parity_cases()
+    assert sum(c["refused"] for c in cases) >= 10
+    assert sum(not c["refused"] for c in cases) >= 10
 
 
 @pytest.mark.reads_blobs
