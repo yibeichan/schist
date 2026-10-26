@@ -1645,6 +1645,186 @@ def _discover_mcp_schist_entries(
     return found
 
 
+_SCHIST_ENTRY_NAME = re.compile(r"schist([-_].*)?")
+
+
+def _is_schist_server(name: str, cfg: dict) -> bool:
+    """A schist entry by name AND by what it runs.
+
+    _looks_like_schist_entry is too loose here: it accepts any arg containing
+    "schist", which a vault path such as ~/schist-vault does, so a
+    filesystem server named "schist" would be exempted.
+    """
+    if not _SCHIST_ENTRY_NAME.fullmatch(name):
+        return False
+    args = cfg.get("args")
+    if not isinstance(args, list):
+        return False
+    return any(
+        isinstance(a, str) and (
+            a.startswith("@schist/mcp-server")
+            or (a.endswith("dist/index.js")
+                and ("mcp-server" in a or "@schist" in a)))
+        for a in args)
+
+
+def _all_mcp_servers(vault_path: Optional[str]) -> list[tuple[str, str, dict]]:
+    """Every MCP server entry in every known client config.
+
+    Returns (where, name, entry) tuples. `where` names the config file, plus
+    the project for Claude Code project-scope servers. Covers the
+    `{"mcpServers": {...}}` and `{"servers": [...]}` shapes of
+    _mcp_config_candidates, Claude Code's `projects.<path>.mcpServers` in
+    ~/.claude.json, and `[mcp_servers.*]` in ~/.codex/config.toml. Every level
+    is shape-guarded, as in _discover_mcp_schist_entries (#437, #441).
+    """
+    found: list[tuple[str, str, dict]] = []
+
+    def add_map(where: str, servers: Any) -> None:
+        if isinstance(servers, dict):
+            for name, cfg in servers.items():
+                if isinstance(cfg, dict):
+                    found.append((where, str(name), cfg))
+
+    for c in _mcp_config_candidates(vault_path):
+        try:
+            if not c.exists():
+                continue
+            data = json.loads(c.read_text())
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        add_map(str(c), data.get("mcpServers"))
+        server_list = data.get("servers")
+        if isinstance(server_list, list):
+            for cfg in server_list:
+                if not isinstance(cfg, dict):
+                    continue
+                name = cfg.get("name")
+                name = str(name) if isinstance(name, (str, int)) else "(unnamed)"
+                found.append((str(c), name, cfg))
+        projects = data.get("projects")
+        if isinstance(projects, dict):
+            for proj, pcfg in projects.items():
+                if isinstance(pcfg, dict):
+                    add_map(f"{c} (project {proj})", pcfg.get("mcpServers"))
+
+    codex = Path.home() / ".codex" / "config.toml"
+    try:
+        import tomllib
+        with open(codex, "rb") as f:
+            data = tomllib.load(f)
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        add_map(str(codex), data.get("mcp_servers"))
+    return found
+
+
+def _abs_path_variants(s: str) -> list[Path]:
+    """`s` (or the value after `--flag=`) as an absolute path, as given and
+    with symlinks resolved. Relative strings and non-paths give []."""
+    out: list[Path] = []
+    pieces = [s]
+    if "=" in s:
+        pieces.append(s.split("=", 1)[1])
+    for piece in pieces:
+        p = os.path.expanduser(piece)
+        if not os.path.isabs(p):
+            continue
+        out.append(Path(p))
+        try:
+            out.append(Path(p).resolve())
+        except (OSError, RuntimeError):
+            pass
+    return out
+
+
+def _reaches(p: Path, vaults: list[Path]) -> bool:
+    """`p` is a vault, inside one, or a folder that contains one."""
+    return any(p == v or v in p.parents or p in v.parents for v in vaults)
+
+
+def _allowed_mcp_servers(vault: Path) -> set[str]:
+    """Server names listed under `vault_access.allowed_mcp_servers` in the
+    vault's schist.yaml. Any malformed shape allows nothing."""
+    try:
+        raw = yaml.safe_load((vault / "schist.yaml").read_text())
+    except Exception:
+        return set()
+    section = raw.get("vault_access") if isinstance(raw, dict) else None
+    names = section.get("allowed_mcp_servers") if isinstance(section, dict) else None
+    if not isinstance(names, list):
+        return set()
+    return {str(n) for n in names if isinstance(n, (str, int))}
+
+
+def check_vault_access(vault_path: Optional[str]) -> CheckResult:
+    """FAIL when an MCP server other than schist can read the vault.
+
+    A server whose command, args or env values name the vault, a folder
+    inside it, or a folder that contains it (a filesystem server rooted at
+    `~`) reads notes without schist's scope and ACL checks. The schist entry
+    is recognized by its name (`schist`, `schist-*`) together with the
+    mcp-server it runs; name or args alone would exempt a look-alike.
+    Offenders are listed by config file, server name and field, never the
+    field's value, since env values can hold tokens. An intended exception goes in schist.yaml
+    `vault_access.allowed_mcp_servers`.
+    """
+    label = "Vault access"
+    if not vault_path:
+        return CheckResult("SKIP", label, "skipped (no vault)")
+    given = Path(os.path.expanduser(vault_path)).absolute()
+    if not given.is_dir():
+        return CheckResult("SKIP", label, "skipped (vault does not exist)")
+    vaults = [given, given.resolve()]
+    allowed = _allowed_mcp_servers(given)
+
+    offenders: list[str] = []
+    allowed_hits: list[str] = []
+    for where, name, cfg in _all_mcp_servers(vault_path):
+        if _is_schist_server(name, cfg):
+            continue
+        fields: list[str] = []
+        command = cfg.get("command")
+        if isinstance(command, str) and any(
+                _reaches(p, vaults) for p in _abs_path_variants(command)):
+            fields.append("command")
+        args = cfg.get("args")
+        if isinstance(args, list) and any(
+                _reaches(p, vaults)
+                for a in args if isinstance(a, str)
+                for p in _abs_path_variants(a)):
+            fields.append("args")
+        env = cfg.get("env")
+        if isinstance(env, dict) and any(
+                _reaches(p, vaults)
+                for v in env.values() if isinstance(v, str)
+                for p in _abs_path_variants(v)):
+            fields.append("env")
+        if not fields:
+            continue
+        entry = f"{where}: {name} ({', '.join(fields)})"
+        (allowed_hits if name in allowed else offenders).append(entry)
+
+    if offenders:
+        return CheckResult(
+            "FAIL", label,
+            "MCP servers other than schist can read the vault, bypassing its "
+            "scope and ACL checks: " + "; ".join(offenders),
+            "Remove the vault path (or a folder that contains it, such as ~) "
+            "from those servers. If a server should read the vault, list its "
+            "name under `vault_access: allowed_mcp_servers:` in schist.yaml.",
+        )
+    if allowed_hits:
+        return CheckResult(
+            "PASS", label,
+            "only schist and servers allowed in schist.yaml: "
+            + "; ".join(allowed_hits))
+    return CheckResult("PASS", label, "no other MCP server names the vault")
+
+
 def check_mcp_config(vault_path: Optional[str]) -> CheckResult:
     """Check if schist is configured in any known MCP client config.
 
@@ -2675,6 +2855,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_mcp_schema_alignment(vault_path),
         check_mcp_vocab_alignment(vault_path),
         check_memory_db_path(vault_path),
+        check_vault_access(vault_path),
         check_index_schema_version(vault_path, db_path),
         check_skill_tool_references(vault_path),
     ]
