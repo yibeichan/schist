@@ -13,7 +13,9 @@ import json
 import os
 import socket
 import sqlite3
+import stat
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -164,6 +166,70 @@ class TestProposals:
             store.propose_link(ro, source='notes/x.md', target='locking', type='related', rationale='r')
         with pytest.raises(proposals_mod.ProposalError, match='type'):
             store.propose_link(ro, source='notes/sync.md', target='locking', type='made-up', rationale='r')
+
+    def test_proposal_files_are_private_to_the_owner(self, vault, ro):
+        """#758: a proposal holds note text and the agent's question, so
+        neither the queue nor its files may be readable by other users, even
+        under a permissive umask."""
+        old = os.umask(0o022)
+        try:
+            store = proposals_mod.ProposalStore(vault)
+            p = store.propose_note(ro, title='New', body='secret body', rationale='r')
+        finally:
+            os.umask(old)
+        assert stat.S_IMODE(store.dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(store._path(p['id']).stat().st_mode) == 0o600
+        assert list(store.dir.glob('*.tmp')) == []
+
+    def test_a_queue_created_world_readable_is_tightened(self, vault, ro):
+        """A directory an earlier version made with the default mode is
+        closed on the next save, which covers the old files inside it."""
+        store = proposals_mod.ProposalStore(vault)
+        store.dir.mkdir(parents=True)
+        os.chmod(store.dir, 0o755)
+        store.propose_note(ro, title='New', body='b', rationale='r')
+        assert stat.S_IMODE(store.dir.stat().st_mode) == 0o700
+
+    def test_old_world_readable_files_are_tightened_on_list(self, vault):
+        """Files an earlier version wrote 0644 keep that mode in a copy of
+        .schist/, so listing the queue (every page load) tightens them too."""
+        store = proposals_mod.ProposalStore(vault)
+        store.dir.mkdir(parents=True)
+        os.chmod(store.dir, 0o755)
+        old = store.dir / '20260101T000000-abcdef.json'
+        old.write_text('{"id": "20260101T000000-abcdef", "status": "pending"}')
+        os.chmod(old, 0o644)
+        store.list()
+        assert stat.S_IMODE(store.dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(old.stat().st_mode) == 0o600
+
+    def test_non_ascii_text_survives_a_non_utf8_locale(self, vault, ro):
+        """Files are written as UTF-8, so they must be read as UTF-8 whatever
+        the locale's encoding is; otherwise an approved note is committed as
+        mojibake."""
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='Café', body='naïve café — →', rationale='r')
+        code = ('import sys, locale; from schist.viewer.proposals import ProposalStore as S; '
+                's = S(sys.argv[1]); assert locale.getencoding().lower() != "utf-8", locale.getencoding(); '
+                'print(ascii(s.get(sys.argv[2])["args"]["body"])); print(ascii(s.list()[0]["args"]["body"]))')
+        env = {**os.environ, 'LC_ALL': 'en_US.ISO8859-1', 'LANG': 'en_US.ISO8859-1', 'PYTHONUTF8': '0'}
+        env.pop('PYTHONIOENCODING', None)
+        out = subprocess.run([sys.executable, '-c', code, str(vault), p['id']],
+                             env=env, capture_output=True, text=True)
+        if 'AssertionError' in out.stderr:
+            pytest.skip('no non-UTF-8 locale on this host')
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.splitlines() == [ascii('naïve café — →')] * 2
+
+    def test_a_bad_id_is_refused_before_any_file_is_written(self, vault, monkeypatch):
+        store = proposals_mod.ProposalStore(vault)
+        opened = []
+        real_open = os.open
+        monkeypatch.setattr(proposals_mod.os, 'open',
+                            lambda path, *a, **k: opened.append(str(path)) or real_open(path, *a, **k))
+        with pytest.raises(proposals_mod.ProposalError):
+            store._save({'id': '../../outside', 'status': 'pending'})
+        assert opened == []
 
     def test_filing_does_not_touch_the_vault(self, vault, ro):
         head = _git(vault, 'rev-parse', 'HEAD')
