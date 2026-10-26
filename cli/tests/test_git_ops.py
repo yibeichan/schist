@@ -1061,8 +1061,10 @@ class TestGlobalScopeReadsVaultConfig:
         ("directories: []\n", "an empty list must not make global stage nothing"),
         ("directories: [\n", "unparseable YAML"),
         ("- notes\n", "top level is not a mapping"),
-        ('directories: [".", "..", "/etc", ".schist", "a/../b", ""]\n',
+        ('directories: [".", "..", "/etc", ".schist", "../x", ""]\n',
          "every entry unsafe as a pathspec"),
+        ('directories: [":", ":/", ":!notes", "*", "n?tes", "[a]", "a\\\\b"]\n',
+         "every entry carries pathspec magic or a glob character"),
     ])
     def test_unusable_vault_config_falls_back_to_packaged(self, tmp_path, text, why):
         from schist import git_ops
@@ -1074,8 +1076,101 @@ class TestGlobalScopeReadsVaultConfig:
         from schist import git_ops
 
         vault = self._vault(
-            tmp_path, 'directories: [notes, ".", "/abs", .git, tools, "tools/"]\n')
+            tmp_path, 'directories: [notes, ".", "/abs", .git, tools, "tools/", ":"]\n')
         assert git_ops._global_scope_dirs(vault) == ["notes", "tools"]
+
+    def test_nested_entry_counts_by_its_first_segment(self, tmp_path):
+        """Ingest indexes all of `research/` for a `research/ai` entry
+        (first path segment), so `global` must stage all of it too."""
+        from schist import git_ops
+
+        vault = self._vault(tmp_path, "directories: [research/ai, ./notes, research]\n")
+        assert git_ops._global_scope_dirs(vault) == ["research", "notes"]
+        assert git_ops.paths_outside_scope(
+            vault, "global", ["research/x.md", "research/ai/y.md"]) == []
+
+    @staticmethod
+    def _git_env():
+        return {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+    def _commit_all(self, vault):
+        for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "-A"],
+                    ["git", "commit", "-q", "-m", "init"]):
+            subprocess.run(cmd, cwd=vault, check=True, env=self._git_env())
+
+    @staticmethod
+    def _staged(vault):
+        return subprocess.run(
+            ["git", "diff", "--cached", "--name-only"], cwd=vault,
+            capture_output=True, text=True, check=True).stdout.split()
+
+    def test_magic_entry_does_not_stage_the_whole_vault(self, tmp_path):
+        """A `:` entry became the pathspec `:/`, which is the whole tree:
+        vault.yaml and a file in an undeclared directory were staged."""
+        from schist import git_ops
+
+        vault = self._vault(tmp_path, 'directories: [notes, ":"]\n')
+        v = Path(vault)
+        for rel in ("notes/x.md", "shared/s.md", "vault.yaml"):
+            (v / rel).parent.mkdir(exist_ok=True)
+            (v / rel).write_text("one\n", encoding="utf-8")
+        self._commit_all(vault)
+        for rel in ("notes/x.md", "shared/s.md", "vault.yaml"):
+            (v / rel).write_text("two\n", encoding="utf-8")
+
+        ok, msg = git_ops.stage_scope_files(vault, "global")
+        assert ok, msg
+        assert self._staged(vault) == ["notes/x.md"]
+
+    def test_sparse_spoke_skips_a_vault_dir_outside_its_cone(self, tmp_path):
+        """A spoke whose cone predates a directory the vault's schist.yaml
+        lists: `git add -- tools/` exits 1 on the tracked, not-checked-out
+        files, which failed every push. The directory is skipped with a
+        warning naming the command that checks it out."""
+        from schist import git_ops
+
+        src = Path(self._vault(tmp_path, "directories: [notes, tools]\n"))
+        for d in ("notes", "tools"):
+            (src / d).mkdir()
+            (src / d / "x.md").write_text("one\n", encoding="utf-8")
+        self._commit_all(str(src))
+        spoke = tmp_path / "spoke"
+        env = self._git_env()
+        subprocess.run(["git", "clone", "-q", "--no-checkout", f"file://{src}", str(spoke)],
+                       check=True, env=env)
+        for cmd in (["git", "sparse-checkout", "init", "--cone"],
+                    ["git", "sparse-checkout", "set", "notes"], ["git", "checkout", "-q"]):
+            subprocess.run(cmd, cwd=spoke, check=True, env=env)
+        assert not (spoke / "tools").exists()
+        (spoke / "notes" / "x.md").write_text("two\n", encoding="utf-8")
+
+        ok, msg = git_ops.stage_scope_files(str(spoke), "global")
+        assert ok, msg
+        assert self._staged(str(spoke)) == ["notes/x.md"]
+        assert msg.startswith(git_ops.SPARSE_SKIP_WARNING_PREFIX)
+        assert "tools/" in msg and "`git sparse-checkout add tools`" in msg
+
+        # Once checked out, the directory is staged with no warning.
+        subprocess.run(["git", "sparse-checkout", "add", "tools"], cwd=spoke,
+                       check=True, env=env)
+        (spoke / "tools" / "x.md").write_text("two\n", encoding="utf-8")
+        ok, msg = git_ops.stage_scope_files(str(spoke), "global")
+        assert ok, msg
+        assert msg == ""
+        assert self._staged(str(spoke)) == ["notes/x.md", "tools/x.md"]
+
+    def test_parity_corpus(self):
+        """schema/global-scope-dirs-parity.json is shared with the MCP
+        server's scopeDirsFromConfig (mcp-server/tests/global-scope-dirs-parity.test.ts)."""
+        import json
+        from schist import git_ops
+
+        corpus = Path(__file__).resolve().parents[2] / "schema" / "global-scope-dirs-parity.json"
+        cases = json.loads(corpus.read_text(encoding="utf-8"))
+        assert len(cases) >= 10
+        for c in cases:
+            assert git_ops.scope_dirs_from_config(c["config"]) == c["dirs"], c["name"]
 
     def test_paths_outside_scope_uses_vault_directories(self, tmp_path):
         from schist import git_ops
