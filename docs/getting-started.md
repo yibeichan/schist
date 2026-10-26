@@ -129,6 +129,8 @@ command -v node
 schist init ~/my-vault --name my-vault --identity local
 ```
 
+Keep the vault out of folders that a sync client manages (iCloud Drive, Dropbox, OneDrive, Google Drive, Box): those clients rewrite files under `.git` and leave conflict copies, which corrupts the repository. Use the hub-and-spoke setup to share a vault between machines. `schist doctor` FAILs its "Vault location" check on a synced vault.
+
 This creates:
 - Git repo at `~/my-vault` with `vault.yaml`, `notes/`, `concepts/`, `papers/`
 - Post-commit hook that rebuilds SQLite on every commit
