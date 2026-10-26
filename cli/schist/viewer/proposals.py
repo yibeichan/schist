@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import stat
 import subprocess
 import sys
 import threading
@@ -115,22 +116,26 @@ class ProposalStore:
         """Make the queue readable by its owner only. A proposal holds the
         proposed note's body and the question and rationale the agent wrote,
         and on a shared host (an HPC login node) the default umask leaves new
-        files world-readable (#758). The chmod also closes a directory an
-        earlier version created with the default mode, which covers the
-        proposal files written then."""
+        files world-readable (#758). It also tightens a queue an earlier
+        version created with the default mode, files included, so a copy of
+        .schist/ does not carry them out world-readable."""
         self.dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.dir, 0o700)
+        for f in self.dir.glob('*.json'):
+            if stat.S_IMODE(f.lstat().st_mode) & 0o077 and not f.is_symlink():
+                os.chmod(f, 0o600)
 
     def _save(self, p: dict) -> dict:
         self._private_dir()
         # Created 0600 from the start (no window at the umask's mode), under a
         # unique name so two saves never meet at O_EXCL.
-        tmp = self.dir / f"{p['id']}.{secrets.token_hex(4)}.tmp"
+        final = self._path(p['id'])
+        tmp = final.with_name(f'{final.stem}.{secrets.token_hex(4)}.tmp')
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 f.write(json.dumps(p, indent=2, ensure_ascii=False))
-            os.replace(tmp, self._path(p['id']))
+            os.replace(tmp, final)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
@@ -140,17 +145,18 @@ class ProposalStore:
         path = self._path(pid)
         if not path.exists():
             raise ProposalError(f'no proposal {pid}')
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding='utf-8'))
 
     def list(self, status: tuple | None = OPEN) -> list[dict]:
         if isinstance(status, str):
             status = (status,)
         if not self.dir.exists():
             return []
+        self._private_dir()
         out = []
         for f in sorted(self.dir.glob('*.json')):
             try:
-                p = json.loads(f.read_text())
+                p = json.loads(f.read_text(encoding='utf-8'))
             except ValueError:
                 continue
             if status is None or p.get('status') in status:
