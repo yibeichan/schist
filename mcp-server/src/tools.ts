@@ -11,7 +11,7 @@ import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote, rewriteNote, updateNote, deleteNote, writeMutex, vaultLockWaitMs } from "./git-writer.js";
 import { withVaultLock, VaultLockTimeout, VaultLockFailed } from "./vault-lock.js";
-import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython, containsLineBoundary, isRoundTrippableTarget } from "./markdown-parser.js";
+import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, hasNonYamlOpener, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython, containsLineBoundary, isRoundTrippableTarget } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
 import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse, PushFailureClass, ComposeBriefResponse, Note, SearchResult } from "./types.js";
@@ -553,9 +553,10 @@ function sentinelAgeMs(
 function syncDirtyRemedy(cls: PushFailureClass | null, ageClause: string): string {
   switch (cls) {
     case "acl-rejected":
-      return "The hub refused this content as out of scope, and retrying pushes the same " +
-        "rejection. Move the note under a directory your identity may write (see vault.yaml), " +
-        "then run `sync_retry`.";
+      return "The hub refused this content, and retrying pushes the same rejection. The " +
+        "REJECTED: lines say why: a path out of scope for your identity (move the note under " +
+        "a directory it may write; see vault.yaml), a note that does not open with a plain `---` line, " +
+        "or a path that is not valid UTF-8 (fix the file). Then run `sync_retry`.";
     case "rate-limited":
       return "The hub rate-limited the push. It will accept a retry once the window resets; " +
         "writes stay blocked until then so the pending batch doesn't outgrow the hub's " +
@@ -3527,6 +3528,10 @@ export async function delete_note(
 
     // Cascade: strip dangling connection lines from each distinct linking note.
     const repairs: Array<{ relPath: string; content: string }> = [];
+    // Linkers the cascade would rewrite but must not: a first line the hub
+    // refuses, or frontmatter the YAML parser cannot read.
+    const nonYaml: string[] = [];
+    const parseErrors: Array<{ relPath: string; message: string }> = [];
     if (args.cascade === true && inbound.length > 0) {
       const sources = [...new Set(inbound.map((e) => e.source))];
       for (const source of sources) {
@@ -3549,7 +3554,30 @@ export async function delete_note(
         // both; repairing only the body would let the next ingest resurrect a
         // deleted concept — see stripConceptRefs).
         const { content: bodyStripped, removed } = stripConnectionsTo(content, refTokens);
-        const { content: repaired, changed } = stripConceptRefs(bodyStripped, refTokens);
+        if (hasNonYamlOpener(content)) {
+          // The hub refuses any pushed note whose first line is `---` plus a
+          // language name (`---js`, `---yaml`, #781), and a body repair keeps
+          // that line, so the cascade commit would block every later push
+          // from this spoke (#789). Ingest reads no frontmatter from such a
+          // note (python-frontmatter returns {} metadata), so its index edges
+          // come only from the body: a note the body strip leaves unchanged
+          // holds a stale row and needs no repair.
+          if (removed > 0) nonYaml.push(source);
+          continue;
+        }
+        let repaired: string;
+        let changed: boolean;
+        try {
+          ({ content: repaired, changed } = stripConceptRefs(bodyStripped, refTokens));
+        } catch (e: unknown) {
+          // The opener is fine, so the YAML itself does not parse (js-yaml
+          // refuses a duplicate key that PyYAML and the hub accept). The
+          // frontmatter may still hold a reference ingest indexed, so the
+          // note cannot be repaired safely.
+          // js-yaml's message continues with a source excerpt; keep its first line.
+          parseErrors.push({ relPath: source, message: (e instanceof Error ? e.message : String(e)).split("\n")[0] });
+          continue;
+        }
         if (removed > 0 || changed) repairs.push({ relPath: source, content: repaired });
       }
 
@@ -3558,8 +3586,7 @@ export async function delete_note(
       // scopes the caller can't write (which the hub pre-receive would then
       // reject anyway). Refuse the whole cascade if any linker is out of scope.
       if (acl !== null) {
-        const denied = repairs
-          .map((r) => r.relPath)
+        const denied = [...repairs.map((r) => r.relPath), ...nonYaml, ...parseErrors.map((p) => p.relPath)]
           .filter((rel) => !canWrite(acl, aclIdentity, deriveScope(rel)));
         if (denied.length > 0) {
           return {
@@ -3569,6 +3596,27 @@ export async function delete_note(
               `Clean up those connections yourself, or ask the hub admin to extend your grant.`,
           } satisfies ToolError;
         }
+      }
+
+      if (nonYaml.length > 0 || parseErrors.length > 0) {
+        const parts: string[] = [];
+        if (nonYaml.length > 0) {
+          parts.push(
+            `Cascade would rewrite notes whose frontmatter is not YAML: ${nonYaml.join(", ")}. ` +
+            `The hub refuses a note whose first line is \`---\` followed by a language name.`,
+          );
+        }
+        if (parseErrors.length > 0) {
+          parts.push(
+            `Cascade cannot read the frontmatter of: ` +
+            parseErrors.map((p) => `${p.relPath} (${p.message})`).join("; ") + ".",
+          );
+        }
+        parts.push(
+          `Edit each file directly (update_note cannot read it): rewrite its frontmatter as YAML ` +
+          `under a plain \`---\` line, commit, then retry the delete.`,
+        );
+        return { error: "VALIDATION_ERROR", message: parts.join(" ") } satisfies ToolError;
       }
     }
 
