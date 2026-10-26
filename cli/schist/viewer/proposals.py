@@ -111,11 +111,29 @@ class ProposalStore:
             raise ProposalError('bad proposal id')
         return self.dir / f'{pid}.json'
 
+    def _private_dir(self) -> None:
+        """Make the queue readable by its owner only. A proposal holds the
+        proposed note's body and the question and rationale the agent wrote,
+        and on a shared host (an HPC login node) the default umask leaves new
+        files world-readable (#758). The chmod also closes a directory an
+        earlier version created with the default mode, which covers the
+        proposal files written then."""
+        self.dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self.dir, 0o700)
+
     def _save(self, p: dict) -> dict:
-        self.dir.mkdir(parents=True, exist_ok=True)
-        tmp = self._path(p['id']).with_suffix('.tmp')
-        tmp.write_text(json.dumps(p, indent=2, ensure_ascii=False))
-        os.replace(tmp, self._path(p['id']))
+        self._private_dir()
+        # Created 0600 from the start (no window at the umask's mode), under a
+        # unique name so two saves never meet at O_EXCL.
+        tmp = self.dir / f"{p['id']}.{secrets.token_hex(4)}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(json.dumps(p, indent=2, ensure_ascii=False))
+            os.replace(tmp, self._path(p['id']))
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         return p
 
     def get(self, pid: str) -> dict:

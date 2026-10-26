@@ -13,6 +13,7 @@ import json
 import os
 import socket
 import sqlite3
+import stat
 import subprocess
 import threading
 import time
@@ -164,6 +165,29 @@ class TestProposals:
             store.propose_link(ro, source='notes/x.md', target='locking', type='related', rationale='r')
         with pytest.raises(proposals_mod.ProposalError, match='type'):
             store.propose_link(ro, source='notes/sync.md', target='locking', type='made-up', rationale='r')
+
+    def test_proposal_files_are_private_to_the_owner(self, vault, ro):
+        """#758: a proposal holds note text and the agent's question, so
+        neither the queue nor its files may be readable by other users, even
+        under a permissive umask."""
+        old = os.umask(0o022)
+        try:
+            store = proposals_mod.ProposalStore(vault)
+            p = store.propose_note(ro, title='New', body='secret body', rationale='r')
+        finally:
+            os.umask(old)
+        assert stat.S_IMODE(store.dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(store._path(p['id']).stat().st_mode) == 0o600
+        assert list(store.dir.glob('*.tmp')) == []
+
+    def test_a_queue_created_world_readable_is_tightened(self, vault, ro):
+        """A directory an earlier version made with the default mode is
+        closed on the next save, which covers the old files inside it."""
+        store = proposals_mod.ProposalStore(vault)
+        store.dir.mkdir(parents=True)
+        os.chmod(store.dir, 0o755)
+        store.propose_note(ro, title='New', body='b', rationale='r')
+        assert stat.S_IMODE(store.dir.stat().st_mode) == 0o700
 
     def test_filing_does_not_touch_the_vault(self, vault, ro):
         head = _git(vault, 'rev-parse', 'HEAD')
