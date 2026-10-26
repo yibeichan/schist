@@ -348,7 +348,8 @@ class TestBuildE2E:
         search_out = out_dir / "search-index.json"
         assert graph_out.is_file()
         assert search_out.is_file()
-        assert (out_dir / "index.html").read_bytes() == build.INDEX_HTML.read_bytes()
+        assert (out_dir / "index.html").read_text(encoding="utf-8") == build.render_page(
+            build.INDEX_HTML.read_text(encoding="utf-8"))
 
         graph = json.loads(graph_out.read_text())
         assert "nodes" in graph and "links" in graph
@@ -488,6 +489,64 @@ class TestShapeContract:
                              if any(re.search(rf"\.{cls}(?![\w-])", part) for part in sel.split(",")))
             assert re.search(r"background:", decls), f".{cls} keeps the button background"
             assert re.search(r"(?<![-\w])color:", decls), f".{cls} keeps the button text colour"
+
+    @staticmethod
+    def _policy(page):
+        csp = re.search(r'http-equiv="Content-Security-Policy" content="([^"]+)"', page)
+        assert csp, "the page declares no Content-Security-Policy"
+        return {d.split()[0]: d.split()[1:] for d in csp.group(1).split(";") if d.strip()}
+
+    def test_scripts_are_limited_to_pinned_files_and_the_page_own(self):
+        """#761: with no script-src the browser ran any script that got past
+        DOMPurify. The policy names exactly the CDN files the page loads and a
+        placeholder the build turns into inline-script hashes, and no source
+        that would let other script run."""
+        script_src = self._policy(self.PAGE)["script-src"]
+        srcs = re.findall(r'<script\b[^>]*\bsrc="([^"]+)"', self.PAGE)
+        assert len(srcs) >= 4
+        assert script_src == srcs + [build.INLINE_SCRIPT_HASHES]
+        for bad in ("'unsafe-inline'", "'unsafe-eval'", "*", "https:", "'self'"):
+            assert bad not in script_src
+
+    def test_inline_scripts_are_hashable_and_handlers_absent(self):
+        """A hash covers only a bare <script>...</script> block, and the policy
+        blocks inline event handlers, so the page may use neither another
+        script-tag form nor on* attributes."""
+        tags = re.findall(r"<script\b[^>]*>", self.PAGE)
+        inline = [t for t in tags if "src=" not in t]
+        assert inline and all(t == "<script>" for t in inline), inline
+        markup = re.sub(r"<script\b[^>]*>.*?</script>", "", self.PAGE, flags=re.S)
+        markup = re.sub(r"<!--.*?-->", "", markup, flags=re.S)
+        assert not re.search(r"<[^>]*\son[a-z]+\s*=", markup, flags=re.I)
+        assert "javascript:" not in markup.lower()
+
+    def test_build_hashes_every_inline_script(self):
+        import base64
+        import hashlib
+
+        rendered = build.render_page(self.PAGE)
+        script_src = self._policy(rendered)["script-src"]
+        blocks = re.findall(r"<script>(.*?)</script>", rendered, flags=re.S)
+        expected = ["'sha256-" + base64.b64encode(hashlib.sha256(b.encode()).digest()).decode() + "'"
+                    for b in blocks]
+        assert len(expected) >= 3
+        assert [s for s in script_src if s.startswith("'sha256-")] == expected
+        assert build.INLINE_SCRIPT_HASHES not in rendered
+
+    @pytest.mark.parametrize("end", ["</script >", "</SCRIPT>", "</script/>"])
+    def test_a_script_end_tag_the_hash_cannot_follow_is_refused(self, end):
+        """The browser ends a script at any of these spellings, the hashing
+        regex only at `</script>`, so it would hash two scripts as one and
+        the page would run neither while every test stayed green."""
+        first = re.search(r"<script>(.*?)</script>", self.PAGE, flags=re.S)
+        page = self.PAGE[:first.end() - len("</script>")] + end + self.PAGE[first.end():]
+        with pytest.raises(build.ViewerPageMissing, match="inline script"):
+            build.render_page(page)
+
+    def test_a_script_tag_inside_an_inline_script_is_refused(self):
+        page = self.PAGE.replace("<script>", "<script>/* <!--<script */", 1)
+        with pytest.raises(build.ViewerPageMissing, match="inline script"):
+            build.render_page(page)
 
     def test_rendering_cannot_fetch_other_hosts(self):
         """Rendered notes and agent answers can carry markup that fetches a URL
@@ -699,6 +758,22 @@ process.stdout.write(JSON.stringify({
             build.write_site(_persist(vault_db, tmp_path / "schist.db"), tmp_path / "site")
         assert not (tmp_path / "site").exists()
 
+    def test_page_without_the_csp_placeholder_raises_before_writing(
+            self, tmp_path, vault_db, monkeypatch):
+        page = tmp_path / "index.html"
+        page.write_text("<!doctype html><script>x()</script>", encoding="utf-8")
+        monkeypatch.setattr(build, "INDEX_HTML", page)
+        with pytest.raises(build.ViewerPageMissing, match="placeholder"):
+            build.write_site(_persist(vault_db, tmp_path / "schist.db"), tmp_path / "site")
+        assert not (tmp_path / "site").exists()
+
+    def test_built_page_has_its_inline_script_hashes(self, tmp_path, vault_db):
+        out = tmp_path / "site"
+        build.write_site(_persist(vault_db, tmp_path / "schist.db"), out)
+        page = (out / "index.html").read_text(encoding="utf-8")
+        assert build.INLINE_SCRIPT_HASHES not in page
+        assert page == build.render_page(build.INDEX_HTML.read_text(encoding="utf-8"))
+
     def test_output_is_ascii(self, tmp_path, vault_db, capsys):
         build.write_site(_persist(vault_db, tmp_path / "schist.db"), tmp_path / "site")
         out = capsys.readouterr().out
@@ -749,7 +824,8 @@ class TestSchistBuildCommand:
             "context": "",
         } in graph["links"]
         assert list(search["store"]) == ["notes/2026-04-16-hello.md"]
-        assert (out / "index.html").read_bytes() == build.INDEX_HTML.read_bytes()
+        assert (out / "index.html").read_text(encoding="utf-8") == build.render_page(
+            build.INDEX_HTML.read_text(encoding="utf-8"))
 
     def test_schist_build_missing_page_is_one_error_line(self, tmp_path):
         """A broken install prints `Error: ...` and exits 1, not a traceback (#603)."""
@@ -792,12 +868,15 @@ class TestSchistBuildCommand:
             capture_output=True, text=True, check=True,
             env={**os.environ, "PYTHONPATH": str(old.parent)},
         )
-        assert (out / "index.html").read_bytes() == build.INDEX_HTML.read_bytes()
+        assert (out / "index.html").read_text(encoding="utf-8") == build.render_page(
+            build.INDEX_HTML.read_text(encoding="utf-8"))
 
     def test_copied_page_is_writable_when_installed_page_is_not(self, tmp_path, vault_db, monkeypatch):
         page = tmp_path / "installed" / "index.html"
         page.parent.mkdir()
-        page.write_text("<!doctype html>", encoding="utf-8")
+        page.write_text(
+            '<!doctype html><meta http-equiv="Content-Security-Policy" '
+            'content="script-src \'inline-script-hashes\'" />', encoding="utf-8")
         page.chmod(0o444)
         monkeypatch.setattr(build, "INDEX_HTML", page)
         db = _persist(vault_db, tmp_path / "schist.db")
