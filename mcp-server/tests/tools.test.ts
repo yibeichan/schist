@@ -5074,6 +5074,33 @@ describe("delete_note", () => {
     expect(await fs.readFile(path.join(vault, linker.id), "utf-8")).not.toContain(`extends: ${slug}`);
   }, 30000);
 
+  it("cascade refuses, before writing, when a linker's frontmatter is not YAML (#789)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const target = await create_note(
+      vault, { owner: TEST_AGENT, title: "Target789", body: "t", directory: "notes" }, config,
+    ) as { id: string };
+    // A linker written before the hub refused non-YAML openers (#781).
+    const linkerId = "notes/old-js-linker.md";
+    const linkerText = `---js\n{ title: "old" }\n---\nbody\n\n## Connections\n\n- extends: ${target.id}\n`;
+    await fs.writeFile(path.join(vault, linkerId), linkerText);
+    await execFile("git", ["add", linkerId], { cwd: vault });
+    await execFile("git", ["commit", "-m", "old linker"], { cwd: vault });
+    await seedEdgesDb(vault, [{ source: linkerId, target: target.id, type: "extends" }]);
+    const head = (await execFile("git", ["rev-parse", "HEAD"], { cwd: vault })).stdout.trim();
+
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: target.id, cascade: true }, config) as {
+      error?: string; message?: string;
+    };
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toContain(linkerId);
+    expect(res.message).toContain("not YAML");
+    // Nothing written: the target survives, the linker is untouched, no commit.
+    await fs.access(path.join(vault, target.id));
+    expect(await fs.readFile(path.join(vault, linkerId), "utf-8")).toBe(linkerText);
+    expect((await execFile("git", ["rev-parse", "HEAD"], { cwd: vault })).stdout.trim()).toBe(head);
+  }, 30000);
+
   it("cascade strips a concepts: frontmatter reference, not just body lines (#119)", async () => {
     const vault = await makeTempVault();
     await fs.writeFile(

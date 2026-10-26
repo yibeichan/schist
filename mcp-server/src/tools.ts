@@ -3483,6 +3483,7 @@ export async function delete_note(
 
     // Cascade: strip dangling connection lines from each distinct linking note.
     const repairs: Array<{ relPath: string; content: string }> = [];
+    const unparseable: string[] = [];
     if (args.cascade === true && inbound.length > 0) {
       const sources = [...new Set(inbound.map((e) => e.source))];
       for (const source of sources) {
@@ -3505,8 +3506,29 @@ export async function delete_note(
         // both; repairing only the body would let the next ingest resurrect a
         // deleted concept — see stripConceptRefs).
         const { content: bodyStripped, removed } = stripConnectionsTo(content, refTokens);
-        const { content: repaired, changed } = stripConceptRefs(bodyStripped, refTokens);
+        let repaired: string;
+        let changed: boolean;
+        try {
+          ({ content: repaired, changed } = stripConceptRefs(bodyStripped, refTokens));
+        } catch {
+          // parseNote refuses a non-YAML frontmatter opener (`---js`, #781).
+          // Repairing only the body is no way out: the hub refuses any pushed
+          // note that opens that way, so the cascade commit would block every
+          // later push from this spoke (#789).
+          unparseable.push(source);
+          continue;
+        }
         if (removed > 0 || changed) repairs.push({ relPath: source, content: repaired });
+      }
+
+      if (unparseable.length > 0) {
+        return {
+          error: "VALIDATION_ERROR",
+          message:
+            `Cascade would rewrite notes whose frontmatter is not YAML: ${unparseable.join(", ")}. ` +
+            `The hub refuses notes that do not open with a plain \`---\` line, so fix the first ` +
+            `line of each, then retry the delete.`,
+        } satisfies ToolError;
       }
 
       // Cascade repairs MUTATE other notes — they must each pass the caller's
