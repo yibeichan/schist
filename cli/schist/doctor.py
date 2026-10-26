@@ -10,8 +10,10 @@ import json
 import os
 import pwd
 import re
+import shlex
 import shutil
 import sqlite3
+import stat as _stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -1661,6 +1663,12 @@ _SCHIST_NPM_SPEC = re.compile(r"@schist/mcp-server(@[^/\s]+)?")
 # and people give it.
 _SCHIST_ENTRY_NAME = re.compile(r"schist([-_ ].*)?", re.IGNORECASE)
 _PACKAGE_RUNNERS = frozenset({"npx", "bunx", "pnpx"})
+# npx options that take a value, so the value is not taken for the package.
+_NPX_VALUE_OPTIONS = frozenset({
+    "--registry", "--cache", "--userconfig", "--prefix", "--node-options",
+    "-c", "--call", "--loglevel", "-w", "--workspace",
+})
+_SCRIPT_SUFFIXES = (".js", ".mjs", ".cjs", ".ts", ".mts")
 _NODE_RUNNERS = frozenset({"node", "nodejs", "bun", "tsx", "ts-node"})
 # schist's server is a Node program, so an entry run by one of these is not it.
 _NON_NODE_RUNNERS = frozenset({
@@ -1669,11 +1677,40 @@ _NON_NODE_RUNNERS = frozenset({
 })
 
 
+def _read_regular_file(path: Path, limit: int) -> Optional[bytes]:
+    """The bytes of `path` when it is a regular file, or None when it is
+    something else (a FIFO, a device such as /dev/zero, a directory). The
+    file is opened non-blocking and checked with fstat, so none of those can
+    hang doctor or fill its memory, whatever a cloned repo links them to.
+    Raises ValueError when the file is larger than `limit` bytes."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not _stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                return b"".join(chunks)
+            size += len(chunk)
+            if size > limit:
+                raise ValueError(f"larger than {limit} bytes")
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+
+
+# Large enough for a Claude Code ~/.claude.json with a long history.
+_MCP_CONFIG_MAX = 64 << 20
+
+
 def _package_name_above(script: Path) -> Optional[str]:
     """`name` from the nearest package.json above `script` that has one."""
     for d in list(script.parents)[:4]:
         try:
-            data = json.loads((d / "package.json").read_text())
+            raw = _read_regular_file(d / "package.json", 1 << 20)
+            data = json.loads(raw) if raw is not None else None
         except (OSError, ValueError):
             continue
         if isinstance(data, dict) and isinstance(data.get("name"), str):
@@ -1710,29 +1747,51 @@ def _schist_evidence(cfg: dict) -> Optional[bool]:
         runner = _runner_name(command)
         if runner in _PACKAGE_RUNNERS:
             packages: list[str] = []
-            first: Optional[str] = None
+            positional: list[str] = []
             it = iter(args)
             for a in it:
                 if a in ("-p", "--package"):
                     packages.append(next(it, ""))
                 elif a.startswith("--package="):
                     packages.append(a.split("=", 1)[1])
-                elif not a.startswith("-") and first is None:
-                    first = a
-            if not packages and first is not None:
-                packages = [first]
+                elif a in _NPX_VALUE_OPTIONS:
+                    next(it, None)
+                elif not a.startswith("-"):
+                    positional.append(a)
+            if not packages and positional:
+                if positional[0] in _NODE_RUNNERS and len(positional) > 1:
+                    # `npx tsx <script>`: the script decides.
+                    return _script_evidence(positional[1])
+                packages = [positional[0]]
             return bool(packages) and all(
                 _SCHIST_NPM_SPEC.fullmatch(p) for p in packages)
         if runner in _NON_NODE_RUNNERS:
             return False
         script = None
-        if command.endswith((".js", ".mjs", ".cjs")):
+        if command.endswith(_SCRIPT_SUFFIXES):
             script = command
         elif runner in _NODE_RUNNERS:
             script = next((a for a in args if not a.startswith("-")
-                           and a.endswith((".js", ".mjs", ".cjs"))), None)
+                           and a.endswith(_SCRIPT_SUFFIXES)), None)
         if script is None:
-            return None
+            # Some other executable. It may be a wrapper that starts schist
+            # (a shell script, one named for schist, or one given schist's
+            # env); otherwise it is another program, such as an installed
+            # `mcp-server-filesystem`.
+            env = cfg.get("env")
+            if ("schist" in runner or command.endswith((".sh", ".bash", ".zsh"))
+                    or (isinstance(env, dict) and "SCHIST_VAULT_PATH" in env)):
+                return None
+            return False
+        return _script_evidence(script)
+    except (OSError, RuntimeError, ValueError, UnicodeError):
+        return None
+
+
+def _script_evidence(script: str) -> Optional[bool]:
+    """Whether the package.json above `script` names schist's package, or
+    None when the script is missing or has no package.json above it."""
+    try:
         path = Path(script)
         if not path.is_file():
             return None
@@ -1809,19 +1868,23 @@ def _all_mcp_servers(
             return parsed[key]
         parsed[key] = None
         try:
-            if not path.is_file():
-                return None
-            text = path.read_bytes().decode("utf-8")
-        except (OSError, ValueError):
+            raw = _read_regular_file(path, _MCP_CONFIG_MAX)
+        except ValueError:
+            unreadable.append(f"{_printable(str(path))} (too large to check)")
+            return None
+        except OSError:
+            return None
+        if raw is None:
             return None
         try:
+            text = raw.decode("utf-8")
             if path.suffix == ".toml":
                 import tomllib
                 parsed[key] = tomllib.loads(text)
             else:
                 parsed[key] = json.loads(text)
         except Exception:
-            unreadable.append(_printable(str(path)))
+            unreadable.append(f"{_printable(str(path))} (cannot be parsed)")
         return parsed[key]
 
     def add_map(where: str, block: Any, project: Optional[Path],
@@ -1933,15 +1996,20 @@ _SHELL_VAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
 
 
-def _expand_mcp_vars(s: str, project: Optional[Path],
-                     shell: bool = False) -> tuple[str, list[str]]:
+def _expand_mcp_vars(s: str, project: Optional[Path], shell: bool = False,
+                     local: Optional[dict] = None) -> tuple[str, list[str]]:
     """`s` with the variables MCP clients expand replaced, and the braced
     names it could not expand (an unbraced one is reported as `$`, since
     its "name" may be the tail of a secret). `shell` also expands unbraced
     `$VAR`, for the script of a shell command. Environment variables come
-    from doctor's own environment, which may differ from the client's."""
+    from the server's own `local` env block first (a placeholder the server
+    fills itself), then doctor's environment, which may differ from the
+    client's."""
     missing: list[str] = []
-    env = _getenv
+
+    def env(name: str) -> Optional[str]:
+        value = local.get(name) if isinstance(local, dict) else None
+        return value if isinstance(value, str) and value else _getenv(name)
 
     def braced(m: "re.Match[str]") -> str:
         name = m.group(1)
@@ -1993,25 +2061,51 @@ _MCP_WORD_SPLIT = re.compile(r"\s+")
 _MCP_VALUE_MAX = 16384
 
 
-def _paths_named(s: str, base: Optional[Path]) -> tuple[list[Path], bool]:
+class _ScanBudget:
+    """How many more path candidates the check may resolve. Each resolve
+    costs file-system calls, so a config made of huge values is reported
+    instead of scanned for minutes."""
+
+    def __init__(self, left: int = 20000) -> None:
+        self.left = left
+
+
+class _ScanBudgetExceeded(Exception):
+    pass
+
+
+_FILE_URL = re.compile(r"file://([^\s'\"]+)")
+
+
+def _paths_named(s: str, base: Optional[Path], budget: _ScanBudget,
+                 positional: bool = False) -> tuple[list[Path], bool]:
     """Resolved paths that `s` names, and whether it holds a `./`-style
     relative path with no `base` to resolve it against.
 
-    A piece counts as a path when it is absolute or starts with `~`; when it
-    is `.`, `..`, `./x` or `../x`; or, with a `base`, when it names
-    something that exists under `base`. A `/` on its own counts only as the
-    whole string, since as a piece it is mostly a URL path (`--sse-path=/`).
-    A `file:` URL counts with its percent-escapes decoded.
+    The string is checked whole, split at = , : ;, split into shell words
+    (so a quoted path with a space stays one word), and with the
+    percent-escapes of each `file://` URL decoded. A piece counts as a path
+    when it is absolute or starts with `~` (a lone `/` too: as
+    `--root=/` it grants everything), or when it is `.`, `..`, `./x` or
+    `../x`. A bare name such as `notes` counts only for a `positional`
+    argument that names something existing under `base`, never for an
+    option's value, which is mostly a word (`--scope shared`).
     """
+    from urllib.parse import unquote
+    words: list[str] = []
+    try:
+        words = shlex.split(s)
+    except ValueError:
+        pass
+    pieces = [s, *_MCP_PATH_SPLIT.split(s), *_MCP_WORD_SPLIT.split(s), *words]
+    for w in words:
+        pieces += _MCP_PATH_SPLIT.split(w)
+    pieces += [unquote(m.group(1)) for m in _FILE_URL.finditer(s)]
     found: list[Path] = []
     unresolvable = False
-    pieces = [s, *_MCP_PATH_SPLIT.split(s), *_MCP_WORD_SPLIT.split(s)]
-    if s.startswith("file://"):
-        from urllib.parse import unquote
-        pieces.append(unquote(s[len("file://"):]))
-    for i, piece in enumerate(pieces):
+    for i, piece in enumerate(dict.fromkeys(pieces)):
         piece = piece.strip().strip("'\"")
-        if not piece or (piece == "/" and i > 0):
+        if not piece:
             continue
         try:
             p = os.path.expanduser(piece)
@@ -2022,11 +2116,15 @@ def _paths_named(s: str, base: Optional[Path]) -> tuple[list[Path], bool]:
                     unresolvable = True
                     continue
                 candidate = base / piece
-            elif (base is not None and not piece.startswith(("-", "@"))
-                    and "://" not in piece and (base / piece).exists()):
+            elif (positional and i == 0 and base is not None
+                    and not piece.startswith(("-", "@")) and "://" not in piece
+                    and (base / piece).exists()):
                 candidate = base / piece
             else:
                 continue
+            if budget.left <= 0:
+                raise _ScanBudgetExceeded
+            budget.left -= 1
             found.append(candidate.resolve())
         except (OSError, RuntimeError, ValueError):
             # A NUL, or a `~user` that does not exist: no program can open
@@ -2068,6 +2166,7 @@ _INHERITED_ENV = frozenset({
 # Env keys whose value is likely a path, for which an unexpandable variable
 # is worth a WARN. Others (`GITHUB_TOKEN: ${GITHUB_TOKEN}`) are mostly
 # secrets passed through, which the check does not need.
+_ENV_NAME = re.compile(r"(env:)?[A-Za-z_][A-Za-z0-9_]{0,63}")
 _PATHLIKE_ENV_KEY = re.compile(r"DIR|PATH|ROOT|FOLDER|HOME|FILE|VAULT|MOUNT",
                                re.IGNORECASE)
 
@@ -2101,7 +2200,7 @@ def _allowed_mcp_servers(vault: Path) -> tuple[set[str], list[str]]:
     if not isinstance(names, list):
         return set(), [problem]
     allowed = {n for n in names if isinstance(n, str)}
-    if len(allowed) != len(names):
+    if any(not isinstance(n, str) for n in names):
         return allowed, ["schist.yaml `allowed_mcp_servers` has entries that "
                          "are not strings; quote names such as 'on' or '007'"]
     return allowed, []
@@ -2146,6 +2245,8 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
     unsure: list[str] = []
     allowed_hits: list[str] = []
     url_only: list[str] = []
+    budget = _ScanBudget()
+    too_much = False
     for s in servers:
         cfg = s.cfg
         if _is_schist_server(s.name, cfg):
@@ -2153,12 +2254,18 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
         fields: list[str] = []
         doubts: list[str] = []
         command = cfg.get("command")
+        own_env = cfg.get("env") if isinstance(cfg.get("env"), dict) else None
         shell = isinstance(command, str) and _runner_name(command) in _SHELLS
 
         def scan(field: str, items: list[tuple[str, Any]],
                  start: Optional[Path]) -> None:
             hit = False
+            prev: Any = None
             for key, v in items:
+                is_positional = (field == "args" and not (
+                    isinstance(prev, str) and prev.startswith("-")
+                    and "=" not in prev))
+                prev = v
                 if not isinstance(v, str):
                     continue
                 if len(v) > _MCP_VALUE_MAX:
@@ -2166,28 +2273,28 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
                     continue
                 try:
                     text, missing = _expand_mcp_vars(
-                        v, s.project, shell=shell and field == "args")
+                        v, s.project, shell=shell and field == "args",
+                        local=own_env)
                     if missing and (field != "env"
                                     or _PATHLIKE_ENV_KEY.search(key)):
-                        names = [f"${{{_printable(n)}}}" for n in missing
-                                 if n != "$"]
+                        names = [f"${{{n}}}" if _ENV_NAME.fullmatch(n)
+                                 else "a variable" for n in missing if n != "$"]
                         if "$" in missing:
                             names.append("a shell variable")
                         doubts.append(f"{field}: cannot expand "
                                       + ", ".join(dict.fromkeys(names)))
-                    paths, unresolvable = _paths_named(text, start)
+                    paths, unresolvable = _paths_named(
+                        text, start, budget, positional=is_positional)
+                except _ScanBudgetExceeded:
+                    raise
                 except (OSError, RuntimeError, ValueError, UnicodeError):
                     doubts.append(f"{field}: value cannot be checked")
                     continue
                 if unresolvable:
                     doubts.append(f"{field}: relative path with no known "
                                   "start folder")
-                if field == "env" and key in _INHERITED_ENV:
-                    if text.strip() == "/":
-                        continue
+                if field in ("env", "env_vars") and key in _INHERITED_ENV:
                     hit = hit or any(_inside(p, vaults, fold) for p in paths)
-                elif field == "env" and text.strip() == "/":
-                    continue
                 else:
                     hit = hit or any(_reaches(p, vaults, fold) for p in paths)
             if hit:
@@ -2209,18 +2316,21 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
                     base = None
             except (RuntimeError, ValueError, UnicodeError):
                 base = None
-        scan("command", [("", command)], base)
-        args = cfg.get("args")
-        scan("args", [("", a) for a in args] if isinstance(args, list) else [],
-             base)
-        env = cfg.get("env")
-        if isinstance(env, dict):
-            scan("env", [(str(k), v) for k, v in env.items()], base)
-        forwarded = cfg.get("env_vars")
-        if isinstance(forwarded, list):
-            # Codex passes these through from its own environment.
-            scan("env_vars", [(str(n), _getenv(n)) for n in forwarded
-                              if isinstance(n, str)], base)
+        try:
+            scan("command", [("", command)], base)
+            args = cfg.get("args")
+            scan("args", [("", a) for a in args] if isinstance(args, list)
+                 else [], base)
+            if own_env is not None:
+                scan("env", [(str(k), v) for k, v in own_env.items()], base)
+            forwarded = cfg.get("env_vars")
+            if isinstance(forwarded, list):
+                # Codex passes these through from its own environment.
+                scan("env_vars", [(str(n), _getenv(n)) for n in forwarded
+                                  if isinstance(n, str)], base)
+        except _ScanBudgetExceeded:
+            too_much = True
+            break
         if not isinstance(command, str) and isinstance(cfg.get("url"), str):
             url_only.append(_printable(s.name))
 
@@ -2235,7 +2345,10 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
 
     offenders = list(dict.fromkeys(offenders))
     unsure = list(dict.fromkeys(unsure))
-    unparsed = [f"{f} (cannot be parsed)" for f in unreadable]
+    unparsed = list(unreadable)
+    if too_much:
+        unparsed.append("the MCP configs hold more path-like values than "
+                        "doctor checks; the rest were not checked")
     unchecked = unparsed + unsure + allow_problems
     also = f"; also could not check: {'; '.join(unchecked)}" if unchecked else ""
     if offenders:
@@ -2244,7 +2357,8 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
             "MCP servers other than schist can read the vault, bypassing its "
             "scope and ACL checks: " + "; ".join(offenders) + also,
             "Remove the vault path, or a folder that contains it such as ~, "
-            "from those servers. If one of them should read the vault, add "
+            "from those servers, or disable them in their client. If one of "
+            "them should read the vault, add "
             "its name to `allowed_mcp_servers` under `vault_access` in the "
             "vault's schist.yaml. On a spoke, schist.yaml comes from the hub "
             "and `schist sync push` does not send it: a participant who can "
@@ -2255,12 +2369,13 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
     if unchecked:
         fixes = []
         if unparsed:
-            fixes.append("fix or remove the config files that cannot be "
-                         "parsed")
+            fixes.append("fix or remove the config files named")
         if unsure:
             fixes.append("make sure each server named does not reach the "
                          "vault (set the variable in the shell that runs "
-                         "`schist doctor`, or give the path in full)")
+                         "`schist doctor`, or give the path in full); a "
+                         "server that should read the vault can be added to "
+                         "`allowed_mcp_servers` in schist.yaml")
         if allow_problems:
             fixes.append("fix the allowlist in schist.yaml")
         fix = "; ".join(fixes)

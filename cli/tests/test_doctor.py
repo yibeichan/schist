@@ -3992,12 +3992,19 @@ class TestCheckVaultAccess:
         assert check_vault_access(str(vault)).status == "PASS"
 
     @pytest.mark.parametrize("server", [
-        {"command": "srv", "args": ["--sse-path=/"]},
-        {"command": "srv", "env": {"BASE_PATH": "/"}},
+        {"command": "srv", "args": ["--root=/"]},
+        {"command": "docker", "args": ["run", "-v", "/:/host", "img"]},
+        {"command": "docker", "args": ["run", "--mount",
+                                       "type=bind,src=/,dst=/h", "img"]},
+        {"command": "srv", "env": {"ALLOWED_DIRECTORIES": "/"}},
     ])
-    def test_slash_as_a_url_path_does_not_count(self, home, vault, server):
-        self._claude_json(home, {"web": server})
-        assert check_vault_access(str(vault)).status == "PASS"
+    def test_root_folder_inside_a_longer_string_counts(self, home, vault,
+                                                      server):
+        # `/` as a piece is also a URL path (`--sse-path=/`), but as a root
+        # it grants everything, so it counts; an allowlist entry clears a
+        # server that only uses it as a URL path.
+        self._claude_json(home, {"srv": server})
+        assert check_vault_access(str(vault)).status == "FAIL"
 
     def test_root_folder_as_a_whole_arg_counts(self, home, vault):
         self._claude_json(home, {"fs": self._fs("/")})
@@ -4450,6 +4457,198 @@ class TestCheckVaultAccess:
         r = check_vault_access(str(vault))
         assert r.message.startswith(
             "no MCP server other than schist and the allowed ones")
+
+    # --- round-3 review cases ----------------------------------------
+
+    @pytest.mark.parametrize("make", ["devzero", "fifo", "huge"])
+    def test_package_json_that_is_not_a_small_file_is_ignored(
+            self, home, vault, make, monkeypatch):
+        import schist.doctor as d
+        pkg = home / "src" / "evil"
+        self._write(pkg / "dist" / "index.js", "")
+        pj = pkg / "dist" / "package.json"
+        if make == "devzero":
+            pj.symlink_to("/dev/zero")
+        elif make == "fifo":
+            os.mkfifo(pj)
+        else:
+            pj.write_text('{"name": "@schist/mcp-server", "x": "' + "a" * 2000
+                          + '"}')
+            real = d._read_regular_file
+            monkeypatch.setattr(d, "_read_regular_file",
+                                lambda p, limit: real(p, min(limit, 1000)))
+        self._claude_json(home, {"evil": {
+            "command": "node", "args": [str(pkg / "dist" / "index.js"),
+                                        str(vault)]}})
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+
+    @pytest.mark.parametrize("make", ["devzero", "fifo"])
+    def test_config_that_is_not_a_regular_file_is_skipped(
+            self, home, vault, make):
+        cfg = vault / ".mcp.json"
+        if make == "devzero":
+            cfg.symlink_to("/dev/zero")
+        else:
+            os.mkfifo(cfg)
+        assert check_vault_access(str(vault)).status == "PASS"
+
+    def test_config_too_large_warns(self, home, vault, monkeypatch):
+        import schist.doctor as d
+        monkeypatch.setattr(d, "_MCP_CONFIG_MAX", 100)
+        self._claude_json(home, {"a": {"command": "x" * 200}})
+        r = check_vault_access(str(vault))
+        assert r.status == "WARN", r
+        assert "too large to check" in r.message
+
+    def test_scan_budget_reports_instead_of_scanning(self, home, vault,
+                                                     monkeypatch):
+        import schist.doctor as d
+        real = d._ScanBudget
+        monkeypatch.setattr(d, "_ScanBudget", lambda: real(3))
+        self._claude_json(home, {f"s{i}": self._fs(f"/srv/{i}")
+                                 for i in range(10)})
+        r = check_vault_access(str(vault))
+        assert r.status == "WARN", r
+        assert "more path-like values than doctor checks" in r.message
+
+    @pytest.mark.parametrize("args", [
+        ["--profile", "notes"], ["--enable=notes"], ["--scope", "notes"],
+        ["run", "-v", "notes:/data", "img"],
+    ])
+    def test_option_values_are_not_bare_paths(self, home, vault, args):
+        (vault / "notes").mkdir()
+        self._claude_json(home, {}, projects={
+            str(vault): {"mcpServers": {"srv": {"command": "srv",
+                                                "args": args}}}})
+        assert check_vault_access(str(vault)).status == "PASS"
+
+    def test_positional_bare_name_counts(self, home, vault):
+        (vault / "notes").mkdir()
+        self._claude_json(home, {}, projects={
+            str(vault): {"mcpServers": {"fs": self._fs("notes")}}})
+        assert check_vault_access(str(vault)).status == "FAIL"
+
+    def test_installed_other_binary_is_not_the_schist_entry(self, home, vault):
+        from schist.doctor import _discover_mcp_schist_entries
+        self._claude_json(home, {"fs": {
+            "command": "mcp-server-filesystem", "args": [str(vault)]}})
+        assert _discover_mcp_schist_entries(None) == []
+        assert check_vault_access(str(vault)).status == "FAIL"
+
+    def test_claude_science_entry_proven_not_schist_is_dropped(self, home,
+                                                                vault):
+        from schist.doctor import _discover_mcp_schist_entries
+        self._write(home / ".claude-science" / "mcp" / "local-mcp.json",
+                    json.dumps({"servers": [{"name": "schist-fs",
+                                             **self._fs(str(vault))}]}))
+        assert _discover_mcp_schist_entries(None) == []
+
+    def test_placeholder_filled_from_the_servers_own_env(self, home, vault,
+                                                         monkeypatch):
+        monkeypatch.delenv("AUTH_HEADER", raising=False)
+        self._claude_json(home, {"remote": {
+            "command": "npx",
+            "args": ["mcp-remote", "https://x.example/mcp", "--header",
+                     "Authorization:${AUTH_HEADER}"],
+            "env": {"AUTH_HEADER": "Bearer t"}}})
+        assert check_vault_access(str(vault)).status == "PASS"
+
+    def test_env_vars_follow_the_inherited_key_rule(self, home, vault,
+                                                    monkeypatch):
+        self._write(home / ".codex" / "config.toml",
+                    '[mcp_servers.x]\ncommand = "srv"\nenv_vars = ["HOME"]\n')
+        assert check_vault_access(str(vault)).status == "PASS"
+
+    @pytest.mark.parametrize("server", [
+        {"command": "sh", "args": ["-c", "cat '{v}/x'"]},
+        {"command": "bash", "args": ["-c", 'cd "{v}" && exec srv']},
+        {"command": "srv", "args": ["--root={url}"]},
+    ])
+    def test_spaced_vault_in_shell_words_and_embedded_urls(
+            self, home, spaced, server):
+        from urllib.parse import quote
+        text = json.dumps(server).replace("{v}", str(spaced)).replace(
+            "{url}", "file://" + quote(str(spaced)))
+        self._claude_json(home, {"srv": json.loads(text)})
+        assert check_vault_access(str(spaced)).status == "FAIL"
+
+    def test_duplicate_allowlist_name_is_not_called_a_non_string(
+            self, home, vault):
+        (vault / "schist.yaml").write_text(
+            "vault_access:\n  allowed_mcp_servers: [fs, fs]\n")
+        self._claude_json(home, {"fs": self._fs(str(vault))})
+        assert check_vault_access(str(vault)).status == "PASS"
+
+    @pytest.mark.parametrize("args", [
+        ["--registry", "https://registry.example", "@schist/mcp-server"],
+        ["-y", "--cache", "/tmp/c", "@schist/mcp-server@0.3.0"],
+    ])
+    def test_npx_option_values_are_not_the_package(self, home, vault, args):
+        self._claude_json(home, {"kb": {
+            "command": "npx", "args": args,
+            "env": {"SCHIST_VAULT_PATH": str(vault)}}})
+        assert check_vault_access(str(vault)).status == "PASS"
+
+    def test_npx_tsx_running_schist_source_is_schist(self, home, vault):
+        pkg = home / "src" / "schist" / "mcp-server"
+        self._write(pkg / "package.json", '{"name": "@schist/mcp-server"}')
+        self._write(pkg / "src" / "index.ts", "")
+        self._claude_json(home, {"dev": {
+            "command": "npx", "args": ["tsx", str(pkg / "src" / "index.ts")],
+            "env": {"SCHIST_VAULT_PATH": str(vault)}}})
+        assert check_vault_access(str(vault)).status == "PASS"
+
+    def test_macos_wiring_folds_case_end_to_end(self, home, monkeypatch):
+        import schist.doctor as d
+        vault = home / "Notes" / "schist-vault"
+        vault.mkdir(parents=True)
+        self._claude_json(home, {"fs": self._fs(str(home / "notes"))})
+        monkeypatch.setattr(d.sys, "platform", "linux")
+        assert check_vault_access(str(vault)).status == "PASS"
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        assert check_vault_access(str(vault)).status == "FAIL"
+
+    def test_macos_inherited_key_folds_case_end_to_end(self, home, monkeypatch):
+        import schist.doctor as d
+        vault = home / "Notes" / "schist-vault"
+        vault.mkdir(parents=True)
+        self._claude_json(home, {"py": {"command": "python3", "env": {
+            "HOME": str(home / "notes" / "SCHIST-VAULT")}}})
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        assert check_vault_access(str(vault)).status == "FAIL"
+
+    def test_cwd_with_an_unset_variable_makes_dot_unresolvable(
+            self, home, vault, monkeypatch):
+        monkeypatch.delenv("NOT_SET_CWD", raising=False)
+        self._write(home / ".codex" / "config.toml",
+                    '[mcp_servers.fs]\ncommand = "npx"\nargs = ["."]\n'
+                    'cwd = "${NOT_SET_CWD}"\n')
+        r = check_vault_access(str(vault))
+        assert r.status == "WARN", r
+        assert "relative path" in r.message
+
+    def test_variable_in_command_is_expanded(self, home, vault, monkeypatch):
+        monkeypatch.setenv("VAULT_DIR", str(vault))
+        self._claude_json(home, {"script": {
+            "command": "${VAULT_DIR}/tools/serve.sh"}})
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+        assert "script (command)" in r.message
+
+    def test_odd_variable_names_are_not_printed(self, home, vault):
+        self._claude_json(home, {"fs": self._fs("${pa ss}/x")})
+        r = check_vault_access(str(vault))
+        assert r.status == "WARN", r
+        assert "pa ss" not in r.message
+        assert "cannot expand a variable" in r.message
+
+    def test_fix_lines_mention_disabling_and_the_allowlist(self, home, vault):
+        self._claude_json(home, {"fs": self._fs(str(vault))})
+        assert "disable them in their client" in check_vault_access(
+            str(vault)).fix
+        self._claude_json(home, {"fs": self._fs(".")})
+        assert "allowed_mcp_servers" in check_vault_access(str(vault)).fix
 
     def test_run_doctor_includes_the_check(self, home, vault, capsys):
         self._claude_json(home, {"fs": self._fs(str(vault))})
