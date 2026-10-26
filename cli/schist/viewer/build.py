@@ -38,11 +38,16 @@ INDEX_HTML = Path(__file__).parent / "index.html"
 # source expression, so a page served without a build runs no inline script.
 INLINE_SCRIPT_HASHES = "'inline-script-hashes'"
 _INLINE_SCRIPT = re.compile(r"<script>(.*?)</script>", re.S)
+# Every script element without a src, however its tags are spelled. When the
+# hashed spans do not match these one for one, a hash would cover the wrong
+# text and the browser would block a script.
+_INLINE_SCRIPT_OPEN = re.compile(r"<script\b(?![^>]*\bsrc\s*=)[^>]*>", re.I)
 _CSP_META = re.compile(r'<meta http-equiv="Content-Security-Policy" content="[^"]*"')
 
 
 class ViewerPageMissing(FileNotFoundError):
-    """index.html is not next to this module: a broken install or checkout."""
+    """index.html is missing, or cannot be built into a page whose scripts
+    run: a broken install, or an edit to the page."""
 
 
 def normalize_endpoint(endpoint: str) -> str:
@@ -191,13 +196,22 @@ def render_page(html: str) -> str:
     if not csp or INLINE_SCRIPT_HASHES not in csp.group(0):
         raise ViewerPageMissing(
             f"viewer page {INDEX_HTML} has no {INLINE_SCRIPT_HASHES} placeholder in its "
-            "Content-Security-Policy, so its scripts could not run. Reinstall the CLI "
-            "(uv tool install --reinstall <path-to-cli>), or in a checkout restore it "
-            "with: git checkout -- cli/schist/viewer/index.html"
+            "Content-Security-Policy, so its scripts could not run. In a checkout, put "
+            f"{INLINE_SCRIPT_HASHES} back in the policy's script-src; otherwise reinstall "
+            "the CLI (uv tool install --reinstall <path-to-cli>)."
+        )
+    scripts = _INLINE_SCRIPT.findall(html)
+    opened = len(_INLINE_SCRIPT_OPEN.findall(html))
+    if len(scripts) != opened or any("<script" in m.lower() for m in scripts):
+        raise ViewerPageMissing(
+            f"viewer page {INDEX_HTML} has {opened} inline script element(s), but only "
+            f"{len(scripts)} written exactly as <script>…</script> with no other <script "
+            "inside, so their hashes would not match what the browser runs. Write each "
+            "inline script's tags as plain <script> and </script>."
         )
     hashes = " ".join(
         "'sha256-" + base64.b64encode(hashlib.sha256(m.encode("utf-8")).digest()).decode() + "'"
-        for m in _INLINE_SCRIPT.findall(html)
+        for m in scripts
     )
     filled = csp.group(0).replace(INLINE_SCRIPT_HASHES, hashes)
     return html[:csp.start()] + filled + html[csp.end():]

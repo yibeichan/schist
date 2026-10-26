@@ -533,6 +533,21 @@ class TestShapeContract:
         assert [s for s in script_src if s.startswith("'sha256-")] == expected
         assert build.INLINE_SCRIPT_HASHES not in rendered
 
+    @pytest.mark.parametrize("end", ["</script >", "</SCRIPT>", "</script/>"])
+    def test_a_script_end_tag_the_hash_cannot_follow_is_refused(self, end):
+        """The browser ends a script at any of these spellings, the hashing
+        regex only at `</script>`, so it would hash two scripts as one and
+        the page would run neither while every test stayed green."""
+        first = re.search(r"<script>(.*?)</script>", self.PAGE, flags=re.S)
+        page = self.PAGE[:first.end() - len("</script>")] + end + self.PAGE[first.end():]
+        with pytest.raises(build.ViewerPageMissing, match="inline script"):
+            build.render_page(page)
+
+    def test_a_script_tag_inside_an_inline_script_is_refused(self):
+        page = self.PAGE.replace("<script>", "<script>/* <!--<script */", 1)
+        with pytest.raises(build.ViewerPageMissing, match="inline script"):
+            build.render_page(page)
+
     def test_rendering_cannot_fetch_other_hosts(self):
         """Rendered notes and agent answers can carry markup that fetches a URL
         with text in it. The sanitizer keeps HTML only and drops the legacy
