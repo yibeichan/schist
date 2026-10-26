@@ -482,6 +482,14 @@ class TestCheckVaultLocation:
         assert _folder_holding([typed], _SYNC_ROOTS, True) is not None
         assert _folder_holding([typed], _SYNC_ROOTS, False) is None
 
+    def test_unlistable_home_fallback_folds_the_home_part_too(
+            self, home, monkeypatch):
+        from schist.doctor import _SYNC_ROOTS, _folder_holding
+        self._unlistable_home(home, monkeypatch)
+        typed = Path(str(home).upper()) / "Dropbox" / "vault"
+        assert _folder_holding([typed], _SYNC_ROOTS, True) is not None
+        assert _folder_holding([typed], _SYNC_ROOTS, False) is None
+
     def test_unlistable_symlinked_home_fallback_uses_the_real_home(
             self, tmp_path, monkeypatch):
         from schist.doctor import _SYNC_ROOTS, _folder_holding
