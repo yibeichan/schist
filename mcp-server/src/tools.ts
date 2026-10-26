@@ -1643,7 +1643,14 @@ async function vaultGeneration(vaultRoot: string): Promise<string> {
 }
 
 function outcomeMessage(outcome: SyncCommandOutcome): string {
-  const output = [outcome.stderr, outcome.stdout, outcome.error].filter(Boolean).join("\n").trim();
+  // Every failure classifier reads this text with line-anchored `m`-flag
+  // regexes, and in JavaScript `^` also matches after U+2028 and U+2029. The
+  // hub echoes refused paths and ref names into its output, so a separator
+  // inside one could start a forged "REJECTED: rate limit" line and make a
+  // permanent refusal look retriable (#813). Git and the CLI break lines only
+  // at \n, so show the separators escaped, as the hub does.
+  const output = [outcome.stderr, outcome.stdout, outcome.error].filter(Boolean).join("\n").trim()
+    .replace(/[\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16)}`);
   if (output) return output;
   if (outcome.timedOut) return "command timed out";
   if (outcome.signal) return `command killed by signal ${outcome.signal}`;
