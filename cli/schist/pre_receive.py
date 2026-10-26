@@ -406,10 +406,18 @@ def check_push(
     return violations
 
 
-def format_rejection(violations: list[Violation]) -> str:
-    """Format a human-readable rejection message."""
+def format_rejection(violations: list[Violation], branch: str = "refs/heads/main") -> str:
+    """Format a human-readable rejection message. `branch` is the served
+    branch, which the frontmatter hint tells the pusher to reset to."""
+    content_only = (NON_UTF8_SCOPE, FRONTMATTER_SCOPE)
+    # Both spoke-side classifiers key on the `REJECTED:` prefix, not on the
+    # words after it, so the header may say what was refused (#795).
+    if all(v.scope in content_only for v in violations):
+        header = "REJECTED: push contains files the hub refuses for every identity"
+    else:
+        header = "REJECTED: push contains out-of-scope writes"
     lines = [
-        "REJECTED: push contains out-of-scope writes",
+        header,
         f"Identity: {violations[0].identity}",
         "",
         "Violations:",
@@ -423,15 +431,29 @@ def format_rejection(violations: list[Violation]) -> str:
             "vault.yaml change helps: rename the file (bytes are shown as \\xNN), "
             "then `git reset --soft` the unpushed commit and recommit."
         )
-    if any(v.scope == FRONTMATTER_SCOPE for v in violations):
+    bad_refs = {v.refname for v in violations if v.scope == FRONTMATTER_SCOPE}
+    if bad_refs:
+        # Reset to the ref that carried the note, so the hint never squashes
+        # one branch's commits onto another (#791).
+        ref = next(iter(bad_refs))
+        if len(bad_refs) > 1 or not ref.startswith('refs/heads/'):
+            ref = branch
         lines.append(
             "Notes must open with a plain `---` line (YAML frontmatter), for every "
-            "identity. Fix the first line, then `git reset --soft origin/main` and "
+            "identity. Fix the first line, then "
+            f"`git reset --soft origin/{_sanitize_log_field(ref.removeprefix('refs/heads/'))}` and "
             "recommit, so no unpushed commit keeps the old version."
         )
-    if any(v.scope not in (NON_UTF8_SCOPE, FRONTMATTER_SCOPE) for v in violations):
+    if any(v.scope not in content_only for v in violations):
         lines.append("Check vault.yaml access rules for your identity.")
     return "\n".join(lines)
+
+
+def _print_ref_reasons(ref_reasons: list[str]) -> None:
+    if ref_reasons:
+        print("REJECTED: push updates refs this identity may not change", file=sys.stderr)
+        for reason in ref_reasons:
+            print(f"  - {_sanitize_log_field(reason)}", file=sys.stderr)
 
 
 def log_rejection(
@@ -629,7 +651,11 @@ def main(
         reason = ref_rejection(identity, acl, newrev, refname, branch)
         if reason is not None:
             ref_reasons.append(reason)
-            continue
+            # Still scan what the ref carries (a deletion carries nothing):
+            # the pusher would otherwise move the commits to the served
+            # branch and be refused again for the files (#790).
+            if newrev == ZERO_SHA:
+                continue
 
         try:
             changed_files = get_changed_files(oldrev, newrev)
@@ -641,6 +667,7 @@ def main(
             # and dump a raw traceback (internal paths, stack frames) onto the
             # pusher's terminal. Reject fail-safe with a human-readable message
             # instead (#243).
+            _print_ref_reasons(ref_reasons)
             print(
                 f"ERROR: timed out diffing {oldrev}..{newrev} — the hub may be "
                 f"under load; please retry the push.",
@@ -648,6 +675,7 @@ def main(
             )
             return 1
         except subprocess.CalledProcessError as e:
+            _print_ref_reasons(ref_reasons)
             print(f"ERROR: failed to diff {oldrev}..{newrev}: {e}", file=sys.stderr)
             return 1
 
@@ -658,16 +686,19 @@ def main(
                                         scope=FRONTMATTER_SCOPE, refname=refname)
                               for path in bad_frontmatter)
 
-    if ref_reasons:
-        print("REJECTED: push updates refs this identity may not change", file=sys.stderr)
-        for reason in ref_reasons:
-            print(f"  - {_sanitize_log_field(reason)}", file=sys.stderr)
-        return 1
+    _print_ref_reasons(ref_reasons)
 
+    # Reported even after a ref refusal: the push is refused either way, and a
+    # pusher told only about the ref would fix it and be refused again for
+    # these (#790).
     if all_violations:
-        msg = format_rejection(all_violations)
+        if ref_reasons:
+            print("", file=sys.stderr)
+        msg = format_rejection(all_violations, branch=branch)
         print(msg, file=sys.stderr)
         log_rejection(all_violations, log_path=log_path)
+
+    if ref_reasons or all_violations:
         return 1
 
     # ACL passed — enforce rate limits. Runs after ACL so that rejected
