@@ -73,12 +73,41 @@ SPDX-License-Identifier: Apache-2.0
     #search:focus { border-color: var(--accent); }
     #search::placeholder { color: var(--muted); }
 
-    #filter-wrap { padding: 8px 12px; border-bottom: 1px solid var(--border); display: flex; gap: 6px; flex-wrap: wrap; }
+    /* Filters: type (directory) chips always shown; status and tags folded.
+       Chip text uses --chip-text (6.6:1 on --surface); --muted is 3.5:1. */
+    #filter-wrap { --chip-text: #9ca3af; padding: 8px 12px; border-bottom: 1px solid var(--border); max-height: 45vh; overflow-y: auto; }
+    .facet-label { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--chip-text); margin: 2px 0 5px; }
+    .facet { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 6px; }
     .filter-btn {
       padding: 3px 9px; border-radius: 12px; border: 1px solid var(--border);
-      background: transparent; color: var(--muted); font-size: 11px; cursor: pointer;
+      background: transparent; color: var(--chip-text); font-size: 11px; cursor: pointer;
+      display: inline-flex; gap: 5px; align-items: baseline;
     }
+    .filter-btn:hover { border-color: var(--accent); }
+    .filter-btn:focus-visible, #more-filters > summary:focus-visible, .tag-chip button:focus-visible,
+    #clear-filters:focus-visible, #tag-input:focus-visible, .tag-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
     .filter-btn.active { background: var(--accent-dim); color: var(--text); border-color: var(--accent); }
+    .filter-btn.empty:not(.active) { opacity: 0.45; }
+    .filter-btn .count { font-size: 10px; opacity: 0.85; font-variant-numeric: tabular-nums; }
+    #more-filters > summary { font-size: 11px; color: var(--chip-text); cursor: pointer; padding: 3px 0; list-style-position: inside; }
+    #more-filters[open] > summary { margin-bottom: 6px; }
+    #filter-count { color: var(--text); }
+    #tag-input {
+      width: 100%; padding: 5px 8px; background: var(--bg); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--text); font-size: 12px; outline: none;
+    }
+    #tag-input::placeholder { color: var(--chip-text); }
+    #active-tags { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 6px; }
+    #active-tags:empty { display: none; }
+    .tag-chip { display: inline-flex; align-items: center; gap: 3px; padding: 2px 4px 2px 8px; border-radius: 12px;
+      background: var(--accent-dim); border: 1px solid var(--accent); color: var(--text); font-size: 11px; }
+    .tag-chip button { background: none; border: 0; color: var(--text); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 3px; border-radius: 50%; }
+    #clear-filters { margin-top: 6px; background: none; border: 0; padding: 2px 0; color: var(--accent); font-size: 11px; cursor: pointer; }
+    #clear-filters:hover { text-decoration: underline; }
+    #clear-filters[hidden] { display: none; }
+    /* Tags on an open note filter the list when clicked */
+    .tag-btn { border: 0; color: var(--text); font: inherit; cursor: pointer; margin-right: 4px; }
+    .tag-btn:hover { background: var(--accent-dim); }
 
     /* Result and connection rows are <button>s for keyboard access. Drop the
        browser's button look so they render as list rows; the rules below
@@ -278,9 +307,20 @@ SPDX-License-Identifier: Apache-2.0
       <input id="search" type="search" placeholder="Search notes…" autocomplete="off" />
     </div>
     <div id="filter-wrap">
-      <button class="filter-btn active" data-filter="all">All</button>
-      <button class="filter-btn" data-filter="note">Notes</button>
-      <button class="filter-btn" data-filter="concept">Concepts</button>
+      <div class="facet-label" id="type-label">Type</div>
+      <div class="facet" id="type-facet" role="group" aria-labelledby="type-label"></div>
+      <details id="more-filters">
+        <summary>Project, status &amp; tags <span id="filter-count"></span></summary>
+        <div class="facet-label" id="project-label">Project</div>
+        <div class="facet" id="project-facet" role="group" aria-labelledby="project-label"></div>
+        <div class="facet-label" id="status-label">Status</div>
+        <div class="facet" id="status-facet" role="group" aria-labelledby="status-label"></div>
+        <div class="facet-label"><label for="tag-input">Tags</label></div>
+        <input id="tag-input" type="text" list="tag-options" placeholder="Filter by tag…" autocomplete="off" />
+        <datalist id="tag-options"></datalist>
+        <div id="active-tags" role="group" aria-label="Active tag filters"></div>
+      </details>
+      <button id="clear-filters" type="button" hidden>Clear filters</button>
     </div>
     <div id="results"></div>
     <div id="stats"></div>
@@ -402,8 +442,13 @@ SPDX-License-Identifier: Apache-2.0
 
   // ── State ─────────────────────────────────────────────────────────────────
   let selectedId = null;
-  let activeFilter = "all";
   let searchQuery = "";
+  // Filters: a value set per facet. Values within a facet are alternatives
+  // (OR); facets combine with AND; every tag in `tag` must be on the node.
+  // An empty set means the facet is off.
+  const filters = { type: new Set(), project: new Set(), status: new Set(), tag: new Set() };
+  let visibleIds = null;   // ids the list shows, when any filter or search is on
+  let graphReady = false;  // set once the graph's elements exist
 
   // ── DOM helpers — all vault-sourced values go through textContent only ────
   function el(tag, cls) {
@@ -453,21 +498,15 @@ SPDX-License-Identifier: Apache-2.0
   const statsEl = document.getElementById("stats");
 
   function renderList() {
-    let items = nodes.filter(n => {
-      if (activeFilter !== "all" && n.type !== activeFilter) return false;
-      return true;
-    });
-
     const hits = searchQuery.trim() ? search(searchQuery) : null;
-    if (hits) {
-      // Best match first; a query with only stop words or punctuation
-      // (hits === null) leaves the full list.
-      const rank = new Map(hits.map((h, i) => [h.ref, i]));
-      items = items.filter(n => rank.has(n.id));
-      items.sort((a, b) => rank.get(a.id) - rank.get(b.id));
-    } else {
-      items.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-    }
+    // Best match first; a query with only stop words or punctuation
+    // (hits === null) leaves the full list.
+    const rank = hits ? new Map(hits.map((h, i) => [h.ref, i])) : null;
+    const pool = rank ? nodes.filter(n => rank.has(n.id)) : nodes;
+    let items = pool.filter(n => matchesFilters(n, filters));
+    if (rank) items.sort((a, b) => rank.get(a.id) - rank.get(b.id));
+    else items.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+    renderFacets(pool);
 
     // #2 XSS fix: build DOM nodes — no innerHTML interpolation of vault data
     const frag = document.createDocumentFragment();
@@ -494,17 +533,193 @@ SPDX-License-Identifier: Apache-2.0
     resultsEl.replaceChildren(frag);
 
     statsEl.textContent = `${items.length} / ${nodes.length} items`;
+    const narrowed = rank || filtersOn(filters);
+    visibleIds = narrowed ? new Set(items.map(n => n.id)) : null;
+    if (graphReady && !selectedId) highlightNode(null);
+    writeHash();
   }
 
-  // ── Filter buttons ────────────────────────────────────────────────────────
-  document.querySelectorAll(".filter-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".filter-btn").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
-      activeFilter = btn.dataset.filter;
-      renderList();
-    });
+  // ── Filters ───────────────────────────────────────────────────────────────
+  // A note's type is its vault directory (the first segment of its id);
+  // concepts are "concepts".
+  function nodeKind(n) {
+    if (n.type === "concept") return "concepts";
+    const i = n.id.indexOf("/");
+    return i > 0 ? n.id.slice(0, i) : "notes";
+  }
+
+  // A note's projects are its `project:<repo>` tags; a note can have several.
+  function nodeProjects(n) {
+    return (n.tags || []).filter(t => t.startsWith("project:")).map(t => t.slice(8));
+  }
+
+  function filtersOn(f) {
+    return f.type.size > 0 || f.project.size > 0 || f.status.size > 0 || f.tag.size > 0;
+  }
+
+  // `skip` names a facet to ignore, for that facet's own counts.
+  function matchesFilters(n, f, skip = null) {
+    if (skip !== "type" && f.type.size && !f.type.has(nodeKind(n))) return false;
+    if (skip !== "project" && f.project.size && !nodeProjects(n).some(p => f.project.has(p))) return false;
+    if (skip !== "status" && f.status.size && !f.status.has(n.status)) return false;
+    if (skip !== "tag" && f.tag.size) {
+      const tags = n.tags || [];
+      for (const t of f.tag) if (!tags.includes(t)) return false;
+    }
+    return true;
+  }
+
+  // Each chip's count is what the list would hold with that value selected:
+  // the other facets and the search apply, this facet does not. `valueOf`
+  // returns one value or a list (a note in two projects counts for both).
+  function facetCounts(pool, f, facet, valueOf) {
+    const counts = new Map();
+    for (const n of pool) {
+      if (!matchesFilters(n, f, facet)) continue;
+      const v = valueOf(n);
+      for (const x of Array.isArray(v) ? v : [v]) if (x) counts.set(x, (counts.get(x) || 0) + 1);
+    }
+    return counts;
+  }
+
+  // Values in order of their count over the whole vault, so chips do not
+  // jump around as other filters change; concepts last.
+  const typeOrder = [...facetCounts(nodes, filters, "type", nodeKind)]
+    .sort((a, b) => (a[0] === "concepts") - (b[0] === "concepts") || b[1] - a[1]).map(e => e[0]);
+  const statusOrder = [...facetCounts(nodes.filter(n => n.type === "note"), filters, "status", n => n.status)]
+    .sort((a, b) => b[1] - a[1]).map(e => e[0]);
+  const projectOrder = [...facetCounts(nodes, filters, "project", nodeProjects)]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(e => e[0]);
+  const tagCounts = new Map();
+  for (const n of nodes) for (const t of (n.tags || [])) tagCounts.set(t, (tagCounts.get(t) || 0) + 1);
+  const tagByLower = new Map([...tagCounts.keys()].map(t => [t.toLowerCase(), t]));
+  {
+    const opts = document.createDocumentFragment();
+    for (const [t, c] of [...tagCounts].sort((a, b) => b[1] - a[1])) {
+      const o = el("option");
+      o.value = t;
+      o.label = `${t} (${c})`;
+      opts.appendChild(o);
+    }
+    document.getElementById("tag-options").replaceChildren(opts);
+  }
+
+  function chip(label, count, active, onClick, title) {
+    const b = el("button", "filter-btn" + (active ? " active" : "") + (count === 0 ? " empty" : ""));
+    b.type = "button";
+    b.setAttribute("aria-pressed", active ? "true" : "false");
+    b.appendChild(document.createTextNode(label));
+    if (count !== null) b.appendChild(txt("span", String(count), "count"));
+    if (title) b.title = title;
+    b.addEventListener("click", onClick);
+    return b;
+  }
+
+  function toggle(facet, value) {
+    const s = filters[facet];
+    if (s.has(value)) s.delete(value); else s.add(value);
+    renderList();
+  }
+
+  function addTag(raw) {
+    const t = tagByLower.get(String(raw).trim().toLowerCase());
+    if (!t || filters.tag.has(t)) return false;
+    filters.tag.add(t);
+    document.getElementById("more-filters").open = true;
+    renderList();
+    return true;
+  }
+
+  function renderFacets(pool) {
+    const types = facetCounts(pool, filters, "type", nodeKind);
+    const typeFrag = document.createDocumentFragment();
+    typeFrag.appendChild(chip("All", null, filters.type.size === 0, () => { filters.type.clear(); renderList(); },
+      "Show every type"));
+    for (const k of typeOrder) {
+      typeFrag.appendChild(chip(k, types.get(k) || 0, filters.type.has(k), () => toggle("type", k)));
+    }
+    document.getElementById("type-facet").replaceChildren(typeFrag);
+
+    const projects = facetCounts(pool, filters, "project", nodeProjects);
+    const projectFrag = document.createDocumentFragment();
+    for (const p of projectOrder) {
+      projectFrag.appendChild(chip(p, projects.get(p) || 0, filters.project.has(p), () => toggle("project", p),
+        `Notes tagged project:${p}`));
+    }
+    document.getElementById("project-facet").replaceChildren(projectFrag);
+
+    const statuses = facetCounts(pool, filters, "status", n => n.status);
+    const statusFrag = document.createDocumentFragment();
+    for (const s of statusOrder) {
+      statusFrag.appendChild(chip(s, statuses.get(s) || 0, filters.status.has(s), () => toggle("status", s)));
+    }
+    document.getElementById("status-facet").replaceChildren(statusFrag);
+
+    const tagFrag = document.createDocumentFragment();
+    for (const t of filters.tag) {
+      const c = el("span", "tag-chip");
+      c.appendChild(document.createTextNode(t));
+      const x = el("button");
+      x.type = "button";
+      x.textContent = "×";
+      x.setAttribute("aria-label", `Remove tag filter ${t}`);
+      x.title = "Remove";
+      x.addEventListener("click", () => { filters.tag.delete(t); renderList(); });
+      c.appendChild(x);
+      tagFrag.appendChild(c);
+    }
+    document.getElementById("active-tags").replaceChildren(tagFrag);
+
+    const folded = filters.project.size + filters.status.size + filters.tag.size;
+    document.getElementById("filter-count").textContent = folded ? `· ${folded} active` : "";
+    document.getElementById("clear-filters").hidden = !filtersOn(filters);
+  }
+
+  const tagInput = document.getElementById("tag-input");
+  // Picking a datalist option fires input with the full tag; Enter adds what
+  // was typed if it names a tag (case-insensitive).
+  tagInput.addEventListener("input", e => {
+    // Typing fires inputType "insertText"; choosing an option does not.
+    if (e.inputType && e.inputType !== "insertReplacementText") return;
+    if (tagCounts.has(tagInput.value) && addTag(tagInput.value)) tagInput.value = "";
   });
+  tagInput.addEventListener("keydown", e => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    if (addTag(tagInput.value)) tagInput.value = "";
+    else tagInput.setCustomValidity(tagInput.value.trim() ? "No note has this tag" : "");
+    tagInput.reportValidity();
+  });
+  tagInput.addEventListener("blur", () => tagInput.setCustomValidity(""));
+  document.getElementById("clear-filters").addEventListener("click", () => {
+    for (const s of Object.values(filters)) s.clear();
+    renderList();
+  });
+
+  // Filters live in the URL hash (#type=ops&type=research&status=active&tag=x),
+  // so a filtered view survives a reload and can be bookmarked.
+  function readHash() {
+    let params;
+    try { params = new URLSearchParams(location.hash.slice(1)); } catch { return; }
+    for (const facet of Object.keys(filters)) {
+      for (const v of params.getAll(facet)) {
+        const known = { tag: tagCounts.has(v), type: typeOrder.includes(v),
+                        project: projectOrder.includes(v), status: statusOrder.includes(v) };
+        if (known[facet]) {
+          filters[facet].add(v);
+        }
+      }
+    }
+    if (filters.project.size || filters.status.size || filters.tag.size) document.getElementById("more-filters").open = true;
+  }
+  function writeHash() {
+    const params = new URLSearchParams();
+    for (const [facet, values] of Object.entries(filters)) for (const v of values) params.append(facet, v);
+    const s = params.toString();
+    const url = s ? `#${s}` : location.pathname + location.search;
+    if ((s ? `#${s}` : "") !== location.hash) history.replaceState(null, "", url);
+  }
+  readHash();
 
   document.getElementById("search").addEventListener("input", e => {
     searchQuery = e.target.value;
@@ -537,7 +752,11 @@ SPDX-License-Identifier: Apache-2.0
     const detailMetaText = detailDate ? `${detailDate} · ${detailStatus}` : detailStatus;
     if (detailMetaText) metaFrag.appendChild(txt("span", detailMetaText, "status"));
     for (const t of (meta.tags || [])) {
-      metaFrag.appendChild(txt("span", t, "tag"));
+      const b = txt("button", t, "tag tag-btn");
+      b.type = "button";
+      b.title = filters.tag.has(t) ? "Already filtering by this tag" : "Show only notes with this tag";
+      b.addEventListener("click", () => addTag(t));
+      metaFrag.appendChild(b);
     }
     metaEl.replaceChildren(metaFrag);
 
@@ -655,10 +874,15 @@ SPDX-License-Identifier: Apache-2.0
     labelEl.attr("x", d => d.x).attr("y", d => d.y);
   });
 
+  // With nothing selected, a filter or search dims what the list does not show.
   function highlightNode(id) {
     if (!id) {
-      nodeEl.attr("opacity", 1);
-      linkEl.attr("stroke-opacity", 0.6).attr("stroke", "var(--link-default)");
+      const shown = d => !visibleIds || visibleIds.has(d.id);
+      const endId = e => e?.id || e;
+      nodeEl.attr("opacity", d => shown(d) ? 1 : 0.12);
+      linkEl.attr("stroke", "var(--link-default)").attr("stroke-opacity", l =>
+        !visibleIds || (visibleIds.has(endId(l.source)) && visibleIds.has(endId(l.target))) ? 0.6 : 0.06);
+      labelEl.attr("opacity", d => shown(d) ? 1 : 0.15);
       return;
     }
     const connectedIds = new Set([id]);
@@ -706,6 +930,7 @@ SPDX-License-Identifier: Apache-2.0
   document.dispatchEvent(new Event("schist:ready"));
 
   // ── Init ──────────────────────────────────────────────────────────────────
+  graphReady = true;
   renderList();
   document.getElementById("vault-name").textContent =
     `${nodes.filter(n => n.type === "note").length} notes · ${nodes.filter(n => n.type === "concept").length} concepts`;
