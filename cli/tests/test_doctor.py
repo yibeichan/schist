@@ -267,6 +267,42 @@ class TestCheckVaultLocation:
         link.symlink_to(target)
         assert check_vault_location(str(link)).status == "FAIL"
 
+    @pytest.mark.parametrize("folder", ["Documents", "Desktop"])
+    def test_macos_documents_or_desktop_warns(self, home, monkeypatch, folder):
+        # iCloud syncs these only with "Desktop & Documents Folders" on,
+        # which doctor cannot read, so it warns instead of failing.
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        vault = home / folder / "schist-vault"
+        vault.mkdir(parents=True)
+        r = check_vault_location(str(vault))
+        assert r.status == "WARN", r
+        assert "iCloud" in r.message
+        assert r.fix
+
+    def test_documents_outside_macos_passes(self, home, monkeypatch):
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "linux")
+        vault = home / "Documents" / "schist-vault"
+        vault.mkdir(parents=True)
+        assert check_vault_location(str(vault)).status == "PASS"
+
+    def test_macos_sync_folder_still_fails(self, home, monkeypatch):
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        vault = home / "Dropbox" / "vault"
+        vault.mkdir(parents=True)
+        assert check_vault_location(str(vault)).status == "FAIL"
+
+    def test_macos_symlink_into_documents_warns(self, home, monkeypatch):
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        target = home / "Documents" / "vault"
+        target.mkdir(parents=True)
+        link = home / "schist-vault"
+        link.symlink_to(target)
+        assert check_vault_location(str(link)).status == "WARN"
+
     def test_tilde_path_is_expanded(self, home, monkeypatch):
         (home / "Dropbox" / "vault").mkdir(parents=True)
         monkeypatch.setenv("HOME", str(home))

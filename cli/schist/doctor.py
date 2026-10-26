@@ -279,6 +279,25 @@ def check_vault_location(vault_path: Optional[str]) -> CheckResult:
                     "On a spoke, a fresh `schist init --spoke` clone is the "
                     "safest move.",
                 )
+    # iCloud syncs ~/Documents and ~/Desktop only when "Desktop & Documents
+    # Folders" is on, a setting doctor cannot read reliably, so WARN.
+    if sys.platform == "darwin":
+        for path in (given, given.resolve()):
+            for h in (home, home.resolve()):
+                for name in ("Documents", "Desktop"):
+                    folder = h / name
+                    if path == folder or folder in path.parents:
+                        return CheckResult(
+                            "WARN", label,
+                            f"{given} is inside {folder}, which iCloud syncs "
+                            "when \"Desktop & Documents Folders\" is on; a "
+                            "synced vault gets corrupted .git files and "
+                            "conflict copies",
+                            "If that iCloud setting is on, move the vault to "
+                            "a folder outside ~/Documents and ~/Desktop and "
+                            "point SCHIST_VAULT_PATH and your MCP config at "
+                            "the new path.",
+                        )
     return CheckResult("PASS", label, "not inside a cloud-sync folder")
 
 
