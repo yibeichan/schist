@@ -2901,6 +2901,32 @@ describe("sync_status + sync_retry (#135)", () => {
     expect(result.blocking_ignored_paths).toEqual(["notes/my secret plan.md"]);
   }, 10000);
 
+  test("sync_status probes a global spoke's vault-added directories (#734)", async () => {
+    // global scope stages the directories the vault's schist.yaml lists, so
+    // the #361 ignore probe must look there too: an ignored file under a
+    // vault-added tools/ fails `schist sync push`, and sync_status reported a
+    // clean tree when it took the packaged list instead.
+    const vault = await makeTempSpokeVault();
+    await fs.writeFile(
+      path.join(vault, ".schist", "spoke.yaml"),
+      "hub: file:///nonexistent\nidentity: test\nscope: global\n",
+    );
+    await fs.writeFile(
+      path.join(vault, "schist.yaml"),
+      "name: Test Vault\ndirectories:\n  - notes\n  - tools\n",
+    );
+    await fs.appendFile(path.join(vault, ".gitignore"), "tools/secret*.md\n");
+    await execFile("git", ["add", "schist.yaml", ".gitignore"], { cwd: vault });
+    await execFile("git", ["commit", "-m", "add tools axis"], { cwd: vault });
+    await fs.mkdir(path.join(vault, "tools"), { recursive: true });
+    await fs.writeFile(path.join(vault, "tools", "secret-plan.md"), "hidden\n");
+
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
+
+    expect(result.blocked_by_ignored).toBe(true);
+    expect(result.blocking_ignored_paths).toEqual(["tools/secret-plan.md"]);
+  }, 10000);
+
   test("ignoredPathsFromPorcelainZ keeps odd names and skips rename sources (#698)", () => {
     const raw = "!! notes/my notes.md~\0R  notes/new.md\0!! decoy\0!! notes/a\"b~\0";
     expect(ignoredPathsFromPorcelainZ(raw)).toEqual(["notes/my notes.md~", 'notes/a"b~']);
