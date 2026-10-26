@@ -553,9 +553,10 @@ function sentinelAgeMs(
 function syncDirtyRemedy(cls: PushFailureClass | null, ageClause: string): string {
   switch (cls) {
     case "acl-rejected":
-      return "The hub refused this content as out of scope, and retrying pushes the same " +
-        "rejection. Move the note under a directory your identity may write (see vault.yaml), " +
-        "then run `sync_retry`.";
+      return "The hub refused this content, and retrying pushes the same rejection. The " +
+        "REJECTED: lines say why: a path out of scope for your identity (move the note under " +
+        "a directory it may write; see vault.yaml), a note that does not open with a plain `---` line, " +
+        "or a path that is not valid UTF-8 (fix the file). Then run `sync_retry`.";
     case "rate-limited":
       return "The hub rate-limited the push. It will accept a retry once the window resets; " +
         "writes stay blocked until then so the pending batch doesn't outgrow the hub's " +

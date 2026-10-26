@@ -78,7 +78,7 @@ VIEWER_STAMP = 'viewer-built-version'
 
 def viewer_fingerprint() -> str:
     """Hash of the files that decide what a build produces (the builder and
-    the page it copies): a site built by other viewer code is stale even
+    the page it renders): a site built by other viewer code is stale even
     when the vault has not moved."""
     h = hashlib.sha256()
     for name in ('build.py', 'index.html'):
