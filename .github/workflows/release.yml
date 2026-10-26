@@ -67,6 +67,12 @@ jobs:
           cache: npm
           cache-dependency-path: mcp-server/package-lock.json
 
+      # Node 22 ships npm 10. mcp-server/package.json requires npm >=11.11.0
+      # through devEngines (older npm drops the lockfile's libc fields), and
+      # Trusted Publishing needs npm 11.5.1 or later.
+      - name: Upgrade npm
+        run: npm install -g npm@11.17.0
+
       - name: Install and build MCP server
         working-directory: mcp-server
         run: |
@@ -81,10 +87,6 @@ jobs:
         run: |
           npm pack --dry-run --json | jq -e 'any(.[0].files[]; .path == "LICENSE")' > /dev/null
           head -1 LICENSE | grep -qx 'GNU AFFERO GENERAL PUBLIC LICENSE'
-
-      # Trusted Publishing needs npm 11.5.1 or later; Node 22 ships npm 10.
-      - name: Upgrade npm
-        run: npm install -g npm@11.5.1
 
       - name: Publish to npm
         working-directory: mcp-server
