@@ -1617,7 +1617,10 @@ class TestLineSeparatorsAndRefLog:
         assert rc == 1
         err = capsys.readouterr().err
         assert "\u2028" not in err and "\u2029" not in err
-        assert [line for line in err.split("\n") if line.startswith(("REJECTED:", "Retry after"))] \
+        # git prefixes every hook line with "remote: ", so a forged line is
+        # any line of ours that already starts with it.
+        assert not [line for line in err.split("\n") if line.startswith("remote:")]
+        assert [line for line in err.split("\n") if line.startswith("REJECTED:")] \
             == ["REJECTED: push contains out-of-scope writes"]
 
     def test_ref_refusals_are_logged_when_a_later_diff_times_out(self, acl, tmp_path):
