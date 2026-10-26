@@ -241,17 +241,36 @@ def _name_matches(name: str, want: str, fold: bool) -> bool:
     return name == want
 
 
+def _within(path: Path, folder: Path, fold: bool) -> bool:
+    """`path` is `folder` or inside it. With `fold`, path parts compare
+    case-insensitively: on the default macOS filesystem `~/dropbox/vault`
+    is inside `~/Dropbox`, and resolving keeps the case as typed."""
+    if not fold:
+        return path == folder or folder in path.parents
+    want = [p.casefold() for p in folder.parts]
+    return [p.casefold() for p in path.parts[:len(want)]] == want
+
+
 def _existing_roots(home: Path, roots: tuple[str, ...],
-                    fold: bool) -> list[tuple[Path, Path]]:
+                    fold: bool) -> tuple[list[tuple[Path, Path]], bool]:
     """(folder, folder with symlinks resolved) for each folder under `home`
-    that one of `roots` names. `fold` compares names case-insensitively, as
-    the default macOS filesystem does."""
+    that one of `roots` names, and whether some parent folder could not be
+    listed. `fold` compares names case-insensitively, as the default macOS
+    filesystem does. Each parent is listed once."""
     found: list[tuple[Path, Path]] = []
+    listings: dict[Path, Optional[list[Path]]] = {}
+    unlisted = False
     for root in roots:
         parts = root.split("/")
-        try:
-            entries = list(home.joinpath(*parts[:-1]).iterdir())
-        except OSError:
+        parent = home.joinpath(*parts[:-1])
+        if parent not in listings:
+            try:
+                listings[parent] = list(parent.iterdir())
+            except OSError:
+                listings[parent] = None
+        entries = listings[parent]
+        if entries is None:
+            unlisted = unlisted or parent == home or parent.exists()
             continue
         for entry in entries:
             if _name_matches(entry.name, parts[-1], fold):
@@ -259,7 +278,29 @@ def _existing_roots(home: Path, roots: tuple[str, ...],
                     found.append((entry, entry.resolve()))
                 except (OSError, RuntimeError, ValueError):
                     pass
-    return found
+    return found, unlisted
+
+
+def _root_named_in(path: Path, home: Path, roots: tuple[str, ...],
+                   fold: bool) -> Optional[Path]:
+    """The folder under `home` named by one of `roots` that the spelling of
+    `path` puts it in, for when a folder cannot be listed."""
+    try:
+        rel = path.relative_to(home)
+    except ValueError:
+        if not fold:
+            return None
+        n = len(home.parts)
+        if [p.casefold() for p in path.parts[:n]] != [
+                p.casefold() for p in home.parts]:
+            return None
+        rel = Path(*path.parts[n:]) if len(path.parts) > n else Path()
+    for root in roots:
+        want = root.split("/")
+        if len(rel.parts) >= len(want) and all(
+                _name_matches(p, w, fold) for p, w in zip(rel.parts, want)):
+            return home.joinpath(*rel.parts[:len(want)])
+    return None
 
 
 def _vault_location_paths(given: Path) -> list[Path]:
@@ -280,17 +321,24 @@ def _vault_location_paths(given: Path) -> list[Path]:
 
 
 def _folder_holding(paths: list[Path], roots: tuple[str, ...],
-                    fold: bool) -> Optional[tuple[Path, Path]]:
-    """(folder, path) for the first of `paths` that is, or is inside, an
-    existing folder under $HOME named by `roots`. Folders compare by their
-    resolved location, and `paths` always holds the vault's resolved path,
-    so either spelling of a symlinked $HOME and a sync folder moved and
-    linked back both match."""
-    existing = _existing_roots(Path.home(), roots, fold)
+                    fold: bool) -> Optional[tuple[Path, Path, Path]]:
+    """(folder, its resolved location, path) for the first of `paths` that
+    is, or is inside, a folder under $HOME named by `roots`. Folders compare
+    by their resolved location, and `paths` always holds the vault's
+    resolved path, so either spelling of a symlinked $HOME and a sync folder
+    moved and linked back both match. When $HOME or one of its folders
+    cannot be listed, the spelling of each path decides instead."""
+    home = Path.home()
+    existing, unlisted = _existing_roots(home, roots, fold)
     for path in paths:
         for folder, real in existing:
-            if path == real or real in path.parents:
-                return folder, path
+            if _within(path, real, fold):
+                return folder, real, path
+        if unlisted:
+            for h in (home, home.resolve()):
+                folder = _root_named_in(path, h, roots, fold)
+                if folder is not None:
+                    return folder, folder, path
     return None
 
 
@@ -320,12 +368,16 @@ def check_vault_location(vault_path: Optional[str]) -> CheckResult:
             return str(given)
         return f"the git directory of {given} ({path})"
 
+    def folder_name(folder: Path, real: Path) -> str:
+        return str(folder) if real == folder else f"{folder} (a link to {real})"
+
     hit = _folder_holding(paths, _SYNC_ROOTS, macos)
     if hit is not None:
-        root, path = hit
+        folder, real, path = hit
         return CheckResult(
             "FAIL", label,
-            f"{where(path)} is inside the cloud-sync folder {root}; sync "
+            f"{where(path)} is inside the cloud-sync folder "
+            f"{folder_name(folder, real)}; sync "
             "clients rewrite files under .git and leave conflict copies, "
             "which corrupts the repository",
             "Move the vault to a folder that is not synced and point "
@@ -337,10 +389,11 @@ def check_vault_location(vault_path: Optional[str]) -> CheckResult:
     if macos:
         hit = _folder_holding(paths, _ICLOUD_OPTIONAL_ROOTS, True)
         if hit is not None:
-            root, path = hit
+            folder, real, path = hit
             return CheckResult(
                 "WARN", label,
-                f"{where(path)} is inside {root}, which iCloud syncs when "
+                f"{where(path)} is inside {folder_name(folder, real)}, "
+                "which iCloud syncs when "
                 "\"Desktop & Documents Folders\" is on; a synced vault gets "
                 "corrupted .git files and conflict copies",
                 "If that iCloud setting is on, move the vault to a folder "

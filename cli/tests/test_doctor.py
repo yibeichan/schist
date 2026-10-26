@@ -419,6 +419,56 @@ class TestCheckVaultLocation:
         vault.mkdir()
         assert "known" in check_vault_location(str(vault)).message
 
+    def test_macos_compare_ignores_the_case_of_the_typed_path(self):
+        # Resolving keeps the case the user typed, so on macOS the vault's
+        # own spelling must be compared case-insensitively too.
+        from schist.doctor import _within
+        assert _within(Path("/h/dropbox/v"), Path("/h/Dropbox"), True)
+        assert _within(Path("/h/Dropbox"), Path("/h/DROPBOX"), True)
+        assert not _within(Path("/h/dropbox/v"), Path("/h/Dropbox"), False)
+        assert not _within(Path("/h/dropboxes/v"), Path("/h/Dropbox"), True)
+
+    def test_macos_sync_folder_inside_documents_fails(self, home, monkeypatch):
+        # ~/Dropbox is a link into ~/Documents: the vault is in both, and
+        # the FAIL for the sync folder wins over the WARN for Documents.
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        real = home / "Documents" / "Dropbox"
+        (real / "vault").mkdir(parents=True)
+        (home / "Dropbox").symlink_to(real)
+        r = check_vault_location(str(real / "vault"))
+        assert r.status == "FAIL", r
+        assert "a link to" in r.message
+
+    def test_unlistable_home_falls_back_to_the_path_spelling(
+            self, home, monkeypatch):
+        vault = home / "Dropbox" / "vault"
+        vault.mkdir(parents=True)
+        (home / "schist-vault").mkdir()
+        real_iterdir = Path.iterdir
+
+        def iterdir(self):
+            if self == home:
+                raise PermissionError("no listing")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", iterdir)
+        assert check_vault_location(str(vault)).status == "FAIL"
+        assert check_vault_location(str(home / "schist-vault")).status == "PASS"
+
+    def test_home_is_listed_once(self, home, monkeypatch):
+        (home / "schist-vault").mkdir()
+        calls = []
+        real_iterdir = Path.iterdir
+
+        def iterdir(self):
+            calls.append(self)
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", iterdir)
+        check_vault_location(str(home / "schist-vault"))
+        assert calls.count(home) == 1
+
     def test_tilde_path_is_expanded(self, home, monkeypatch):
         (home / "Dropbox" / "vault").mkdir(parents=True)
         monkeypatch.setenv("HOME", str(home))
