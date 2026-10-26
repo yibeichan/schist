@@ -924,7 +924,7 @@ SPDX-License-Identifier: Apache-2.0
     if (name) return { cls: "", name, open: true, tip: name };
     const newer = cited && typeof cited[id] === "string" ? cited[id] : null;
     if (newer) return { cls: " newer", name: newer, open: false,
-      tip: `${newer} — added after this page was built; reload the page to open it` };
+      tip: `${newer} — in the vault but not in this page, which was built before it; rebuild the site and reload to open it` };
     if (!final) return { cls: " pending", name: null, open: false, tip: id };
     return { cls: " unknown", name: null, open: false,
       tip: `${id} — no note has this id; the model may have invented it` };

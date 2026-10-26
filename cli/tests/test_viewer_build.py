@@ -548,7 +548,7 @@ process.stdout.write(JSON.stringify(out));
         out = json.loads(res.stdout)
         assert out["notes/old.md"]["final"]["cls"] == "" and out["notes/old.md"]["final"]["open"]
         assert out["notes/new.md"]["final"]["cls"] == " newer"
-        assert "reload the page" in out["notes/new.md"]["final"]["tip"]
+        assert "rebuild the site and reload" in out["notes/new.md"]["final"]["tip"]
         assert out["notes/fake.md"]["final"]["cls"] == " unknown"
         # Mid-stream nothing is struck through yet.
         assert out["notes/new.md"]["streaming"]["cls"] == " pending"
