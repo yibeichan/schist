@@ -24,12 +24,21 @@ Stdlib-only, so the ``viewer/build.py`` shim can run it without an install.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
-import shutil
+import re
 import sqlite3
 from pathlib import Path
 
 INDEX_HTML = Path(__file__).parent / "index.html"
+
+# Stands in index.html's Content-Security-Policy for the hashes of the page's
+# inline scripts, which render_page fills in. Unfilled it is not a valid
+# source expression, so a page served without a build runs no inline script.
+INLINE_SCRIPT_HASHES = "'inline-script-hashes'"
+_INLINE_SCRIPT = re.compile(r"<script>(.*?)</script>", re.S)
+_CSP_META = re.compile(r'<meta http-equiv="Content-Security-Policy" content="[^"]*"')
 
 
 class ViewerPageMissing(FileNotFoundError):
@@ -171,6 +180,29 @@ def build_search_index(db: sqlite3.Connection) -> dict:
     return {"documents": documents, "store": store}
 
 
+def render_page(html: str) -> str:
+    """Fill the page's script-src with a SHA-256 hash of each inline script.
+
+    The policy allows only the pinned CDN files and these exact inline
+    scripts, so markup that gets past DOMPurify cannot run script (#761).
+    Hashing at build time keeps the policy right after any edit to the page.
+    """
+    csp = _CSP_META.search(html)
+    if not csp or INLINE_SCRIPT_HASHES not in csp.group(0):
+        raise ViewerPageMissing(
+            f"viewer page {INDEX_HTML} has no {INLINE_SCRIPT_HASHES} placeholder in its "
+            "Content-Security-Policy, so its scripts could not run. Reinstall the CLI "
+            "(uv tool install --reinstall <path-to-cli>), or in a checkout restore it "
+            "with: git checkout -- cli/schist/viewer/index.html"
+        )
+    hashes = " ".join(
+        "'sha256-" + base64.b64encode(hashlib.sha256(m.encode("utf-8")).digest()).decode() + "'"
+        for m in _INLINE_SCRIPT.findall(html)
+    )
+    filled = csp.group(0).replace(INLINE_SCRIPT_HASHES, hashes)
+    return html[:csp.start()] + filled + html[csp.end():]
+
+
 def write_site(db_path: Path, out_dir: Path) -> dict:
     """Write graph.json, search-index.json and index.html into ``out_dir``.
 
@@ -187,6 +219,7 @@ def write_site(db_path: Path, out_dir: Path) -> dict:
             f"it with: git checkout -- cli/schist/viewer/index.html"
         )
 
+    page = render_page(INDEX_HTML.read_text(encoding="utf-8"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     db = sqlite3.connect(db_path)
@@ -200,10 +233,10 @@ def write_site(db_path: Path, out_dir: Path) -> dict:
     search_out = out_dir / "search-index.json"
     graph_out.write_text(json.dumps(graph, indent=2, ensure_ascii=False), encoding="utf-8")
     search_out.write_text(json.dumps(search, indent=2, ensure_ascii=False), encoding="utf-8")
-    # copyfile, not copy: an installed page can be read-only (a Nix store
-    # file is 0444), and copying its mode would make the next build into
-    # this directory fail to overwrite it.
-    shutil.copyfile(INDEX_HTML, out_dir / "index.html")
+    # Written, not copied: the page's CSP gets its inline-script hashes here.
+    # An installed page can be read-only (a Nix store file is 0444); writing
+    # its text never carries that mode over to the built copy.
+    (out_dir / "index.html").write_text(page, encoding="utf-8")
 
     counts = {
         "nodes": len(graph["nodes"]),
