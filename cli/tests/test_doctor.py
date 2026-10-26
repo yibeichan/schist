@@ -244,6 +244,22 @@ class TestCheckVaultLocation:
         vault.mkdir(parents=True)
         assert check_vault_location(str(vault)).status == "PASS"
 
+    def test_two_level_root_needs_its_parent(self, home):
+        # "CloudStorage" counts only as Library/CloudStorage.
+        vault = home / "Projects" / "CloudStorage" / "vault"
+        vault.mkdir(parents=True)
+        assert check_vault_location(str(vault)).status == "PASS"
+
+    def test_home_reached_through_a_symlink(self, tmp_path, monkeypatch):
+        # ORCD-style: $HOME is a symlink, the vault path is given resolved.
+        real = tmp_path / "real-home"
+        (real / "Dropbox" / "vault").mkdir(parents=True)
+        link = tmp_path / "home"
+        link.symlink_to(real)
+        monkeypatch.setattr("pathlib.Path.home", lambda: link)
+        r = check_vault_location(str(real / "Dropbox" / "vault"))
+        assert r.status == "FAIL"
+
     def test_symlink_into_sync_folder_fails(self, home):
         target = home / "Dropbox" / "vault"
         target.mkdir(parents=True)
