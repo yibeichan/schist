@@ -348,7 +348,8 @@ class TestBuildE2E:
         search_out = out_dir / "search-index.json"
         assert graph_out.is_file()
         assert search_out.is_file()
-        assert (out_dir / "index.html").read_bytes() == build.INDEX_HTML.read_bytes()
+        assert (out_dir / "index.html").read_text(encoding="utf-8") == build.render_page(
+            build.INDEX_HTML.read_text(encoding="utf-8"))
 
         graph = json.loads(graph_out.read_text())
         assert "nodes" in graph and "links" in graph
@@ -422,15 +423,20 @@ class TestShapeContract:
         # buttons, checked in test_ask_buttons_are_styled.
         main = self.PAGE[:self.PAGE.index("// ── Ask the vault")]
         classes = set(re.findall(r'el\("button",\s*"([\w-]+)', main))
-        assert {"result-item", "conn-item"} <= classes  # guards against a regex that matches nothing
+        rows = {"result-item", "conn-item"}
+        assert rows <= classes  # guards against a regex that matches nothing
         css = re.sub(r"/\*.*?\*/", "", self.PAGE, flags=re.S)
         rules = re.findall(r"([^{}]+)\{([^}]*)\}", css)
         for cls in classes:
             decls = " ".join(body for sel, body in rules
                              if f".{cls}" in [s.strip() for s in sel.split(",")])
             assert re.search(r"background:\s*(transparent|none)", decls), f".{cls} keeps the button background"
-            assert re.search(r"color:\s*inherit", decls), f".{cls} keeps the button text colour"
-            assert re.search(r"text-align:\s*left", decls), f".{cls} keeps centred button text"
+            if cls in rows:
+                assert re.search(r"color:\s*inherit", decls), f".{cls} keeps the button text colour"
+                assert re.search(r"text-align:\s*left", decls), f".{cls} keeps centred button text"
+            else:
+                # Chips are styled buttons, not rows: they set their own colour.
+                assert re.search(r"(?<![-\w])color:\s*\S", decls), f".{cls} keeps the button text colour"
 
     def test_rebuild_bar_is_hidden_unless_the_server_answers(self):
         """The Rebuild button needs a server with /api/status; served as plain
@@ -483,6 +489,64 @@ class TestShapeContract:
                              if any(re.search(rf"\.{cls}(?![\w-])", part) for part in sel.split(",")))
             assert re.search(r"background:", decls), f".{cls} keeps the button background"
             assert re.search(r"(?<![-\w])color:", decls), f".{cls} keeps the button text colour"
+
+    @staticmethod
+    def _policy(page):
+        csp = re.search(r'http-equiv="Content-Security-Policy" content="([^"]+)"', page)
+        assert csp, "the page declares no Content-Security-Policy"
+        return {d.split()[0]: d.split()[1:] for d in csp.group(1).split(";") if d.strip()}
+
+    def test_scripts_are_limited_to_pinned_files_and_the_page_own(self):
+        """#761: with no script-src the browser ran any script that got past
+        DOMPurify. The policy names exactly the CDN files the page loads and a
+        placeholder the build turns into inline-script hashes, and no source
+        that would let other script run."""
+        script_src = self._policy(self.PAGE)["script-src"]
+        srcs = re.findall(r'<script\b[^>]*\bsrc="([^"]+)"', self.PAGE)
+        assert len(srcs) >= 4
+        assert script_src == srcs + [build.INLINE_SCRIPT_HASHES]
+        for bad in ("'unsafe-inline'", "'unsafe-eval'", "*", "https:", "'self'"):
+            assert bad not in script_src
+
+    def test_inline_scripts_are_hashable_and_handlers_absent(self):
+        """A hash covers only a bare <script>...</script> block, and the policy
+        blocks inline event handlers, so the page may use neither another
+        script-tag form nor on* attributes."""
+        tags = re.findall(r"<script\b[^>]*>", self.PAGE)
+        inline = [t for t in tags if "src=" not in t]
+        assert inline and all(t == "<script>" for t in inline), inline
+        markup = re.sub(r"<script\b[^>]*>.*?</script>", "", self.PAGE, flags=re.S)
+        markup = re.sub(r"<!--.*?-->", "", markup, flags=re.S)
+        assert not re.search(r"<[^>]*\son[a-z]+\s*=", markup, flags=re.I)
+        assert "javascript:" not in markup.lower()
+
+    def test_build_hashes_every_inline_script(self):
+        import base64
+        import hashlib
+
+        rendered = build.render_page(self.PAGE)
+        script_src = self._policy(rendered)["script-src"]
+        blocks = re.findall(r"<script>(.*?)</script>", rendered, flags=re.S)
+        expected = ["'sha256-" + base64.b64encode(hashlib.sha256(b.encode()).digest()).decode() + "'"
+                    for b in blocks]
+        assert len(expected) >= 3
+        assert [s for s in script_src if s.startswith("'sha256-")] == expected
+        assert build.INLINE_SCRIPT_HASHES not in rendered
+
+    @pytest.mark.parametrize("end", ["</script >", "</SCRIPT>", "</script/>"])
+    def test_a_script_end_tag_the_hash_cannot_follow_is_refused(self, end):
+        """The browser ends a script at any of these spellings, the hashing
+        regex only at `</script>`, so it would hash two scripts as one and
+        the page would run neither while every test stayed green."""
+        first = re.search(r"<script>(.*?)</script>", self.PAGE, flags=re.S)
+        page = self.PAGE[:first.end() - len("</script>")] + end + self.PAGE[first.end():]
+        with pytest.raises(build.ViewerPageMissing, match="inline script"):
+            build.render_page(page)
+
+    def test_a_script_tag_inside_an_inline_script_is_refused(self):
+        page = self.PAGE.replace("<script>", "<script>/* <!--<script */", 1)
+        with pytest.raises(build.ViewerPageMissing, match="inline script"):
+            build.render_page(page)
 
     def test_rendering_cannot_fetch_other_hosts(self):
         """Rendered notes and agent answers can carry markup that fetches a URL
@@ -558,6 +622,89 @@ process.stdout.write(JSON.stringify(out));
         assert re.search(r"renderAnswer\(t\.answer, t\.sources, text, cited, true\)", self.PAGE)
         assert 'kind === "cited"' in self.PAGE
 
+
+    def test_list_filters_by_type_status_and_tags(self):
+        """The list filters by vault directory (a note's type), status and
+        tags: values within a facet are alternatives, facets combine, every
+        tag must match, and a facet's own counts ignore that facet."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node not installed")
+        fns = []
+        for name in ("nodeKind", "nodeProjects", "filtersOn", "matchesFilters", "facetCounts"):
+            m = re.search(rf"function {name}\(.*?\n  \}}\n", self.PAGE, re.S)
+            assert m, f"{name} not found"
+            fns.append(m.group(0))
+        script = "\n".join(fns) + """
+const nodes = [
+  { id: "ops/a.md", type: "note", status: "active", tags: ["security", "hub", "project:alpha"] },
+  { id: "ops/b.md", type: "note", status: "final", tags: ["security", "project:beta"] },
+  { id: "decisions/c.md", type: "note", status: "active", tags: ["hub", "project:alpha", "project:beta"] },
+  { id: "papers/d.md", type: "note", status: "final", tags: [] },
+  { id: "top.md", type: "note", status: "draft", tags: [] },
+  { id: "locking", type: "concept" },
+];
+const F = (type = [], status = [], tag = [], project = []) =>
+  ({ type: new Set(type), project: new Set(project), status: new Set(status), tag: new Set(tag) });
+const ids = f => nodes.filter(n => matchesFilters(n, f)).map(n => n.id);
+const counts = (f, facet, fn) => Object.fromEntries(facetCounts(nodes, f, facet, fn));
+process.stdout.write(JSON.stringify({
+  kinds: nodes.map(nodeKind),
+  none: ids(F()), on: [filtersOn(F()), filtersOn(F([], [], ["hub"]))],
+  orWithin: ids(F(["ops", "decisions"])),
+  andAcross: ids(F(["ops"], ["active"])),
+  allTags: ids(F([], [], ["security", "hub"])),
+  concepts: ids(F(["concepts"])),
+  conceptsHaveNoStatus: ids(F(["concepts"], ["active"])),
+  typeCounts: counts(F(["ops"], ["active"]), "type", nodeKind),
+  statusCounts: counts(F(["ops"], ["active"]), "status", n => n.status),
+  projects: nodes.map(nodeProjects),
+  projectOr: ids(F([], [], [], ["alpha"])),
+  projectTwo: ids(F([], [], [], ["alpha", "beta"])),
+  projectAndType: ids(F(["ops"], [], [], ["beta"])),
+  projectOn: filtersOn(F([], [], [], ["alpha"])),
+  projectCounts: counts(F([], ["active"], [], ["alpha"]), "project", nodeProjects),
+}));
+"""
+        res = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+        assert res.returncode == 0, res.stderr
+        out = json.loads(res.stdout)
+        assert out["kinds"] == ["ops", "ops", "decisions", "papers", "notes", "concepts"]
+        assert len(out["none"]) == 6 and out["on"] == [False, True]
+        assert out["orWithin"] == ["ops/a.md", "ops/b.md", "decisions/c.md"]
+        assert out["andAcross"] == ["ops/a.md"]
+        assert out["allTags"] == ["ops/a.md"]
+        assert out["concepts"] == ["locking"]
+        assert out["conceptsHaveNoStatus"] == []
+        # Type counts apply the status filter but not the type filter, and
+        # status counts the reverse, so each chip shows what selecting it gives.
+        assert out["typeCounts"] == {"ops": 1, "decisions": 1}
+        assert out["statusCounts"] == {"active": 1, "final": 1}
+        # Projects come from project:<repo> tags; a note can be in several.
+        assert out["projects"] == [["alpha"], ["beta"], ["alpha", "beta"], [], [], []]
+        assert out["projectOr"] == ["ops/a.md", "decisions/c.md"]
+        # Two projects selected: a note in either one matches, not only one in both.
+        assert out["projectTwo"] == ["ops/a.md", "ops/b.md", "decisions/c.md"]
+        assert out["projectAndType"] == ["ops/b.md"]
+        assert out["projectOn"] is True
+        # A note in two projects counts for both; the project filter itself is skipped.
+        assert out["projectCounts"] == {"alpha": 2, "beta": 1}
+
+    def test_filter_controls_are_accessible_and_restored_from_the_url(self):
+        assert 'b.setAttribute("aria-pressed"' in self.PAGE
+        assert 'role="group" aria-labelledby="type-label"' in self.PAGE
+        assert 'x.setAttribute("aria-label", `Remove tag filter ${t}`)' in self.PAGE
+        assert '<label for="tag-input">' in self.PAGE
+        # Filters round-trip through the hash, and only known values come back.
+        assert re.search(r"function readHash\(\)", self.PAGE) and re.search(r"function writeHash\(\)", self.PAGE)
+        assert "history.replaceState(" in self.PAGE
+        known = re.search(r"const known = \{(.*?)\};", self.PAGE, re.S)
+        assert known, "readHash validation not found"
+        for check in ("tag: tagCounts.has(v)", "type: typeOrder.includes(v)",
+                      "project: projectOrder.includes(v)", "status: statusOrder.includes(v)"):
+            assert check in known.group(1), check
+        assert 'role="group" aria-labelledby="project-label"' in self.PAGE
+
     def test_page_reads_only_fields_the_builder_writes(self, vault_db):
         graph = build.build_graph(vault_db)
         search = build.build_search_index(vault_db)
@@ -611,6 +758,22 @@ process.stdout.write(JSON.stringify(out));
             build.write_site(_persist(vault_db, tmp_path / "schist.db"), tmp_path / "site")
         assert not (tmp_path / "site").exists()
 
+    def test_page_without_the_csp_placeholder_raises_before_writing(
+            self, tmp_path, vault_db, monkeypatch):
+        page = tmp_path / "index.html"
+        page.write_text("<!doctype html><script>x()</script>", encoding="utf-8")
+        monkeypatch.setattr(build, "INDEX_HTML", page)
+        with pytest.raises(build.ViewerPageMissing, match="placeholder"):
+            build.write_site(_persist(vault_db, tmp_path / "schist.db"), tmp_path / "site")
+        assert not (tmp_path / "site").exists()
+
+    def test_built_page_has_its_inline_script_hashes(self, tmp_path, vault_db):
+        out = tmp_path / "site"
+        build.write_site(_persist(vault_db, tmp_path / "schist.db"), out)
+        page = (out / "index.html").read_text(encoding="utf-8")
+        assert build.INLINE_SCRIPT_HASHES not in page
+        assert page == build.render_page(build.INDEX_HTML.read_text(encoding="utf-8"))
+
     def test_output_is_ascii(self, tmp_path, vault_db, capsys):
         build.write_site(_persist(vault_db, tmp_path / "schist.db"), tmp_path / "site")
         out = capsys.readouterr().out
@@ -661,7 +824,8 @@ class TestSchistBuildCommand:
             "context": "",
         } in graph["links"]
         assert list(search["store"]) == ["notes/2026-04-16-hello.md"]
-        assert (out / "index.html").read_bytes() == build.INDEX_HTML.read_bytes()
+        assert (out / "index.html").read_text(encoding="utf-8") == build.render_page(
+            build.INDEX_HTML.read_text(encoding="utf-8"))
 
     def test_schist_build_missing_page_is_one_error_line(self, tmp_path):
         """A broken install prints `Error: ...` and exits 1, not a traceback (#603)."""
@@ -704,12 +868,15 @@ class TestSchistBuildCommand:
             capture_output=True, text=True, check=True,
             env={**os.environ, "PYTHONPATH": str(old.parent)},
         )
-        assert (out / "index.html").read_bytes() == build.INDEX_HTML.read_bytes()
+        assert (out / "index.html").read_text(encoding="utf-8") == build.render_page(
+            build.INDEX_HTML.read_text(encoding="utf-8"))
 
     def test_copied_page_is_writable_when_installed_page_is_not(self, tmp_path, vault_db, monkeypatch):
         page = tmp_path / "installed" / "index.html"
         page.parent.mkdir()
-        page.write_text("<!doctype html>", encoding="utf-8")
+        page.write_text(
+            '<!doctype html><meta http-equiv="Content-Security-Policy" '
+            'content="script-src \'inline-script-hashes\'" />', encoding="utf-8")
         page.chmod(0o444)
         monkeypatch.setattr(build, "INDEX_HTML", page)
         db = _persist(vault_db, tmp_path / "schist.db")

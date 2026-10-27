@@ -359,3 +359,26 @@ cat ~/my-vault/.schist/spoke.yaml
 ```
 
 Common causes: SSH key not loaded, hub URL wrong, or firewall blocking the connection.
+
+### 9. `Vault access: MCP servers other than schist can read the vault`
+
+A server whose command, arguments or environment name the vault, a folder inside it, or a folder that contains it (for example a filesystem server rooted at `~`) reads notes directly, without schist's scope and ACL checks. `schist doctor` reads the servers each client would start:
+
+- Claude Code: user and local scope in `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`), and project scope in `.mcp.json` in the project folder and every folder above it, leaving out servers listed in `disabledMcpjsonServers` (in `~/.claude.json`, the user settings in `~/.claude` or `$CLAUDE_CONFIG_DIR`, or the project's `.claude/settings.json` and `settings.local.json`);
+- Codex: `${CODEX_HOME:-~/.codex}/config.toml`, and `.codex/config.toml` in projects with `trust_level = "trusted"`, leaving out servers with `enabled = false`; variables named in `env_vars` are read from the environment;
+- Cursor: `~/.cursor/mcp.json`, and `.cursor/mcp.json` in the vault and every project Claude Code lists (Cursor keeps no project list doctor can read);
+- Claude Desktop and Claude Science configs.
+
+Projects are the vault, every project Claude Code lists, and every project Codex trusts. Paths are found inside longer strings too (`--root=<path>`, `src=<path>,dst=...`, `-v <path>:/data`, quoted words in a shell script, `file://` URLs), after expanding the variables these clients expand (`${HOME}`, `${VAR:-default}`, `${env:NAME}`, `${userHome}`, `${workspaceFolder}`, and `$NAME` in a shell command's script); a variable that is not set where doctor runs is taken from the server's own `env` block. A folder a shell script changes into (`cd ~`) counts like any other path it names. `/` on its own counts as a folder that contains the vault, even where it is a URL path such as `--sse-path=/`; allow such a server by name. Relative paths (`.`, `./x`, `../x`, and `notes/x` when it exists) count against the server's `cwd` or its project folder, and so does a bare name such as `notes` when it is a positional argument that exists there; the folder a server starts in does not count by itself. Environment variables such as `HOME` and `TMPDIR` count only when they point into the vault. The result names each server and field, never the value.
+
+The check WARNs when it cannot decide: a config file it cannot parse, a variable that is not set in the shell running `doctor` (in arguments, or in an environment variable whose name suggests a path), a `./` path with no known start folder, or a malformed allowlist. It cannot see a folder given to a server some other way, such as through the MCP roots a client offers or a Claude Desktop extension's own settings, and servers reached by URL have no local paths to check; the PASS message names those.
+
+The schist server itself is recognized by what it runs, whatever its entry is called: the `@schist/mcp-server` npm package, or a script whose `package.json` names that package, also when a launcher such as `/usr/bin/env` or `singularity exec <image>` runs it. Only when that cannot be told (a wrapper script, or a build missing from this machine) does the entry's name decide: `schist`, `schist-<name>` or `schist <name>`, with `SCHIST_VAULT_PATH` in its environment or a `mcp-server/dist/index.js` script.
+
+Remove the vault path, or the folder that contains it, from that server. If a server should read the vault, list it by name in `.schist/vault-access.yaml` in the vault, quoting names YAML would read as something else (`'on'`, `'007'`):
+
+```yaml
+allowed_mcp_servers: [obsidian]
+```
+
+The check then passes and names the allowed servers. The file is per machine: `.schist/` is not tracked or synced, so list the server on each machine where it should read the vault. A missing file allows nothing; a file the check cannot read or parse also allows nothing and makes it WARN.

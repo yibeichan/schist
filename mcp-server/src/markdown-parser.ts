@@ -275,6 +275,30 @@ function patchFrontmatterFlowHashtags(content: string): string {
   return patched ? patchedLines.join("\n") : content;
 }
 
+// Python's bytes.strip() whitespace: space, \t, \n, \r, \v, \f. Not JS
+// trim(), which also strips U+00A0, U+FEFF, U+2028 and the rest of Unicode's
+// space separators, so `---\u00a0` would pass here and fail at the hub.
+const OPENER_BLANK_RE = /^[ \t\n\r\v\f]*$/;
+
+/**
+ * True when the hub's pre-receive hook refuses a note with this content: a
+ * port of `_bad_opener` in cli/schist/pre_receive.py. After one leading BOM,
+ * the note opens with `---`, the fourth character is not another `-`, and
+ * the rest of the first line (up to `\n`) is not blank.
+ *
+ * This is stricter than parseNote, which reads `---yaml`, `---YML` and
+ * `--- yaml` as YAML (gray-matter aliases them to its yaml engine). A writer
+ * that keeps a note's first line must check this before committing it.
+ * schema/frontmatter-opener-parity.json pins both implementations.
+ */
+export function hasNonYamlOpener(content: string): boolean {
+  const s = content.startsWith("\uFEFF") ? content.slice(1) : content;
+  if (!s.startsWith("---") || s[3] === "-") return false;
+  const nl = s.indexOf("\n");
+  const rest = nl === -1 ? s.slice(3) : s.slice(3, nl);
+  return !OPENER_BLANK_RE.test(rest);
+}
+
 // gray-matter reads the text after the opening `---` as a language name, and
 // its built-in `javascript` engine evaluates the block. Note content arrives
 // from every participant through the hub, so only YAML is parsed: the other

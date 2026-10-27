@@ -273,3 +273,44 @@ def test_global_scope_spoke_checks_out_content_dirs(tmp_path, monkeypatch, capsy
     assert "global" not in cone
     assert set(cone) == set(git_ops._global_scope_dirs())
     assert "scope=global (2 files)" in capsys.readouterr().out
+
+
+def test_global_scope_spoke_cone_follows_committed_schist_yaml(tmp_path, monkeypatch):
+    """#734: the spoke clone has no checkout, so schist.yaml is not on
+    disk when the cone is set. Reading the disk set the cone from the
+    packaged list, left out the directories the vault adds, and `git add` of
+    those tracked, not-checked-out directories then failed every push."""
+    from schist import git_ops
+    from schist.sync import init_spoke
+
+    src = tmp_path / "src"
+    src.mkdir()
+    _run(["git", "init", "-q"], cwd=src)
+    _run(["git", "config", "user.email", "t@test"], cwd=src)
+    _run(["git", "config", "user.name", "t"], cwd=src)
+    (src / "vault.yaml").write_text("name: e2e\n")
+    (src / "schist.yaml").write_text("directories: [notes, tools, figures]\n")
+    for rel in ("notes/a.md", "tools/t.md", "figures/f.md"):
+        (src / rel).parent.mkdir()
+        (src / rel).write_text("---\ntitle: x\n---\n")
+    _run(["git", "add", "-A"], cwd=src)
+    _run(["git", "commit", "-q", "-m", "seed"], cwd=src)
+
+    monkeypatch.setattr("schist.sync._rebuild_index", lambda *a, **k: None)
+    spoke = tmp_path / "spoke"
+    init_spoke(
+        SimpleNamespace(hub=f"file://{src}", scope="global", identity="gamma"),
+        str(spoke),
+        str(tmp_path / "db.sqlite"),
+    )
+
+    cone = _run(["git", "sparse-checkout", "list"], cwd=spoke).stdout.split()
+    assert set(cone) == {"notes", "tools", "figures"}
+    assert (spoke / "tools" / "t.md").exists()
+
+    (spoke / "notes" / "a.md").write_text("---\ntitle: y\n---\n")
+    (spoke / "tools" / "t.md").write_text("---\ntitle: y\n---\n")
+    ok, msg = git_ops.stage_scope_files(str(spoke), "global")
+    assert ok, msg
+    staged = _run(["git", "diff", "--cached", "--name-only"], cwd=spoke).stdout.split()
+    assert staged == ["notes/a.md", "tools/t.md"]

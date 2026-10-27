@@ -941,6 +941,31 @@ class TestSyncPush:
         assert "research/mario/.DS_Store" in captured.err
         assert "Nothing to push" in captured.out
 
+    @patch("schist.sync.git_ops.has_unpushed_commits", return_value=False)
+    @patch("schist.sync.git_ops.stage_scope_files")
+    @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=True)
+    @patch("subprocess.run")
+    def test_push_surfaces_each_stage_warning_line(
+        self, mock_run, mock_changes, mock_stage, mock_unpushed, tmp_path, capsys
+    ):
+        """A junk skip and a directory outside the sparse cone arrive as two
+        lines; each is printed as its own warning and the push proceeds."""
+        from schist import git_ops
+        from schist.sync import sync_push
+
+        vault = _make_spoke(tmp_path)
+        mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
+        mock_stage.return_value = (True, (
+            f"{git_ops.JUNK_SKIP_WARNING_PREFIX} under scope 'global': notes/.DS_Store.\n"
+            f"{git_ops.SPARSE_SKIP_WARNING_PREFIX}: tools/ (listed in the vault's "
+            f"schist.yaml). Run `git sparse-checkout add tools` in the vault."
+        ))
+        sync_push(MagicMock(force=False), vault, "db.sqlite")
+
+        err = capsys.readouterr().err
+        assert f"Warning: {git_ops.JUNK_SKIP_WARNING_PREFIX}" in err
+        assert f"Warning: {git_ops.SPARSE_SKIP_WARNING_PREFIX}" in err
+
     @patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False)
     @patch("subprocess.run")
     def test_push_force_keeps_merge_head_when_abort_fails(

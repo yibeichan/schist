@@ -1,0 +1,21 @@
+[
+  {"name": "plain list kept in order", "config": {"directories": ["notes", "tools", "figures"]}, "dirs": ["notes", "tools", "figures"]},
+  {"name": "trailing slash stripped", "config": {"directories": ["notes/", "tools//"]}, "dirs": ["notes", "tools"]},
+  {"name": "duplicates merged, first occurrence first", "config": {"directories": ["tools", "notes", "tools/"]}, "dirs": ["tools", "notes"]},
+  {"name": "nested entry counts by its first segment", "config": {"directories": ["research/ai", "research"]}, "dirs": ["research"]},
+  {"name": "leading ./ is dropped like ingest's Path().parts", "config": {"directories": ["./notes"]}, "dirs": ["notes"]},
+  {"name": "doubled slash inside an entry", "config": {"directories": ["notes//x"]}, "dirs": ["notes"]},
+  {"name": "absolute entry dropped", "config": {"directories": ["/etc", "notes"]}, "dirs": ["notes"]},
+  {"name": "dot and dot-dot dropped", "config": {"directories": [".", "..", "../x", "notes"]}, "dirs": ["notes"]},
+  {"name": "dot-prefixed dropped", "config": {"directories": [".schist", ".git", "notes"]}, "dirs": ["notes"]},
+  {"name": "empty entry dropped", "config": {"directories": ["", "/", "notes"]}, "dirs": ["notes"]},
+  {"name": "pathspec magic dropped", "config": {"directories": [":", ":/", ":!notes", ":(glob)x", "notes"]}, "dirs": ["notes"]},
+  {"name": "glob characters dropped", "config": {"directories": ["*", "n?tes", "[a]", "a\\b", "notes"]}, "dirs": ["notes"]},
+  {"name": "number entry is its string form", "config": {"directories": [2024]}, "dirs": ["2024"]},
+  {"name": "every entry dropped gives an empty list", "config": {"directories": [".", ":"]}, "dirs": []},
+  {"name": "empty list", "config": {"directories": []}, "dirs": []},
+  {"name": "mapping is not a list", "config": {"directories": {"notes": "notes"}}, "dirs": null},
+  {"name": "no directories key", "config": {"name": "x"}, "dirs": null},
+  {"name": "top level is a list", "config": ["notes"], "dirs": null},
+  {"name": "top level is null", "config": null, "dirs": null}
+]

@@ -7,7 +7,7 @@
 import fnmatch
 import os
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import signal
 import subprocess
 import threading
@@ -287,6 +287,14 @@ IGNORE_GUARD_JUNK_BASENAMES = ('.DS_Store', 'Thumbs.db', 'desktop.ini', '*~')
 # this to surface the warning WITHOUT treating staging as failed — same
 # contract as HOOK_STALL_WARNING_PREFIX below.
 JUNK_SKIP_WARNING_PREFIX = "skipped .gitignore-excluded junk file(s)"
+
+# Prefix of the success-with-warning line stage_scope_files returns when a
+# `global` directory lies outside the spoke's sparse-checkout cone, so it is
+# not staged (#734). sync_push prints it and keeps syncing.
+SPARSE_SKIP_WARNING_PREFIX = "not staged: outside this spoke's sparse checkout"
+
+# Every success-with-warning prefix stage_scope_files can return, one per line.
+STAGE_WARNING_PREFIXES = (JUNK_SKIP_WARNING_PREFIX, SPARSE_SKIP_WARNING_PREFIX)
 
 
 def _is_junk_basename(path: str) -> bool:
@@ -632,7 +640,15 @@ def setup_sparse_checkout(vault_path: str, scope: str) -> tuple[bool, str]:
     and other root configs are always available. `global` is a logical
     scope, not a directory: it expands to every content directory, or the
     cone would be a single nonexistent global/ and check out no notes (#786).
+    Those directories come from the COMMITTED schist.yaml: the clone has no
+    checkout yet, so the file is not on disk, and reading the disk would set
+    the cone from the packaged list and leave out every directory the vault
+    adds (#734).
     """
+    if scope == "global":
+        dirs = _global_scope_dirs(vault_path, _committed_schist_yaml(vault_path))
+    else:
+        dirs = scope_dirs(scope)
     try:
         # All three are local index/worktree operations, but each can hang
         # indefinitely on a stale index.lock or an NFS stall (#345) — the
@@ -644,7 +660,7 @@ def setup_sparse_checkout(vault_path: str, scope: str) -> tuple[bool, str]:
             timeout=30,
         )
         subprocess.run(
-            ['git', 'sparse-checkout', 'set', *scope_dirs(scope)],
+            ['git', 'sparse-checkout', 'set', *dirs],
             cwd=vault_path, check=True, capture_output=True, **_GIT_TEXT,
             timeout=30,
         )
@@ -1167,9 +1183,21 @@ def stage_scope_files(vault_path: str, scope: str) -> tuple[bool, str]:
             "(`git status`) before syncing, so conflict markers are not pushed"
         )
     try:
-        targets = _scope_targets(vault_path, scope)
+        warnings: list[str] = []
+        if scope == "global":
+            targets, outside_cone = _global_scope_split(vault_path)
+            if outside_cone:
+                shown = ' '.join(outside_cone)
+                warnings.append(
+                    f"{SPARSE_SKIP_WARNING_PREFIX}: {', '.join(d + '/' for d in outside_cone)} "
+                    f"(listed in the vault's schist.yaml). Run "
+                    f"`git sparse-checkout add {shown}` in the vault to check "
+                    f"them out and sync them."
+                )
+        else:
+            targets = _scope_targets(vault_path, scope)
         if not targets:
-            return True, ""
+            return True, "\n".join(warnings)
 
         # timeout matches commit()'s git add (#256/#314): staging is the same
         # index-write operation and stalls the same way on NFS lock contention.
@@ -1204,11 +1232,13 @@ def stage_scope_files(vault_path: str, scope: str) -> tuple[bool, str]:
             shown = ', '.join(_display_path(p) for p in junk[:10])
             if len(junk) > 10:
                 shown += f", … and {len(junk) - 10} more"
-            return True, (
+            warnings.insert(0,
                 f"{JUNK_SKIP_WARNING_PREFIX} under scope '{scope}' "
                 f"(OS/editor litter, never syncs to the hub): {shown}. "
                 f"Delete the file(s) to silence this warning."
             )
+        if warnings:
+            return True, "\n".join(warnings)
         return True, output.strip()
     except subprocess.TimeoutExpired:
         return False, 'git add timed out after 60s (NFS stall or stale index lock?)'
@@ -1216,11 +1246,12 @@ def stage_scope_files(vault_path: str, scope: str) -> tuple[bool, str]:
         return False, (e.stdout or '') + (e.stderr or '')
 
 
-def scope_dirs(scope: str) -> list[str]:
+def scope_dirs(scope: str, vault_path: str | None = None) -> list[str]:
     """The directories a scope names: the content directories for `global`,
-    else the scope path itself. No trailing slash."""
+    else the scope path itself. No trailing slash. Pass `vault_path` so
+    `global` reads the vault's own `schist.yaml` (#734)."""
     if scope == "global":
-        return _global_scope_dirs()
+        return _global_scope_dirs(vault_path)
     return [scope.rstrip('/')]
 
 
@@ -1246,7 +1277,7 @@ def paths_outside_scope(vault_path: str, scope: str, paths: list[str]) -> list[s
     dir that is empty on disk and untracked, which would misreport a staged
     deletion of its last file as out of scope.
     """
-    dirs = [d + '/' for d in scope_dirs(scope)]
+    dirs = [d + '/' for d in scope_dirs(scope, vault_path)]
     return [p for p in paths if not any(p.startswith(d) for d in dirs)]
 
 
@@ -1325,8 +1356,96 @@ def ignored_scope_files(vault_path: str, scope: str) -> tuple[list[str], list[st
     return blocking, junk
 
 
-def _global_scope_dirs() -> list[str]:
-    """Return canonical content directories for logical `global` scope."""
+# Characters that make a pathspec a glob or give it magic (`:/` is the whole
+# tree, `:!x` an exclusion). A `directories` entry containing one is dropped
+# rather than staged, so a vault's schist.yaml cannot widen what a `global`
+# push stages beyond plain top-level directories (#734).
+_PATHSPEC_SPECIAL_CHARS = frozenset(':*?[\\')
+
+
+def scope_dirs_from_config(raw: object) -> list[str] | None:
+    """The `global` scope directories a parsed schist.yaml names, or None when
+    it is not a mapping with a `directories` list.
+
+    Each entry counts by its first path segment, as in ingest's
+    `_configured_content_roots`: a nested `research/ai` makes `research/`
+    content, so `global` stages all of `research/`, which is what the index
+    reads. A segment that is not a plain directory name is dropped: absolute
+    (`/etc`), `..`, dot-prefixed (`.schist`, `.git`), or containing a pathspec
+    special character (`:`, `*`, `?`, `[`, backslash). Duplicates are merged,
+    first occurrence first. Pinned against the MCP server's twin by
+    schema/global-scope-dirs-parity.json.
+    """
+    dirs = raw.get("directories") if isinstance(raw, dict) else None
+    if not isinstance(dirs, list):
+        return None
+    kept: list[str] = []
+    for entry in dirs:
+        parts = PurePosixPath(str(entry).rstrip("/")).parts
+        if not parts:
+            continue
+        top = parts[0]
+        if (top in ("/", "..") or top.startswith(".")
+                or any(c in _PATHSPEC_SPECIAL_CHARS for c in top)):
+            continue
+        if top not in kept:
+            kept.append(top)
+    return kept
+
+
+def _vault_scope_dirs(vault_path: str, config_text: str | None = None) -> list[str] | None:
+    """`scope_dirs_from_config` for the vault's schist.yaml, or None when the
+    file is absent, unreadable or unparseable.
+
+    `config_text` is the file's content when it is not on disk yet: a spoke is
+    cloned with `--no-checkout`, so setup_sparse_checkout reads the committed
+    copy instead.
+    """
+    try:
+        import yaml  # lazily: `schist lock hold` imports this module on every MCP write
+        if config_text is None:
+            config_text = (Path(vault_path) / "schist.yaml").read_text(encoding="utf-8")
+        raw = yaml.safe_load(config_text)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        # Ingest refuses a corrupt schist.yaml outright; here the packaged list
+        # is the safer failure, since a push that stages the defaults still
+        # syncs every standard directory.
+        return None
+    return scope_dirs_from_config(raw)
+
+
+def _committed_schist_yaml(vault_path: str) -> str | None:
+    """HEAD's schist.yaml, or None when HEAD has none (or git fails)."""
+    try:
+        result = subprocess.run(
+            ['git', 'show', 'HEAD:schist.yaml'],
+            cwd=vault_path, capture_output=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode('utf-8', 'replace')
+
+
+def _global_scope_dirs(vault_path: str | None = None,
+                       config_text: str | None = None) -> list[str]:
+    """Return the content directories for logical `global` scope.
+
+    With `vault_path`, a `directories` list in the vault's schist.yaml decides
+    (#734): a directory the vault adds, such as `tools/`, was otherwise never
+    staged, and `sync push` reported "Nothing to push" for edits in it. The
+    packaged default.yaml is the fallback, and a vault list that is empty
+    (or empty once unusable entries are dropped) also falls back, for the
+    reason given below. `config_text` stands in for the file on disk; see
+    `_vault_scope_dirs`.
+    """
+    if vault_path is not None:
+        configured = _vault_scope_dirs(vault_path, config_text)
+        if configured:
+            return configured
     default_yaml = Path(__file__).resolve().parent / "default.yaml"
     resolved: list[str] = []
     try:
@@ -1358,23 +1477,69 @@ def _global_scope_dirs() -> list[str]:
     return [d for d in resolved if d] or GLOBAL_SCOPE_FALLBACK_DIRS
 
 
-def _global_scope_targets(vault_path: str) -> list[str]:
+def _sparse_cone_dirs(vault_path: str) -> set[str] | None:
+    """The directories a cone-mode sparse checkout includes, or None when the
+    checkout is not sparse, not in cone mode, or git cannot say (staging is
+    then not filtered, and a failure stays loud)."""
+    try:
+        sparse = subprocess.run(
+            ['git', 'config', '--bool', 'core.sparseCheckout'],
+            cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=30,
+        )
+        if sparse.stdout.strip() != 'true':
+            return None
+        cone = subprocess.run(
+            ['git', 'config', '--bool', 'core.sparseCheckoutCone'],
+            cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=30,
+        )
+        if cone.stdout.strip() != 'true':
+            return None
+        listed = subprocess.run(
+            ['git', 'sparse-checkout', 'list'],
+            cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if listed.returncode != 0:
+        return None
+    return {line.strip().rstrip('/') for line in listed.stdout.splitlines() if line.strip()}
+
+
+def _global_scope_split(vault_path: str) -> tuple[list[str], list[str]]:
+    """`(targets, outside_cone)` for logical `global` scope.
+
+    `targets` are the configured directories that exist on disk or hold
+    tracked files. On a cone-mode sparse spoke, a directory outside the cone
+    goes to `outside_cone` instead: `git add` exits 1 on a pathspec that
+    matches tracked paths outside the sparse definition, which failed every
+    push on a spoke whose cone predates a directory the vault's schist.yaml
+    added (#734). `git add --sparse` is not the answer: it would stage
+    the deletion of every file the cone does not check out.
+    """
+    cone = _sparse_cone_dirs(vault_path)
     targets: list[str] = []
-    for d in _global_scope_dirs():
+    outside: list[str] = []
+    for d in _global_scope_dirs(vault_path):
         target = f"{d}/"
-        if (Path(vault_path) / d).exists():
+        if not (Path(vault_path) / d).exists():
+            try:
+                tracked = subprocess.run(
+                    ['git', 'ls-files', '--', target],
+                    cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=30,
+                )
+            except subprocess.TimeoutExpired:
+                # Skip the stalled directory (#314): a partial target list stages
+                # less than everything, which the next push attempt picks up —
+                # better than hanging the whole sync path.
+                continue
+            if not (tracked.returncode == 0 and tracked.stdout.strip()):
+                continue
+        if cone is not None and d not in cone:
+            outside.append(d)
+        else:
             targets.append(target)
-            continue
-        try:
-            tracked = subprocess.run(
-                ['git', 'ls-files', '--', target],
-                cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=30,
-            )
-        except subprocess.TimeoutExpired:
-            # Skip the stalled directory (#314): a partial target list stages
-            # less than everything, which the next push attempt picks up —
-            # better than hanging the whole sync path.
-            continue
-        if tracked.returncode == 0 and tracked.stdout.strip():
-            targets.append(target)
-    return targets
+    return targets, outside
+
+
+def _global_scope_targets(vault_path: str) -> list[str]:
+    return _global_scope_split(vault_path)[0]

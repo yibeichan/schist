@@ -120,9 +120,15 @@ schist --vault ~/vault init --spoke \
 
 Repeat on each spoke with `--identity <spoke-name> --scope research` (or whichever
 content-axis dir the spoke should sparse-checkout). `--scope global` checks out every
-content directory in the packaged default list (`notes`, `papers`, `concepts`,
-`research`, `decisions`, `ops`, `projects`, `logs`); add any other vault directory with
-`git sparse-checkout add <dir>`. Authorship is recorded in the
+content directory the hub's committed `schist.yaml` lists under `directories`, or the
+packaged default list (`notes`, `papers`, `concepts`, `research`, `decisions`, `ops`,
+`projects`, `logs`) when it lists none. A nested entry such as `research/ai` counts as
+its top-level directory (`research`), as it does for the index; an entry that is
+absolute, `..`, starts with `.`, or contains `:`, `*`, `?`, `[` or a backslash is
+ignored. `schist sync push` stages the same directories, except one outside the spoke's
+sparse checkout: a directory added to `schist.yaml` after the spoke was set up is not
+checked out there, and each push skips it with a warning until you run
+`git sparse-checkout add <dir>` in the spoke's vault. Authorship is recorded in the
 auto-filled `source_agent` frontmatter, not via directory placement.
 
 **`SCHIST_IDENTITY` must be set in the shell profile** (`.bashrc`, `.zshrc`,
@@ -235,6 +241,23 @@ identity's write scope. Check:
 - The file's parent directory is covered by your `write:` list in
   `vault.yaml`. Parent scopes grant child access (`write: [research]` covers
   `research/laptop/note.md`).
+
+### "REJECTED: push contains files the hub refuses for every identity"
+
+No vault.yaml change helps here: the hub refuses these files whoever pushes
+them. Each violation says why:
+
+- `(note must open with a plain --- line)`: the note's first line names a
+  frontmatter language (`---js`, `---yaml`). Make it a bare `---`, then
+  `git reset --soft origin/<branch>` (the message names the branch the note
+  was pushed to) and
+  recommit, so no unpushed commit keeps the old first line.
+- `(path is not valid UTF-8)`: rename the file, then reset and recommit the
+  same way.
+
+A push can also be refused for its refs and its files at once, including
+files on the refused ref itself; the message then lists both, under
+separate `REJECTED:` lines.
 
 ### "REJECTED: cannot determine push identity"
 
