@@ -3621,9 +3621,9 @@ class TestHubFilesThatAreNotUtf8:
 class TestCheckVaultAccess:
     """Any MCP server other than schist whose command, args, cwd or env name
     the vault, a folder inside it, or a folder that contains it can read the
-    vault without schist's scope and ACL checks. FAIL by default; schist.yaml
-    `vault_access.allowed_mcp_servers` records an intended exception; what
-    the check cannot decide WARNs."""
+    vault without schist's scope and ACL checks. FAIL by default; the
+    per-machine .schist/vault-access.yaml `allowed_mcp_servers` records an
+    intended exception; what the check cannot decide WARNs."""
 
     @pytest.fixture
     def home(self, tmp_path, monkeypatch):
@@ -3672,6 +3672,13 @@ class TestCheckVaultAccess:
         (home / ".claude.json").write_text(json.dumps(data))
 
     @staticmethod
+    def _allow(vault, text):
+        path = vault / ".schist" / "vault-access.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
+
+    @staticmethod
     def _write(path, text):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
@@ -3712,7 +3719,7 @@ class TestCheckVaultAccess:
         assert "fs (args)" in r.message
         assert str(home / ".claude.json") in r.message
         assert r.fix and "allowed_mcp_servers" in r.fix
-        assert "spoke" in r.fix
+        assert "per machine" in r.fix
 
     # --- strings are checked piece by piece --------------------------
 
@@ -4134,17 +4141,15 @@ class TestCheckVaultAccess:
     # --- allowlist ----------------------------------------------------
 
     def test_allowed_server_passes_and_is_named(self, home, vault):
-        (vault / "schist.yaml").write_text(
-            "vault_access:\n  allowed_mcp_servers: [fs]\n")
+        self._allow(vault, "allowed_mcp_servers: [fs]\n")
         self._claude_json(home, {"fs": self._fs(str(vault))})
         r = check_vault_access(str(vault))
         assert r.status == "PASS", r
-        assert "allowed in schist.yaml" in r.message
+        assert "allowed in .schist/vault-access.yaml" in r.message
         assert "fs" in r.message
 
     def test_allowlist_covers_only_the_named_server(self, home, vault):
-        (vault / "schist.yaml").write_text(
-            "vault_access:\n  allowed_mcp_servers: [fs]\n")
+        self._allow(vault, "allowed_mcp_servers: [fs]\n")
         self._claude_json(home, {"fs": self._fs(str(vault)),
                                  "fs2": self._fs(str(vault))})
         r = check_vault_access(str(vault))
@@ -4153,21 +4158,38 @@ class TestCheckVaultAccess:
 
     def test_allowlist_also_covers_doubts(self, home, vault, monkeypatch):
         monkeypatch.delenv("NOT_SET_Z", raising=False)
-        (vault / "schist.yaml").write_text(
-            "vault_access:\n  allowed_mcp_servers: [fs]\n")
+        self._allow(vault, "allowed_mcp_servers: [fs]\n")
         self._claude_json(home, {"fs": self._fs("${NOT_SET_Z}")})
         assert check_vault_access(str(vault)).status == "PASS"
 
     @pytest.mark.parametrize("yaml_text", [
-        "vault_access: [fs]\n",
-        "vault_access:\n  allowed_mcp_servers: fs\n",
-        "vault_access: null\n",
+        "[fs]\n",
+        "allowed_mcp_servers: fs\n",
+        "allowed_mcp_servers: null\n",
         ": not yaml: [\n",
     ])
     def test_malformed_allowlist_allows_nothing(self, home, vault, yaml_text):
-        (vault / "schist.yaml").write_text(yaml_text)
+        self._allow(vault, yaml_text)
         self._claude_json(home, {"fs": self._fs(str(vault))})
         assert check_vault_access(str(vault)).status == "FAIL"
+
+    def test_allowlist_in_schist_yaml_is_not_read(self, home, vault):
+        # The list is per machine; a vault-wide schist.yaml entry would need
+        # a `*` writer on the hub and blocks a spoke's pull when uncommitted.
+        (vault / "schist.yaml").write_text(
+            "vault_access:\n  allowed_mcp_servers: [fs]\n")
+        self._claude_json(home, {"fs": self._fs(str(vault))})
+        assert check_vault_access(str(vault)).status == "FAIL"
+
+    def test_empty_allowlist_file_is_not_a_problem(self, home, vault):
+        self._allow(vault, "")
+        assert check_vault_access(str(vault)).status == "PASS"
+
+    def test_unreadable_allowlist_file_warns(self, home, vault):
+        self._allow(vault, "").write_bytes(b"allowed_mcp_servers: [caf\xe9]\n")
+        r = check_vault_access(str(vault))
+        assert r.status == "WARN", r
+        assert ".schist/vault-access.yaml cannot be read" in r.message
 
     # --- what it cannot check ----------------------------------------
 
@@ -4394,26 +4416,24 @@ class TestCheckVaultAccess:
         assert not _inside(Path("/h/notes"), v, True)
 
     def test_malformed_allowlist_warns_when_nothing_else_does(self, home, vault):
-        (vault / "schist.yaml").write_text("vault_access: [fs]\n")
+        self._allow(vault, "[fs]\n")
         r = check_vault_access(str(vault))
         assert r.status == "WARN", r
-        assert "vault_access" in r.message
+        assert ".schist/vault-access.yaml must be a mapping" in r.message
         assert r.fix.startswith("Fix the allowlist")
 
     def test_non_string_allowlist_entry_is_reported(self, home, vault):
-        (vault / "schist.yaml").write_text(
-            "vault_access:\n  allowed_mcp_servers: [on, fs]\n")
+        self._allow(vault, "allowed_mcp_servers: [on, fs]\n")
         self._claude_json(home, {"fs": self._fs(str(vault))})
         r = check_vault_access(str(vault))
         assert r.status == "WARN", r
         assert "quote names" in r.message
 
-    def test_fix_line_says_how_a_spoke_changes_the_allowlist(self, home, vault):
+    def test_fix_line_says_the_allowlist_is_per_machine(self, home, vault):
         self._claude_json(home, {"fs": self._fs(str(vault))})
         fix = check_vault_access(str(vault)).fix
-        assert "commits and pushes the change with git" in fix
-        assert "`schist sync push` does not send it" in fix
-        assert "An uncommitted edit on a spoke stops" in fix
+        assert ".schist/vault-access.yaml in the vault" in fix
+        assert "per machine and not synced" in fix
 
     def test_warn_fix_names_only_what_went_wrong(self, home, vault):
         self._claude_json(home, {"fs": self._fs(".")})
@@ -4451,8 +4471,7 @@ class TestCheckVaultAccess:
             locked.chmod(0o755)
 
     def test_allowed_pass_wording(self, home, vault):
-        (vault / "schist.yaml").write_text(
-            "vault_access:\n  allowed_mcp_servers: [fs]\n")
+        self._allow(vault, "allowed_mcp_servers: [fs]\n")
         self._claude_json(home, {"fs": self._fs(str(vault))})
         r = check_vault_access(str(vault))
         assert r.message.startswith(
@@ -4575,8 +4594,7 @@ class TestCheckVaultAccess:
 
     def test_duplicate_allowlist_name_is_not_called_a_non_string(
             self, home, vault):
-        (vault / "schist.yaml").write_text(
-            "vault_access:\n  allowed_mcp_servers: [fs, fs]\n")
+        self._allow(vault, "allowed_mcp_servers: [fs, fs]\n")
         self._claude_json(home, {"fs": self._fs(str(vault))})
         assert check_vault_access(str(vault)).status == "PASS"
 

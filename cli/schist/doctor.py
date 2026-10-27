@@ -2243,29 +2243,44 @@ def _printable(s: str) -> str:
         for c in s)
 
 
+# Per-machine, under the untracked .schist/ runtime dir: the servers a
+# client starts are set up machine by machine, and any spoke can edit this
+# file without touching a hub-tracked one.
+VAULT_ACCESS_RELPATH = (".schist", "vault-access.yaml")
+_VAULT_ACCESS_FILE = "/".join(VAULT_ACCESS_RELPATH)
+
+
 def _allowed_mcp_servers(vault: Path) -> tuple[set[str], list[str]]:
-    """Server names listed under `vault_access.allowed_mcp_servers` in the
-    vault's schist.yaml, and problems with that list. A malformed list
-    allows nothing; a non-string entry (`on`, `007`, which YAML reads as a
-    boolean and a number) is left out and reported."""
-    try:
-        raw = yaml.safe_load((vault / "schist.yaml").read_text())
-    except Exception:
-        return set(), []
-    if not isinstance(raw, dict) or "vault_access" not in raw:
-        return set(), []
-    problem = ("schist.yaml `vault_access` must be a mapping with a list "
+    """Server names listed under `allowed_mcp_servers` in the vault's
+    .schist/vault-access.yaml, and problems with that list. A missing file
+    allows nothing and is not a problem; an unreadable or malformed one
+    allows nothing and is reported. A non-string entry (`on`, `007`, which
+    YAML reads as a boolean and a number) is left out and reported."""
+    path = vault.joinpath(*VAULT_ACCESS_RELPATH)
+    problem = (f"{_VAULT_ACCESS_FILE} must be a mapping with a list "
                "`allowed_mcp_servers`")
-    section = raw.get("vault_access")
-    if not isinstance(section, dict):
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return set(), []
+    except (OSError, UnicodeDecodeError):
+        return set(), [f"{_VAULT_ACCESS_FILE} cannot be read"]
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError:
         return set(), [problem]
-    names = section.get("allowed_mcp_servers")
+    if raw is None:
+        return set(), []
+    if not isinstance(raw, dict):
+        return set(), [problem]
+    names = raw.get("allowed_mcp_servers")
     if not isinstance(names, list):
         return set(), [problem]
     allowed = {n for n in names if isinstance(n, str)}
     if any(not isinstance(n, str) for n in names):
-        return allowed, ["schist.yaml `allowed_mcp_servers` has entries that "
-                         "are not strings; quote names such as 'on' or '007'"]
+        return allowed, [f"{_VAULT_ACCESS_FILE} `allowed_mcp_servers` has "
+                         "entries that are not strings; quote names such as "
+                         "'on' or '007'"]
     return allowed, []
 
 
@@ -2287,8 +2302,9 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
     (a config file it cannot parse, a variable it cannot expand, a relative
     path with no known start folder, a malformed allowlist) makes it WARN.
     Servers reached by URL have no local paths to check, so the PASS message
-    names them. Servers listed under `vault_access.allowed_mcp_servers` in
-    schist.yaml are reported in the PASS message instead.
+    names them. Servers listed under `allowed_mcp_servers` in the vault's
+    .schist/vault-access.yaml (per machine, untracked) are reported in the
+    PASS message instead.
     """
     label = "Vault access"
     if not vault_path:
@@ -2423,13 +2439,10 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
             "from those servers, or turn them off (Claude Code: "
             "`disabledMcpjsonServers` for a project's .mcp.json servers; "
             "Codex: `enabled = false`). If one of them should read the "
-            "vault, add "
-            "its name to `allowed_mcp_servers` under `vault_access` in the "
-            "vault's schist.yaml. On a spoke, schist.yaml comes from the hub "
-            "and `schist sync push` does not send it: a participant who can "
-            "write the vault root commits and pushes the change with git, "
-            "and each spoke gets it on its next pull. An uncommitted edit on "
-            "a spoke stops that spoke's sync.",
+            "vault, add its name to `allowed_mcp_servers` in "
+            f"{_VAULT_ACCESS_FILE} in the vault. The file is per machine "
+            "and not synced: list the server on each machine where it "
+            "should read the vault.",
         )
     if unchecked:
         fixes = []
@@ -2445,9 +2458,9 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
                          "vault (set the variable in the shell that runs "
                          "`schist doctor`, or give the path in full); a "
                          "server that should read the vault can be added to "
-                         "`allowed_mcp_servers` in schist.yaml")
+                         f"`allowed_mcp_servers` in {_VAULT_ACCESS_FILE}")
         if allow_problems:
-            fixes.append("fix the allowlist in schist.yaml")
+            fixes.append(f"fix the allowlist in {_VAULT_ACCESS_FILE}")
         fix = "; ".join(fixes)
         return CheckResult(
             "WARN", label,
@@ -2458,7 +2471,8 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
     if allowed_hits:
         parts = [f"no MCP server other than schist and the allowed ones names "
                  f"the vault by path ({n_read} config file(s) read)",
-                 "allowed in schist.yaml: " + "; ".join(allowed_hits)]
+                 f"allowed in {_VAULT_ACCESS_FILE}: "
+                 + "; ".join(allowed_hits)]
     else:
         parts = [f"no MCP server other than schist names the vault by path "
                  f"({n_read} config file(s) read)"]

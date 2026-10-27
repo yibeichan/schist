@@ -373,11 +373,10 @@ The check WARNs when it cannot decide: a config file it cannot parse, a variable
 
 The schist server itself is recognized by what it runs, whatever its entry is called: the `@schist/mcp-server` npm package, or a script whose `package.json` names that package, also when a launcher such as `/usr/bin/env` or `singularity exec <image>` runs it. Only when that cannot be told (a wrapper script, or a build missing from this machine) does the entry's name decide: `schist`, `schist-<name>` or `schist <name>`, with `SCHIST_VAULT_PATH` in its environment or a `mcp-server/dist/index.js` script.
 
-Remove the vault path, or the folder that contains it, from that server. If a server should read the vault, list it by name in the vault's `schist.yaml`, quoting names YAML would read as something else (`'on'`, `'007'`):
+Remove the vault path, or the folder that contains it, from that server. If a server should read the vault, list it by name in `.schist/vault-access.yaml` in the vault, quoting names YAML would read as something else (`'on'`, `'007'`):
 
 ```yaml
-vault_access:
-  allowed_mcp_servers: [obsidian]
+allowed_mcp_servers: [obsidian]
 ```
 
-The check then passes and names the allowed servers. The list applies to servers of that name on every machine that shares the vault. On a spoke, `schist.yaml` comes from the hub, and `schist sync push` does not send it: a participant who can write the vault root commits and pushes the change with git, and each spoke gets it on its next `schist sync pull`. An uncommitted edit to `schist.yaml` on a spoke stops that spoke from pulling.
+The check then passes and names the allowed servers. The file is per machine: `.schist/` is not tracked or synced, so list the server on each machine where it should read the vault. A missing file allows nothing; a file the check cannot read or parse also allows nothing and makes it WARN.
