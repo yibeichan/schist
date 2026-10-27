@@ -41,6 +41,7 @@ from schist.doctor import (
     check_vault_access,
     check_vault_exists,
     check_vault_is_git,
+    check_vault_location,
     run_doctor,
 )
 from schist.sync import HOOK_VERSION, POST_COMMIT_HOOK, PRE_COMMIT_HOOK
@@ -193,6 +194,404 @@ class TestCheckVaultIsGit:
     def test_not_git(self, tmp_path):
         r = check_vault_is_git(str(tmp_path))
         assert r.status == "FAIL"
+
+
+class TestCheckVaultLocation:
+    """A vault inside a cloud-sync folder FAILs: sync clients rewrite files
+    under .git and leave conflict copies, which corrupts the repository."""
+
+    @pytest.fixture
+    def home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        return home
+
+    def test_no_path(self):
+        assert check_vault_location(None).status == "SKIP"
+
+    def test_missing_vault_skips(self, home):
+        assert check_vault_location(str(home / "nope")).status == "SKIP"
+
+    def test_plain_home_folder_passes(self, home):
+        vault = home / "schist-vault"
+        vault.mkdir()
+        assert check_vault_location(str(vault)).status == "PASS"
+
+    @pytest.mark.parametrize("root", [
+        "Dropbox",
+        "Dropbox (Personal)",
+        "OneDrive",
+        "OneDrive - MIT",
+        "Google Drive",
+        "My Drive",
+        "Box",
+        "pCloud Drive",
+        "pCloudDrive",
+        "Box Sync",
+        "iCloudDrive",
+        "Sync",
+        "Nextcloud",
+        "ownCloud",
+        "Seafile",
+        "MEGA",
+        "MEGAsync",
+        "Insync",
+        "SynologyDrive",
+        "Tresorit",
+        "Library/Mobile Documents/com~apple~CloudDocs",
+        "Library/CloudStorage/GoogleDrive-me@example.org/My Drive",
+    ])
+    def test_vault_in_sync_folder_fails(self, home, root):
+        vault = home / root / "notes" / "vault"
+        vault.mkdir(parents=True)
+        r = check_vault_location(str(vault))
+        assert r.status == "FAIL", r
+        assert ".git" in r.message
+        assert r.fix
+
+    def test_vault_that_is_the_sync_folder_itself_fails(self, home):
+        (home / "Dropbox").mkdir()
+        assert check_vault_location(str(home / "Dropbox")).status == "FAIL"
+
+    def test_sync_folder_name_deeper_down_passes(self, home):
+        # Only folders at the sync client's own location count; a project
+        # folder that happens to be called "Box" does not.
+        vault = home / "code" / "Box" / "vault"
+        vault.mkdir(parents=True)
+        assert check_vault_location(str(vault)).status == "PASS"
+
+    def test_two_level_root_needs_its_parent(self, home):
+        # "CloudStorage" counts only as Library/CloudStorage.
+        vault = home / "Projects" / "CloudStorage" / "vault"
+        vault.mkdir(parents=True)
+        assert check_vault_location(str(vault)).status == "PASS"
+
+    def test_home_reached_through_a_symlink(self, tmp_path, monkeypatch):
+        # ORCD-style: $HOME is a symlink, the vault path is given resolved.
+        real = tmp_path / "real-home"
+        (real / "Dropbox" / "vault").mkdir(parents=True)
+        link = tmp_path / "home"
+        link.symlink_to(real)
+        monkeypatch.setattr("pathlib.Path.home", lambda: link)
+        r = check_vault_location(str(real / "Dropbox" / "vault"))
+        assert r.status == "FAIL"
+
+    def test_symlink_into_sync_folder_fails(self, home):
+        target = home / "Dropbox" / "vault"
+        target.mkdir(parents=True)
+        link = home / "schist-vault"
+        link.symlink_to(target)
+        assert check_vault_location(str(link)).status == "FAIL"
+
+    @pytest.mark.parametrize("folder", ["Documents", "Desktop"])
+    def test_macos_documents_or_desktop_warns(self, home, monkeypatch, folder):
+        # iCloud syncs these only with "Desktop & Documents Folders" on,
+        # which doctor cannot read, so it warns instead of failing.
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        vault = home / folder / "schist-vault"
+        vault.mkdir(parents=True)
+        r = check_vault_location(str(vault))
+        assert r.status == "WARN", r
+        assert "iCloud" in r.message
+        assert r.fix
+
+    def test_documents_outside_macos_passes(self, home, monkeypatch):
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "linux")
+        vault = home / "Documents" / "schist-vault"
+        vault.mkdir(parents=True)
+        assert check_vault_location(str(vault)).status == "PASS"
+
+    def test_macos_sync_folder_still_fails(self, home, monkeypatch):
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        vault = home / "Dropbox" / "vault"
+        vault.mkdir(parents=True)
+        assert check_vault_location(str(vault)).status == "FAIL"
+
+    def test_macos_symlink_into_documents_warns(self, home, monkeypatch):
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        target = home / "Documents" / "vault"
+        target.mkdir(parents=True)
+        link = home / "schist-vault"
+        link.symlink_to(target)
+        assert check_vault_location(str(link)).status == "WARN"
+
+    def test_macos_vault_at_documents_itself_warns(self, home, monkeypatch):
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        (home / "Documents").mkdir()
+        assert check_vault_location(str(home / "Documents")).status == "WARN"
+
+    def test_macos_documents_via_symlinked_home_warns(
+            self, tmp_path, monkeypatch):
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        real = tmp_path / "real-home"
+        (real / "Documents" / "vault").mkdir(parents=True)
+        link = tmp_path / "home"
+        link.symlink_to(real)
+        monkeypatch.setattr("pathlib.Path.home", lambda: link)
+        r = check_vault_location(str(real / "Documents" / "vault"))
+        assert r.status == "WARN"
+
+    def test_macos_documents_link_into_sync_folder_fails(
+            self, home, monkeypatch):
+        # The FAIL for the sync folder wins over the WARN for Documents.
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        target = home / "Dropbox" / "real"
+        target.mkdir(parents=True)
+        (home / "Documents").mkdir()
+        link = home / "Documents" / "vault"
+        link.symlink_to(target)
+        assert check_vault_location(str(link)).status == "FAIL"
+
+    @pytest.mark.parametrize("folder,expect", [
+        ("dropbox", "FAIL"), ("documents", "WARN"), ("DESKTOP", "WARN"),
+    ])
+    def test_macos_names_compare_case_insensitively(
+            self, home, monkeypatch, folder, expect):
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        vault = home / folder / "vault"
+        vault.mkdir(parents=True)
+        assert check_vault_location(str(vault)).status == expect
+
+    def test_linux_names_compare_case_sensitively(self, home, monkeypatch):
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "linux")
+        vault = home / "dropbox" / "vault"
+        vault.mkdir(parents=True)
+        assert check_vault_location(str(vault)).status == "PASS"
+
+    def test_git_dir_symlinked_into_sync_folder_fails(self, home):
+        gitdir = home / "Dropbox" / "vault.git"
+        gitdir.mkdir(parents=True)
+        vault = home / "schist-vault"
+        vault.mkdir()
+        (vault / ".git").symlink_to(gitdir)
+        r = check_vault_location(str(vault))
+        assert r.status == "FAIL"
+        assert "git directory" in r.message
+
+    def test_gitdir_file_into_sync_folder_fails(self, home):
+        gitdir = home / "Dropbox" / "vault.git"
+        gitdir.mkdir(parents=True)
+        vault = home / "schist-vault"
+        vault.mkdir()
+        (vault / ".git").write_text(f"gitdir: {gitdir}\n")
+        assert check_vault_location(str(vault)).status == "FAIL"
+
+    def test_relative_gitdir_file_is_resolved_from_the_vault(self, home):
+        (home / "Dropbox" / "vault.git").mkdir(parents=True)
+        vault = home / "schist-vault"
+        vault.mkdir()
+        (vault / ".git").write_text("gitdir: ../Dropbox/vault.git\n")
+        assert check_vault_location(str(vault)).status == "FAIL"
+
+    def test_sync_folder_that_is_a_symlink_matches_its_target(
+            self, home, tmp_path):
+        # ~/Dropbox moved to another disk and linked back; the vault is
+        # given by its real path.
+        moved = tmp_path / "disk" / "Dropbox"
+        (moved / "vault").mkdir(parents=True)
+        (home / "Dropbox").symlink_to(moved)
+        r = check_vault_location(str(moved / "vault"))
+        assert r.status == "FAIL"
+        assert str(home / "Dropbox") in r.message
+
+    def test_dotdot_in_vault_path_is_resolved(self, home):
+        (home / "Dropbox").mkdir()
+        (home / "schist-vault").mkdir()
+        r = check_vault_location(str(home / "Dropbox" / ".." / "schist-vault"))
+        assert r.status == "PASS", r
+
+    def test_fail_fix_says_to_move_the_vault(self, home):
+        vault = home / "Dropbox" / "vault"
+        vault.mkdir(parents=True)
+        fix = check_vault_location(str(vault)).fix
+        assert fix.startswith("Move the vault to a folder that is not synced")
+
+    def test_git_dir_fix_covers_a_vault_that_is_not_a_spoke(self, home):
+        gitdir = home / "Dropbox" / "vault.git"
+        gitdir.mkdir(parents=True)
+        vault = home / "schist-vault"
+        vault.mkdir()
+        (vault / ".git").symlink_to(gitdir)
+        assert "Otherwise, move the git directory" in check_vault_location(
+            str(vault)).fix
+
+    def test_gitdir_file_is_read_only_at_its_start(self, home, monkeypatch):
+        import builtins
+        gitdir = home / "Dropbox" / "vault.git"
+        gitdir.mkdir(parents=True)
+        vault = home / "schist-vault"
+        vault.mkdir()
+        (vault / ".git").write_text(f"gitdir: {gitdir}\n" + "x" * 100000)
+        sizes = []
+        real_open = builtins.open
+
+        def spy(file, mode="r", *a, **k):
+            f = real_open(file, mode, *a, **k)
+            if str(file).endswith(".git") and "b" in mode:
+                real_read = f.read
+
+                class F:
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *e):
+                        f.close()
+
+                    def read(self, n=-1):
+                        sizes.append(n)
+                        return real_read(n)
+                return F()
+            return f
+
+        monkeypatch.setattr(builtins, "open", spy)
+        assert check_vault_location(str(vault)).status == "FAIL"
+        assert sizes and all(0 < n <= 4096 for n in sizes)
+
+    def test_fail_fix_says_to_push_first(self, home):
+        vault = home / "Dropbox" / "vault"
+        vault.mkdir(parents=True)
+        assert "schist sync push" in check_vault_location(str(vault)).fix
+
+    def test_pass_message_is_limited_to_known_folders(self, home):
+        vault = home / "schist-vault"
+        vault.mkdir()
+        assert "known" in check_vault_location(str(vault)).message
+
+    def test_macos_compare_ignores_the_case_of_the_typed_path(self):
+        # Resolving keeps the case the user typed, so on macOS the vault's
+        # own spelling must be compared case-insensitively too.
+        from schist.doctor import _within
+        assert _within(Path("/h/dropbox/v"), Path("/h/Dropbox"), True)
+        assert _within(Path("/h/Dropbox"), Path("/h/DROPBOX"), True)
+        assert not _within(Path("/h/dropbox/v"), Path("/h/Dropbox"), False)
+        assert not _within(Path("/h/dropboxes/v"), Path("/h/Dropbox"), True)
+
+    def test_macos_sync_folder_inside_documents_fails(self, home, monkeypatch):
+        # ~/Dropbox is a link into ~/Documents: the vault is in both, and
+        # the FAIL for the sync folder wins over the WARN for Documents.
+        import schist.doctor as d
+        monkeypatch.setattr(d.sys, "platform", "darwin")
+        real = home / "Documents" / "Dropbox"
+        (real / "vault").mkdir(parents=True)
+        (home / "Dropbox").symlink_to(real)
+        r = check_vault_location(str(real / "vault"))
+        assert r.status == "FAIL", r
+        assert "a link to" in r.message
+
+    def test_unlistable_home_falls_back_to_the_path_spelling(
+            self, home, monkeypatch):
+        vault = home / "Dropbox" / "vault"
+        vault.mkdir(parents=True)
+        (home / "schist-vault").mkdir()
+        real_iterdir = Path.iterdir
+
+        def iterdir(self):
+            if self == home:
+                raise PermissionError("no listing")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", iterdir)
+        assert check_vault_location(str(vault)).status == "FAIL"
+        assert check_vault_location(str(home / "schist-vault")).status == "PASS"
+
+    def test_folder_holding_folds_the_typed_case(self, home):
+        # On a case-insensitive disk the vault's path keeps the case the
+        # user typed; _folder_holding must match it against ~/Dropbox.
+        from schist.doctor import _SYNC_ROOTS, _folder_holding
+        (home / "Dropbox").mkdir()
+        typed = home / "dropbox" / "vault"
+        assert _folder_holding([typed], _SYNC_ROOTS, True) is not None
+        assert _folder_holding([typed], _SYNC_ROOTS, False) is None
+
+    def _unlistable_home(self, home, monkeypatch):
+        real_iterdir = Path.iterdir
+
+        def iterdir(self):
+            if self in (home, home.resolve()):
+                raise PermissionError("no listing")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", iterdir)
+
+    def test_unlistable_home_fallback_folds_case(self, home, monkeypatch):
+        from schist.doctor import _SYNC_ROOTS, _folder_holding
+        self._unlistable_home(home, monkeypatch)
+        typed = home / "dropbox" / "vault"
+        assert _folder_holding([typed], _SYNC_ROOTS, True) is not None
+        assert _folder_holding([typed], _SYNC_ROOTS, False) is None
+
+    def test_unlistable_home_fallback_folds_the_home_part_too(
+            self, home, monkeypatch):
+        from schist.doctor import _SYNC_ROOTS, _folder_holding
+        self._unlistable_home(home, monkeypatch)
+        typed = Path(str(home).upper()) / "Dropbox" / "vault"
+        assert _folder_holding([typed], _SYNC_ROOTS, True) is not None
+        assert _folder_holding([typed], _SYNC_ROOTS, False) is None
+
+    def test_unlistable_symlinked_home_fallback_uses_the_real_home(
+            self, tmp_path, monkeypatch):
+        from schist.doctor import _SYNC_ROOTS, _folder_holding
+        real = tmp_path / "real-home"
+        (real / "Dropbox" / "vault").mkdir(parents=True)
+        link = tmp_path / "home"
+        link.symlink_to(real)
+        monkeypatch.setattr("pathlib.Path.home", lambda: link)
+        self._unlistable_home(link, monkeypatch)
+        hit = _folder_holding([real / "Dropbox" / "vault"], _SYNC_ROOTS, False)
+        assert hit is not None
+
+    def test_symlinked_home_is_not_called_a_link(self, tmp_path, monkeypatch):
+        real = tmp_path / "real-home"
+        (real / "Dropbox" / "vault").mkdir(parents=True)
+        link = tmp_path / "home"
+        link.symlink_to(real)
+        monkeypatch.setattr("pathlib.Path.home", lambda: link)
+        r = check_vault_location(str(link / "Dropbox" / "vault"))
+        assert r.status == "FAIL"
+        assert "a link to" not in r.message
+
+    def test_git_dir_fail_says_to_move_the_git_directory(self, home):
+        gitdir = home / "Dropbox" / "vault.git"
+        gitdir.mkdir(parents=True)
+        vault = home / "schist-vault"
+        vault.mkdir()
+        (vault / ".git").symlink_to(gitdir)
+        r = check_vault_location(str(vault))
+        assert r.fix.startswith("Move the git directory")
+
+    def test_home_is_listed_once(self, home, monkeypatch):
+        (home / "schist-vault").mkdir()
+        calls = []
+        real_iterdir = Path.iterdir
+
+        def iterdir(self):
+            calls.append(self)
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", iterdir)
+        check_vault_location(str(home / "schist-vault"))
+        assert calls.count(home) == 1
+
+    def test_tilde_path_is_expanded(self, home, monkeypatch):
+        (home / "Dropbox" / "vault").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        assert check_vault_location("~/Dropbox/vault").status == "FAIL"
+
+    def test_run_doctor_includes_the_check(self, home, capsys):
+        vault = home / "Dropbox" / "vault"
+        vault.mkdir(parents=True)
+        labels = {r.label: r.status for r in run_doctor(str(vault), None)}
+        assert labels.get("Vault location") == "FAIL"
 
 
 class TestCheckSchistYaml:
