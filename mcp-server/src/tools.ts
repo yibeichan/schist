@@ -1130,6 +1130,30 @@ const RATE_LIMIT_REJECTION_RE = /^remote:\s*rejected: rate limit exceeded \((not
 // added to prevent.
 const RETRY_WINDOW_RE = /^remote:\s*retry after: \d+ seconds\b/mi;
 
+// The hub's content refusal (format_rejection in pre_receive.py), the only
+// block in which it echoes pusher-chosen text: the identity, each refused path
+// and the directory printed as its scope. A hub before #813 printed the scope
+// unescaped, so a newline in a directory name put a forged "REJECTED: rate
+// limit exceeded" or "ERROR: timed out diffing" line into the refusal. The
+// first made a permanent refusal look retriable; the second read as transport,
+// which is self-clearing, so writes stayed open while every push was refused.
+// Neither hub reason can follow this header: the rate limit runs only after
+// the ACL passes, and a diff timeout returns before the header is printed
+// (ref reasons and the diff-timeout line come first, and are kept). So the
+// three hub-reason patterns read only the text before it. A forged header can
+// only cut evidence off, which turns a retriable rate limit into a refusal:
+// the push stops retrying rather than retrying forever. The header is also
+// found right after a sentinel's "push failed [<class>]: " prefix, where the
+// first line of output lands, so a stored sentinel re-read for retriability
+// is cut the same way.
+const CONTENT_REFUSAL_HEADER_RE = /(?:^|\]:\s)remote:\s*rejected: push contains\b/mi;
+
+/** The part of `text` before the hub's content refusal, where only the hub writes. */
+function hubReasonText(text: string): string {
+  const header = CONTENT_REFUSAL_HEADER_RE.exec(text);
+  return header ? text.slice(0, header.index) : text;
+}
+
 const STALE_STATE_PATTERNS = [
   "index.lock",
   "another git process seems to be running",
@@ -1180,7 +1204,8 @@ export function classifyPushFailure(outcome: SyncCommandOutcome): PushFailureCla
   // return 1, so git wraps both in "(pre-receive hook declined)" — which
   // means the generic wrapper alone would call the hub asking us to retry an
   // ACL violation and mark it non-retriable. Tested before isAclRejection.
-  if (HUB_TRANSIENT_RE.test(text)) return "transport";
+  const hubReasons = hubReasonText(text);
+  if (HUB_TRANSIENT_RE.test(hubReasons)) return "transport";
   // Anchored on the hub's own rejection line (rate_limit.py:211), NOT a bare
   // "rate limit" substring. This text is matched against combined stdout and
   // stderr, and two purely LOCAL failures echo vault paths into it verbatim —
@@ -1192,7 +1217,7 @@ export function classifyPushFailure(outcome: SyncCommandOutcome): PushFailureCla
   // The bare substring also swallowed the hub's fail-OPEN warning
   // ("WARNING: RATE_LIMIT_BYPASSED — rate limit DB unavailable", allowing the
   // push), so an unrelated later failure read as rate-limited.
-  if (RATE_LIMIT_REJECTION_RE.test(text)) return "rate-limited";
+  if (RATE_LIMIT_REJECTION_RE.test(hubReasons)) return "rate-limited";
   // Non-fast-forward before ACL: the CLI's own header is first in stderr only
   // after its classifier selected divergence. Git's `! [rejected]` and hint
   // lines remain as fallback for raw Git output. Both are anchored so a hub
@@ -1246,9 +1271,12 @@ function tailOutput(s: string, cap = 500): string {
   // "?", so a Unicode ellipsis would reach the operator as noise.
   if (trimmed.length <= cap) return trimmed;
   const tail = "..." + trimmed.slice(-cap);
+  // Lifted from before the content refusal only: a line lifted from inside it
+  // would land above the header in the sentinel, where a re-read trusts it.
+  const hubReasons = hubReasonText(trimmed);
   const mustSurvive = [
-    trimmed.match(RATE_LIMIT_REJECTION_RE)?.[0],
-    trimmed.match(RETRY_WINDOW_RE)?.[0],
+    hubReasons.match(RATE_LIMIT_REJECTION_RE)?.[0],
+    hubReasons.match(RETRY_WINDOW_RE)?.[0],
     transportEvidenceLine(trimmed),
   ]
     .filter((line): line is string => line !== undefined && !tail.includes(line));
@@ -1862,10 +1890,11 @@ function isRebaseConflict(outcome: SyncCommandOutcome): boolean {
 function isRetriableFailure(cls: PushFailureClass, text: string): boolean {
   if (cls === "acl-rejected" || cls === "spawn-failed" || cls === "stale-git-state") return false;
   if (cls === "rate-limited") {
-    const limit = RATE_LIMIT_REJECTION_RE.exec(text)?.[1]?.toLowerCase();
+    const hubReasons = hubReasonText(text);
+    const limit = RATE_LIMIT_REJECTION_RE.exec(hubReasons)?.[1]?.toLowerCase();
     if (limit === "git_syncs_per_hour") return true;
     if (limit === "notes_per_sync") return false;
-    return RETRY_WINDOW_RE.test(text);
+    return RETRY_WINDOW_RE.test(hubReasons);
   }
   return true;
 }
