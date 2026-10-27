@@ -553,12 +553,26 @@ if ! "$TAILSCALE" --socket="$SOCKET" status >/dev/null 2>&1; then
         --tun=userspace-networking \
         --statedir="$STATEDIR" \
         --socket="$SOCKET" \
-        >"$LOGFILE" 2>&1 &
+        >"$LOGFILE" 2>&1 </dev/null &
     echo $! > "$PIDFILE"
-    for _ in $(seq 1 20); do
-        sleep 0.5
-        "$TAILSCALE" --socket="$SOCKET" status >/dev/null 2>&1 && break
-    done
+fi
+
+# `status` succeeds while the backend is still Starting; wait until it is
+# Running and the target is a known peer. `status` goes first because
+# `tailscale ip` blocks when no daemon answers.
+ready() {
+    "$TAILSCALE" --socket="$SOCKET" status --json 2>/dev/null \
+        | grep -q '"BackendState": "Running"' &&
+        "$TAILSCALE" --socket="$SOCKET" ip -4 "$1" >/dev/null 2>&1
+}
+for _ in $(seq 1 60); do
+    ready "$1" && break
+    sleep 0.25
+done
+if ! ready "$1"; then
+    echo "schist-tailscale-nc: tailscaled is not Running or $1 is not a known peer" \
+         "after 15s; see $LOGFILE" >&2
+    exit 1
 fi
 
 exec "$TAILSCALE" --socket="$SOCKET" nc "$1" "$2"
@@ -576,10 +590,12 @@ fi
 
 `chmod 755` both. The `--tun=userspace-networking` flag skips the kernel TUN device (no root) and `tailscale nc` pipes the SSH connection through the userspace stack — no listening SOCKS port that other users on a shared host could hijack.
 
+The readiness wait matters on a fresh start. Since Tailscale 1.104 the daemon loads a cached netmap from the state directory, and `tailscale status` succeeds before the backend reaches `Running`. A `tailscale nc` started at that moment never connects, and SSH hangs at the banner exchange. Waiting for `Running` plus a known peer removes the hang. `</dev/null` keeps the long-lived daemon from inheriting SSH's proxy pipe as its stdin.
+
 ### Authenticate the spoke
 
 ```bash
-~/.local/bin/schist-tailscale-nc trigger nothing  # forces the daemon up
+~/.local/bin/schist-tailscale-nc trigger nothing  # starts the daemon; reports "not Running" until you log in
 ~/.local/bin/tailscale --socket=$HOME/.tailscale-state/tailscaled.sock up \
   --hostname=<spoke-name> --shields-up --accept-dns=false
 ```
