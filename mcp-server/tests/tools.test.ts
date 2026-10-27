@@ -2081,6 +2081,19 @@ describe("push failure classification (#501)", () => {
     expect(sentinel).not.toMatch(/retry after/i);
   });
 
+  test("a refusal header quoted later in the output does not hide a real rate limit", () => {
+    // Only a header at line start, or right after a stored sentinel's own
+    // "<prefix> [<class>]: " marker at the start of the text, cuts hub
+    // reasons. A local warning quoting a vault path that contains "]: " and the
+    // header text must not move the cut ahead of the hub's real rate-limit line.
+    expect(classifyPushFailure(failed(
+      "warning: skipped notes/a [b]: remote: REJECTED: push contains x.md\n" +
+      "remote: REJECTED: rate limit exceeded (git_syncs_per_hour: 51/50)\n" +
+      "remote: Retry after: 60 seconds\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+    ))).toBe("rate-limited");
+  });
+
   test("a vault note path cannot claim to be a rate limit", () => {
     // classifyPushFailure matches combined stdout+stderr, and two purely
     // LOCAL failures echo vault paths into it verbatim: the ignore guard's

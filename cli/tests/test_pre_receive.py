@@ -1655,12 +1655,14 @@ class TestLineSeparatorsAndRefLog:
         assert "REF_REJECTED identity=cluster-mario" in log.read_text(encoding="utf-8")
 
     def test_rejection_log_is_utf8_under_a_c_locale(self, tmp_path):
-        # A hub whose locale is C opens files as ASCII by default, and a refused
-        # path with a non-ASCII name then raised UnicodeEncodeError, which the
-        # OSError handler does not catch, so the hook crashed instead of
-        # refusing cleanly. The child's source stays ASCII (the path is built
-        # with chr()), because a C-locale interpreter cannot decode a non-ASCII
-        # -c argument.
+        # A hub process under a non-UTF-8 locale (sshd forwards the client's
+        # LANG/LC_*) opened the log in that encoding, and a refused path the
+        # encoding cannot represent raised UnicodeEncodeError, which the OSError
+        # handler does not catch, so the hook crashed instead of refusing
+        # cleanly. C with locale coercion and UTF-8 mode off is the portable
+        # stand-in. The child's source stays ASCII (the path is built with
+        # chr()), because a C-locale interpreter cannot decode a non-ASCII -c
+        # argument.
         log = tmp_path / "rejected.log"
         code = (
             "import sys\n"

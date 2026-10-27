@@ -1142,14 +1142,21 @@ const RETRY_WINDOW_RE = /^remote:\s*retry after: \d+ seconds\b/mi;
 // (ref reasons and the diff-timeout line come first, and are kept). So the
 // three hub-reason patterns read only the text before it. A forged header can
 // only cut evidence off, which turns a retriable rate limit into a refusal:
-// the push stops retrying rather than retrying forever. The header is also
-// found right after a sentinel's "push failed [<class>]: " prefix, where the
-// first line of output lands, so a stored sentinel re-read for retriability
-// is cut the same way.
-const CONTENT_REFUSAL_HEADER_RE = /(?:^|\]:\s)remote:\s*rejected: push contains\b/mi;
+// the push stops retrying rather than retrying forever.
+const CONTENT_REFUSAL_HEADER_RE = /^remote:\s*rejected: push contains\b/mi;
+
+// A stored sentinel puts the first line of output on the same line as its
+// "<prefix> [<class>]: " marker, so a refusal header there is not at line
+// start. Matched only at the start of the whole text (no `m` flag), where the
+// marker is, and only with a real class name in the brackets, so neither a
+// "]: " later in the output nor a first-line local warning that quotes a path
+// moves the cut.
+const SENTINEL_CONTENT_REFUSAL_RE =
+  /^[^\n]*? \[(?:non-fast-forward|acl-rejected|rate-limited|transport|stale-git-state|timeout|spawn-failed|other)\]:\s+(?=remote:\s*rejected: push contains\b)/i;
 
 /** The part of `text` before the hub's content refusal, where only the hub writes. */
 function hubReasonText(text: string): string {
+  if (SENTINEL_CONTENT_REFUSAL_RE.test(text)) return "";
   const header = CONTENT_REFUSAL_HEADER_RE.exec(text);
   return header ? text.slice(0, header.index) : text;
 }
