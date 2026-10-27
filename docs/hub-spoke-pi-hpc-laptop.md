@@ -532,50 +532,90 @@ mkdir -p ~/.tailscale-state
 
 ### On-demand daemon wrapper (HPC / shared hosts)
 
-On a shared login node, you don't want a persistent VPN daemon. Wrap the SSH ProxyCommand so `tailscaled` starts on first use and stops when you `~/.local/bin/schist-tailscale-down`:
+On a shared login node, you don't want a persistent VPN daemon. Wrap the SSH ProxyCommand so `tailscaled` starts on first use and stops again when the last connection on that node closes. Login nodes cap the threads each user may run (768 on MIT ORCD), and an idle `tailscaled` holds about 135 of them, so a resident daemon (or several duplicates) can stop `fork` and `srun` from working.
 
 ```bash
 # ~/.local/bin/schist-tailscale-nc
 #!/usr/bin/env bash
-set -e
+# SSH ProxyCommand: start a userspace tailscaled on demand, pipe %h:%p through
+# `tailscale nc`, and stop the daemon once the last connection on this node
+# closes. GOMAXPROCS=2 keeps both tailscaled and `tailscale nc` small.
 STATEDIR="$HOME/.tailscale-state"
 SOCKET="$STATEDIR/tailscaled.sock"
 PIDFILE="$STATEDIR/tailscaled.pid"
 LOGFILE="$STATEDIR/tailscaled.log"
+LOCK="$STATEDIR/launch.lock"
 TAILSCALED="$HOME/.local/bin/tailscaled"
 TAILSCALE="$HOME/.local/bin/tailscale"
+export GOMAXPROCS=2
 
 mkdir -p "$STATEDIR"
 
-if ! "$TAILSCALE" --socket="$SOCKET" status >/dev/null 2>&1; then
-    rm -f "$PIDFILE"
-    nohup "$TAILSCALED" \
-        --tun=userspace-networking \
-        --statedir="$STATEDIR" \
-        --socket="$SOCKET" \
-        >"$LOGFILE" 2>&1 </dev/null &
-    echo $! > "$PIDFILE"
-fi
-
-# `status` succeeds while the backend is still Starting; wait until it is
-# Running and the target is a known peer. `status` goes first because
-# `tailscale ip` blocks when no daemon answers.
+# Anchored patterns, so shells whose command line merely mentions these paths
+# never match.
+daemon_running() { pgrep -u "$(id -u)" -f "^$TAILSCALED " >/dev/null; }
+nc_running()     { pgrep -u "$(id -u)" -f "^$TAILSCALE --socket=$SOCKET nc " >/dev/null; }
+# `status` succeeds while the backend is still Starting; ready = Running and
+# the target ($1: tailnet IP or name) is a known peer. `status` goes first
+# because `tailscale ip` blocks when no daemon answers.
 ready() {
     "$TAILSCALE" --socket="$SOCKET" status --json 2>/dev/null \
         | grep -q '"BackendState": "Running"' &&
         "$TAILSCALE" --socket="$SOCKET" ip -4 "$1" >/dev/null 2>&1
 }
+
+# Serialize start and stop so concurrent syncs share one daemon.
+exec 9>"$LOCK"
+flock -w 60 9 || { echo "schist-tailscale-nc: lock timeout" >&2; exit 1; }
+
+if ! daemon_running; then
+    nohup "$TAILSCALED" \
+        --tun=userspace-networking \
+        --statedir="$STATEDIR" \
+        --socket="$SOCKET" \
+        >"$LOGFILE" 2>&1 </dev/null 9>&- &
+    echo $! > "$PIDFILE"
+fi
 for _ in $(seq 1 60); do
     ready "$1" && break
     sleep 0.25
 done
 if ! ready "$1"; then
+    # Stop a daemon no connection is using before giving up.
+    nc_running || { pkill -TERM -u "$(id -u)" -f "^$TAILSCALED "; rm -f "$PIDFILE"; }
     echo "schist-tailscale-nc: tailscaled is not Running or $1 is not a known peer" \
          "after 15s; see $LOGFILE" >&2
     exit 1
 fi
 
-exec "$TAILSCALE" --socket="$SOCKET" nc "$1" "$2"
+flock -u 9
+exec 9>&-
+
+# Run nc as a child (not exec) so we can clean up after it. Explicit <&0:
+# bash would otherwise point a background job's stdin at /dev/null.
+"$TAILSCALE" --socket="$SOCKET" nc "$1" "$2" <&0 &
+NC_PID=$!
+
+cleanup() {
+    trap - EXIT HUP INT TERM
+    kill "$NC_PID" 2>/dev/null
+    wait "$NC_PID" 2>/dev/null
+    exec 9>"$LOCK"
+    flock -w 30 9 || return
+    # Last connection on this node gone: stop the daemon. (Plain SIGTERM,
+    # not `tailscale down`, which would persist WantRunning=false.)
+    if ! nc_running; then
+        pkill -TERM -u "$(id -u)" -f "^$TAILSCALED "
+        rm -f "$PIDFILE"
+    fi
+}
+trap cleanup EXIT
+trap 'exit 129' HUP   # ssh sends SIGHUP to the ProxyCommand on exit
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+wait "$NC_PID"
+exit $?
 ```
 
 ```bash
@@ -588,19 +628,27 @@ if [ -f "$PIDFILE" ]; then
 fi
 ```
 
-`chmod 755` both. The `--tun=userspace-networking` flag skips the kernel TUN device (no root) and `tailscale nc` pipes the SSH connection through the userspace stack — no listening SOCKS port that other users on a shared host could hijack.
+`chmod 755` both. `schist-tailscale-down` is for stopping a daemon you started by hand (below) or one left behind by a killed connection. The `--tun=userspace-networking` flag skips the kernel TUN device (no root) and `tailscale nc` pipes the SSH connection through the userspace stack — no listening SOCKS port that other users on a shared host could hijack. The wrapper needs `flock` and `pgrep`, which every Linux distribution ships.
 
 The readiness wait matters on a fresh start. Since Tailscale 1.104 the daemon loads a cached netmap from the state directory, and `tailscale status` succeeds before the backend reaches `Running`. A `tailscale nc` started at that moment never connects, and SSH hangs at the banner exchange. Waiting for `Running` plus a known peer removes the hang. `</dev/null` keeps the long-lived daemon from inheriting SSH's proxy pipe as its stdin.
 
 ### Authenticate the spoke
 
+The wrapper stops the daemon as soon as its own connection ends, so start the daemon by hand for the login:
+
 ```bash
-~/.local/bin/schist-tailscale-nc trigger nothing  # starts the daemon; reports "not Running" until you log in
-~/.local/bin/tailscale --socket=$HOME/.tailscale-state/tailscaled.sock up \
+TS=$HOME/.tailscale-state
+~/.local/bin/tailscaled --tun=userspace-networking --statedir=$TS \
+  --socket=$TS/tailscaled.sock > $TS/tailscaled.log 2>&1 &
+echo $! > $TS/tailscaled.pid
+~/.local/bin/tailscale --socket=$TS/tailscaled.sock up \
   --hostname=<spoke-name> --shields-up --accept-dns=false
+~/.local/bin/schist-tailscale-down    # after the login is approved
 ```
 
-`tailscale up` prints a `https://login.tailscale.com/a/...` URL — open it in a browser logged into the Tailscale account that owns the Pi. After approval, `tailscale status` lists both the spoke and the hub.
+`tailscale up` prints a `https://login.tailscale.com/a/...` URL — open it in a browser logged into the Tailscale account that owns the Pi. After approval, `tailscale status` lists both the spoke and the hub. The login is kept in the state directory, so later connections need no browser step.
+
+Node keys expire after 180 days by default. When the spoke's key expires, every sync fails at the ssh banner (`kex_exchange_identification: Connection closed by remote host`) and `tailscaled.log` reports that the node key has expired. Repeat the login above, and in the Tailscale admin console choose **Disable key expiry** for the spoke's machine so it does not happen again.
 
 `--shields-up` rejects all incoming tailnet connections to this node — appropriate for HPC where the spoke only initiates outbound git pushes/pulls.
 
@@ -629,7 +677,8 @@ schist sync push              # should land a commit on the Pi
 
 - `tailscale ping <pi-name>` shows whether traffic is routed direct (UDP punch-through) or via DERP (Tailscale's relay). HPC clusters often block outbound UDP, so DERP is normal — adds ~30-100ms but otherwise transparent.
 - If `ssh schist-hub` hangs: `~/.local/bin/schist-tailscale-down`, then re-run. The wrapper restarts the daemon on next use.
-- If the daemon dies between sessions: pidfile is stale; the wrapper detects that via `tailscale status` and respawns.
+- The daemon runs only while a connection is open; a stale pidfile is harmless, since the wrapper checks for the running process, not the pidfile.
+- If every connection fails after about 15 s with `not Running or ... is not a known peer`, the wrapper never saw the hub as a peer. Check that `HostName` matches the hub's tailnet IP or name in `tailscale status`, and that the node's key has not expired (`tailscale status` then says logged out).
 - `~/.tailscale-state/tailscaled.log` has the daemon's output if anything fails to start.
 
 ### Checking with your HPC operator
