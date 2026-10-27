@@ -10,6 +10,7 @@ import datetime
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1636,6 +1637,46 @@ class TestLineSeparatorsAndRefLog:
                       log_path=log, db_path=tmp_path / "rl.sqlite")
         assert rc == 1
         assert "REF_REJECTED identity=cluster-mario" in log.read_text(encoding="utf-8")
+
+    def test_ref_refusals_are_logged_when_a_later_diff_fails(self, acl, tmp_path):
+        # The other early return: a diff that fails outright (a missing or
+        # corrupt rev) must log the ref refusals already found, like a timeout.
+        log = tmp_path / "rejected.log"
+
+        def diff(old, new):
+            if new == "ddd":
+                raise subprocess.CalledProcessError(128, ["git", "log"])
+            return []
+        with patch("schist.pre_receive.get_changed_files", side_effect=diff):
+            rc = main(stdin=["aaa bbb refs/heads/feature", "ccc ddd refs/heads/main"],
+                      acl=acl, identity="cluster-mario",
+                      log_path=log, db_path=tmp_path / "rl.sqlite")
+        assert rc == 1
+        assert "REF_REJECTED identity=cluster-mario" in log.read_text(encoding="utf-8")
+
+    def test_rejection_log_is_utf8_under_a_c_locale(self, tmp_path):
+        # A hub whose locale is C opens files as ASCII by default, and a refused
+        # path with a non-ASCII name then raised UnicodeEncodeError, which the
+        # OSError handler does not catch, so the hook crashed instead of
+        # refusing cleanly. The child's source stays ASCII (the path is built
+        # with chr()), because a C-locale interpreter cannot decode a non-ASCII
+        # -c argument.
+        log = tmp_path / "rejected.log"
+        code = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from schist.pre_receive import Violation, log_rejection\n"
+            "path = 'security/na' + chr(0xef) + 've' + chr(0x2014) + 'caf' + chr(0xe9) + '.md'\n"
+            "log_rejection([Violation(identity='cluster-mario', filepath=path, scope='security',\n"
+            "                          refname='refs/heads/main')],\n"
+            "              log_path=Path(sys.argv[1]))\n"
+        )
+        env = {k: v for k, v in os.environ.items() if not k.startswith("LC_")}
+        env.update(LC_ALL="C", LANG="C", PYTHONCOERCECLOCALE="0", PYTHONUTF8="0")
+        result = subprocess.run([sys.executable, "-c", code, str(log)],
+                                env=env, capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, result.stderr
+        assert "security/naïve—café.md" in log.read_bytes().decode("utf-8")
 
     def test_spoke_side_display_path_escapes_line_separators(self):
         from schist.git_ops import _display_path
