@@ -588,13 +588,18 @@ if ! ready "$1"; then
     exit 1
 fi
 
-flock -u 9
-exec 9>&-
-
 # Run nc as a child (not exec) so we can clean up after it. Explicit <&0:
 # bash would otherwise point a background job's stdin at /dev/null.
-"$TAILSCALE" --socket="$SOCKET" nc "$1" "$2" <&0 &
+"$TAILSCALE" --socket="$SOCKET" nc "$1" "$2" <&0 9>&- &
 NC_PID=$!
+# Keep the lock until pgrep can see this nc: a closing connection's cleanup
+# that ran in between would find no nc and stop the daemon under this one.
+for _ in $(seq 1 40); do
+    pgrep -u "$(id -u)" -f "^$TAILSCALE --socket=$SOCKET nc " | grep -qx "$NC_PID" && break
+    sleep 0.05
+done
+flock -u 9
+exec 9>&-
 
 cleanup() {
     trap - EXIT HUP INT TERM
