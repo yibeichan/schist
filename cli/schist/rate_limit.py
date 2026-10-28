@@ -195,7 +195,7 @@ def _fail_open(
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
-            with open(log_path, "a") as f:
+            with open(log_path, "a", encoding="utf-8") as f:
                 f.write(
                     f"[{timestamp}] RATE_LIMIT_BYPASSED identity={identity} "
                     f"src={source} err={err!r}\n"

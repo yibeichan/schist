@@ -80,6 +80,12 @@ def _escape_char(c: str) -> str:
         return "\\x%02x" % (o - 0xDC00)
     if o < 0x20 or o == 0x7F:
         return "\\x%02x" % o
+    # C1 controls (U+0085 NEXT LINE among them) and the Unicode line and
+    # paragraph separators end a line for JavaScript's `^` under the `m` flag,
+    # which the MCP server's failure classifiers use. Left as they are, a
+    # refused path could carry a forged "REJECTED: rate limit" line (#813).
+    if 0x80 <= o <= 0x9F or o in (0x2028, 0x2029):
+        return "\\u%04x" % o
     return c
 
 
@@ -160,7 +166,7 @@ def log_pinning_rejection(identity: str, log_path: Path | None = None) -> None:
 
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "a") as f:
+        with open(log_path, "a", encoding="utf-8") as f:
             f.write(entry)
     except OSError as e:
         logger.warning("Failed to write pinning rejection log: %s", e)
@@ -419,12 +425,12 @@ def format_rejection(violations: list[Violation], branch: str = "refs/heads/main
         header = "REJECTED: push contains out-of-scope writes"
     lines = [
         header,
-        f"Identity: {violations[0].identity}",
+        f"Identity: {_sanitize_log_field(violations[0].identity)}",
         "",
         "Violations:",
     ]
     for v in violations:
-        lines.append(f"  - {_sanitize_log_field(v.filepath)} (scope: {v.scope})")
+        lines.append(f"  - {_sanitize_log_field(v.filepath)} (scope: {_sanitize_log_field(v.scope)})")
     lines.append("")
     if any(v.scope == NON_UTF8_SCOPE for v in violations):
         lines.append(
@@ -450,39 +456,60 @@ def format_rejection(violations: list[Violation], branch: str = "refs/heads/main
     return "\n".join(lines)
 
 
-def _print_ref_reasons(ref_reasons: list[str]) -> None:
+def _report_ref_reasons(identity: str, ref_reasons: list[str], log_path: Path | None) -> None:
     if ref_reasons:
         print("REJECTED: push updates refs this identity may not change", file=sys.stderr)
         for reason in ref_reasons:
             print(f"  - {_sanitize_log_field(reason)}", file=sys.stderr)
+        log_ref_rejection(identity, ref_reasons, log_path=log_path)
+
+
+def _rejection_log_path(log_path: Path | None) -> Path:
+    if log_path is None:
+        # Default: alongside the hook in GIT_DIR/hooks/
+        git_dir = os.environ.get("GIT_DIR", ".")
+        log_path = Path(git_dir) / "hooks" / "rejected-pushes.log"
+    return log_path
+
+
+def _append_log(log_path: Path, entries: list[str]) -> None:
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.writelines(entries)
+    except OSError as e:
+        logger.warning("Failed to write rejection log: %s", e)
 
 
 def log_rejection(
     violations: list[Violation],
     log_path: Path | None = None,
 ) -> None:
-    """Append rejection details to the audit log."""
-    if log_path is None:
-        # Default: alongside the hook in GIT_DIR/hooks/
-        git_dir = os.environ.get("GIT_DIR", ".")
-        log_path = Path(git_dir) / "hooks" / "rejected-pushes.log"
-
+    """Append rejection details to the audit log, one entry per ref."""
     timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
     identity = _sanitize_log_field(violations[0].identity)
-    refname = _sanitize_log_field(violations[0].refname)
-    files = ", ".join(_sanitize_log_field(v.filepath) for v in violations)
-
-    entry = (
+    by_ref: dict[str, list[str]] = {}
+    for v in violations:
+        by_ref.setdefault(v.refname, []).append(_sanitize_log_field(v.filepath))
+    _append_log(_rejection_log_path(log_path), [
         f"[{timestamp}] REJECTED identity={identity} src={_push_source()} "
-        f"ref={refname} files=[{files}]\n"
-    )
+        f"ref={_sanitize_log_field(ref)} files=[{', '.join(files)}]\n"
+        for ref, files in by_ref.items()
+    ])
 
-    try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "a") as f:
-            f.write(entry)
-    except OSError as e:
-        logger.warning("Failed to write rejection log: %s", e)
+
+def log_ref_rejection(
+    identity: str,
+    reasons: list[str],
+    log_path: Path | None = None,
+) -> None:
+    """Append ref refusals (another branch, a tag, a deletion) to the audit log."""
+    timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+    _append_log(_rejection_log_path(log_path), [
+        f"[{timestamp}] REF_REJECTED identity={_sanitize_log_field(identity)} "
+        f"src={_push_source()} reason={_sanitize_log_field(r)}\n"
+        for r in reasons
+    ])
 
 
 def log_rate_limit_rejection(
@@ -505,7 +532,7 @@ def log_rate_limit_rejection(
 
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "a") as f:
+        with open(log_path, "a", encoding="utf-8") as f:
             f.write(entry)
     except OSError as e:
         logger.warning("Failed to write rate-limit rejection log: %s", e)
@@ -623,7 +650,7 @@ def main(
     # Verify identity is a known participant
     if acl.get_participant(identity) is None:
         print(
-            f"REJECTED: unknown identity '{identity}' — "
+            f"REJECTED: unknown identity '{_sanitize_log_field(identity)}' — "
             "not listed in vault.yaml participants",
             file=sys.stderr,
         )
@@ -668,7 +695,7 @@ def main(
             # and dump a raw traceback (internal paths, stack frames) onto the
             # pusher's terminal. Reject fail-safe with a human-readable message
             # instead (#243).
-            _print_ref_reasons(ref_reasons)
+            _report_ref_reasons(identity, ref_reasons, log_path)
             print(
                 f"ERROR: timed out diffing {oldrev}..{newrev} — the hub may be "
                 f"under load; please retry the push.",
@@ -676,7 +703,7 @@ def main(
             )
             return 1
         except subprocess.CalledProcessError as e:
-            _print_ref_reasons(ref_reasons)
+            _report_ref_reasons(identity, ref_reasons, log_path)
             print(f"ERROR: failed to diff {oldrev}..{newrev}: {e}", file=sys.stderr)
             return 1
 
@@ -687,7 +714,7 @@ def main(
                                         scope=FRONTMATTER_SCOPE, refname=refname)
                               for path in bad_frontmatter)
 
-    _print_ref_reasons(ref_reasons)
+    _report_ref_reasons(identity, ref_reasons, log_path)
 
     # Reported even after a ref refusal: the push is refused either way, and a
     # pusher told only about the ref would fix it and be refused again for

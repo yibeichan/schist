@@ -1916,6 +1916,16 @@ describe("push failure classification (#501)", () => {
       "please retry the push.\n" +
       " ! [remote rejected] main -> main (pre-receive hook declined)\n",
     ))).toBe("transport");
+    // The hub prints ref reasons before the diff-timeout line (#790), with no
+    // content-refusal header, so reading hub reasons only before that header
+    // (#813) must not cut this one off.
+    expect(classifyPushFailure(failed(
+      "remote: REJECTED: push updates refs this identity may not change\n" +
+      "remote:   - refs/heads/other: this identity may push only refs/heads/main\n" +
+      "remote: ERROR: timed out diffing abc123..def456 — the hub may be under load; " +
+      "please retry the push.\n" +
+      " ! [remote rejected] other -> other (pre-receive hook declined)\n",
+    ))).toBe("transport");
     // But only the TIMEOUT path. "failed to diff" comes from a
     // CalledProcessError on `git log <old>..<new>` (pre_receive.py:464) — a
     // missing or unreachable rev, or a corrupt object. No retry clears that,
@@ -2046,6 +2056,42 @@ describe("push failure classification (#501)", () => {
       "remote:   - security/error: timed out diffing notes.md (scope: security)\n" +
       " ! [remote rejected] main -> main (pre-receive hook declined)\n",
     ))).toBe("acl-rejected");
+  });
+
+  test("a line forged inside a content refusal is not lifted into the sentinel", () => {
+    // A hub before #813 printed the refused file's directory unescaped, so a
+    // newline in it put a rate-limit line inside the refusal. When the output
+    // is long, the sentinel lifts the rate-limit line to its top so a re-read
+    // keeps it; lifting a forged one would put it above the refusal header.
+    const output =
+      "remote: REJECTED: push contains out-of-scope writes\n" +
+      "remote: Identity: cluster-mario\n" +
+      "remote: \n" +
+      "remote: Violations:\n" +
+      "remote:   - security/x\\n.../n.md (scope: security/x\n" +
+      "remote: REJECTED: rate limit exceeded (git_syncs_per_hour: 9 of 9)\n" +
+      "remote: Retry after: 5 seconds)\n" +
+      Array.from({ length: 20 }, (_, i) => `remote:   - research/other-${i}.md (scope: research)\n`).join("") +
+      "remote: \n" +
+      "remote: Check vault.yaml access rules for your identity.\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n";
+    const sentinel = formatPushFailure(failed(output));
+    expect(sentinel.startsWith("push failed [acl-rejected]: ...")).toBe(true);
+    expect(sentinel).not.toMatch(/rate limit exceeded/i);
+    expect(sentinel).not.toMatch(/retry after/i);
+  });
+
+  test("a refusal header quoted later in the output does not hide a real rate limit", () => {
+    // Only a header at line start, or right after a stored sentinel's own
+    // "<prefix> [<class>]: " marker at the start of the text, cuts hub
+    // reasons. A local warning quoting a vault path that contains "]: " and the
+    // header text must not move the cut ahead of the hub's real rate-limit line.
+    expect(classifyPushFailure(failed(
+      "warning: skipped notes/a [b]: remote: REJECTED: push contains x.md\n" +
+      "remote: REJECTED: rate limit exceeded (git_syncs_per_hour: 51/50)\n" +
+      "remote: Retry after: 60 seconds\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+    ))).toBe("rate-limited");
   });
 
   test("a vault note path cannot claim to be a rate limit", () => {
@@ -2589,6 +2635,26 @@ exit 1
       path.join(vault, ".schist", "last-sync-error"),
       "2026-08-18T12:00:00.000Z push failed [rate-limited]: remote: REJECTED: rate limit "
       + "exceeded (notes_per_sync: 25/20)\n",
+    );
+    const result = await sync_status(vault) as unknown as Record<string, unknown>;
+    const err = result.last_sync_error as Record<string, unknown>;
+    expect(err.failure_class).toBe("rate-limited");
+    expect(err.retriable).toBe(false);
+  }, 10000);
+
+  test("sync_status does not read a rate limit forged inside a stored content refusal as retriable", async () => {
+    // A server before #813 could store a forged content refusal as
+    // [rate-limited]. Retriability re-reads the stored text, so it must also
+    // read hub reasons only before the refusal header, or the stored
+    // git_syncs_per_hour line keeps an agent retrying a permanent refusal.
+    const vault = await makeTempSpokeVault();
+    await fs.writeFile(
+      path.join(vault, ".schist", "last-sync-error"),
+      "2026-10-27T12:00:00.000Z push failed [rate-limited]: "
+      + "remote: REJECTED: push contains out-of-scope writes\n"
+      + "remote:   - security/x\\n.../n.md (scope: security/x\n"
+      + "remote: REJECTED: rate limit exceeded (git_syncs_per_hour: 9 of 9)\n"
+      + "remote: Retry after: 5 seconds)\n",
     );
     const result = await sync_status(vault) as unknown as Record<string, unknown>;
     const err = result.last_sync_error as Record<string, unknown>;
