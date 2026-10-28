@@ -36,6 +36,7 @@ import {
 import type { VaultConfig } from "./types.js";
 import { listAllTools, REMOVED_TOOLS } from "./tool-registry.js";
 import { SERVER_INSTRUCTIONS } from "./server-instructions.js";
+import { SERVER_VERSION } from "./version.js";
 import { formatToolResult } from "./output-contract.js";
 
 function resolveVaultPath(): string {
@@ -91,7 +92,7 @@ async function main() {
   }
 
   const server = new Server(
-    { name: "schist", version: "0.1.0" },
+    { name: "schist", version: SERVER_VERSION },
     {
       capabilities: { tools: {} },
       instructions: SERVER_INSTRUCTIONS,
