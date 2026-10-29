@@ -47,12 +47,14 @@ with `node` and these environment variables:
 - `SCHIST_AGENT_ID`: the identity write tools act as; without it (or
   `SCHIST_ALLOWED_AGENTS` for several agents sharing one server) every write
   tool returns `CONFIG_ERROR`.
-- `SCHIST_IDENTITY`: the participant name a hub checks when the server pushes
-  a spoke vault's changes.
+- `SCHIST_IDENTITY`: this machine's participant name in the vault's
+  `vault.yaml`. The server checks each write against that participant's
+  access, and a hub checks the same name when the server pushes a spoke
+  vault's changes.
 - `SCHIST_MEMORY_DB`: the agent memory database (default
   `~/.schist/memory/agent-state.db`).
 
-`schist doctor --vault <vault>` checks the setup, including the client's MCP
+`schist --vault <vault> doctor` checks the setup, including the client's MCP
 entry.
 
 ## Agent memory from the shell
