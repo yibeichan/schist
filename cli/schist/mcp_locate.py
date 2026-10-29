@@ -26,17 +26,29 @@ def _checkout_entry() -> Path:
     return Path(__file__).resolve().parents[2] / "mcp-server" / "dist" / "index.js"
 
 
+def _run_stdout(cmd: list[str]) -> str:
+    """A command's stripped stdout, or "" when it is missing, fails or hangs."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", check=True, timeout=15).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
 def _npm_global_entry() -> Optional[Path]:
     """`dist/index.js` of a global `npm install -g @schist/mcp-server`, or None
-    when npm is missing, fails, or has no such package installed."""
-    try:
-        root = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", check=True,
-                              timeout=15).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if not root:
-        return None
+    when there is no npm global root to look in.
+
+    The root is `npm root -g`. npm prints `***` in place of a path segment that
+    looks like a secret (a dashed UUID), so for such a root it is worked out
+    from node's own path instead: `<prefix>/bin/node` keeps global packages in
+    `<prefix>/lib/node_modules`."""
+    root = _run_stdout(["npm", "root", "-g"])
+    if not root or "***" in root:
+        node = _run_stdout(["node", "-p", "process.execPath"])
+        if not node:
+            return None
+        root = str(Path(node).parent.parent / "lib" / "node_modules")
     return Path(root) / NPM_PACKAGE / "dist" / "index.js"
 
 
@@ -44,7 +56,10 @@ def find_mcp_server_entry() -> Optional[str]:
     """Absolute path of the MCP server's `dist/index.js`: a source checkout's
     first, since a developer running from one means that build, then the npm
     global install. None when neither exists."""
-    for candidate in (_checkout_entry(), _npm_global_entry()):
-        if candidate is not None and candidate.is_file():
-            return str(candidate.resolve())
+    checkout = _checkout_entry()
+    if checkout.is_file():
+        return str(checkout.resolve())
+    npm = _npm_global_entry()          # only now: `npm root -g` costs a process
+    if npm is not None and npm.is_file():
+        return str(npm.resolve())
     return None

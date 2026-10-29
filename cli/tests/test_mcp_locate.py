@@ -39,6 +39,32 @@ class TestFindMcpServerEntry:
         with patch("subprocess.run", _npm_root(tmp_path / "npm")):
             assert mcp_locate.find_mcp_server_entry() == str(checkout.resolve())
 
+    def test_npm_is_not_run_when_a_checkout_has_the_build(self, tmp_path, monkeypatch):
+        checkout = tmp_path / "index.js"
+        checkout.write_text("", encoding="utf-8")
+        monkeypatch.setattr(mcp_locate, "_checkout_entry", lambda: checkout)
+
+        def run(*a, **k):
+            raise AssertionError("npm should not run")
+
+        with patch("subprocess.run", run):
+            assert mcp_locate.find_mcp_server_entry() == str(checkout.resolve())
+
+    def test_a_redacted_npm_root_is_found_from_node(self, tmp_path, monkeypatch):
+        """npm prints *** for a path segment that looks like a UUID, so its
+        root names nothing; node's own path gives the same root."""
+        monkeypatch.setattr(mcp_locate, "_checkout_entry", lambda: tmp_path / "absent.js")
+        prefix = tmp_path / "0f8fad5b-d9cb-469f-a165-70867728950e"
+        entry = _global_install(prefix / "lib" / "node_modules")
+
+        def run(cmd, *a, **k):
+            out = {("npm", "root", "-g"): "/home/u/***/lib/node_modules",
+                   ("node", "-p", "process.execPath"): str(prefix / "bin" / "node")}[tuple(cmd)]
+            return subprocess.CompletedProcess(cmd, 0, stdout=out + "\n", stderr="")
+
+        with patch("subprocess.run", run):
+            assert mcp_locate.find_mcp_server_entry() == str(entry.resolve())
+
     def test_a_package_install_finds_the_npm_global_install(self, tmp_path, monkeypatch):
         """`pip install schist` has no mcp-server/ beside it, so the README's
         `init --print-mcp-config` failed for anyone who installed both
