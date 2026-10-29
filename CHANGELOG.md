@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`schist init --print-mcp-config` and `schist doctor` find an MCP server installed with npm.** Both looked for `dist/index.js` only beside a source checkout, which a `pip install schist` does not have, so after the README's `pip install schist` and `npm install -g @schist/mcp-server` the first `--print-mcp-config` failed with "cannot find mcp-server/dist/index.js". They now fall back to `$(npm root -g)/@schist/mcp-server/dist/index.js`; a source checkout's build still comes first. As a result `schist doctor` can now WARN when the configured server is a different copy from the one it finds.
+
 ## [0.3.0] - 2026-10-28
 
 ### License

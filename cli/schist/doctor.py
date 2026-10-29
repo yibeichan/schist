@@ -1730,17 +1730,11 @@ def check_hub_sshd_acceptenv(hub_path: Optional[str]) -> CheckResult:
 
 
 def _auto_detect_mcp_path() -> Optional[str]:
-    """Locate `mcp-server/dist/index.js` relative to this checkout.
-
-    Mirrors the fallback logic in sync.py:_print_mcp_config (lines 719-722).
-    Returns the absolute path if found; None if not (e.g. distribution-
-    installed schist with no source checkout).
-    """
-    pkg_dir = Path(__file__).resolve().parents[2]
-    candidate = pkg_dir / "mcp-server" / "dist" / "index.js"
-    if candidate.exists():
-        return str(candidate.resolve())
-    return None
+    """The MCP server's `dist/index.js`, found the way
+    `init --print-mcp-config` finds it (schist.mcp_locate): a source checkout,
+    else the npm global install. None when neither has it."""
+    from schist.mcp_locate import find_mcp_server_entry
+    return find_mcp_server_entry()
 
 
 def _mcp_config_candidates(vault_path: Optional[str]) -> list[Path]:
