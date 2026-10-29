@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`--vault` and `--db` can follow the subcommand.** `schist doctor --vault ~/vault`, `schist add --vault ~/vault --title …` and `schist sync push --vault ~/vault` failed with "unrecognized arguments", because both options were accepted only before the subcommand, yet the README's quick start and the guides wrote them after it. Every subcommand now accepts them in either place; given in both, the one after the subcommand wins, and `SCHIST_VAULT_PATH` still applies when neither is given.
+
 ## [0.3.0] - 2026-10-28
 
 ### License
