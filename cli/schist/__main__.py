@@ -69,6 +69,30 @@ def _lock_hold_args(argv: list) -> "tuple[str, float, float] | None":
     return vault, opts['--timeout'], opts['--max-hold']
 
 
+def _accept_vault_options_after_subcommands(parser: argparse.ArgumentParser) -> None:
+    """Let `--vault` and `--db` follow the subcommand too (`schist doctor
+    --vault V`, `schist sync push --vault V`), as the docs write them.
+
+    They were top-level only, so that form failed with "unrecognized
+    arguments". Each subcommand parser, nested ones included, gets both with a
+    SUPPRESS default: it sets the value only when the option is given after
+    it, so `schist --vault V doctor` and SCHIST_VAULT_PATH work as before, and
+    when both are given the one after the subcommand wins.
+    """
+    for action in parser._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        for subparser in action.choices.values():
+            taken = {flag for a in subparser._actions for flag in a.option_strings}
+            if '--vault' not in taken:
+                subparser.add_argument('--vault', default=argparse.SUPPRESS,
+                                       help='Path to vault root (same as schist --vault)')
+            if '--db' not in taken:
+                subparser.add_argument('--db', default=argparse.SUPPRESS,
+                                       help='Path to SQLite database (same as schist --db)')
+            _accept_vault_options_after_subcommands(subparser)
+
+
 def main():
     fast = _lock_hold_args(sys.argv[1:])
     if fast is not None:
@@ -327,6 +351,7 @@ def main():
     p_hub_sec.add_argument('--hub-path', dest='hub_path', required=True,
                            help='Path to the bare hub repo')
 
+    _accept_vault_options_after_subcommands(parser)
     args = parser.parse_args()
 
     if not args.command:
