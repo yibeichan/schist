@@ -127,6 +127,11 @@ schist --vault /path/to/vault init --print-mcp-config --format claude --identity
 # Run the printed `claude mcp add` command
 ```
 
+`--print-mcp-config` finds the server in a source checkout, or else where
+`npm install -g @schist/mcp-server` put it
+(`$(npm root -g)/@schist/mcp-server/dist/index.js`); pass `--mcp-server-path`
+for any other location. The examples below use a checkout's path.
+
 ### Cursor
 
 Add to `.cursor/mcp.json`:
