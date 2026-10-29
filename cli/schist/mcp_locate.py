@@ -14,6 +14,7 @@ can be.
 
 from __future__ import annotations
 
+import fnmatch
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -40,15 +41,26 @@ def _npm_global_entry() -> Optional[Path]:
     when there is no npm global root to look in.
 
     The root is `npm root -g`. npm prints `***` in place of a path segment that
-    looks like a secret (a dashed UUID), so for such a root it is worked out
-    from node's own path instead: `<prefix>/bin/node` keeps global packages in
-    `<prefix>/lib/node_modules`."""
+    looks like a secret (a dashed UUID), so such a root names nothing. node's
+    own prefix (`<prefix>/bin/node` keeps globals in `<prefix>/lib/node_modules`)
+    is used instead only when it matches what npm printed, segment by segment
+    with `***` matching the hidden part; when it does not (Homebrew, a
+    distribution's npm, NPM_CONFIG_PREFIX set elsewhere) the root is unknown,
+    rather than guessed."""
     root = _run_stdout(["npm", "root", "-g"])
-    if not root or "***" in root:
+    if not root:
+        return None
+    if "***" in root:
         node = _run_stdout(["node", "-p", "process.execPath"])
         if not node:
             return None
-        root = str(Path(node).parent.parent / "lib" / "node_modules")
+        guess = Path(node).parent.parent / "lib" / "node_modules"
+        printed = Path(root).parts
+        if len(printed) != len(guess.parts) or not all(
+                fnmatch.fnmatchcase(part, shown.replace("***", "*"))
+                for part, shown in zip(guess.parts, printed)):
+            return None
+        root = str(guess)
     return Path(root) / NPM_PACKAGE / "dist" / "index.js"
 
 

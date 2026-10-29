@@ -57,13 +57,42 @@ class TestFindMcpServerEntry:
         prefix = tmp_path / "0f8fad5b-d9cb-469f-a165-70867728950e"
         entry = _global_install(prefix / "lib" / "node_modules")
 
+        redacted = str(tmp_path / "***" / "lib" / "node_modules")
+
         def run(cmd, *a, **k):
-            out = {("npm", "root", "-g"): "/home/u/***/lib/node_modules",
+            out = {("npm", "root", "-g"): redacted,
                    ("node", "-p", "process.execPath"): str(prefix / "bin" / "node")}[tuple(cmd)]
             return subprocess.CompletedProcess(cmd, 0, stdout=out + "\n", stderr="")
 
         with patch("subprocess.run", run):
             assert mcp_locate.find_mcp_server_entry() == str(entry.resolve())
+
+    def test_node_is_not_trusted_when_its_prefix_is_not_npms(self, tmp_path, monkeypatch):
+        """npm's redacted root and node's prefix disagree (npm installs
+        elsewhere): node's prefix may hold another copy, so it is not used."""
+        monkeypatch.setattr(mcp_locate, "_checkout_entry", lambda: tmp_path / "absent.js")
+        node_prefix = tmp_path / "node-home"
+        _global_install(node_prefix / "lib" / "node_modules")
+
+        def run(cmd, *a, **k):
+            out = {("npm", "root", "-g"): str(tmp_path / "npm" / "***" / "lib" / "node_modules"),
+                   ("node", "-p", "process.execPath"): str(node_prefix / "bin" / "node")}[tuple(cmd)]
+            return subprocess.CompletedProcess(cmd, 0, stdout=out + "\n", stderr="")
+
+        with patch("subprocess.run", run):
+            assert mcp_locate.find_mcp_server_entry() is None
+
+    def test_node_is_not_asked_when_npm_fails(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mcp_locate, "_checkout_entry", lambda: tmp_path / "absent.js")
+        calls = []
+
+        def run(cmd, *a, **k):
+            calls.append(cmd[0])
+            raise subprocess.CalledProcessError(1, cmd)
+
+        with patch("subprocess.run", run):
+            assert mcp_locate.find_mcp_server_entry() is None
+        assert calls == ["npm"]
 
     def test_a_package_install_finds_the_npm_global_install(self, tmp_path, monkeypatch):
         """`pip install schist` has no mcp-server/ beside it, so the README's
