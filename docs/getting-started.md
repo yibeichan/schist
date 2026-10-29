@@ -56,7 +56,7 @@ source ~/.bashrc
 # Create venv and install schist
 uv venv ~/schist-venv
 source ~/schist-venv/bin/activate
-uv pip install git+https://github.com/yibeichan/schist.git
+uv pip install "git+https://github.com/yibeichan/schist.git#subdirectory=cli"
 ```
 
 If Node.js >= 22 is not available via modules, install with nvm:
@@ -92,7 +92,7 @@ npm install -g @schist/mcp-server
 > **Note:** `pip install schist` installs the latest published release.
 > For unreleased changes on `main`, install directly from git:
 > ```bash
-> pip install git+https://github.com/yibeichan/schist.git
+> pip install "git+https://github.com/yibeichan/schist.git#subdirectory=cli"
 > ```
 > Or from a local clone (see Option B below).
 

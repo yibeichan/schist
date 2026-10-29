@@ -288,7 +288,7 @@ source ~/.bashrc
 # Create venv and install schist
 uv venv ~/schist-venv
 source ~/schist-venv/bin/activate
-uv pip install git+https://github.com/yibeichan/schist.git
+uv pip install "git+https://github.com/yibeichan/schist.git#subdirectory=cli"
 ```
 
 If Node.js >= 22 is not available via modules:
