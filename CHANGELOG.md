@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`--vault` and `--db` can follow the subcommand.** `schist doctor --vault ~/vault`, `schist add --vault ~/vault --title …` and `schist sync push --vault ~/vault` failed with "unrecognized arguments", because both options were accepted only before the subcommand, yet the README's quick start and the guides wrote them after it. Every subcommand now accepts them in either place; given in both, the one after the subcommand wins, and `SCHIST_VAULT_PATH` still applies when neither is given.
+
 ### Fixed
 - **`schist init --print-mcp-config` and `schist doctor` find an MCP server installed with npm.** Both looked for `dist/index.js` only beside a source checkout, which a `pip install schist` does not have, so after the README's `pip install schist` and `npm install -g @schist/mcp-server` the first `--print-mcp-config` failed with "cannot find mcp-server/dist/index.js". They now fall back to `$(npm root -g)/@schist/mcp-server/dist/index.js`; a source checkout's build still comes first. As a result `schist doctor` can now WARN when the configured server is a different copy from the one it finds.
 

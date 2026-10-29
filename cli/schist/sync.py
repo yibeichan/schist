@@ -1981,6 +1981,18 @@ def _dispatch_init(args) -> None:
         init_spoke(args, vault_path, db_path)
         return
 
+    # A typed --vault names the new vault, like the positional path: without
+    # this, `schist init --vault T` (the form the docs use for every other
+    # command) scaffolded the current directory and left T untouched.
+    # SCHIST_VAULT_PATH alone does not, so a bare `schist init` still means
+    # the current directory.
+    if getattr(args, "vault_explicit", False) and args.vault:
+        if standalone_path and Path(standalone_path).resolve() != Path(args.vault).resolve():
+            print(f"Error: init got two vault paths, {standalone_path} and --vault {args.vault}; "
+                  "give one", file=sys.stderr)
+            sys.exit(1)
+        args.path = args.vault
+
     init_standalone(args)
 
 
