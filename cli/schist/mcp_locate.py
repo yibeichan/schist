@@ -15,6 +15,7 @@ can be.
 from __future__ import annotations
 
 import fnmatch
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -51,6 +52,12 @@ def _npm_global_entry() -> Optional[Path]:
     if not root:
         return None
     if "***" in root:
+        # A prefix set in the environment is where npm installs; take it as
+        # given rather than guess from node, whose prefix it can differ from
+        # only in the hidden part.
+        configured = os.environ.get("NPM_CONFIG_PREFIX") or os.environ.get("npm_config_prefix")
+        if configured:
+            return Path(configured) / "lib" / "node_modules" / NPM_PACKAGE / "dist" / "index.js"
         node = _run_stdout(["node", "-p", "process.execPath"])
         if not node:
             return None

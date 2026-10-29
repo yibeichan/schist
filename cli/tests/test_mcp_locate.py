@@ -54,6 +54,8 @@ class TestFindMcpServerEntry:
         """npm prints *** for a path segment that looks like a UUID, so its
         root names nothing; node's own path gives the same root."""
         monkeypatch.setattr(mcp_locate, "_checkout_entry", lambda: tmp_path / "absent.js")
+        monkeypatch.delenv("NPM_CONFIG_PREFIX", raising=False)
+        monkeypatch.delenv("npm_config_prefix", raising=False)
         prefix = tmp_path / "0f8fad5b-d9cb-469f-a165-70867728950e"
         entry = _global_install(prefix / "lib" / "node_modules")
 
@@ -71,6 +73,8 @@ class TestFindMcpServerEntry:
         """npm's redacted root and node's prefix disagree (npm installs
         elsewhere): node's prefix may hold another copy, so it is not used."""
         monkeypatch.setattr(mcp_locate, "_checkout_entry", lambda: tmp_path / "absent.js")
+        monkeypatch.delenv("NPM_CONFIG_PREFIX", raising=False)
+        monkeypatch.delenv("npm_config_prefix", raising=False)
         node_prefix = tmp_path / "node-home"
         _global_install(node_prefix / "lib" / "node_modules")
 
@@ -81,6 +85,25 @@ class TestFindMcpServerEntry:
 
         with patch("subprocess.run", run):
             assert mcp_locate.find_mcp_server_entry() is None
+
+    def test_a_configured_prefix_wins_over_a_matching_node_prefix(self, tmp_path, monkeypatch):
+        """Two UUID-named prefixes side by side redact to the same root; with
+        NPM_CONFIG_PREFIX set, that prefix is where npm installed."""
+        monkeypatch.setattr(mcp_locate, "_checkout_entry", lambda: tmp_path / "absent.js")
+        npm_prefix = tmp_path / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        node_prefix = tmp_path / "0f8fad5b-d9cb-469f-a165-70867728950e"
+        wanted = _global_install(npm_prefix / "lib" / "node_modules")
+        _global_install(node_prefix / "lib" / "node_modules")
+        monkeypatch.setenv("NPM_CONFIG_PREFIX", str(npm_prefix))
+        monkeypatch.delenv("npm_config_prefix", raising=False)
+
+        def run(cmd, *a, **k):
+            out = {("npm", "root", "-g"): str(tmp_path / "***" / "lib" / "node_modules"),
+                   ("node", "-p", "process.execPath"): str(node_prefix / "bin" / "node")}[tuple(cmd)]
+            return subprocess.CompletedProcess(cmd, 0, stdout=out + "\n", stderr="")
+
+        with patch("subprocess.run", run):
+            assert mcp_locate.find_mcp_server_entry() == str(wanted.resolve())
 
     def test_node_is_not_asked_when_npm_fails(self, tmp_path, monkeypatch):
         monkeypatch.setattr(mcp_locate, "_checkout_entry", lambda: tmp_path / "absent.js")
