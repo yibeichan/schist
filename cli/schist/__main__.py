@@ -102,7 +102,9 @@ def main():
     from . import commands, doctor as doctor_mod, sync
 
     parser = argparse.ArgumentParser(prog='schist', description='Agent-first knowledge graph CLI')
-    parser.add_argument('--vault', default=os.environ.get('SCHIST_VAULT_PATH'), help='Path to vault root (or set SCHIST_VAULT_PATH)')
+    # default None, then SCHIST_VAULT_PATH after parsing: `init` must tell a
+    # typed --vault (its target) from the environment (which it ignores).
+    parser.add_argument('--vault', default=None, help='Path to vault root (or set SCHIST_VAULT_PATH)')
     parser.add_argument('--db', default=None, help='Path to SQLite database (default: <vault>/.schist/schist.db)')
 
     sub = parser.add_subparsers(dest='command')
@@ -353,6 +355,9 @@ def main():
 
     _accept_vault_options_after_subcommands(parser)
     args = parser.parse_args()
+    args.vault_explicit = args.vault is not None
+    if args.vault is None:
+        args.vault = os.environ.get('SCHIST_VAULT_PATH')
 
     if not args.command:
         parser.print_help()
