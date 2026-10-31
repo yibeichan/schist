@@ -532,7 +532,7 @@ mkdir -p ~/.tailscale-state
 
 ### On-demand daemon wrapper (HPC / shared hosts)
 
-On a shared login node, you don't want a persistent VPN daemon. Wrap the SSH ProxyCommand so `tailscaled` starts on first use and stops again when the last connection on that node closes. Login nodes cap the threads each user may run (768 on MIT ORCD), and an idle `tailscaled` holds about 135 of them, so a resident daemon (or several duplicates) can stop `fork` and `srun` from working.
+On a shared login node, you don't want a persistent VPN daemon. Wrap the SSH ProxyCommand so `tailscaled` starts on first use and stops again when the last connection on that node closes. Because HPC home directories are usually shared across nodes, the wrapper also claims the state directory for one node at a time. Login nodes cap the threads each user may run (768 on MIT ORCD), and an idle `tailscaled` holds about 135 of them, so a resident daemon (or several duplicates) can stop `fork` and `srun` from working.
 
 ```bash
 # ~/.local/bin/schist-tailscale-nc
@@ -541,12 +541,14 @@ On a shared login node, you don't want a persistent VPN daemon. Wrap the SSH Pro
 # `tailscale nc`, and stop the daemon once the last connection on this node
 # closes. GOMAXPROCS=2 keeps both tailscaled and `tailscale nc` small.
 STATEDIR="$HOME/.tailscale-state"
+OWNER="$STATEDIR/owner"
 SOCKET="$STATEDIR/tailscaled.sock"
 PIDFILE="$STATEDIR/tailscaled.pid"
 LOGFILE="$STATEDIR/tailscaled.log"
 LOCK="$STATEDIR/launch.lock"
 TAILSCALED="$HOME/.local/bin/tailscaled"
 TAILSCALE="$HOME/.local/bin/tailscale"
+HOST=$(hostname)
 export GOMAXPROCS=2
 
 mkdir -p "$STATEDIR"
@@ -564,9 +566,27 @@ ready() {
         "$TAILSCALE" --socket="$SOCKET" ip -4 "$1" >/dev/null 2>&1
 }
 
+# pgrep and the socket only see this node, but the home directory (and so
+# the state) may be shared by every node. Claim the state for this node with
+# an atomic symlink before starting a daemon: two daemons on one state would
+# run with the same node key.
+claim_owner() {
+    ln -s "$HOST" "$OWNER" 2>/dev/null && return 0
+    [ "$(readlink "$OWNER")" = "$HOST" ]
+}
+release_owner() {
+    [ "$(readlink "$OWNER")" = "$HOST" ] && rm -f "$OWNER"
+}
+
 # Serialize start and stop so concurrent syncs share one daemon.
 exec 9>"$LOCK"
 flock -w 60 9 || { echo "schist-tailscale-nc: lock timeout" >&2; exit 1; }
+
+if ! claim_owner; then
+    echo "schist-tailscale-nc: $STATEDIR is in use on $(readlink "$OWNER");" \
+         "if no tailscaled runs there, remove $OWNER" >&2
+    exit 1
+fi
 
 if ! daemon_running; then
     nohup "$TAILSCALED" \
@@ -582,7 +602,7 @@ for _ in $(seq 1 60); do
 done
 if ! ready "$1"; then
     # Stop a daemon no connection is using before giving up.
-    nc_running || { pkill -TERM -u "$(id -u)" -f "^$TAILSCALED "; rm -f "$PIDFILE"; }
+    nc_running || { pkill -TERM -u "$(id -u)" -f "^$TAILSCALED "; rm -f "$PIDFILE"; release_owner; }
     echo "schist-tailscale-nc: tailscaled is not Running or $1 is not a known peer" \
          "after 15s; see $LOGFILE" >&2
     exit 1
@@ -607,6 +627,7 @@ cleanup() {
     if ! nc_running; then
         pkill -TERM -u "$(id -u)" -f "^$TAILSCALED "
         rm -f "$PIDFILE"
+        release_owner
     fi
 }
 trap cleanup EXIT
@@ -621,14 +642,19 @@ exit $?
 ```bash
 # ~/.local/bin/schist-tailscale-down
 #!/usr/bin/env bash
-PIDFILE="$HOME/.tailscale-state/tailscaled.pid"
+STATEDIR="$HOME/.tailscale-state"
+PIDFILE="$STATEDIR/tailscaled.pid"
 if [ -f "$PIDFILE" ]; then
     kill "$(cat "$PIDFILE")" 2>/dev/null
     rm -f "$PIDFILE"
 fi
+# Release this node's claim on the state directory.
+[ "$(readlink "$STATEDIR/owner")" = "$(hostname)" ] && rm -f "$STATEDIR/owner"
 ```
 
 `chmod 755` both. `schist-tailscale-down` is for stopping a daemon you started by hand (below) or one left behind by a killed connection. The `--tun=userspace-networking` flag skips the kernel TUN device (no root) and `tailscale nc` pipes the SSH connection through the userspace stack — no listening SOCKS port that other users on a shared host could hijack. The wrapper needs `flock` and `pgrep`, which every Linux distribution ships.
+
+The `owner` symlink names the node whose daemon uses the state directory. `pgrep` and the unix socket only see the current node, so without it two nodes that share a home directory would each start a daemon on the same state and run with the same node key. Creating a symlink fails if the name exists, also on NFS, so only one node wins the claim; the wrapper drops it when it stops the daemon. A connection from another node fails at once with `in use on <node>` until then. If that node went down with the daemon running, the claim stays behind: check that no `tailscaled` of yours runs there and remove `~/.tailscale-state/owner`.
 
 The readiness wait matters on a fresh start. Since Tailscale 1.104 the daemon loads a cached netmap from the state directory, and `tailscale status` succeeds before the backend reaches `Running`. A `tailscale nc` started at that moment never connects, and SSH hangs at the banner exchange. Waiting for `Running` plus a known peer removes the hang. `</dev/null` keeps the long-lived daemon from inheriting SSH's proxy pipe as its stdin.
 
@@ -638,6 +664,7 @@ The wrapper stops the daemon as soon as its own connection ends, so start the da
 
 ```bash
 TS=$HOME/.tailscale-state
+ln -s "$(hostname)" $TS/owner         # fails if another node holds the state
 ~/.local/bin/tailscaled --tun=userspace-networking --statedir=$TS \
   --socket=$TS/tailscaled.sock > $TS/tailscaled.log 2>&1 &
 echo $! > $TS/tailscaled.pid
@@ -678,6 +705,7 @@ schist sync push              # should land a commit on the Pi
 - `tailscale ping <pi-name>` shows whether traffic is routed direct (UDP punch-through) or via DERP (Tailscale's relay). HPC clusters often block outbound UDP, so DERP is normal — adds ~30-100ms but otherwise transparent.
 - If `ssh schist-hub` hangs: `~/.local/bin/schist-tailscale-down`, then re-run. The wrapper restarts the daemon on next use.
 - The daemon runs only while a connection is open; a stale pidfile is harmless, since the wrapper checks for the running process, not the pidfile.
+- If every connection fails at once with `in use on <node>`, another node holds the state directory (`readlink ~/.tailscale-state/owner` names it). Wait for that node's connections to close, or, if the node is gone or runs no `tailscaled` of yours, remove the `owner` link.
 - If every connection fails after about 15 s with `not Running or ... is not a known peer`, the wrapper never saw the hub as a peer. Check that `HostName` matches the hub's tailnet IP or name in `tailscale status`, and that the node's key has not expired (`tailscale status` then says logged out).
 - `~/.tailscale-state/tailscaled.log` has the daemon's output if anything fails to start.
 
