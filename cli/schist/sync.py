@@ -1858,17 +1858,16 @@ def _print_mcp_config(args) -> None:
 
     identity = getattr(args, "identity", None) or os.environ.get("SCHIST_IDENTITY", "")
 
-    # Find mcp-server/dist/index.js
+    # Find the server's dist/index.js: a source checkout, else the npm
+    # global install.
     mcp_path = getattr(args, "mcp_server_path", None)
     if not mcp_path:
-        # Auto-detect from source checkout
-        pkg_dir = Path(__file__).resolve().parents[2]
-        candidate = pkg_dir / "mcp-server" / "dist" / "index.js"
-        if candidate.exists():
-            mcp_path = str(candidate)
+        from schist.mcp_locate import find_mcp_server_entry
+        mcp_path = find_mcp_server_entry()
     if not mcp_path:
-        print("Error: cannot find mcp-server/dist/index.js. "
-              "Use --mcp-server-path to specify.", file=sys.stderr)
+        print("Error: cannot find the MCP server's dist/index.js, either in a source "
+              "checkout or in a global `npm install -g @schist/mcp-server`. Install it, "
+              "or pass --mcp-server-path.", file=sys.stderr)
         sys.exit(1)
     mcp_path = os.path.abspath(mcp_path)
 
@@ -1981,6 +1980,18 @@ def _dispatch_init(args) -> None:
         db_path = args.db or os.path.join(vault_path, ".schist", "schist.db")
         init_spoke(args, vault_path, db_path)
         return
+
+    # A typed --vault names the new vault, like the positional path: without
+    # this, `schist init --vault T` (the form the docs use for every other
+    # command) scaffolded the current directory and left T untouched.
+    # SCHIST_VAULT_PATH alone does not, so a bare `schist init` still means
+    # the current directory.
+    if getattr(args, "vault_explicit", False) and args.vault:
+        if standalone_path and Path(standalone_path).resolve() != Path(args.vault).resolve():
+            print(f"Error: init got two vault paths, {standalone_path} and --vault {args.vault}; "
+                  "give one", file=sys.stderr)
+            sys.exit(1)
+        args.path = args.vault
 
     init_standalone(args)
 

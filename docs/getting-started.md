@@ -56,7 +56,7 @@ source ~/.bashrc
 # Create venv and install schist
 uv venv ~/schist-venv
 source ~/schist-venv/bin/activate
-uv pip install git+https://github.com/yibeichan/schist.git
+uv pip install "git+https://github.com/yibeichan/schist.git#subdirectory=cli"
 ```
 
 If Node.js >= 22 is not available via modules, install with nvm:
@@ -92,7 +92,7 @@ npm install -g @schist/mcp-server
 > **Note:** `pip install schist` installs the latest published release.
 > For unreleased changes on `main`, install directly from git:
 > ```bash
-> pip install git+https://github.com/yibeichan/schist.git
+> pip install "git+https://github.com/yibeichan/schist.git#subdirectory=cli"
 > ```
 > Or from a local clone (see Option B below).
 
@@ -175,11 +175,14 @@ For Cursor format, use `--format cursor`:
 schist --vault ~/my-vault init --print-mcp-config --format cursor --identity local
 ```
 
-If auto-detection of `mcp-server/dist/index.js` fails, specify the path explicitly:
+`--print-mcp-config` finds the server in a source checkout, or else where
+`npm install -g @schist/mcp-server` put it. If it finds neither, specify the
+path explicitly, for example for the npm install:
 ```bash
 schist --vault ~/my-vault init --print-mcp-config \
-  --mcp-server-path /path/to/schist/mcp-server/dist/index.js
+  --mcp-server-path "$(npm root -g)/@schist/mcp-server/dist/index.js"
 ```
+or for a source checkout, `/path/to/schist/mcp-server/dist/index.js`.
 
 ### Verify Stage 3
 
