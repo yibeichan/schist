@@ -610,17 +610,12 @@
       ]
     },
     {
-      "name": "HTML type 2 comment inside a section hides an edge line",
+      "name": "HTML comment inside a section: the section ends at a heading marked shows",
       "body": "## Connections\n- extends: note-a\n<!--\n- extends: fake\n## Notes\n-->\n- related: note-b",
       "edges": [
         {
           "type": "extends",
           "target": "note-a",
-          "context": null
-        },
-        {
-          "type": "related",
-          "target": "note-b",
           "context": null
         }
       ]
@@ -696,15 +691,9 @@
       ]
     },
     {
-      "name": "HTML type 7 cannot interrupt a paragraph",
+      "name": "HTML type 7 tag after paragraph text: skipped, since marked may start a block",
       "body": "Some text\n<span>\n## Connections\n- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": []
     },
     {
       "name": "HTML type 7 needs the tag alone on the line",
@@ -734,17 +723,12 @@
       ]
     },
     {
-      "name": "HTML block inside a section skips lines until the blank line",
+      "name": "HTML block inside a section: the section ends at a heading marked shows",
       "body": "## Connections\n- extends: note-a\n<div>\n- extends: fake\n## Notes\n\n- related: note-b",
       "edges": [
         {
           "type": "extends",
           "target": "note-a",
-          "context": null
-        },
-        {
-          "type": "related",
-          "target": "note-b",
           "context": null
         }
       ]
@@ -825,20 +809,9 @@
       ]
     },
     {
-      "name": "edge lines trim U+001F and U+FEFF alike",
+      "name": "U+001F or U+FEFF before - is not an edge line",
       "body": "## Connections\n\u001f- extends: note-a\n\ufeff- extends: note-b",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        },
-        {
-          "type": "extends",
-          "target": "note-b",
-          "context": null
-        }
-      ]
+      "edges": []
     },
     {
       "name": "heading indented 1 space is a heading",
@@ -860,6 +833,151 @@
       "name": "indented first body line is an indented code block",
       "body": "    ## Connections\n    - extends: fake",
       "edges": []
+    },
+    {
+      "name": "edge indented 4 spaces is code",
+      "body": "## Connections\n    - extends: fake",
+      "edges": []
+    },
+    {
+      "name": "edge indented by a tab is code",
+      "body": "## Connections\n\t- extends: fake",
+      "edges": []
+    },
+    {
+      "name": "NBSP before - is not an edge line",
+      "body": "## Connections\n\u00a0- extends: fake",
+      "edges": []
+    },
+    {
+      "name": "edge nested under the previous item is not top-level",
+      "body": "## Connections\n- extends: note-a\n  - extends: fake",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "edge after a dash-tab item stays in that item",
+      "body": "## Connections\n-\textends: fake\n - extends: fake",
+      "edges": []
+    },
+    {
+      "name": "first edge indented 1 space is top-level",
+      "body": "## Connections\n - extends: note-a\n- extends: note-b",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "note-b",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "heading inside a list item is not a heading",
+      "body": "- item\n  ## Connections\n- extends: fake",
+      "edges": []
+    },
+    {
+      "name": "heading indented in a list item after a blank line is not a heading",
+      "body": "- item\n\n  ## Connections\n- extends: fake",
+      "edges": []
+    },
+    {
+      "name": "heading after a list at column 0 is a heading",
+      "body": "- item\n  more\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "fence opened in a list item is not closed by a shallower fence line",
+      "body": "1) item\n\t```\n  ```\n## Connections\n- extends: fake",
+      "edges": []
+    },
+    {
+      "name": "\"- \" alone is paragraph text, so the next fence opens",
+      "body": "- \n  ```\n    ```\n## Connections\n- extends: fake",
+      "edges": []
+    },
+    {
+      "name": "marked ends an HTML declaration at > and reads on",
+      "body": "<!DOCTYPE x\n> ```\n## Connections\n- extends: fake",
+      "edges": []
+    },
+    {
+      "name": "HTML comment after a list item: hidden for CommonMark",
+      "body": "- x\n<!--\n## Connections\n- extends: fake\n-->",
+      "edges": []
+    },
+    {
+      "name": "a - line after paragraph text can make marked end the paragraph",
+      "body": "foo\n</span>\n- \n## Connections\n- extends: fake",
+      "edges": []
+    },
+    {
+      "name": "uppercase HTML tag does not interrupt a paragraph in marked",
+      "body": "text\n<DIV>\n<pre>\n## Connections\n- extends: fake",
+      "edges": []
+    },
+    {
+      "name": "empty quote line then a type 7 tag",
+      "body": "> \n<x-y a=\"1\">\n## Connections\n- extends: fake",
+      "edges": []
+    },
+    {
+      "name": "thematic break then a type 7 tag",
+      "body": "***\n</span>\n## Connections\n- extends: fake",
+      "edges": []
+    },
+    {
+      "name": "U+2028 makes marked read an ATX line as paragraph text",
+      "body": "x\n## Other \u2028y\n<span>\n```\n## Connections\n- extends: fake",
+      "edges": []
+    },
+    {
+      "name": "U+2028 inside an edge's dash context",
+      "body": "## Connections\n- extends: note-a \u2014 why\u2028more",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": "why\u2028more"
+        }
+      ]
+    },
+    {
+      "name": "U+2028 in a tilde fence's info string",
+      "body": "~~~\u2028x\n## Connections\n- extends: fake\n~~~",
+      "edges": []
+    },
+    {
+      "name": "ordinary note: heading, blank line, edges",
+      "body": "Intro.\n\n## Connections\n\n- extends: note-a\n- supports: note-b \"why\"\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "supports",
+          "target": "note-b",
+          "context": "why"
+        }
+      ]
     }
   ],
   "files": [

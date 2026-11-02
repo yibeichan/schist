@@ -28,13 +28,14 @@ const NON_WS_CLASS = `[^${SLUG_WS_CHARS}]`;
  * `\S` → its negation): native \s / \S membership drifts between JS and
  * Python, so the two languages' CONNECTION_REs parsed divergent codepoints
  * differently — e.g. a NEL (U+0085) separator produced an edge under
- * Python's \s but not under JS's (#338). Semantics are otherwise identical.
+ * Python's \s but not under JS's (#338). The context group is [^\n\r]*, not
+ * `.*`: JS's `.` stops at U+2028/U+2029, which can sit inside a line.
  * schema/connection-line-parity.json pins this against
  * cli/schist/ingest.py's CONNECTION_RE.
  */
 export const CONNECTION_RE = new RegExp(
   `^-${WS_CLASS}+(${NON_WS_CLASS}+):${WS_CLASS}+(${NON_WS_CLASS}+)` +
-  `(?:${WS_CLASS}+"([^"]*)")?(?:${WS_CLASS}+—${WS_CLASS}+(.*))?$`
+  `(?:${WS_CLASS}+"([^"]*)")?(?:${WS_CLASS}+—${WS_CLASS}+([^\n\r]*))?$`
 );
 
 // Codepoints Python's str.splitlines() treats as line boundaries. This is a
@@ -133,12 +134,16 @@ export function isRoundTrippableTarget(target: string): boolean {
  *   HTML_BLOCK_STARTS; type 7 cannot interrupt a paragraph). Whichever block
  *   opens first governs until it closes; an unclosed one runs to the end.
  *   Lines in a fence or HTML block are never a heading, never an edge, and
- *   never end the section. Container blocks (block quotes, list items) are
- *   not interpreted: their lines are read as top-level lines.
+ *   never end the section. Once a list item opens, its indented lines are
+ *   skipped the same way (listOpen in scanBlocks). A line starting with `>`
+ *   (a block quote) is never a heading or an edge.
  * - The section ends at the next other line of 0-3 spaces, then `## `, then
  *   text (SECTION_END_RE).
- * - Edge lines are trimmed with the explicit SLUG_WS_CHARS set, not trim(),
- *   whose whitespace differs from Python's str.strip() (U+001F, U+FEFF).
+ * - An edge line starts with 0-3 spaces, `-` and a space
+ *   (EDGE_PREFIX_RE), then matches CONNECTION_RE once trimmed with the
+ *   explicit SLUG_WS_CHARS set (not trim(), whose whitespace differs from
+ *   Python's str.strip()).
+ * - Lines end only at CommonMark line endings (splitConnectionLines).
  */
 const CONNECTIONS_HEADING_RE = /^ {0,3}## Connections[ \t]*$/;
 const SECTION_END_RE = /^ {0,3}## [ \t]*[^ \t]/;
@@ -163,7 +168,7 @@ export function trimConnectionWs(text: string): string {
   return text.slice(a, b);
 }
 
-const FENCE_OPEN_RE = /^ {0,3}(?:(`{3,})[^`]*|(~{3,}).*)$/;
+const FENCE_OPEN_RE = /^ {0,3}(?:(`{3,})[^`]*|(~{3,})[^\n\r]*)$/;
 const FENCE_CLOSE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 
 // CommonMark 0.31 HTML blocks (spec section 4.6). Patterns run on the line
@@ -194,9 +199,11 @@ const HTML_BLOCK_STARTS: [number, RegExp][] = [
     `|</(?!(?:script|style|pre|textarea)[ \\t>])[a-z][a-z0-9-]*[ \\t]*>)[ \\t]*$`,
   )],
 ];
-const HTML_TYPE1_ENDS = ["</script>", "</pre>", "</style>", "</textarea>"];
 const HTML_END_MARKERS: Record<number, string> = { 2: "-->", 3: "?>", 4: ">", 5: "]]>" };
 const ATX_HEADING_RE = /^ {0,3}#{1,6}(?:[ \t]|$)/;
+const LIST_MARKER_RE = /^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|$)/;
+const THEMATIC_BREAK_RE = /^ {0,3}([-*_])[ \t]*(?:\1[ \t]*){2,}$/;
+const EDGE_PREFIX_RE = /^ {0,3}- /;
 
 function asciiLower(line: string): string {
   return line.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
@@ -218,12 +225,114 @@ function isBlank(line: string): boolean {
   return /^[ \t]*$/.test(line);
 }
 
-function htmlBlockEnd(kind: number, low: string): boolean {
-  if (kind === 1) return HTML_TYPE1_ENDS.some((end) => low.includes(end));
+const EMPTY_QUOTE_RE = /^ {0,3}>[ \t]*$/;
+// The HTML that interrupts a paragraph in marked 12 (its `paragraph` rule):
+// lowercase type 6 tags followed by spaces, the end, `>` or `/>`, and the
+// type 1 and 2 openers, at the start of the line (no indentation), as written
+// (case-sensitive).
+const MARKED_HTML_INTERRUPT_RE = new RegExp(
+  `^(?:</?(?:${HTML_BLOCK_6_TAGS})(?: +|$|/?>)|<(?:script|pre|style|textarea|!--))`,
+);
+const MARKED_ITEM_RE = /^( {0,3}(?:[*+-]|[0-9]{1,9}[.)]))((?:[\t ][^\n]*)?)$/;
+
+/** marked's lexer turns leading tabs (after any spaces) into four spaces each
+ * before it reads blocks. */
+function markedTabs(line: string): string {
+  return line.replace(/^( *)(\t+)/, (_m, sp: string, tabs: string) => sp + "    ".repeat(tabs.length));
+}
+
+/** [indent, first content line] of the list item marked starts at `line`, or
+ * [0, ""] when it starts none. Mirrors ingest.py _marked_item_start. */
+function markedItemStart(line: string, inList = false): [number, string] {
+  const m = MARKED_ITEM_RE.exec(markedTabs(line));
+  // marked's list rule needs the bullet alone or followed by a space or tab
+  // and at least one more character, so "- " starts no list; inside a list
+  // (inList: the line ended the previous item) it is an item.
+  if (!m || (m[2].length === 1 && !inList)) return [0, ""];
+  let n = (m[2] + "\n").search(/[^ ]/);
+  n = n > 4 ? 1 : n;
+  const first = m[2].replace(/^\t+/, (t) => "   ".repeat(t.length));
+  return [n + m[1].length, first.slice(n)];
+}
+
+/** Whether marked keeps `line` inside the open list item (marked 12
+ * Tokenizer.list). Mirrors ingest.py _marked_item_continues. */
+function markedItemContinues(line: string, indent: number, prev: string, blankSeen: boolean): boolean {
+  const nl = markedTabs(line);
+  const k = Math.min(3, indent - 1);
+  const begins = [new RegExp(`^ {0,${k}}(?:\`\`\`|~~~)`), new RegExp(`^ {0,${k}}#`)];
+  if (begins.some((b) => b.test(nl))) return false;
+  if (new RegExp(`^ {0,${k}}(?:[*+-]|[0-9]{1,9}[.)])(?:[ \t][^\n]*)?$`).test(nl)) return false;
+  const hr = new RegExp(`^ {0,${k}}((?:- *){3,}|(?:_ *){3,}|(?:\\* *){3,})$`);
+  if (hr.test(nl)) return false;
+  if (!nl.trim()) return true;
+  if (nl.search(/[^ ]/) >= indent) return true;
+  if (blankSeen) return false;
+  if (prev && prev.search(/[^ ]/) >= 4) return false;
+  if (begins.some((b) => b.test(prev)) || hr.test(prev)) return false;
+  return true;
+}
+
+/** True for a non-indented line that cannot continue a list item: an ATX
+ * heading, a fence, an HTML block start or a thematic break. */
+function closesList(line: string): boolean {
+  if (ATX_HEADING_RE.test(line) || FENCE_OPEN_RE.test(line) || THEMATIC_BREAK_RE.test(line)) return true;
+  return startsHtmlBlock(line);
+}
+
+function startsHtmlBlock(line: string): boolean {
+  const low = asciiLower(line);
+  return HTML_BLOCK_STARTS.some(([, pattern]) => pattern.test(low));
+}
+
+/** The text after the end marker of an HTML block of type 2-5 on `line`
+ * (marked ends the block there and reads on). */
+function afterHtmlEnd(kind: number, line: string, searchFrom: number): string {
+  const marker = HTML_END_MARKERS[kind];
+  const idx = line.indexOf(marker, searchFrom);
+  return idx === -1 ? "" : line.slice(idx + marker.length);
+}
+
+/** Under the marked reading, what the rest of a line after an HTML end
+ * marker opens. An HTML block of type 2-5 that also ends inside `rest` hands
+ * its own rest on. Mirrors ingest.py _open_in_rest. */
+function openInRest(rest: string): { fenceChar: string; fenceLen: number; htmlKind: number; htmlTag: string } {
+  const none = { fenceChar: "", fenceLen: 0, htmlKind: 0, htmlTag: "" };
+  for (let guard = 0; guard <= rest.length; guard++) {
+    const m = FENCE_OPEN_RE.exec(rest);
+    if (m) {
+      const run = m[1] ?? m[2];
+      return { fenceChar: run[0], fenceLen: run.length, htmlKind: 0, htmlTag: "" };
+    }
+    const low = asciiLower(rest);
+    let next: string | null = null;
+    for (const [kind, pattern] of HTML_BLOCK_STARTS) {
+      const hm = pattern.exec(low);
+      if (hm) {
+        const tag = kind === 1 ? hm[1] : "";
+        if (kind === 6 || kind === 7 || !htmlBlockEnd(kind, tag, low)) {
+          return { fenceChar: "", fenceLen: 0, htmlKind: kind, htmlTag: tag };
+        }
+        if (kind === 1) return none;
+        next = afterHtmlEnd(kind, rest, hm.index + 2);
+        break;
+      }
+    }
+    if (next === null) return none;
+    rest = next;
+  }
+  return none;
+}
+
+function htmlBlockEnd(kind: number, tag: string, low: string): boolean {
+  // Only the opener's own close tag: CommonMark accepts any of the four, but
+  // marked (the viewer's renderer) needs the matching one, and the stricter
+  // end only keeps the block open longer.
+  if (kind === 1) return low.includes(`</${tag}>`);
   return low.includes(HTML_END_MARKERS[kind]);
 }
 
-type LineKind = "" | "header" | "fence" | "html";
+type LineKind = "" | "header" | "fence" | "html" | "list" | "lazy";
 
 /**
  * Classify each line: "" (ordinary), "header" (before `start`), "fence" (a
@@ -231,23 +340,64 @@ type LineKind = "" | "header" | "fence" | "html";
  * block). Whichever block opens first governs until it closes. `closer` is
  * what an unclosed block still needs at the end: its closing line, "" (a
  * blank line) for HTML block types 6 and 7, or null when nothing is open.
+ *
+ * With markedReading, the places where marked (the viewer's renderer)
+ * departs from CommonMark follow marked: list items follow marked's own rules
+ * (markedItemContinues); only marked's own set of HTML openers interrupts a
+ * paragraph; an HTML block of type 2-5 ends right after its end
+ * marker, so the rest of that line can open a fence, another HTML block or
+ * a list item;
+ * and a line holding U+2028 or U+2029 is not a heading, a rule or a type 7
+ * HTML start. With anyHtmlInterrupts as well, an HTML block of any type may
+ * start right after paragraph text: marked also ends paragraphs in places
+ * neither rule set predicts (a line followed by a `-` line can read as a
+ * table), and starting the block there only skips more. connectionsSection skips
+ * a line when either reading skips it. Mirrors ingest.py _scan_blocks.
  */
-function scanBlocks(lines: string[], start = 0): { kinds: LineKind[]; closer: string | null } {
+function scanBlocks(
+  lines: string[],
+  start = 0,
+  markedReading = false,
+  anyHtmlInterrupts = false,
+): { kinds: LineKind[]; closer: string | null } {
   const kinds: LineKind[] = [];
   let fenceChar = "";
   let fenceLen = 0;
+  let fenceIndent = 0; // opener's indentation for a fence opened in a list item
   let htmlKind = 0;
   let htmlTag = "";
   let inParagraph = false;
+  // List items: once a list marker line opens a list, an indented line is
+  // list-item content, never a top-level heading, edge or section end. The
+  // list closes at a non-indented line after a blank line, or at a
+  // non-indented heading, fence, HTML block or thematic break. Stricter than
+  // CommonMark's content-column rule on purpose (renderers differ there): it
+  // only ever skips more lines. Mirrors ingest.py _scan_blocks.
+  let listOpen = false;
+  // The marked reading follows marked's own list-item rules instead
+  // (markedItemStart, markedItemContinues).
+  let itemIndent = 0;
+  let itemPrev = "";
+  let itemBlank = false;
+  let prevBlank = true;
   for (let i = 0; i < lines.length; i++) {
     const ln = lines[i];
+    const blank = isBlank(ln);
+    const wasBlank = prevBlank;
+    prevBlank = blank;
+    const listBefore = markedReading ? itemIndent !== 0 : listOpen;
     if (i < start) {
       kinds.push("header");
       continue;
     }
     if (fenceChar) {
       kinds.push("fence");
-      const m = FENCE_CLOSE_RE.exec(ln);
+      // A fence opened inside a list item closes only at a closer at least as
+      // indented; a shallower fence line ends the item and opens a new fence
+      // for a renderer, so keeping this one open only skips more.
+      const m = fenceIndent
+        ? (indentWidth(ln) >= fenceIndent ? FENCE_CLOSE_RE.exec(ln.replace(/^[ \t]+/, "")) : null)
+        : FENCE_CLOSE_RE.exec(ln);
       if (m && m[1][0] === fenceChar && m[1].length >= fenceLen) {
         fenceChar = "";
         fenceLen = 0;
@@ -266,35 +416,113 @@ function scanBlocks(lines: string[], start = 0): { kinds: LineKind[]; closer: st
         continue;
       }
       kinds.push("html");
-      if (htmlBlockEnd(htmlKind, asciiLower(ln))) htmlKind = 0;
+      if (htmlBlockEnd(htmlKind, htmlTag, asciiLower(ln))) {
+        const ended = htmlKind;
+        htmlKind = 0;
+        if (markedReading && ended !== 1) {
+          const rest = afterHtmlEnd(ended, ln, 0);
+          ({ fenceChar, fenceLen, htmlKind, htmlTag } = openInRest(rest));
+          fenceIndent = 0;
+          if (!fenceChar && !htmlKind) {
+            [itemIndent, itemPrev] = markedItemStart(rest);
+            itemBlank = false;
+          }
+        }
+      }
       continue;
     }
-    const m = FENCE_OPEN_RE.exec(ln);
+    // marked's heading, rule and type 7 HTML patterns stop at U+2028 and
+    // U+2029 (JS `.` and `$`), so to marked such a line is none of these.
+    const lineSep = markedReading && (ln.includes("\u2028") || ln.includes("\u2029"));
+    let probe = ln;
+    let endedItem = false;
+    if (markedReading) {
+      if (itemIndent) {
+        if (markedItemContinues(ln, itemIndent, itemPrev, itemBlank)) {
+          kinds.push("list");
+          if (!ln.trim()) itemBlank = true;
+          itemPrev = markedTabs(ln).slice(itemIndent);
+          continue;
+        }
+        itemIndent = 0;
+        endedItem = true;
+      }
+    } else if (listOpen && !blank) {
+      if (indentWidth(ln) >= 1) {
+        // Item content, or the first line after the list when the renderer's
+        // content column is deeper: never a heading or an edge. A fence or
+        // HTML block opened here still opens one (at any indentation).
+        probe = ln.replace(/^[ \t]+/, "");
+        const lowProbe = asciiLower(probe);
+        if (!(FENCE_OPEN_RE.test(probe) ||
+              HTML_BLOCK_STARTS.some(([kind, pattern]) => kind !== 7 && pattern.test(lowProbe)))) {
+          kinds.push("list");
+          continue;
+        }
+      } else if ((wasBlank && !LIST_MARKER_RE.test(ln)) || closesList(ln)) {
+        listOpen = false;
+      }
+    }
+    const m = FENCE_OPEN_RE.exec(probe);
     if (m) {
       const run = m[1] ?? m[2];
       fenceChar = run[0];
       fenceLen = run.length;
+      fenceIndent = probe !== ln ? indentWidth(ln) : 0;
       kinds.push("fence");
       inParagraph = false;
       continue;
     }
-    const low = asciiLower(ln);
+    const low = asciiLower(probe);
     let opened = false;
     for (const [kind, pattern] of HTML_BLOCK_STARTS) {
-      if (kind === 7 && inParagraph) continue; // type 7 cannot interrupt a paragraph
+      if (kind === 7 && (lineSep || (inParagraph && !listBefore && !anyHtmlInterrupts))) {
+        continue; // type 7 cannot interrupt a paragraph
+      }
+      if (markedReading && inParagraph && !listBefore && !anyHtmlInterrupts &&
+          !MARKED_HTML_INTERRUPT_RE.test(probe)) {
+        break; // marked: only these (case-sensitive) interrupt one
+      }
       const hm = pattern.exec(low);
       if (hm) {
         kinds.push("html");
         opened = true;
         inParagraph = false;
         htmlTag = kind === 1 ? hm[1] : "";
-        if (kind === 6 || kind === 7 || !htmlBlockEnd(kind, low)) htmlKind = kind;
+        if (kind === 6 || kind === 7 || !htmlBlockEnd(kind, htmlTag, low)) {
+          htmlKind = kind;
+        } else if (markedReading && kind !== 1) {
+          const rest = afterHtmlEnd(kind, probe, hm.index + 2);
+          ({ fenceChar, fenceLen, htmlKind, htmlTag } = openInRest(rest));
+          fenceIndent = 0;
+          if (!fenceChar && !htmlKind) {
+            [itemIndent, itemPrev] = markedItemStart(rest);
+            itemBlank = false;
+          }
+        }
         break;
       }
     }
     if (opened) continue;
+    if (inParagraph && !listOpen && indentWidth(ln) >= 1 && indentWidth(ln) <= 3 && LIST_MARKER_RE.test(ln)) {
+      // An indented list marker right after paragraph text: marked can read
+      // it as part of a setext heading's text ("text\n - a\n-"), so it is
+      // never an edge, and the paragraph goes on.
+      kinds.push("lazy");
+      listOpen = true; // marked may read it as a list; skip its content
+      if (markedReading) {
+        [itemIndent, itemPrev] = markedItemStart(ln, endedItem);
+        itemBlank = false;
+      }
+      continue;
+    }
     kinds.push("");
-    if (isBlank(ln) || ATX_HEADING_RE.test(ln)) {
+    if (LIST_MARKER_RE.test(ln) && !THEMATIC_BREAK_RE.test(ln)) listOpen = true;
+    if (markedReading && !THEMATIC_BREAK_RE.test(ln)) {
+      [itemIndent, itemPrev] = markedItemStart(ln, endedItem);
+      itemBlank = false;
+    }
+    if (isBlank(ln) || EMPTY_QUOTE_RE.test(ln) || (!lineSep && (ATX_HEADING_RE.test(ln) || THEMATIC_BREAK_RE.test(ln)))) {
       inParagraph = false;
     } else if (!inParagraph && indentWidth(ln) >= 4) {
       // an indented code line, not a paragraph
@@ -311,9 +539,21 @@ function scanBlocks(lines: string[], start = 0): { kinds: LineKind[]; closer: st
 }
 
 /** Per line: true for a line before `start` (frontmatter), a fence
- * delimiter, or a line inside a fenced code block or an HTML block. */
+ * delimiter, or a line inside a fenced code block, an HTML block or a list
+ * item, under either the CommonMark or the marked reading (scanBlocks). */
+/** Line kinds under each reading: CommonMark, marked, and marked with HTML
+ * blocks allowed to interrupt any paragraph. Mirrors ingest.py _readings. */
+function readings(lines: string[], start: number): LineKind[][] {
+  return [
+    scanBlocks(lines, start).kinds,
+    scanBlocks(lines, start, true).kinds,
+    scanBlocks(lines, start, true, true).kinds,
+  ];
+}
+
 export function skippedLineFlags(lines: string[], start = 0): boolean[] {
-  return scanBlocks(lines, start).kinds.map((k) => k !== "");
+  const rs = readings(lines, start);
+  return lines.map((_l, i) => rs.some((r) => r[i] !== ""));
 }
 
 /** What a fence or HTML block still open after the last line needs before a
@@ -328,14 +568,17 @@ export function unclosedBlockCloser(lines: string[], start = 0): string | null {
  * `start` (a writer passes noteBodyStartLine): the heading index, the end
  * index (the `## ` line that closes the section, or lines.length), and the
  * skipped flags; lines between heading and end whose flag is true are in a
- * fence or HTML block and must be skipped. Null when no heading sits outside
- * both.
+ * fence, HTML block or list item and must be skipped. A line counts as a
+ * heading or an edge only when every reading (readings) leaves it alone; a
+ * `## ` line ends the section when any does, which only ends it sooner.
+ * Null when no heading sits outside all of these.
  */
 export function connectionsSection(
   lines: string[],
   start = 0,
 ): { heading: number; end: number; skipped: boolean[] } | null {
-  const skipped = skippedLineFlags(lines, start);
+  const rs = readings(lines, start);
+  const skipped = lines.map((_l, i) => rs.some((r) => r[i] !== ""));
   let heading = -1;
   for (let i = 0; i < lines.length; i++) {
     if (!skipped[i] && isConnectionsHeading(lines[i])) {
@@ -346,7 +589,7 @@ export function connectionsSection(
   if (heading === -1) return null;
   let end = lines.length;
   for (let i = heading + 1; i < lines.length; i++) {
-    if (!skipped[i] && isSectionEnd(lines[i])) {
+    if (rs.some((r) => r[i] === "") && isSectionEnd(lines[i])) {
       end = i;
       break;
     }
@@ -476,33 +719,45 @@ export function noteBodyStartLine(content: string): number {
   return splitConnectionLines(content.slice(0, frontmatterLength(content))).length;
 }
 
-export function parseConnections(body: string): Connection[] {
-  const connections: Connection[] = [];
+/**
+ * The edge a body line carries under the connection rule, or null: the line
+ * must start with 0-3 spaces, "-" and a space (EDGE_PREFIX_RE; a tab or 4+
+ * spaces make code, and marked reads "-<tab>" after a quote as quote text),
+ * and, trimmed with trimConnectionWs, match
+ * CONNECTION_RE,
+ * and a bracket reference (`[moltbook]`, `[[wiki-note]]`) is skipped (#415).
+ * ingest.py parse_connection_lines applies the same test.
+ */
+export function connectionLineMatch(line: string): RegExpMatchArray | null {
+  if (!EDGE_PREFIX_RE.test(line)) return null;
+  const stripped = trimConnectionWs(line);
+  const match = stripped.match(CONNECTION_RE);
+  if (!match || match[2].startsWith("[")) return null;
+  return match;
+}
+
+/** Edges of a raw body's `## Connections` section, each with its index in
+ * splitConnectionLines(body). ingest.py parse_connection_lines is its twin. */
+export function parseConnectionLines(body: string): { index: number; connection: Connection }[] {
+  const out: { index: number; connection: Connection }[] = [];
   const lines = splitConnectionLines(body);
   const section = connectionsSection(lines);
-  if (section === null) return connections;
+  if (section === null) return out;
   for (let i = section.heading + 1; i < section.end; i++) {
     if (section.skipped[i]) continue;
-    const stripped = trimConnectionWs(lines[i]);
-    const match = stripped.match(CONNECTION_RE);
+    const match = connectionLineMatch(lines[i]);
     if (match) {
-      // #415: skip bracket references like `[moltbook]` / `[[wiki-note]]`,
-      // exactly as cli/schist/ingest.py parse_connections and tools.ts
-      // bodyConnectionEdgeLines do. This parser was the ODD ONE OUT: the
-      // index never contains these lines, so get_note showed an "edge"
-      // query_graph could never return (reader split-brain). Note only a
-      // single-token bracket reaches this check — a multi-word one
-      // (`[Moltbook, Jan 2026]`) never matches CONNECTION_RE at all.
-      // Pinned by schema/connection-line-parity.json body cases.
-      if (match[2].startsWith("[")) continue;
-      connections.push({
-        type: match[1],
-        target: match[2],
-        context: match[3] || match[4] || undefined,
+      out.push({
+        index: i,
+        connection: { type: match[1], target: match[2], context: match[3] || match[4] || undefined },
       });
     }
   }
-  return connections;
+  return out;
+}
+
+export function parseConnections(body: string): Connection[] {
+  return parseConnectionLines(body).map((e) => e.connection);
 }
 
 const HASHTAG_AT_START_RE = /^#[^\s,\]\}]+/u;

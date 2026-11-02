@@ -208,7 +208,11 @@ In the `## Connections` section of a document:
 - **TARGET**: Relative path to target note or concept (e.g., `notes/2026-03-20-foo.md` or `concepts/self-attention.md`)
 - **CONTEXT**: Optional quoted string explaining the connection
 
-Multiple connections per document are allowed. One connection per line.
+Multiple connections per document are allowed. One connection per line. A
+connection line starts with at most three spaces, then `- ` (a dash and a
+space); a line indented by a tab or four or more spaces is code, and a line
+nested under the previous list item is part of that item, so neither is a
+connection.
 
 The section is read from the note body: the text after the frontmatter's
 closing line, as written (leading blank lines and indentation kept).
@@ -250,11 +254,20 @@ Fenced code blocks and HTML blocks are skipped, following CommonMark 0.31:
 
 A line inside a fence or HTML block is never the heading, never a connection
 and never ends the section, so a note can show an example `## Connections`
-section in a fence without creating edges. Block quotes and list items are not
-interpreted: their lines are read as top-level lines. Lines end only at
-Markdown line endings (`\n`, `\r\n`, `\r`); a vertical tab, form feed,
-U+001C–U+001E, U+0085, U+2028 or U+2029 stays inside its line, as a renderer
-shows it.
+section in a fence without creating edges. Once a list item starts, its
+indented lines are skipped the same way, so a heading or connection nested in
+a list item does not count; a line starting with `>` (a block quote) is never
+a heading or a connection. Lines end only at Markdown line endings (`\n`,
+`\r\n`, `\r`); a vertical tab, form feed, U+001C–U+001E, U+0085, U+2028 or
+U+2029 stays inside its line, as a renderer shows it.
+
+Renderers do not agree on every one of these structures, so the rule reads
+each body three ways, by CommonMark 0.31 and twice by the rules of marked, the
+renderer the schist viewer uses (once letting any HTML block interrupt a
+paragraph). A line is a heading or a connection only when no reading puts it
+inside a fence, HTML block or list item; a `## ` line ends the section when
+any reading sees it. The stricter result can drop a connection a renderer
+would show, never add one it would not.
 
 When a note's only `## Connections` is in a fence or HTML block, `schist link`
 and `add_connection` add a real section at the end of the note, first closing

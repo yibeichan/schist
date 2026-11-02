@@ -11,7 +11,7 @@ import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote, rewriteNote, updateNote, deleteNote, writeMutex, vaultLockWaitMs } from "./git-writer.js";
 import { withVaultLock, VaultLockTimeout, VaultLockFailed } from "./vault-lock.js";
-import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, hasNonYamlOpener, CONNECTION_RE, SLUG_WS_CHARS, containsLineBoundary, isRoundTrippableTarget, connectionsSection, skippedLineFlags, isConnectionsHeading, isSectionEnd, hasConnectionsHeading, noteBodyStartLine, trimConnectionWs, splitConnectionLines, connectionBody } from "./markdown-parser.js";
+import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, hasNonYamlOpener, SLUG_WS_CHARS, containsLineBoundary, isRoundTrippableTarget, connectionsSection, skippedLineFlags, isConnectionsHeading, isSectionEnd, hasConnectionsHeading, noteBodyStartLine, trimConnectionWs, splitConnectionLines, connectionBody, connectionLineMatch } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
 import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse, PushFailureClass, ComposeBriefResponse, Note, SearchResult } from "./types.js";
@@ -2641,12 +2641,9 @@ export function* bodyConnectionEdgeLines(body: string): Generator<{ line: string
   if (section === null) return;
   for (let i = section.heading + 1; i < section.end; i++) {
     if (section.skipped[i]) continue; // in a fence or HTML block — ingest skips it
-    const stripped = trimConnectionWs(lines[i]);
-    if (!stripped.startsWith("- ")) continue;
-    const m = stripped.match(CONNECTION_RE);
-    if (!m) continue; // malformed line — ingest skips it
-    if (m[2].startsWith("[")) continue; // bracket reference — ingest skips it
-    yield { line: stripped, type: m[1] };
+    const m = connectionLineMatch(lines[i]); // malformed or bracket lines: null, as in ingest
+    if (!m) continue;
+    yield { line: trimConnectionWs(lines[i]), type: m[1] };
   }
 }
 
@@ -3376,8 +3373,9 @@ export function normalizeConceptSlug(value: string): string {
  * Remove every `## Connections` line in `content` whose target matches any of
  * `targets`. Returns the rewritten content and the count removed. Used by
  * delete_note's cascade path to repair notes that linked to a deleted note.
- * Matching mirrors markdown-parser's parseConnections (trim, CONNECTION_RE,
- * group 2 = target) so the lines we strip are exactly the edges ingest produced.
+ * Matching uses markdown-parser's connectionLineMatch (the edge-line test
+ * parseConnections and ingest apply; group 2 = target) so the lines we strip
+ * are exactly the edges ingest produced.
  */
 export function stripConnectionsTo(content: string, targets: string[]): { content: string; removed: number } {
   const targetSet = new Set(targets);
@@ -3405,7 +3403,6 @@ export function stripConnectionsTo(content: string, targets: string[]): { conten
   const inSkipped = skippedLineFlags(inLines, bodyStart);
   for (let idx = 0; idx < inLines.length; idx++) {
     const line = inLines[idx];
-    const stripped = trimConnectionWs(line);
     if (inSkipped[idx]) {
       out.push(line);
       continue;
@@ -3421,7 +3418,8 @@ export function stripConnectionsTo(content: string, targets: string[]): { conten
       continue;
     }
     if (inSection) {
-      const m = stripped.match(CONNECTION_RE);
+      // The same edge-line test ingest applies (prefix, CONNECTION_RE).
+      const m = connectionLineMatch(line);
       if (m && targetSet.has(m[2])) {
         removed++;
         continue;
@@ -3431,8 +3429,8 @@ export function stripConnectionsTo(content: string, targets: string[]): { conten
   }
   if (removed === 0) return { content: finalize(out), removed };
 
-  // Removed lines were body edge lines outside any fence or HTML block, so
-  // `out` has the same frontmatter and blocks as the input.
+  // `out` is scanned again: removing an edge line (a list item) can change
+  // which lines read as list content.
   const outSkipped = skippedLineFlags(out, bodyStart);
   const cleaned: string[] = [];
   for (let i = 0; i < out.length; i++) {
