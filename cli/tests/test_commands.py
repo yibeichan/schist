@@ -145,6 +145,37 @@ class TestAddConcept:
         assert "cannot contain" in capsys.readouterr().err
         assert not (tmp_path / "concepts").exists()
 
+    def test_accepts_fenced_connections_example(self, tmp_path, capsys):
+        """A `## Connections` shown inside a fenced code block yields no edges
+        (same rule as ingest.parse_connections), so a concept may show one."""
+        body = (
+            "definition\n\nExample:\n\n```markdown\n## Connections\n\n"
+            "- extends: concepts/other\n```"
+        )
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.add_concept(
+                _add_concept_args(body=body),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert "cannot contain" not in capsys.readouterr().err
+        note = markdown_io.read_note(str(tmp_path / "concepts" / "stable-concept.md"))
+        assert note["body"] == body
+
+    @pytest.mark.parametrize("body", [
+        "definition\n\n  ## Connections\n\n- extends: concepts/other",
+        "definition\n\n```\ncode\n```\n\n## Connections\n- extends: concepts/other",
+    ])
+    def test_rejects_real_connections_section_outside_fence(
+        self, tmp_path, capsys, body,
+    ):
+        with pytest.raises(SystemExit):
+            commands.add_concept(
+                _add_concept_args(body=body),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert "cannot contain" in capsys.readouterr().err
+        assert not (tmp_path / "concepts").exists()
+
     def test_refuses_to_overwrite_stable_slug(self, tmp_path, capsys):
         with patch("schist.commands.git_ops.commit", return_value=(True, "")):
             commands.add_concept(

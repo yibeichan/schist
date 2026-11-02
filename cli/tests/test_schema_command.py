@@ -142,6 +142,106 @@ class TestSchemaCommand:
         assert "concept frontmatter contains document-only field(s): date, status" in out
         assert "concept nodes cannot have outgoing ## Connections sections" in out
 
+    def test_validate_accepts_fenced_connections_example_in_concept(
+        self, tmp_path, capsys,
+    ):
+        concepts_dir = tmp_path / "concepts"
+        concepts_dir.mkdir()
+        (concepts_dir / "example.md").write_text(
+            "---\ntitle: Example\n---\n\nDefinition.\n\n```\n## Connections\n"
+            "- extends: concepts/other\n```\n",
+            encoding="utf-8",
+        )
+        commands.schema(
+            _schema_args(validate=True), str(tmp_path),
+            str(tmp_path / ".schist" / "schist.db"),
+        )
+        out = capsys.readouterr().out
+        assert "cannot have outgoing" not in out
+        assert "All documents valid." in out
+        assert "concepts/example.md:8:" in out
+        assert "inside a fenced code block" in out
+
+    def test_validate_refuses_real_connections_section_after_fence_in_concept(
+        self, tmp_path, capsys,
+    ):
+        concepts_dir = tmp_path / "concepts"
+        concepts_dir.mkdir()
+        (concepts_dir / "example.md").write_text(
+            "---\ntitle: Example\n---\n\n```\ncode\n```\n\n## Connections\n"
+            "- extends: concepts/other\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(SystemExit) as exc:
+            commands.schema(
+                _schema_args(validate=True), str(tmp_path),
+                str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert exc.value.code == 1
+        assert "cannot have outgoing ## Connections sections" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("line,reason", [
+        ("## Connections (x)", "heading text is not exactly '## Connections'"),
+        ("## Connections to Our Vault", "heading text is not exactly '## Connections'"),
+        ("    ## Connections", "indented by 4 or more spaces or by a tab"),
+        ("\t## Connections", "indented by 4 or more spaces or by a tab"),
+    ])
+    def test_validate_warns_on_near_miss_connections_heading(
+        self, tmp_path, capsys, line, reason,
+    ):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir()
+        (notes_dir / "near.md").write_text(
+            f"---\ntitle: Near\nstatus: draft\n---\n\nBody\n\n{line}\n"
+            "- extends: notes/other\n",
+            encoding="utf-8",
+        )
+        commands.schema(
+            _schema_args(validate=True), str(tmp_path),
+            str(tmp_path / ".schist" / "schist.db"),
+        )
+        out = capsys.readouterr().out
+        assert "1 warning(s):" in out
+        assert "WARN: notes/near.md:8:" in out
+        assert reason in out
+        # A warning, not a violation: validation still passes.
+        assert "All documents valid." in out
+
+    def test_validate_warns_on_fenced_connections_heading(self, tmp_path, capsys):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir()
+        (notes_dir / "fenced.md").write_text(
+            "---\ntitle: Fenced\nstatus: draft\n---\n\n~~~\n## Connections\n"
+            "- extends: notes/other\n~~~\n",
+            encoding="utf-8",
+        )
+        commands.schema(
+            _schema_args(validate=True), str(tmp_path),
+            str(tmp_path / ".schist" / "schist.db"),
+        )
+        out = capsys.readouterr().out
+        assert "WARN: notes/fenced.md:7:" in out
+        assert "inside a fenced code block" in out
+        assert "All documents valid." in out
+
+    def test_validate_does_not_warn_on_exact_connections_heading(
+        self, tmp_path, capsys,
+    ):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir()
+        (notes_dir / "exact.md").write_text(
+            "---\ntitle: Exact\nstatus: draft\n---\n\nBody\n\n  ## Connections  \n"
+            "- extends: notes/other\n",
+            encoding="utf-8",
+        )
+        commands.schema(
+            _schema_args(validate=True), str(tmp_path),
+            str(tmp_path / ".schist" / "schist.db"),
+        )
+        out = capsys.readouterr().out
+        assert "WARN" not in out
+        assert out.strip() == "All documents valid."
+
     @pytest.mark.parametrize("stem", [
         "invalid_slug",   # underscore
         "Invalid",        # uppercase

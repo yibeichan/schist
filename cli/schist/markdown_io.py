@@ -12,6 +12,8 @@ import tempfile
 
 import frontmatter
 
+from .ingest import connections_section, unclosed_fence
+
 # Explicit whitespace set shared verbatim with ingest.py's _SLUG_WS_CHARS and
 # mcp-server's SLUG_WS_CHARS (markdown-parser.ts): the UNION of Python's and
 # JS's \s (30 codepoints). Native \s drifts between engines — Python adds
@@ -155,7 +157,10 @@ def insert_connection_line(content: str, line: str) -> str:
     ignores it (#365). The section gate is the same line-scan the readers use
     (not a substring test): a mid-line prose mention of "## Connections" is
     not a heading, so the edge gets a real section instead of landing outside
-    any section. Output is always '\\n'-joined with a single trailing newline,
+    any section. The heading must be exact and outside a fenced code block
+    (ingest.connections_section, the rule parse_connections reads with), so a
+    `## Connections` shown in a fence never receives an edge. Output is always
+    '\\n'-joined with a single trailing newline,
     healing exotic separators on write the way the TS repair paths do.
 
     Byte-identical to mcp-server markdown-parser.ts insertConnectionLine;
@@ -163,26 +168,26 @@ def insert_connection_line(content: str, line: str) -> str:
     slugs.
     """
     lines = content.splitlines()
-    section_found = False
-    in_section = False
-    insert_idx = None
-    for i, ln in enumerate(lines):
-        stripped = ln.strip()
-        if not section_found and stripped.startswith('## Connections'):
-            section_found = True
-            in_section = True
-            continue
-        if in_section and stripped.startswith('## '):
-            insert_idx = i
-            break
-    if not section_found:
+    section = connections_section(lines)
+    if section is None:
         # Create section at end. Blank line after the heading matches the
         # MCP server's create-path shape so both writers mint one format.
-        return content.rstrip() + '\n\n## Connections\n\n' + line + '\n'
-    if insert_idx is None:
-        lines.append(line)
+        # When the only `## Connections` sits in an unclosed fence, the new
+        # heading lands inside that fence too, so close it first.
+        fence = unclosed_fence(lines)
+        closer = '\n' + fence if fence else ''
+        return (content.rstrip() + closer
+                + '\n\n## Connections\n\n' + line + '\n')
+    _heading, end, _fenced = section
+    if end < len(lines):
+        lines.insert(end, line)
     else:
-        lines.insert(insert_idx, line)
+        # The section runs to EOF. If it ends inside an unclosed fence, close
+        # the fence so the appended edge is outside it.
+        fence = unclosed_fence(lines)
+        if fence:
+            lines.append(fence)
+        lines.append(line)
     return '\n'.join(lines) + '\n'
 
 

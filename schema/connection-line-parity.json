@@ -473,6 +473,143 @@
           "context": null
         }
       ]
+    },
+    {
+      "name": "heading inside a backtick fence is not a heading",
+      "body": "Example:\n```\n## Connections\n- extends: note-a\n```\n",
+      "edges": []
+    },
+    {
+      "name": "heading text with a suffix is not a heading",
+      "body": "## Connections (x)\n- extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "heading text with extra words is not a heading",
+      "body": "## Connections to Our Vault\n- extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "heading indented 4 spaces is an indented code block",
+      "body": "    ## Connections\n- extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "heading indented by a tab is an indented code block",
+      "body": "\t## Connections\n- extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "heading indented 2 spaces is a heading",
+      "body": "  ## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "heading with trailing spaces and tab is a heading",
+      "body": "## Connections \t\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "real section after a closed fence yields its edges",
+      "body": "```\n## Connections\n- extends: fake\n```\n\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "edge-looking line inside a fence within a real section is skipped",
+      "body": "## Connections\n- extends: note-a\n```\n- extends: fake\n## Notes\n```\n- related: note-b",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "related",
+          "target": "note-b",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "unclosed fence before a heading leaves no section",
+      "body": "```python\nx = 1\n## Connections\n- extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "tilde fence hides a heading",
+      "body": "~~~\n## Connections\n- extends: note-a\n~~~",
+      "edges": []
+    },
+    {
+      "name": "tilde fence is not closed by backticks",
+      "body": "~~~\n```\n## Connections\n- extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "longer closing fence closes the fence",
+      "body": "```\ncode\n`````\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "shorter closing fence does not close the fence",
+      "body": "````\n```\n## Connections\n- extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "closing fence with trailing text does not close the fence",
+      "body": "```\n``` not a close\n## Connections\n- extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "fence indented 4 spaces is not a fence",
+      "body": "    ```\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "CRLF exact heading is a heading",
+      "body": "## Connections\r\n- extends: note-a\r\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "CRLF fenced heading is not a heading",
+      "body": "```\r\n## Connections\r\n- extends: note-a\r\n```\r\n",
+      "edges": []
     }
   ]
 }

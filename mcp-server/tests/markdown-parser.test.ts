@@ -117,6 +117,37 @@ describe("markdown-parser", () => {
     expect(parsed.connections[1].type).toBe(connections[1].type);
   });
 
+  test("buildNote adds a real section when '## Connections' appears only in a fence", () => {
+    const body = ["Example:", "", "```", "## Connections", "- supports: notes/fake.md", "```"].join("\n");
+    const built = buildNote({ title: "t" }, body, [{ target: "notes/a.md", type: "supports" }]);
+    const parsed = parseNote(built);
+    expect(parsed.body).toContain("- supports: notes/fake.md");
+    expect(parsed.connections.map((c) => c.target)).toEqual(["notes/a.md"]);
+    expect(built.trimEnd().endsWith("```\n\n## Connections\n\n- supports: notes/a.md")).toBe(true);
+  });
+
+  test("buildNote closes an unclosed fence before adding the section", () => {
+    const body = ["Example:", "", "~~~~", "## Connections"].join("\n");
+    const built = buildNote({ title: "t" }, body, [{ target: "notes/a.md", type: "supports" }]);
+    expect(parseNote(built).connections.map((c) => c.target)).toEqual(["notes/a.md"]);
+    expect(built).toContain("## Connections\n~~~~\n\n## Connections\n\n- supports: notes/a.md");
+  });
+
+  test("buildNote replaces only the real section, past a fenced ## line", () => {
+    const body = [
+      "Intro", "", "```", "## Connections", "```", "",
+      "## Connections", "", "- supports: notes/old.md", "~~~", "## inside", "~~~", "",
+      "## Next", "kept",
+    ].join("\n");
+    const built = buildNote({ title: "t" }, body, [{ target: "notes/a.md", type: "supports" }]);
+    const parsed = parseNote(built);
+    expect(parsed.connections.map((c) => c.target)).toEqual(["notes/a.md"]);
+    expect(parsed.body).not.toContain("notes/old.md");
+    expect(parsed.body).not.toContain("## inside");
+    expect(parsed.body).toContain("```\n## Connections\n```");
+    expect(parsed.body).toContain("## Next\nkept");
+  });
+
   // #732: a mid-line mention of the heading text (prose, inline code, a code
   // sample) is not a section. buildNote used a substring test plus an
   // unanchored regex, so it replaced everything from the mention up to the next

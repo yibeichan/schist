@@ -112,34 +112,128 @@ export function isRoundTrippableTarget(target: string): boolean {
   return true;
 }
 
-export function parseConnections(body: string): Connection[] {
-  const connections: Connection[] = [];
-  let inSection = false;
-  for (const line of splitLinesLikePython(body)) {
-    const stripped = line.trim();
-    if (stripped.startsWith("## Connections")) {
-      inSection = true;
+/**
+ * The connections section rule, shared by every reader and writer of a
+ * note's `## Connections` section: parseConnections and insertConnectionLine
+ * here, buildNote's section replace, and tools.ts's body validator, concept
+ * check and delete-cascade repair. Mirrors cli/schist/ingest.py's
+ * connections_section and friends; the body cases in
+ * schema/connection-line-parity.json and the writer cases in
+ * schema/connection-append-parity.json pin the two.
+ *
+ * - A heading is a line of 0-3 spaces, then exactly `## Connections`, then
+ *   optional spaces or tabs. Four spaces or a tab make an indented code block.
+ * - A fence opens on a line of 0-3 spaces then 3+ backticks or 3+ tildes, and
+ *   closes on a later line of 0-3 spaces, then the same character at least as
+ *   many times, then optional spaces or tabs. An unclosed fence runs to the
+ *   end. Fence lines and lines inside a fence are never a heading, never an
+ *   edge, and never end the section.
+ * - The section ends at the next line outside a fence whose trimmed text
+ *   starts with `## `.
+ */
+const CONNECTIONS_HEADING_RE = /^ {0,3}## Connections[ \t]*$/;
+const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})/;
+const FENCE_CLOSE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+/** True when `line` (already split) has the shape of a connections heading.
+ * It says nothing about fences; connectionsSection checks both. */
+export function isConnectionsHeading(line: string): boolean {
+  return CONNECTIONS_HEADING_RE.test(line);
+}
+
+function scanFences(lines: string[]): { flags: boolean[]; open: string } {
+  const flags: boolean[] = [];
+  let fenceChar = "";
+  let fenceLen = 0;
+  for (const ln of lines) {
+    if (!fenceChar) {
+      const m = FENCE_OPEN_RE.exec(ln);
+      if (m) {
+        fenceChar = m[1][0];
+        fenceLen = m[1].length;
+      }
+      flags.push(m !== null);
       continue;
     }
-    if (inSection && stripped.startsWith("## ")) break;
-    if (inSection) {
-      const match = stripped.match(CONNECTION_RE);
-      if (match) {
-        // #415: skip bracket references like `[moltbook]` / `[[wiki-note]]`,
-        // exactly as cli/schist/ingest.py parse_connections and tools.ts
-        // bodyConnectionEdgeLines do. This parser was the ODD ONE OUT: the
-        // index never contains these lines, so get_note showed an "edge"
-        // query_graph could never return (reader split-brain). Note only a
-        // single-token bracket reaches this check — a multi-word one
-        // (`[Moltbook, Jan 2026]`) never matches CONNECTION_RE at all.
-        // Pinned by schema/connection-line-parity.json body cases.
-        if (match[2].startsWith("[")) continue;
-        connections.push({
-          type: match[1],
-          target: match[2],
-          context: match[3] || match[4] || undefined,
-        });
-      }
+    flags.push(true);
+    const m = FENCE_CLOSE_RE.exec(ln);
+    if (m && m[1][0] === fenceChar && m[1].length >= fenceLen) {
+      fenceChar = "";
+      fenceLen = 0;
+    }
+  }
+  return { flags, open: fenceChar.repeat(fenceLen) };
+}
+
+/** Per line: true for a fence delimiter or a line inside a fence. */
+export function fencedLineFlags(lines: string[]): boolean[] {
+  return scanFences(lines).flags;
+}
+
+/** The delimiter that closes a fence still open after the last line, or ""
+ * when every fence is closed. Writers append it before adding a heading or
+ * edge at the end, so the new line is not swallowed by the fence. */
+export function unclosedFence(lines: string[]): string {
+  return scanFences(lines).open;
+}
+
+/**
+ * Locate the first connections section in `lines`: the heading index, the
+ * end index (the `## ` line that closes the section, or lines.length), and
+ * the fenced flags; lines between heading and end whose flag is true must be
+ * skipped. Null when no heading sits outside a fence.
+ */
+export function connectionsSection(
+  lines: string[],
+): { heading: number; end: number; fenced: boolean[] } | null {
+  const fenced = fencedLineFlags(lines);
+  let heading = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (!fenced[i] && isConnectionsHeading(lines[i])) {
+      heading = i;
+      break;
+    }
+  }
+  if (heading === -1) return null;
+  let end = lines.length;
+  for (let i = heading + 1; i < lines.length; i++) {
+    if (!fenced[i] && lines[i].trim().startsWith("## ")) {
+      end = i;
+      break;
+    }
+  }
+  return { heading, end, fenced };
+}
+
+/** True when `body` has a connections heading outside a fence. */
+export function hasConnectionsHeading(body: string): boolean {
+  return connectionsSection(splitLinesLikePython(body)) !== null;
+}
+
+export function parseConnections(body: string): Connection[] {
+  const connections: Connection[] = [];
+  const lines = splitLinesLikePython(body);
+  const section = connectionsSection(lines);
+  if (section === null) return connections;
+  for (let i = section.heading + 1; i < section.end; i++) {
+    if (section.fenced[i]) continue;
+    const stripped = lines[i].trim();
+    const match = stripped.match(CONNECTION_RE);
+    if (match) {
+      // #415: skip bracket references like `[moltbook]` / `[[wiki-note]]`,
+      // exactly as cli/schist/ingest.py parse_connections and tools.ts
+      // bodyConnectionEdgeLines do. This parser was the ODD ONE OUT: the
+      // index never contains these lines, so get_note showed an "edge"
+      // query_graph could never return (reader split-brain). Note only a
+      // single-token bracket reaches this check — a multi-word one
+      // (`[Moltbook, Jan 2026]`) never matches CONNECTION_RE at all.
+      // Pinned by schema/connection-line-parity.json body cases.
+      if (match[2].startsWith("[")) continue;
+      connections.push({
+        type: match[1],
+        target: match[2],
+        context: match[3] || match[4] || undefined,
+      });
     }
   }
   return connections;
@@ -392,7 +486,9 @@ export function buildConnectionLine(conn: Connection): string {
  * shape as the missing-trailing-newline drop (#295). The heading gate is a
  * line-scan, not a substring test, so a mid-line prose mention of
  * "## Connections" gets a real section instead of an edge outside any
- * section. Output is always "\n"-joined with a single trailing newline,
+ * section. The heading must be exact and outside a fenced code block
+ * (connectionsSection, the rule parseConnections reads with), so a
+ * `## Connections` shown in a fence never receives an edge. Output is always "\n"-joined with a single trailing newline,
  * healing CRLF and exotic separators on write like stripConnectionsTo does.
  *
  * Byte-identical to the CLI's markdown_io.insert_connection_line;
@@ -401,28 +497,22 @@ export function buildConnectionLine(conn: Connection): string {
  */
 export function insertConnectionLine(content: string, line: string): string {
   const lines = splitLinesLikePython(content);
-  let sectionFound = false;
-  let inSection = false;
-  let insertIdx: number | null = null;
-  for (let i = 0; i < lines.length; i++) {
-    const stripped = lines[i].trim();
-    if (!sectionFound && stripped.startsWith("## Connections")) {
-      sectionFound = true;
-      inSection = true;
-      continue;
-    }
-    if (inSection && stripped.startsWith("## ")) {
-      insertIdx = i;
-      break;
-    }
+  const section = connectionsSection(lines);
+  if (section === null) {
+    // When the only `## Connections` sits in an unclosed fence, the new
+    // heading would land inside that fence too, so close it first.
+    const fence = unclosedFence(lines);
+    const closer = fence ? "\n" + fence : "";
+    return content.trimEnd() + closer + "\n\n## Connections\n\n" + line + "\n";
   }
-  if (!sectionFound) {
-    return content.trimEnd() + "\n\n## Connections\n\n" + line + "\n";
-  }
-  if (insertIdx === null) {
-    lines.push(line);
+  if (section.end < lines.length) {
+    lines.splice(section.end, 0, line);
   } else {
-    lines.splice(insertIdx, 0, line);
+    // The section runs to EOF. If it ends inside an unclosed fence, close
+    // the fence so the appended edge is outside it.
+    const fence = unclosedFence(lines);
+    if (fence) lines.push(fence);
+    lines.push(line);
   }
   return lines.join("\n") + "\n";
 }
@@ -435,17 +525,19 @@ export function buildNote(
   let content = body;
   if (connections && connections.length > 0) {
     const connectionLines = connections.map(buildConnectionLine).join("\n");
-    // The section heading is a line whose trimmed text starts with
-    // `## Connections`, the same rule as parseConnections and
-    // insertConnectionLine. A substring test matched mid-line mentions (prose,
+    // The section is found by connectionsSection, the same rule as
+    // parseConnections and insertConnectionLine: an exact heading outside a
+    // fenced code block. A substring test matched mid-line mentions (prose,
     // code samples) and replaced the text after them (#732).
     const lines = splitLinesLikePython(content);
-    const start = lines.findIndex((l) => l.trim().startsWith("## Connections"));
-    if (start === -1) {
-      content = content.trimEnd() + `\n\n## Connections\n\n${connectionLines}\n`;
+    const found = connectionsSection(lines);
+    if (found === null) {
+      const fence = unclosedFence(lines);
+      const closer = fence ? "\n" + fence : "";
+      content = content.trimEnd() + closer + `\n\n## Connections\n\n${connectionLines}\n`;
     } else {
-      let end = lines.findIndex((l, i) => i > start && l.trim().startsWith("## "));
-      if (end === -1) end = lines.length;
+      const start = found.heading;
+      const end = found.end;
       const section = ["## Connections", "", ...connectionLines.split("\n"), ""];
       content = [...lines.slice(0, start), ...section, ...lines.slice(end)].join("\n");
       if (end === lines.length) content = content.trimEnd() + "\n";

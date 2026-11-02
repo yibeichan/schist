@@ -210,6 +210,23 @@ In the `## Connections` section of a document:
 
 Multiple connections per document are allowed. One connection per line.
 
+The section starts at the first line that is exactly `## Connections`: up to
+three leading spaces and trailing spaces or tabs are allowed, but nothing else
+on the line, so `## Connections (draft)` or `## Connections to other work` is
+an ordinary heading. A line indented by four or more spaces or by a tab is an
+indented code block, not a heading. The section ends at the next line starting
+with `## `.
+
+Fenced code blocks are ignored. A fence opens on a line that starts (after up
+to three spaces) with three or more backticks or tildes, and closes on a later
+line made of the same character repeated at least as many times, with nothing
+after it but spaces or tabs; a fence that is never closed runs to the end of
+the note. A line inside a fence is never the heading, never a connection and
+never ends the section, so a note can show an example `## Connections` section
+in a fence without creating edges. When the only `## Connections` in a note is
+in a fence, `schist link` and `add_connection` add a real section at the end of
+the note, closing a fence left open first.
+
 ### Implicit Concept Edges
 
 For document notes, every slug in frontmatter `concepts: [...]` creates an
@@ -337,5 +354,6 @@ The `schist schema --validate` command checks:
 4. All connection targets resolve to existing files
 5. All concept slugs match the `slug_pattern`
 6. All note filenames match `YYYY-MM-DD-slug.md` pattern
-7. No concept files have `## Connections` sections
+7. No concept files have `## Connections` sections (by the rule in [Connection Syntax](#connection-syntax); an example inside a fenced code block is allowed)
 8. No orphaned concepts (concepts with zero incoming edges — warning, not error)
+9. No line looks like a connections heading without being one (warning, not error): a line whose text starts with `## Connections` but is not exactly that heading, is indented by four or more spaces or a tab, or is inside a fenced code block. Connection lines under it are not indexed. Each warning names the file, the line number and the reason.

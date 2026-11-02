@@ -105,6 +105,128 @@ CONNECTION_RE = re.compile(
     f'(?:{_WS_CLASS}+"([^"]*)")?(?:{_WS_CLASS}+—{_WS_CLASS}+(.*))?$'
 )
 
+# The connections section rule, shared by every reader and writer of a note's
+# `## Connections` section (parse_connections here; markdown_io's insert and
+# append; the concept checks and `schist schema --validate` in commands.py).
+# It lives in ingest.py, not markdown_io, because the bare-script hook copy of
+# this file cannot import markdown_io. mcp-server/src/markdown-parser.ts
+# mirrors it (connectionsSection and friends); the body cases in
+# schema/connection-line-parity.json and the writer cases in
+# schema/connection-append-parity.json pin the two.
+#
+# - A heading is a line of 0-3 spaces, then exactly `## Connections`, then
+#   optional spaces or tabs. Four spaces or a tab make an indented code block.
+# - A fence opens on a line of 0-3 spaces then 3+ backticks or 3+ tildes, and
+#   closes on a later line of 0-3 spaces, then the same character at least as
+#   many times, then optional spaces or tabs. An unclosed fence runs to the
+#   end. Fence lines and lines inside a fence are never a heading, never an
+#   edge, and never end the section.
+# - The section ends at the next line outside a fence whose stripped text
+#   starts with `## `.
+CONNECTIONS_HEADING_TEXT = '## Connections'
+_CONNECTIONS_HEADING_RE = re.compile(r' {0,3}## Connections[ \t]*')
+_FENCE_OPEN_RE = re.compile(r' {0,3}(`{3,}|~{3,})')
+_FENCE_CLOSE_RE = re.compile(r' {0,3}(`{3,}|~{3,})[ \t]*')
+
+
+def is_connections_heading(line: str) -> bool:
+    """True when `line` (already split, no terminator) has the shape of a
+    connections heading. It says nothing about fences; connections_section
+    checks both."""
+    return _CONNECTIONS_HEADING_RE.fullmatch(line) is not None
+
+
+def _scan_fences(lines: list[str]) -> tuple[list[bool], str]:
+    flags: list[bool] = []
+    fence_char = ''
+    fence_len = 0
+    for ln in lines:
+        if not fence_char:
+            m = _FENCE_OPEN_RE.match(ln)
+            if m:
+                fence_char = m.group(1)[0]
+                fence_len = len(m.group(1))
+            flags.append(m is not None)
+            continue
+        flags.append(True)
+        m = _FENCE_CLOSE_RE.fullmatch(ln)
+        if m and m.group(1)[0] == fence_char and len(m.group(1)) >= fence_len:
+            fence_char = ''
+            fence_len = 0
+    return flags, fence_char * fence_len
+
+
+def fenced_line_flags(lines: list[str]) -> list[bool]:
+    """Per line: True for a fence delimiter or a line inside a fence."""
+    return _scan_fences(lines)[0]
+
+
+def unclosed_fence(lines: list[str]) -> str:
+    """The delimiter that closes a fence still open after the last line
+    (e.g. '````'), or '' when every fence is closed. Writers append it before
+    adding a heading or edge at the end, so the new line is not swallowed by
+    the fence."""
+    return _scan_fences(lines)[1]
+
+
+def connections_section(lines: list[str]) -> tuple[int, int, list[bool]] | None:
+    """Locate the first connections section in `lines`.
+
+    Returns (heading index, end index, fenced flags). `end` is the index of
+    the `## ` line that closes the section, or len(lines). Lines between
+    heading and end whose flag is True are fenced and must be skipped.
+    Returns None when no heading sits outside a fence.
+    """
+    fenced = fenced_line_flags(lines)
+    heading = None
+    for i, ln in enumerate(lines):
+        if not fenced[i] and is_connections_heading(ln):
+            heading = i
+            break
+    if heading is None:
+        return None
+    end = len(lines)
+    for i in range(heading + 1, len(lines)):
+        if not fenced[i] and lines[i].strip().startswith('## '):
+            end = i
+            break
+    return heading, end, fenced
+
+
+def connections_heading_index(lines: list[str]) -> int | None:
+    """Index of the first connections heading outside a fence, or None."""
+    section = connections_section(lines)
+    return None if section is None else section[0]
+
+
+def connections_heading_near_misses(lines: list[str]) -> list[tuple[int, str]]:
+    """Lines whose stripped text starts with `## Connections` (the earlier,
+    looser heading rule) that the current rule does not take as a heading,
+    each with the reason. `schist schema --validate` warns on these so a vault
+    owner can see which notes no longer yield edges."""
+    fenced = fenced_line_flags(lines)
+    out: list[tuple[int, str]] = []
+    for i, ln in enumerate(lines):
+        if not ln.strip().startswith(CONNECTIONS_HEADING_TEXT):
+            continue
+        if fenced[i]:
+            out.append((i, 'inside a fenced code block'))
+            continue
+        if is_connections_heading(ln):
+            continue
+        indent = ln[:len(ln) - len(ln.lstrip())]
+        if indent.strip(' ') or len(indent) > 3:
+            out.append((
+                i,
+                'indented by 4 or more spaces or by a tab (an indented code '
+                'block, not a heading)',
+            ))
+        else:
+            out.append((
+                i, f"heading text is not exactly '{CONNECTIONS_HEADING_TEXT}'",
+            ))
+    return out
+
 
 def _normalize_concept_slug(value: str) -> str:
     """Mirror mcp-server normalizeConceptSlug: strip edge whitespace,
@@ -355,17 +477,19 @@ def patch_frontmatter_flow_hashtags(content: str) -> str:
 
 
 def parse_connections(body: str) -> list[dict]:
-    """Extract connections from ## Connections section."""
+    """Extract connections from the ## Connections section (see
+    connections_section for the heading and fence rule)."""
     edges = []
-    in_section = False
-    for line in body.splitlines():
-        stripped = line.strip()
-        if stripped.startswith('## Connections'):
-            in_section = True
+    lines = body.splitlines()
+    section = connections_section(lines)
+    if section is None:
+        return edges
+    heading, end, fenced = section
+    for i in range(heading + 1, end):
+        if fenced[i]:
             continue
-        if in_section and stripped.startswith('## '):
-            break
-        if not in_section or not stripped.startswith('- '):
+        stripped = lines[i].strip()
+        if not stripped.startswith('- '):
             continue
         m = CONNECTION_RE.match(stripped)
         if m:

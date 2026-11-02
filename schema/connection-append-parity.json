@@ -82,5 +82,53 @@
     "content": "## Connections\n",
     "line": "- refutes: notes/c.md \"disagrees on mechanism\"",
     "expected": "## Connections\n- refutes: notes/c.md \"disagrees on mechanism\"\n"
+  },
+  {
+    "name": "heading only inside a closed fence: new section at end",
+    "content": "---\ntitle: A\n---\n\nExample:\n```\n## Connections\n- supports: notes/x.md\n```\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\n\nExample:\n```\n## Connections\n- supports: notes/x.md\n```\n\n## Connections\n\n- extends: notes/b.md\n"
+  },
+  {
+    "name": "heading only inside an unclosed fence: fence closed, new section at end",
+    "content": "---\ntitle: A\n---\n\n```\n## Connections\n- supports: notes/x.md\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\n\n```\n## Connections\n- supports: notes/x.md\n```\n\n## Connections\n\n- extends: notes/b.md\n"
+  },
+  {
+    "name": "near-miss heading text: new section at end",
+    "content": "---\ntitle: A\n---\n\n## Connections (x)\n- supports: notes/x.md\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\n\n## Connections (x)\n- supports: notes/x.md\n\n## Connections\n\n- extends: notes/b.md\n"
+  },
+  {
+    "name": "heading indented 4 spaces: new section at end",
+    "content": "---\ntitle: A\n---\n\n    ## Connections\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\n\n    ## Connections\n\n## Connections\n\n- extends: notes/b.md\n"
+  },
+  {
+    "name": "real section after a fenced example: insert into the real section",
+    "content": "---\ntitle: A\n---\n\n```\n## Connections\n## Notes\n```\n\n## Connections\n\n- supports: notes/x.md\n\n## Notes\nBody.\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\n\n```\n## Connections\n## Notes\n```\n\n## Connections\n\n- supports: notes/x.md\n\n- extends: notes/b.md\n## Notes\nBody.\n"
+  },
+  {
+    "name": "fenced ## heading inside the section does not end it",
+    "content": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n~~~\n## Not a heading\n~~~\n\n## Notes\nBody.\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n~~~\n## Not a heading\n~~~\n\n- extends: notes/b.md\n## Notes\nBody.\n"
+  },
+  {
+    "name": "section ending in an unclosed fence: fence closed before the edge",
+    "content": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n````\ncode\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n````\ncode\n````\n- extends: notes/b.md\n"
+  },
+  {
+    "name": "CRLF exact heading: insert and normalize to LF",
+    "content": "---\r\ntitle: A\r\n---\r\n\r\n## Connections\r\n\r\n- supports: notes/x.md\r\n\r\n## Notes\r\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n\n- extends: notes/b.md\n## Notes\n"
   }
 ]

@@ -11,7 +11,7 @@ import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote, rewriteNote, updateNote, deleteNote, writeMutex, vaultLockWaitMs } from "./git-writer.js";
 import { withVaultLock, VaultLockTimeout, VaultLockFailed } from "./vault-lock.js";
-import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, hasNonYamlOpener, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython, containsLineBoundary, isRoundTrippableTarget } from "./markdown-parser.js";
+import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, hasNonYamlOpener, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython, containsLineBoundary, isRoundTrippableTarget, connectionsSection, fencedLineFlags, isConnectionsHeading, hasConnectionsHeading } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
 import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse, PushFailureClass, ComposeBriefResponse, Note, SearchResult } from "./types.js";
@@ -2630,20 +2630,19 @@ export async function get_note(
  * Yields each `## Connections` edge line in a raw body that ingest would
  * index. Mirrors cli/schist/ingest.py's parse_connections: the same
  * splitlines() line boundaries (splitLinesLikePython, NOT split("\n") — see
- * #359), the same section tracking, the same CONNECTION_RE, and the same
+ * #359), the same section rule (connectionsSection: an exact heading, fenced
+ * code skipped), the same CONNECTION_RE, and the same
  * bracket-reference skip. Anything else (malformed lines, non-edge lines)
  * is skipped, matching ingest. Lines are yielded trimmed.
  */
-function* bodyConnectionEdgeLines(body: string): Generator<{ line: string; type: string }> {
-  let inSection = false;
-  for (const rawLine of splitLinesLikePython(body)) {
-    const stripped = rawLine.trim();
-    if (stripped.startsWith("## Connections")) {
-      inSection = true;
-      continue;
-    }
-    if (inSection && stripped.startsWith("## ")) break;
-    if (!inSection || !stripped.startsWith("- ")) continue;
+export function* bodyConnectionEdgeLines(body: string): Generator<{ line: string; type: string }> {
+  const lines = splitLinesLikePython(body);
+  const section = connectionsSection(lines);
+  if (section === null) return;
+  for (let i = section.heading + 1; i < section.end; i++) {
+    if (section.fenced[i]) continue; // fenced code — ingest skips it
+    const stripped = lines[i].trim();
+    if (!stripped.startsWith("- ")) continue;
     const m = stripped.match(CONNECTION_RE);
     if (!m) continue; // malformed line — ingest skips it
     if (m[2].startsWith("[")) continue; // bracket reference — ingest skips it
@@ -2688,9 +2687,9 @@ function isConceptNoteId(id: string): boolean {
 }
 
 function hasConnectionsSection(body: string): boolean {
-  return splitLinesLikePython(body).some(
-    (line) => line.trim().startsWith("## Connections"),
-  );
+  // Same rule as parseConnections and ingest: a `## Connections` shown in a
+  // fenced code block, or a near-miss heading, yields no edges and is allowed.
+  return hasConnectionsHeading(body);
 }
 
 /**
@@ -3380,7 +3379,7 @@ export function normalizeConceptSlug(value: string): string {
  * Matching mirrors markdown-parser's parseConnections (trim, CONNECTION_RE,
  * group 2 = target) so the lines we strip are exactly the edges ingest produced.
  */
-function stripConnectionsTo(content: string, targets: string[]): { content: string; removed: number } {
+export function stripConnectionsTo(content: string, targets: string[]): { content: string; removed: number } {
   const targetSet = new Set(targets);
   const out: string[] = [];
   let inSection = false;
@@ -3400,9 +3399,20 @@ function stripConnectionsTo(content: string, targets: string[]): { content: stri
     const s = lines.join("\n");
     return s === "" || s.endsWith("\n") ? s : s + "\n";
   };
-  for (const line of splitLinesLikePython(content)) {
+  // Section boundaries follow connectionsSection's rule (exact heading,
+  // fenced code never a heading, an edge, or a section end), so only lines
+  // ingest indexed as edges are removed. Every exact heading outside a fence
+  // opens a section here, not just the first, as before.
+  const inLines = splitLinesLikePython(content);
+  const inFenced = fencedLineFlags(inLines);
+  for (let idx = 0; idx < inLines.length; idx++) {
+    const line = inLines[idx];
     const stripped = line.trim();
-    if (stripped.startsWith("## Connections")) {
+    if (inFenced[idx]) {
+      out.push(line);
+      continue;
+    }
+    if (isConnectionsHeading(line)) {
       inSection = true;
       out.push(line);
       continue;
@@ -3423,10 +3433,12 @@ function stripConnectionsTo(content: string, targets: string[]): { content: stri
   }
   if (removed === 0) return { content: finalize(out), removed };
 
+  // Removed lines were edge lines outside any fence, so `out` has the same
+  // fences as the input.
+  const outFenced = fencedLineFlags(out);
   const cleaned: string[] = [];
   for (let i = 0; i < out.length; i++) {
-    const stripped = out[i].trim();
-    if (!stripped.startsWith("## Connections")) {
+    if (outFenced[i] || !isConnectionsHeading(out[i])) {
       cleaned.push(out[i]);
       continue;
     }
@@ -3434,7 +3446,7 @@ function stripConnectionsTo(content: string, targets: string[]): { content: stri
     let j = i + 1;
     while (j < out.length && out[j].trim() === "") j++;
     const next = j < out.length ? out[j].trim() : "";
-    if (j >= out.length || next.startsWith("## ")) {
+    if (j >= out.length || (!outFenced[j] && next.startsWith("## "))) {
       while (cleaned.length > 0 && cleaned[cleaned.length - 1].trim() === "") cleaned.pop();
       // Push a single "" either way: as the blank separator before the next
       // section (j < out.length), or — when Connections was the last section

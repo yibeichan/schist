@@ -12,7 +12,13 @@ from datetime import date, datetime
 from pathlib import Path
 
 from . import git_ops, markdown_io, sqlite_query
-from .ingest import SchemaConfigError, _normalize_concept_slug, _normalize_tag
+from .ingest import (
+    SchemaConfigError,
+    _normalize_concept_slug,
+    _normalize_tag,
+    connections_heading_index,
+    connections_heading_near_misses,
+)
 
 
 def _reject_escaping_relpath(value: str, what: str):
@@ -471,7 +477,10 @@ def add_concept(args, vault_path: str, db_path: str):
         body = sys.stdin.read()
     if body is None:
         body = ''
-    if any(line.strip().startswith('## Connections') for line in body.splitlines()):
+    # Same heading rule as ingest.parse_connections: a `## Connections`
+    # shown inside a fenced code block, or a near-miss heading, yields no
+    # edges, so it is allowed in a concept body.
+    if connections_heading_index(body.splitlines()) is not None:
         print(
             'Error: concept nodes cannot contain an outgoing '
             '## Connections section',
@@ -780,6 +789,7 @@ def schema(args, vault_path: str, db_path: str):
     # (root README/SCHEMA docs, shared skills, CI docs) are not vault notes and
     # must not make the content validator permanently red.
     violations = []
+    warnings: list[str] = []
     vault = Path(vault_path)
     content_roots = {
         Path(directory).parts[0].casefold()
@@ -837,6 +847,7 @@ def schema(args, vault_path: str, db_path: str):
         fm = note['frontmatter']
         if not fm.get('title') and not fm.get('topic') and not fm.get('concept'):
             violations.append(f'{rel}: missing title/topic/concept in frontmatter')
+        warnings.extend(_connections_heading_warnings(md_file, rel, note['body']))
         is_concept_path = (
             len(rel.parts) > 1
             and rel.parts[0].casefold() == 'concepts'
@@ -882,10 +893,7 @@ def schema(args, vault_path: str, db_path: str):
                     f"field(s): {', '.join(forbidden)}",
                 )
             body = note['body']
-            if any(
-                line.strip().startswith('## Connections')
-                for line in body.splitlines()
-            ):
+            if connections_heading_index(body.splitlines()) is not None:
                 violations.append(
                     f'{rel}: concept nodes cannot have outgoing '
                     '## Connections sections',
@@ -895,6 +903,10 @@ def schema(args, vault_path: str, db_path: str):
                 f'{rel}: concept nodes must live under concepts/',
             )
 
+    if warnings:
+        print(f'{len(warnings)} warning(s):')
+        for w in warnings:
+            print(f'  WARN: {w}')
     if violations:
         print(f'{len(violations)} violation(s):')
         for v in violations:
@@ -902,3 +914,38 @@ def schema(args, vault_path: str, db_path: str):
         sys.exit(1)
     else:
         print('All documents valid.')
+
+
+def _connections_heading_warnings(md_file: Path, rel: Path, body: str) -> list[str]:
+    """Warn on each body line the earlier, looser heading rule (stripped text
+    starts with `## Connections`) took as a connections heading but the
+    current rule does not: a near-miss heading, an indented one, or one inside
+    a fenced code block. Edges under such a line are no longer indexed, so the
+    warning shows a vault owner which notes changed. Uses the parser's own
+    helper (ingest.connections_heading_near_misses), so the two cannot
+    disagree. Line numbers are 1-based in the file, frontmatter included."""
+    body_lines = body.splitlines()
+    misses = connections_heading_near_misses(body_lines)
+    if not misses:
+        return []
+    offset = 0
+    try:
+        raw_lines = md_file.read_text(encoding='utf-8').splitlines()
+    except (OSError, UnicodeDecodeError):
+        raw_lines = []
+    # python-frontmatter strips the body, so locate it in the raw file by
+    # content rather than by counting frontmatter lines.
+    stripped_body = [ln.strip() for ln in body_lines]
+    stripped_raw = [ln.strip() for ln in raw_lines]
+    n = len(stripped_body)
+    for k in range(len(stripped_raw) - n + 1):
+        if (stripped_raw[k] == stripped_body[0]
+                and stripped_raw[k:k + n] == stripped_body):
+            offset = k
+            break
+    return [
+        f'{rel}:{offset + i + 1}: line starting with "## Connections" is not a '
+        f'connections heading ({reason}); connection lines under it are not '
+        'indexed'
+        for i, reason in misses
+    ]

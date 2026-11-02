@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A note's `## Connections` section starts only at an exact `## Connections` heading, and fenced code blocks are ignored.** Ingest, the MCP server and the CLI took any line whose text began with `## Connections` as the heading, including `## Connections (draft)`, a line indented as a code block, and a line inside a fenced code block, and indexed the `- type: target` lines under it as edges. Now the heading must be exactly `## Connections` (up to three leading spaces, trailing spaces or tabs), and lines inside a ```` ``` ```` or `~~~` fence are never a heading, a connection or the end of the section. A concept may now show an example section in a fence. When a note's only `## Connections` is in a fence, `schist link` and `add_connection` add a real section at the end instead of writing into the fence. Notes that relied on the looser rule lose those edges at the next ingest: `schist schema --validate` now warns, with the file and line, for each line that starts with `## Connections` but is no longer a heading, without failing validation. The rule is in `schema/SCHEMA.md` and pinned in both languages by `schema/connection-line-parity.json` and `schema/connection-append-parity.json`.
+
 ## [0.3.0] - 2026-11-03
 
 ### License

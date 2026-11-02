@@ -1014,6 +1014,38 @@ describe("create_concept", () => {
     expect(result.message).toContain("at most 200 characters");
   });
 
+  test("accepts a Connections example inside a fenced code block", async () => {
+    const vault = await makeConceptVault();
+    const config = await loadVaultConfig(vault);
+    const body = "definition\n\n```markdown\n## Connections\n\n- extends: concepts/other\n```";
+    const result = await create_concept(
+      vault,
+      { owner: TEST_AGENT, slug: "fenced-example", title: "Fenced Example", body },
+      config,
+    ) as { id: string; error?: string };
+    expect(result.error).toBeUndefined();
+    const parsed = parseNote(await fs.readFile(path.join(vault, result.id), "utf-8"));
+    expect(parsed.body.trim()).toBe(body);
+    expect(parsed.connections).toEqual([]);
+  }, 30000);
+
+  test("refuses a real Connections section after a closed fence", async () => {
+    const vault = await makeConceptVault();
+    const config = await loadVaultConfig(vault);
+    const result = await create_concept(
+      vault,
+      {
+        owner: TEST_AGENT,
+        slug: "after-fence",
+        title: "After Fence",
+        body: "definition\n\n```\ncode\n```\n\n  ## Connections\n- extends: concepts/other",
+      },
+      config,
+    ) as { error: string; message: string };
+    expect(result.error).toBe("VALIDATION_ERROR");
+    expect(result.message).toContain("cannot contain an outgoing");
+  });
+
   test("refuses an outgoing Connections section", async () => {
     const vault = await makeConceptVault();
     const config = await loadVaultConfig(vault);

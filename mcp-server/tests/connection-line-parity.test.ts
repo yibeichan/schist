@@ -21,6 +21,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONNECTION_RE, parseConnections } from "../src/markdown-parser.js";
+import { bodyConnectionEdgeLines, stripConnectionsTo } from "../src/tools.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -79,11 +80,61 @@ describe("connection-body splitter parity (#359)", () => {
     });
   }
 
+  // The write-time validator and the delete cascade read the section with
+  // the same rule (exact heading, fenced code skipped) as parseConnections and
+  // ingest, so each body case must give them the same edges.
+  for (const c of fixture.bodies) {
+    test(`validator sees the same edges: ${c.name}`, () => {
+      const got = [...bodyConnectionEdgeLines(c.body)].map(({ line }) => {
+        const m = line.match(CONNECTION_RE)!;
+        return { type: m[1], target: m[2], context: m[3] || m[4] || null };
+      });
+      expect(got).toEqual(c.edges);
+    });
+  }
+
+  for (const c of fixture.bodies.filter((b) => b.edges.length === 0)) {
+    test(`delete cascade strips nothing: ${c.name}`, () => {
+      const targets = [...splitLinesForTargets(c.body)];
+      expect(stripConnectionsTo(c.body, targets).removed).toBe(0);
+    });
+  }
+
   test("splitLinesLikePython is linear on a 1M-char body", async () => {
     const { splitLinesLikePython } = await import("../src/markdown-parser.js");
     const big = "x".repeat(1_000_000);
     const t0 = performance.now();
     expect(splitLinesLikePython(big)).toEqual([big]); // no boundaries → one line
     expect(performance.now() - t0).toBeLessThan(2000); // linear is a few ms
+  });
+});
+
+/** Every target any line of `body` would carry if it were an edge. Bracket
+ * references are left out: the cascade matches by target and never sees one,
+ * since a note id never starts with "[". */
+function* splitLinesForTargets(body: string): Generator<string> {
+  for (const raw of body.split(/\r\n|[\n\r\v\f\u001c-\u001e\u0085\u2028\u2029]/)) {
+    const m = raw.trim().match(CONNECTION_RE);
+    if (m && !m[2].startsWith("[")) yield m[2];
+  }
+}
+
+describe("delete cascade leaves fenced lines alone", () => {
+  test("strips the real edge and keeps the same line inside a fence", () => {
+    const body = [
+      "## Connections",
+      "- extends: note-a",
+      "```",
+      "- extends: note-a",
+      "## Notes",
+      "```",
+      "- related: note-b",
+      "",
+    ].join("\n");
+    const { content, removed } = stripConnectionsTo(body, ["note-a"]);
+    expect(removed).toBe(1);
+    expect(content).toBe(
+      ["## Connections", "```", "- extends: note-a", "## Notes", "```", "- related: note-b", ""].join("\n"),
+    );
   });
 });
