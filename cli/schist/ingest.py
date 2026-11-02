@@ -151,8 +151,9 @@ CONNECTION_RE = re.compile(
 # - Problems inside the section, outside fences: a line that starts, after
 #   spaces and tabs, with `>`; a non-blank line indented by a tab or 4+
 #   spaces; a non-blank line made only of `-`, `=`, `*`, `_`, `+`, `|`, `:`,
-#   spaces and tabs (setext underlines, thematic breaks, table delimiter
-#   rows); a list marker followed by a tab or 4+ spaces.
+#   spaces and tabs, ignoring _SLUG_WS_CHARS at either end (setext
+#   underlines, thematic breaks, table delimiter rows); a list marker
+#   followed by a tab or 4+ spaces.
 # - An edge line, in the section and outside fences: `-` at column 0, 1-3
 #   spaces, then text that, trimmed with the explicit _SLUG_WS_CHARS set,
 #   matches CONNECTION_RE with a type that starts with an ASCII letter or
@@ -296,7 +297,10 @@ def _line_problem(line: str, in_section: bool) -> str | None:
     lead = line[:len(line) - len(s)]
     if '\t' in lead or len(lead) >= 4:
         return 'a line indented by a tab or 4+ spaces in the Connections section'
-    if all(c in _RULE_LINE_CHARS for c in s):
+    # Whitespace at either end does not count: marked trims the end of a
+    # list's last item with JS trimEnd(), so `=` + U+FEFF underlines it.
+    rule = trim_connection_ws(s)
+    if rule and all(c in _RULE_LINE_CHARS for c in rule):
         return (
             'a line of only "-", "=", "*", "_", "+", "|" or ":" in the '
             'Connections section (a heading underline, rule or table)'

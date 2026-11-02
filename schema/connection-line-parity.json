@@ -1462,6 +1462,30 @@
       "body": "## Connections ##\n- extends: note-a\n",
       "edges": [],
       "problem": null
+    },
+    {
+      "name": "marked trims the last item: a rule line with U+FEFF after it underlines the item",
+      "body": "## Connections\n- extends: p\n=\ufeff\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "marked trims the last item: - then U+FEFF and a tab",
+      "body": "## Connections\n- extends: p\n-\ufeff\t\n1.\n- extends: z\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "marked trims the last item: - then U+3000",
+      "body": "## Connections\n- extends: p\n-\u3000\n- extends: z\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "marked trims the last item: a table row with U+3000 after it",
+      "body": "## Connections\n- extends: p\n|-\u3000\n- extends: z\n",
+      "edges": [],
+      "problem": 2
     }
   ],
   "files": [

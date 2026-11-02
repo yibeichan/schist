@@ -142,7 +142,7 @@ export function isRoundTrippableTarget(target: string): boolean {
  *   with ``` or ~~~; a line starting with `<`; a line starting with `[` that
  *   could open a link reference definition. In the section also: `>`, a
  *   line indented by a tab or 4+ spaces, a line of only `-=*_+|:` and
- *   whitespace, a list marker followed by a tab or 4+ spaces, a fence
+ *   whitespace (SLUG_WS_CHARS at either end ignored), a list marker followed by a tab or 4+ spaces, a fence
  *   indented 4+ spaces.
  * - Edge line: `-` at column 0, 1-3 spaces, CONNECTION_RE on the trimmed
  *   line, a type starting with an ASCII letter or digit, a target not
@@ -281,7 +281,10 @@ function lineProblem(line: string, inSection: boolean): string | null {
   if (lead.includes("\t") || lead.length >= 4) {
     return "a line indented by a tab or 4+ spaces in the Connections section";
   }
-  if (RULE_LINE_RE.test(s)) {
+  // Whitespace at either end does not count: marked trims the end of a list's
+  // last item with JS trimEnd(), so `=` + U+FEFF underlines it.
+  const rule = trimConnectionWs(s);
+  if (rule !== "" && RULE_LINE_RE.test(rule)) {
     return (
       'a line of only "-", "=", "*", "_", "+", "|" or ":" in the ' +
       "Connections section (a heading underline, rule or table)"

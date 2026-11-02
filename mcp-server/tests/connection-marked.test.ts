@@ -120,6 +120,7 @@ const POOL = [
   "## Other", "#\tOther", "##", "## ", "# H1", "### Sub", "#tag", "####### seven", "  ## Indented",
   "#\u00a0nbsp", "Other", "1. item", "1.     x", "2) y", "* item", "+ x", "1.",
   "\u0085```", "a\u2028b", "\u000c", "\u00a0", "\u3000", "\u00a0```", "\ufeff## Connections",
+  "=\ufeff", "-\u3000", "|-\u3000", "-\ufeff\t", "text\u00a0", "\u00a0",
 ];
 
 /** mulberry32: a small seeded generator, so a failure reproduces. */
@@ -152,6 +153,37 @@ function randomBody(next: () => number): string {
   }
   return lines.join("\n") + (next() < 0.5 ? "\n" : "");
 }
+
+// Characters and short pieces for a second generator that builds lines
+// character by character, so it reaches shapes the line pool does not.
+const PIECES = [
+  "\n", "\n", "\r", "\r\n", " ", "  ", "    ", "\t", "<", "[", "]", "\\", ":", "-", "- ", "#", "## ", "`", "```",
+  "~~~", ">", "=", "===", "---", "*", "_", "|", "+", "1.", "1)", "a", "x", "\"", "(", ")", "\u2014", "\u00a0",
+  "\u0085", "\u2028", "\u2029", "\u3000", "\ufeff", "\u001c", "\u000b", "<a>", "[x]:", "<!--", "- extends: a",
+  "- b: c \"x\"",
+];
+
+function randomCharBody(next: () => number): string {
+  let mid = "";
+  const n = 5 + Math.floor(next() * 40);
+  for (let k = 0; k < n; k++) mid += PIECES[Math.floor(next() * PIECES.length)];
+  return next() < 0.5
+    ? `## Connections\n- extends: p\n${mid}\n- extends: z\n`
+    : `${mid}\n## Connections\n- extends: q\n${PIECES[Math.floor(next() * PIECES.length)]}\n- extends: r`;
+}
+
+test("random character-built bodies: each edge read is a list item marked shows", () => {
+  const failures: { body: string; unseen: string[] }[] = [];
+  let withEdges = 0;
+  for (let seed = 1; seed <= 20000; seed++) {
+    const body = randomCharBody(rng(seed));
+    if (parseConnections(body).length > 0) withEdges++;
+    const u = unseen(body);
+    if (u.length > 0) failures.push({ body, unseen: u });
+  }
+  expect(failures.slice(0, 5)).toEqual([]);
+  expect(withEdges).toBeGreaterThan(1000);
+});
 
 test("random bodies: each edge read is a list item marked shows under Connections", () => {
   const failures: { body: string; unseen: string[] }[] = [];
