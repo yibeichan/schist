@@ -1387,3 +1387,37 @@ class TestStandardsReview:
         assert 'Not shown by get_standards: ' + ', '.join(unseen) in str(e.value)
         p = store.propose_note(ro, title='T', body='b', rationale='r', checked_standards=shown + unseen)
         assert len(p['checked_standards']) == 80
+
+    def test_standards_result_always_returns(self):
+        # A directory string too long to fit once ran the trimming loop forever.
+        out = {}
+        t = threading.Thread(target=lambda: out.setdefault(
+            'res', proposals_mod.standards_result('d' * 12000, [])), daemon=True)
+        t.start()
+        t.join(5)
+        assert not t.is_alive() and out['res']['standards'] == []
+        long_ids = [{'id': f'notes/{i:03d}-' + 'x' * 190 + '.md', 'title': 't', 'body': 'b'}
+                    for i in range(80)]
+        t = threading.Thread(target=lambda: out.__setitem__(
+            'res', proposals_mod.standards_result('d' * 12000, long_ids)), daemon=True)
+        t.start()
+        t.join(5)
+        assert not t.is_alive() and out['res']['omitted'] == 80
+
+    def test_get_standards_refuses_an_unknown_directory(self, vault, db_path, ro):
+        agent = agent_mod.Agent(db_path, proposals_mod.ProposalStore(vault), opener=FakeOllama([]))
+        for bad in ('x' * 12000, 'nowhere', '../notes'):
+            res, _ = agent._run_tool(ro, 'get_standards', {'directory': bad}, 'q')
+            assert res['error'].startswith('directory must be one of: ')
+        res, _ = agent._run_tool(ro, 'get_standards', {'directory': 'notes'}, 'q')
+        assert res['standards'] == []
+
+    def test_the_refusal_stays_under_the_tool_cut(self, vault, ro):
+        for i in range(120):
+            _standard(vault, f'{i:03d}-' + 'x' * 190 + '.md', f'Rule {i}')
+        _reindex(vault)
+        with pytest.raises(proposals_mod.ProposalError) as e:
+            proposals_mod.ProposalStore(vault).propose_note(ro, title='T', body='b', rationale='r')
+        msg = str(e.value)
+        assert len(json.dumps({'error': msg}, ensure_ascii=False)) < agent_mod.MAX_TOOL_CHARS
+        assert 'more that do not fit here either' in msg and 'archive some' in msg

@@ -54,6 +54,7 @@ MAX_REASON = 2_000
 MAX_STANDARD_CHARS = 2_000   # of each standard's body, as shown to the agent
 STANDARDS_BODY_CHARS = 8_000     # all bodies in one get_standards result, shared evenly
 STANDARDS_RESULT_CHARS = 11_000  # one get_standards result as JSON; the agent cuts at 12000
+MAX_UNSEEN_CHARS = 9_000         # ids a refusal names, so it too stays under the cut
 STANDARD_TAG = 'standard'
 APPROVE_TIMEOUT_S = 120
 PENDING, APPROVED, REJECTED, FAILED = 'pending', 'approved', 'rejected', 'failed'
@@ -122,8 +123,10 @@ def standards_result(directory: str, found: list[dict]) -> dict:
             title_cap = 40
         elif title_cap:
             title_cap = 0
-        else:
+        elif keep:
             keep -= 1
+        else:
+            return res   # nothing left to cut; callers pass a configured directory
 
 
 def _parent_dir(note_id: str) -> str:
@@ -160,7 +163,13 @@ def _require_checked(db, directory: str, checked) -> list[str]:
         shown = {s['id'] for s in standards_result(directory, found)['standards']}
         unseen = [sid for sid in missing if sid not in shown]
         if unseen:   # too many to list in get_standards: name them here
-            msg += f'. Not shown by get_standards: {", ".join(unseen)}; read_note each one'
+            listed, rest = [], list(unseen)
+            while rest and len(', '.join(listed + rest[:1])) <= MAX_UNSEEN_CHARS:
+                listed.append(rest.pop(0))
+            msg += f'. Not shown by get_standards: {", ".join(listed)}'
+            msg += (f', and {len(rest)} more that do not fit here either; {directory}/ has '
+                    'too many standards to check, so ask the user to archive some'
+                    if rest else '; read_note each one')
         raise ProposalError(msg)
     return required
 

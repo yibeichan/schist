@@ -416,6 +416,10 @@ class Agent:
             return res, {'type': 'step', 'text': f'looking up concepts “{args.get("query", "")}”'}
         if name == 'get_standards':
             directory = str(args.get('directory', '') or 'notes').strip().strip('/')
+            known = proposals_mod.commands._directories(str(self.store.vault))
+            if directory not in known:
+                return ({'error': f'directory must be one of: {", ".join(known)}'},
+                        {'type': 'step', 'text': 'reading standards: unknown directory'})
             found = proposals_mod.standards_for(db, directory)
             res = proposals_mod.standards_result(directory, found)   # fits under MAX_TOOL_CHARS
             return res, {'type': 'step', 'text': f'reading standards for {directory}/ → {len(found)}'}
