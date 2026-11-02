@@ -986,6 +986,7 @@ def check_ingest_available(vault_path: Optional[str]) -> CheckResult:
         # write and validate. Each rule change bumps CONNECTIONS_RULE_VERSION
         # in ingest.py; a copy without the marker predates rule 2 (any line
         # starting with `## Connections` was a heading, fences were ignored).
+        # A copy with a different version, older or newer, reads another rule.
         from .ingest import CONNECTIONS_RULE_VERSION
         rule = re.search(r"^CONNECTIONS_RULE_VERSION\s*=\s*(\d+)", script_text, re.MULTILINE)
         if rule is None:
@@ -994,11 +995,13 @@ def check_ingest_available(vault_path: Optional[str]) -> CheckResult:
                 "sections with the old rule (any line starting with "
                 "'## Connections', fenced code included) — refresh the hook copy"
             )
-        elif int(rule.group(1)) < CONNECTIONS_RULE_VERSION:
+        elif int(rule.group(1)) != CONNECTIONS_RULE_VERSION:
+            # Either direction is skew: an older copy indexes edges this CLI
+            # does not read, a newer one (from a later schist) the reverse.
             issues.append(
                 f"reads ## Connections sections with rule v{rule.group(1)} but "
                 f"this installed schist uses v{CONNECTIONS_RULE_VERSION} — "
-                "refresh the hook copy"
+                "refresh the hook copy, or upgrade schist if the copy is newer"
             )
         if issues:
             return CheckResult(

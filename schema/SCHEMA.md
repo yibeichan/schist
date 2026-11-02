@@ -208,70 +208,89 @@ In the `## Connections` section of a document:
 - **TARGET**: Relative path to target note or concept (e.g., `notes/2026-03-20-foo.md` or `concepts/self-attention.md`)
 - **CONTEXT**: Optional quoted string explaining the connection
 
-Multiple connections per document are allowed. One connection per line. A
-connection line starts with at most three spaces, then `- ` (a dash and a
-space); a line indented by a tab or four or more spaces is code, and a line
-nested under the previous list item is part of that item, so neither is a
-connection.
+Multiple connections per document are allowed. One connection per line.
 
-The section is read from the note body: the text after the frontmatter's
-closing line, as written (leading blank lines and indentation kept).
-Frontmatter lines never count, even a YAML block scalar holding `## Connections`
-or a fence line. Where the frontmatter ends follows the parser ingest uses
-(python-frontmatter): after turning CRLF into LF and stripping leading
-whitespace, a first line of three or more `-` (then only whitespace) opens it
-and the next line of three or more `-` closes it, so `-----` closes and
-`---foo` does not. A byte-order mark before the first `---` means the note has
-no frontmatter, and a note whose frontmatter is never closed is all body.
-`schema/frontmatter-boundary-parity.json` pins this rule in the CLI and the
-MCP server.
+The rule that reads the section is deliberately strict. It indexes a
+connection only where the viewer shows it as a top-level list item under the
+`## Connections` heading, and when a note holds Markdown whose rendering the
+rule does not follow, it indexes no connection from that note at all and says
+why (see below). Ingest, the MCP server and the CLI share the rule, and
+`schema/connection-line-parity.json` pins it in both languages; a test runs
+marked 12.0.2, the renderer the viewer loads, over those cases and thousands of
+generated notes and checks every connection the rule reads against it.
 
-The section starts at the first line that is exactly `## Connections`: up to
-three leading spaces and trailing spaces or tabs are allowed, but nothing else
-on the line, so `## Connections (draft)` or `## Connections to other work` is
-an ordinary heading. A line indented by four or more spaces or by a tab is an
-indented code block, not a heading. The section ends at the next line that is
-up to three spaces, then `## `, then text.
+**What is read.** The note body: CRLF and CR become LF (as when a file is read
+in text mode), the text after the frontmatter's closing line, without leading
+and trailing blank lines. Ingest stores exactly this text in the index, and the
+viewer renders it unchanged. Frontmatter lines never count, even a YAML block
+scalar holding `## Connections`. Where the frontmatter ends follows the parser
+ingest uses (python-frontmatter): after stripping leading whitespace, a first
+line of three or more `-` (then only whitespace) opens it and the next line of
+three or more `-` closes it, so `-----` closes and `---foo` does not. A
+byte-order mark before the first `---` means the note has no frontmatter, and a
+note whose frontmatter is never closed is all body.
+`schema/frontmatter-boundary-parity.json` pins this rule in the CLI and the MCP
+server.
 
-Fenced code blocks and HTML blocks are skipped, following CommonMark 0.31:
+**The section.** It starts at the first line that is exactly `## Connections`
+at the start of the line (trailing spaces or tabs allowed), outside a fenced
+code block; `## Connections (draft)` and an indented `## Connections` are not
+the heading. It ends at the next heading of any level (`#` to `######` after at
+most three spaces, then whitespace or the end of the line), or at the end of
+the note.
 
-- A fence opens on a line that starts (after up to three spaces) with three or
-  more backticks, with no backtick later on the line, or three or more tildes.
-  It closes on a later line made of the same character repeated at least as
-  many times, with nothing after it but spaces or tabs.
-- An HTML block opens on a line that starts (after up to three spaces) with
-  `<script`, `<pre`, `<style` or `<textarea` (closed by the line containing
-  `</script>`, `</pre>`, `</style>` or `</textarea>`), `<!--` (closed by `-->`),
-  `<?` (closed by `?>`), `<!` and a letter (closed by `>`), `<![CDATA[` (closed
-  by `]]>`), an opening or closing tag of a block-level element such as `div`,
-  `table` or `section` (closed by a blank line), or any other complete tag
-  alone on the line (closed by a blank line; this kind cannot interrupt a
-  paragraph). The closing text may be on the opening line. Tag names are
-  matched without regard to ASCII case.
-- Whichever block opens first governs until it closes, so a fence line inside
-  an HTML block opens nothing, and the reverse. A block that is never closed
-  runs to the end of the note.
+**A connection** is a line in the section that starts with `-` at the start of
+the line and one to three spaces, then `TYPE: TARGET` with optional context.
+The type must start with a letter or digit, and a target starting with `[` (a
+bracket reference) is not a connection. Indented lines, such as an item nested
+under a connection, are not connections.
 
-A line inside a fence or HTML block is never the heading, never a connection
-and never ends the section, so a note can show an example `## Connections`
-section in a fence without creating edges. Once a list item starts, its
-indented lines are skipped the same way, so a heading or connection nested in
-a list item does not count; a line starting with `>` (a block quote) is never
-a heading or a connection. Lines end only at Markdown line endings (`\n`,
-`\r\n`, `\r`); a vertical tab, form feed, U+001C–U+001E, U+0085, U+2028 or
-U+2029 stays inside its line, as a renderer shows it.
+**Fenced code** is skipped when it is unambiguous: an opening line of spaces,
+three or more backticks or tildes and an optional info word (letters, digits,
+`_+.#-`), closed by the first later line with the same spaces and the same
+run, with every line between blank or indented at least as much and none
+starting with ```` ``` ```` or `~~~`. Lines in such a fence are never the
+heading, a connection or the end of the section, so a note can show an example
+`## Connections` section in a fence.
 
-Renderers do not agree on every one of these structures, so the rule reads
-each body three ways, by CommonMark 0.31 and twice by the rules of marked, the
-renderer the schist viewer uses (once letting any HTML block interrupt a
-paragraph). A line is a heading or a connection only when no reading puts it
-inside a fence, HTML block or list item; a `## ` line ends the section when
-any reading sees it. The stricter result can drop a connection a renderer
-would show, never add one it would not.
+**When nothing is indexed.** A note indexes no connections when, from the start
+of the body to the end of the section, it has:
 
-When a note's only `## Connections` is in a fence or HTML block, `schist link`
-and `add_connection` add a real section at the end of the note, first closing
-a fence or HTML block left open.
+- a line holding a vertical tab, form feed, U+001C to U+001F, U+0085, U+2028 or
+  U+2029 (some readers break lines there and Markdown does not);
+- a line starting with ```` ``` ```` or `~~~` that is not part of a fence as
+  above;
+- a line starting with `<` (HTML);
+- a line starting with `[` that could open a link reference definition (its
+  first unescaped `]` is followed by `:`, comes after another `[`, or is
+  missing); `[text](url)` is fine;
+
+or, inside the section:
+
+- a line starting with `>` (a block quote);
+- a line indented by a tab or four or more spaces;
+- a line made only of `-`, `=`, `*`, `_`, `+`, `|`, `:` and whitespace (a
+  setext heading underline, a thematic break or a table delimiter row);
+- a list marker followed by a tab or four or more spaces.
+
+"Starting with" means after any spaces and tabs. `schist schema --validate`
+warns about such a note with the line and the reason; the MCP server's
+`get_note` returns the line and the reason as `connections_warning`, and
+`create_note` and `update_note` return them as `connectionsWarning` when the
+note they wrote is one of them.
+
+**Writers check their result.** `add_connection`, `create_note`,
+`update_note`, `delete_note`'s cascade, `schist link` and `schist add` read
+what they are about to write with the same rule and refuse, writing nothing,
+unless the note's connections come out exactly as intended (the earlier ones
+plus the new one, or minus the removed ones). A new connection goes after the
+section's last non-blank line; a note without a section gets one at the end.
+Adding a connection to a note the rule indexes nothing from is refused with the
+line and the reason, so the note can be fixed first.
+
+The viewer's note panel lists every connection the index holds for the note,
+from the index rather than from the rendered body, so an indexed connection is
+always visible there.
 
 ### Implicit Concept Edges
 
@@ -402,4 +421,4 @@ The `schist schema --validate` command checks:
 6. All note filenames match `YYYY-MM-DD-slug.md` pattern
 7. No concept files have `## Connections` sections (by the rule in [Connection Syntax](#connection-syntax); an example inside a fenced code block is allowed)
 8. No orphaned concepts (concepts with zero incoming edges — warning, not error)
-9. Notes the connection rule change affects (warning, not error): each line whose text starts with `## Connections` but is not a heading under the rule in [Connection Syntax](#connection-syntax) (not exactly that text, indented by four or more spaces or a tab, or inside a fenced code block or HTML block), and each connection the earlier rule indexed that is no longer indexed, or the reverse. Each warning names the file, the line number and the reason.
+9. Notes the connection rule affects (warning, not error): a note with a `## Connections` heading that holds Markdown the rule does not follow, so no connection is indexed from it (the line and the reason, as in [Connection Syntax](#connection-syntax)); each line whose text starts with `## Connections` but is not the heading (not exactly that text, indented, inside a fenced code block, or a later `## Connections` heading, since only the first section is read); and each connection the earlier rule indexed that is no longer indexed, or the reverse. Each warning names the file, the line number and the reason.

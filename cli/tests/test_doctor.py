@@ -1468,6 +1468,26 @@ class TestCheckIngestAvailableStaleHandCopy:
         assert r.status == "WARN"
         assert "rule v1" in r.message
 
+    def test_warn_when_copy_has_newer_connections_rule_version(self, tmp_path):
+        """A copy from a later schist reads a rule this CLI does not."""
+        import re as _re
+
+        from schist.ingest import CONNECTIONS_RULE_VERSION
+
+        newer = CONNECTIONS_RULE_VERSION + 1
+        vault = self._vault_with_copy(tmp_path, with_sibling=True)
+        script = tmp_path / ".schist" / "ingest.py"
+        text, n = _re.subn(
+            r"^CONNECTIONS_RULE_VERSION = \d+", f"CONNECTIONS_RULE_VERSION = {newer}",
+            script.read_text(), flags=_re.MULTILINE,
+        )
+        assert n == 1
+        script.write_text(text)
+        with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
+            r = check_ingest_available(str(vault))
+        assert r.status == "WARN"
+        assert f"rule v{newer}" in r.message
+
     def test_pass_when_current_copy_lacks_env_utils_sibling(self, tmp_path):
         """The CURRENT ingest.py defines the env_flag fallback inline, so a
         copy without the env_utils.py sibling is self-contained — doctor must
