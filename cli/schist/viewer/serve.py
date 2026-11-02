@@ -24,7 +24,9 @@ timer's `if_changed` rebuild does not skip it.
   POST /api/agent/chat              SSE stream of agent events (see agent.py)
   GET  /api/proposals               pending and failed proposals
   POST /api/proposals/<id>/approve  write it through `schist add` / `schist link`
-  POST /api/proposals/<id>/reject
+  POST /api/proposals/<id>/reject   optional JSON {reason, save_standard}: with
+                                    save_standard, the reason is first written as a
+                                    standard note through `schist add` (proposals.py)
 
 The site holds the full text of every note, and approve writes to the vault,
 so the server binds 127.0.0.1 by default and guards every request:
@@ -445,14 +447,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def _decide(self, pid: str, action: str):
         srv = self.server
+        body = self._body()
+        if body is None:
+            return
         try:
-            p = srv.store.approve(pid) if action == 'approve' else srv.store.reject(pid)
+            if action == 'approve':
+                p = srv.store.approve(pid)
+            else:
+                reason = body.get('reason', '')
+                if not isinstance(reason, str) or not isinstance(body.get('save_standard', False), bool):
+                    return self._json(400, {'ok': False, 'reason': 'reason must be a string and '
+                                                                   'save_standard a boolean'})
+                p = srv.store.reject(pid, reason=reason, save_standard=body.get('save_standard', False))
         except proposals_mod.ProposalError as e:
             return self._json(400, {'ok': False, 'reason': str(e)})
-        # An approved proposal is a new commit: rebuild in the background so
-        # the site shows it. If a rebuild is already running it may have
-        # started before the commit, so the page asks for another instead.
-        rebuilding = p['status'] == proposals_mod.APPROVED and srv.build_lock.acquire(blocking=False)
+        standard = p.get('standard') or {}
+        committed = p['status'] == proposals_mod.APPROVED or standard.get('status') == 'saved'
+        ok = p['status'] in (proposals_mod.APPROVED, proposals_mod.REJECTED)
+        # An approved proposal or a saved standard is a new commit: rebuild the
+        # site in the background so it shows it. The build does not reindex;
+        # the agent sees a new standard once the index has it (a spoke's
+        # post-commit hook refreshes it). If a rebuild is already running it
+        # may have started before the commit, so the page asks for another.
+        rebuilding = committed and srv.build_lock.acquire(blocking=False)
         if rebuilding:
             def run():
                 try:
@@ -460,7 +477,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 finally:
                     srv.build_lock.release()
             threading.Thread(target=run, daemon=True).start()
-        return self._json(200, {'ok': p['status'] != proposals_mod.FAILED, 'rebuilding': rebuilding, **p})
+        return self._json(200, {'ok': ok, 'rebuilding': rebuilding, **p})
 
 
 def serve(vault: str, db: str, out: str | None, host: str, port: int,

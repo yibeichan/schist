@@ -290,6 +290,9 @@ SPDX-License-Identifier: Apache-2.0
     .proposal .p-actions .p-approve { background: var(--bg); border-color: #4caf7d; color: #8fd19e; }
     .proposal .p-result { font-size: 11px; color: var(--muted); flex: 1; overflow-wrap: anywhere; }
     .proposal .p-failed { font-size: 11px; color: #e57373; margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .proposal .p-reason { margin-top: 8px; font-size: 12px; }
+    .proposal .p-reason textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 12px; padding: 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text); resize: vertical; }
+    .proposal .p-reason label { display: block; margin-top: 4px; color: var(--muted); }
   </style>
 </head>
 <body>
@@ -1047,7 +1050,8 @@ SPDX-License-Identifier: Apache-2.0
 //   step {text} · token {text} · interim · proposal {id, title} · done · error {message}
 // The agent only reads; it can file proposals (GET api/proposals, POST
 // api/proposals/<id>/approve|reject), and nothing is written until approved
-// here. Every POST carries X-Schist-Agent: 1, which a cross-site page cannot
+// here. Reject posts {reason, save_standard}; a saved standard is the one
+// write a rejection makes. Every POST carries X-Schist-Agent: 1, which a cross-site page cannot
 // send. Served any other way, the status request fails and the button stays
 // hidden. Answers render through the page's sanitized Markdown renderer;
 // [[note-id]] citations become buttons inserted as DOM nodes afterwards.
@@ -1093,6 +1097,8 @@ SPDX-License-Identifier: Apache-2.0
       b.textContent = String(list.length);
       b.hidden = list.length === 0;
     }
+    // Re-rendering would discard a rejection reason being typed.
+    if (props.querySelector(".p-reason:not([hidden])")) return;
     const frag = document.createDocumentFragment();
     for (const p of list) frag.appendChild(proposalCard(p));
     props.replaceChildren(frag);
@@ -1106,35 +1112,84 @@ SPDX-License-Identifier: Apache-2.0
     if (p.rationale) card.appendChild(el("div", "p-why", p.rationale));
     if (p.question) card.appendChild(el("div", "p-meta", `asked: “${p.question}”`));
     card.appendChild(el("pre", null, p.diff || ""));
+    const checked = Array.isArray(p.checked_standards) ? p.checked_standards : [];
+    if (checked.length) {
+      const s = el("div", "p-meta", `the agent listed ${checked.length} standard${checked.length > 1 ? "s" : ""} it checked: `);
+      s.appendChild(document.createTextNode(checked.join(", ")));
+      card.appendChild(s);
+    }
     const failed = p.status === "failed";
     if (failed) card.appendChild(el("div", "p-failed", `last attempt failed: ${p.output || "no output"}`));
+    if (p.standard && p.standard.status === "failed")
+      card.appendChild(el("div", "p-failed", `saving the standard failed: ${p.standard.output || "no output"}`));
     const actions = el("div", "p-actions");
     const ok = el("button", "p-approve", failed ? "Retry" : "Approve"), no = el("button", "p-reject", "Reject");
     ok.type = no.type = "button";
     const result = el("span", "p-result");
     actions.append(ok, no, result);
     card.appendChild(actions);
-    async function decide(action) {
-      ok.disabled = no.disabled = true;
-      result.textContent = action === "approve" ? "writing…" : "rejecting…";
+
+    // Reject asks why. A reason saved as a standard becomes a note the agent
+    // must check every later proposal into the same directory against.
+    const dir = p.kind === "link" ? String((p.args && p.args.source) || "").split("/")[0]
+                                  : String((p.args && p.args.directory) || "");
+    const box = el("div", "p-reason");
+    box.hidden = true;
+    const why = el("textarea");
+    why.rows = 3;
+    why.maxLength = 2000;
+    why.placeholder = "Why? (optional; the first line becomes the standard's title)";
+    why.value = p.reason || "";
+    const keepLabel = el("label");
+    const keep = el("input");
+    keep.type = "checkbox";
+    keepLabel.append(keep, document.createTextNode(` save as a standard for ${dir}/`));
+    const confirm = el("button", "p-reject", "Reject"), cancel = el("button", null, "Cancel");
+    confirm.type = cancel.type = "button";
+    const row = el("div", "p-actions");
+    row.append(confirm, cancel);
+    box.append(why, keepLabel, row);
+    card.appendChild(box);
+    const sync = () => { keep.disabled = !why.value.trim(); if (keep.disabled) keep.checked = false; };
+    why.addEventListener("input", sync);
+    sync();
+
+    async function decide(action, payload) {
+      ok.disabled = no.disabled = confirm.disabled = true;
+      result.textContent = action === "approve" ? "writing…"
+        : payload && payload.save_standard ? "saving the standard and rejecting…" : "rejecting…";
       try {
-        const r = await fetch(`api/proposals/${encodeURIComponent(p.id)}/${action}`, { method: "POST", headers: HDR });
+        const r = await fetch(`api/proposals/${encodeURIComponent(p.id)}/${action}`,
+          { method: "POST", headers: HDR, body: JSON.stringify(payload || {}) });
         const body = await r.json().catch(() => ({}));
         if (r.ok && body.ok) {
-          result.textContent = action !== "approve" ? "rejected"
-            : body.rebuilding ? "approved and committed; rebuilding the site"
-            : "approved and committed; rebuild the site to see it";
+          box.hidden = true;
+          const std = body.standard || {};
+          result.textContent = action === "approve"
+            ? (body.rebuilding ? "approved and committed; rebuilding the site"
+                               : "approved and committed; rebuild the site to see it")
+            : std.status === "saved" ? `rejected; standard saved in ${std.directory}/`
+                + (body.rebuilding ? "; rebuilding the site" : "")
+            : std.status === "unknown" ? `rejected; ${std.output}`
+            : payload && payload.save_standard
+              ? "rejected, but this server did not save the standard (restart schist serve after an upgrade)"
+            : "rejected";
           setTimeout(loadProposals, 1500);
           return;
         }
-        result.textContent = `failed: ${body.reason || body.output || body.status || "HTTP " + r.status}`;
-        result.title = body.output || "";
+        const std = body.standard || {};
+        result.textContent = std.status === "failed" ? "saving the standard failed; still open"
+          : `failed: ${body.reason || body.output || body.status || "HTTP " + r.status}`;
+        result.title = std.output || body.output || "";
         if (action === "approve" && body.status === "failed") { setTimeout(loadProposals, 1500); return; }
       } catch { result.textContent = "failed: server unreachable"; }
-      ok.disabled = no.disabled = false;
+      ok.disabled = no.disabled = confirm.disabled = false;
     }
     ok.addEventListener("click", () => decide("approve"));
-    no.addEventListener("click", () => decide("reject"));
+    no.addEventListener("click", () => { box.hidden = false; no.disabled = true; why.focus(); });
+    cancel.addEventListener("click", () => { box.hidden = true; no.disabled = false; });
+    confirm.addEventListener("click", () =>
+      decide("reject", { reason: why.value.trim(), save_standard: keep.checked }));
     return card;
   }
 

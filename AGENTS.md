@@ -89,7 +89,12 @@ read tools open the index with SQLite `mode=ro`) and `/api/proposals/*`
 (`proposals.py`: the agent's only write path is filing a proposal under
 `<vault>/.schist/proposals/`; approving one runs `schist add` / `schist link`,
 and on a spoke a proposal must target a path the spoke's identity can write
-under `vault.yaml`, checked at filing and again at approval). A site is stale
+under `vault.yaml`, checked at filing and again at approval. A rejection can
+keep its reason as a standard: a note tagged `standard` and
+`applies-to:<directory>`, written by `schist add` directly in that directory after
+the same scope check (only a note in the directory itself counts).
+The agent reads a directory's standards with `get_standards`, and a proposal
+that does not list every one in `checked_standards` is refused). A site is stale
 when the vault moved past its build or when other viewer code built it
 (`.schist/viewer-built-version`, a hash of `build.py` + `index.html`); the
 server rebuilds such a site at startup and the `if_changed` timer does not
