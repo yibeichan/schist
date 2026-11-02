@@ -590,6 +590,29 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     expect(content).toContain("- legacy-type: notes/x.md");
   }, 30000);
 
+  test("update_note grandfathers only edges ingest indexed, read with ingest's frontmatter rule", async () => {
+    // `---foo: |` does not close the frontmatter for ingest (python-frontmatter),
+    // but gray-matter closes at it, so gray-matter's body holds a section with
+    // a legacy edge that ingest never indexed. That line is not grandfathered.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const rel = "notes/2026-07-13-fm-split.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    const original =
+      "---\ntitle: FM Split\n---foo: |\n  ## Connections\n  - legacy-type: notes/x.md\n---\nProse.\n";
+    await fs.writeFile(path.join(vault, rel), original, "utf-8");
+
+    const res = await update_note(
+      vault,
+      { owner: TEST_AGENT, id: rel, body: "Prose.\n\n## Connections\n\n- legacy-type: notes/x.md\n" },
+      config
+    ) as { error: string; message: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toContain('"legacy-type"');
+    expect(await fs.readFile(path.join(vault, rel), "utf-8")).toBe(original);
+  }, 30000);
+
   test("update_note still rejects a NEW out-of-vocabulary edge even alongside a grandfathered one (#363)", async () => {
     const vault = await makeTempVault();
     const config = await loadVaultConfig(vault);
