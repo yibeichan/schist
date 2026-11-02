@@ -133,6 +133,38 @@ test("the oracle sees an edge the page hides (positive control)", () => {
   expect(unseen(body)).toEqual([]);
 });
 
+// After a raw <code>, <pre>, <kbd> or <script> tag marked leaves later text
+// unescaped unless the viewer resets that state, so a tag marked's grammar
+// rejects but a browser parses (an unclosed comment, `<textarea/x>`) would
+// reach the page raw.
+const RAW_BLOCK_ROWS = [
+  "x <code> <!--\n\n## Connections\n- extends: evil\n",
+  "x <code>\n\n## Connections\n- extends: a\n- y <!--\n- extends: evil\n",
+  "## Connections\n- extends: a <kbd> <textarea/x>\n- extends: evil\n",
+  "x <pre>\n\nmore <!--\n\n## Connections\n- extends: evil\n",
+  "## Connections\n- extends: a\n- see <script> <style/x>\n- extends: evil\n",
+  "## Connections\n- extends: a \"<code>\"\n- x <!--\n- extends: evil\n",
+];
+
+test("without the inRawBlock reset these rows hide the edge (positive control)", () => {
+  const htmlOnly = new markedModule.Marked({
+    gfm: true,
+    breaks: false,
+    renderer: { html: (html: string) => html.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") },
+  });
+  const body = RAW_BLOCK_ROWS[0];
+  expect(unseenIn(body, purify.sanitize(htmlOnly.parse(body) as string))).toEqual(["extends: evil"]);
+});
+
+describe("text after a raw <code>, <pre>, <kbd> or <script> tag stays escaped", () => {
+  for (const body of RAW_BLOCK_ROWS) {
+    test(JSON.stringify(body), () => {
+      expect(parseConnections(body).map((c) => c.target)).toContain("evil");
+      expect(unseen(body)).toEqual([]);
+    });
+  }
+});
+
 describe("every parity body: each edge read is shown under Connections in the rendered page", () => {
   for (const c of fixture.bodies) {
     test(c.name, () => {
@@ -154,7 +186,7 @@ const POOL = [
   "x <select>", "Intro <plaintext>", "x <h2>Other</h2>", "<div>", "</div>", "<!--", "-->", "- ## Other",
   "* # Rejected", "- > ## Other", "para", "    ~~~", "    <textarea>", "    ```", "```", "~~~", "text", "",
   "", "  - extends: n", "### Sub", "---", "===", "| a |", "|-|", "[x](y)", "[x]: /u", "<https://e.org>",
-  "a <b>bold</b> c", "1. item", "* item", "\u00a0", "#tag", "- extends: e <span hidden>",
+  "a <b>bold</b> c", "x <code> <!--", "- y <kbd> <textarea/x>", "more <pre>", "z <script> <style/x>", "1. item", "* item", "\u00a0", "#tag", "- extends: e <span hidden>",
 ];
 
 // Ordinary lines, drawn more often so that many bodies keep their edges.

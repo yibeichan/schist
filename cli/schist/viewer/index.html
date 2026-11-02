@@ -497,6 +497,17 @@ SPDX-License-Identifier: Apache-2.0
             return block ? `<p>${escapeHtml(html)}</p>\n` : escapeHtml(html);
           },
         },
+        tokenizer: {
+          // marked stops escaping text after a raw <pre>, <code>, <kbd> or
+          // <script> tag (its inRawBlock state, which lasts to the matching
+          // close tag, across blocks). Those tags are shown as text here, so
+          // the text after them is escaped too: reset the state and let
+          // marked's own inlineText run (returning false falls back to it).
+          inlineText() {
+            this.lexer.state.inRawBlock = false;
+            return false;
+          },
+        },
       })
     : null;
   if (window.DOMPurify) {

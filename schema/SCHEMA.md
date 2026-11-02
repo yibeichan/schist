@@ -214,8 +214,11 @@ The rule that reads the section is deliberately strict. It indexes a
 connection only where the viewer shows it as a top-level list item under the
 `## Connections` heading, and when a note holds Markdown whose rendering the
 rule does not follow, it indexes no connection from that note at all and says
-why (see below). The viewer shows raw HTML written in a note as text, so no
-tag in a note can hide or move what follows it. Ingest, the MCP server and the
+why (see below). The viewer shows raw HTML written in a note as text, as it
+does the text after a raw `<code>`, `<pre>`, `<kbd>` or `<script>` tag (which
+marked would otherwise pass through unescaped), so a tag written in a note is
+not parsed as HTML; the HTML in the page is marked's own output, sanitized by
+DOMPurify. Ingest, the MCP server and the
 CLI share the rule, and `schema/connection-line-parity.json` pins it in both
 languages. Two tests check every connection the rule reads, over those cases
 and thousands of generated notes: one against the tokens of marked 12.0.2, the
