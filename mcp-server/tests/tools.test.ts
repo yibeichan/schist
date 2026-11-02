@@ -12,7 +12,7 @@ import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { load as yamlLoadSync } from "js-yaml";
 import { jest } from "@jest/globals";
-import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, formatPushFailure, search_memory, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, ignoredPathsFromPorcelainZ, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES, PULL_AUTOSTASH_CONFLICT_PREFIX } from "../src/tools.js";
+import { get_note, loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, formatPushFailure, search_memory, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, ignoredPathsFromPorcelainZ, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES, PULL_AUTOSTASH_CONFLICT_PREFIX } from "../src/tools.js";
 import { writeMutex } from "../src/git-writer.js";
 import Database from "better-sqlite3";
 import { INDEX_SCHEMA_VERSION, memoryDbPath } from "../src/sqlite-reader.js";
@@ -6650,6 +6650,19 @@ describe("connection writers check their own result", () => {
     expect(res.error).toBe("VALIDATION_ERROR");
     expect(res.message).toContain("update_note refused");
     expect(await fs.readFile(path.join(vault, rel), "utf-8")).toBe(original);
+  }, 30000);
+
+  test("get_note says when a note's section is not read", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const rel = await noteIn(vault, "notes/2026-11-02-get.md", "---\ntitle: G\n---\n<div>\n\n## Connections\n- extends: notes/a.md\n");
+    const res = await get_note(vault, { id: rel }, config) as { connections: unknown[]; connections_warning?: string };
+    expect(res.connections).toEqual([]);
+    expect(res.connections_warning).toContain('line 4: the line starts with "<" (HTML)');
+    const plain = await noteIn(vault, "notes/2026-11-02-plain.md", "---\ntitle: P\n---\n## Connections\n- extends: notes/a.md\n");
+    const ok = await get_note(vault, { id: plain }, config) as { connections: unknown[]; connections_warning?: string };
+    expect(ok.connections).toHaveLength(1);
+    expect(ok.connections_warning).toBeUndefined();
   }, 30000);
 
   test("add_connection refuses a note the rule indexes nothing from, and writes nothing", async () => {
