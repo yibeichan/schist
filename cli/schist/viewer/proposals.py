@@ -52,6 +52,8 @@ MAX_TITLE = 200
 MAX_BODY = 50_000
 MAX_REASON = 2_000
 MAX_STANDARD_CHARS = 2_000   # of each standard's body, as shown to the agent
+STANDARDS_BODY_CHARS = 8_000     # all bodies in one get_standards result, shared evenly
+STANDARDS_RESULT_CHARS = 11_000  # one get_standards result as JSON; the agent cuts at 12000
 STANDARD_TAG = 'standard'
 APPROVE_TIMEOUT_S = 120
 PENDING, APPROVED, REJECTED, FAILED = 'pending', 'approved', 'rejected', 'failed'
@@ -86,6 +88,44 @@ def standards_for(db, directory: str) -> list[dict]:
             for r in rows]
 
 
+def standards_result(directory: str, found: list[dict]) -> dict:
+    """get_standards' result for the agent, at most STANDARDS_RESULT_CHARS of
+    JSON (the agent cuts any tool result at 12000). Every id comes first:
+    bodies are shortened, then titles, before any standard is left out, and
+    only when the ids alone do not fit is the tail left out and counted as
+    `omitted` (the refusal then names the missing ids, so the agent is never
+    locked out of a directory)."""
+    share, title_cap = STANDARDS_BODY_CHARS // max(1, len(found)), MAX_TITLE
+    keep = len(found)
+    while True:
+        items = []
+        for s in found[:keep]:
+            item = {'id': s['id']}
+            if title_cap:
+                item['title'] = s['title'][:title_cap]
+            if share:
+                item['body'] = s['body'][:share]
+            if len(s['body']) > share or len(s['title']) > title_cap:
+                item['truncated'] = True
+            items.append(item)
+        res = {'directory': directory, 'standards': items,
+               'note': ('meet each standard and pass every id as checked_standards; '
+                        'read_note a truncated one for its full text'
+                        if found else 'no standards for this directory; pass []')}
+        if keep < len(found):
+            res['omitted'] = len(found) - keep
+        if len(json.dumps(res, ensure_ascii=False)) <= STANDARDS_RESULT_CHARS:
+            return res
+        if share:
+            share = share // 2 if share >= 100 else 0
+        elif title_cap > 40:
+            title_cap = 40
+        elif title_cap:
+            title_cap = 0
+        else:
+            keep -= 1
+
+
 def _parent_dir(note_id: str) -> str:
     return note_id.rsplit('/', 1)[0] if '/' in note_id else ''
 
@@ -112,11 +152,16 @@ def _require_checked(db, directory: str, checked) -> list[str]:
     named = {str(c).strip() for c in checked}
     missing = [sid for sid in required if sid not in named]
     if missing:
-        raise ProposalError(
-            f'{directory}/ has {len(required)} standard(s) and this proposal names '
-            f'{len(required) - len(missing)} of them. Call get_standards with directory '
-            f'{directory!r}, make the proposal meet each one, and list every id it returns '
-            'in checked_standards')
+        msg = (f'{directory}/ has {len(required)} standard(s) and this proposal names '
+               f'{len(required) - len(missing)} of them. Call get_standards with directory '
+               f'{directory!r}, make the proposal meet each one, and list every id it returns '
+               'in checked_standards')
+        found = standards_for(db, directory)
+        shown = {s['id'] for s in standards_result(directory, found)['standards']}
+        unseen = [sid for sid in missing if sid not in shown]
+        if unseen:   # too many to list in get_standards: name them here
+            msg += f'. Not shown by get_standards: {", ".join(unseen)}; read_note each one'
+        raise ProposalError(msg)
     return required
 
 
@@ -385,11 +430,12 @@ class ProposalStore:
         if len(title) > MAX_TITLE:
             title = title[:MAX_TITLE - 1].rstrip() + '…'
         when = datetime.now(timezone.utc).date().isoformat()
-        # The proposal's title comes from note titles other writers control:
-        # one line only, so it cannot add headings or Connections lines to a
+        # Only the reviewer's words and the proposal's target path: its title
+        # comes from note titles other writers control, so it stays out of a
         # note committed under the reviewer's name.
-        body = (f'{reason}\n\nRecorded on {when} when the reviewer rejected a proposal: '
-                f'"{_one_line(p["title"])}" ({p["kind"]}, {_one_line(p["target"])}).\n')
+        kind = 'new note' if p['kind'] == 'create' else 'new connection in'
+        body = (f'{reason}\n\nRecorded on {when} when the reviewer rejected a proposal '
+                f'({kind} {_one_line(p["target"])}).\n')
         cmd = [sys.executable, '-m', 'schist', f'--vault={self.vault}', f'--db={self.db_path}',
                'add', f'--title={title}', f'--dir={directory}',
                f'--tags={STANDARD_TAG},{applies_tag(directory)}']

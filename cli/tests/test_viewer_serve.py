@@ -1162,7 +1162,8 @@ class TestStandards:
         assert len(written) == 1
         text = written[0].read_text(encoding='utf-8')
         assert 'standard' in text and 'applies-to:notes' in text
-        assert 'A claim without a citation is a guess.' in text and '"Unsourced claim"' in text
+        assert 'A claim without a citation is a guess.' in text
+        assert 'Unsourced claim' not in text and '(new note notes/' in text   # no other writer's title
         _reindex(vault)
         sid = f'notes/{written[0].name}'
         with pytest.raises(proposals_mod.ProposalError, match='names 0 of them'):
@@ -1336,6 +1337,49 @@ class TestStandardsReview:
         agent = agent_mod.Agent(db_path, proposals_mod.ProposalStore(vault), opener=FakeOllama([]))
         res, _ = agent._run_tool(ro, 'get_standards', {'directory': 'notes'}, 'q')
         assert [s['id'] for s in res['standards']] == ids
-        assert sum(len(s['body']) for s in res['standards']) <= agent_mod.STANDARDS_BODY_CHARS
+        assert sum(len(s['body']) for s in res['standards']) <= proposals_mod.STANDARDS_BODY_CHARS
         assert all(s.get('truncated') for s in res['standards'])
-        assert len(json.dumps(res)) < agent_mod.MAX_TOOL_CHARS
+        assert len(json.dumps(res, ensure_ascii=False)) < agent_mod.MAX_TOOL_CHARS
+
+    def test_every_id_fits_with_long_real_titles(self, vault, db_path, ro):
+        # Standards saved through the real reject path, with first lines near
+        # the title cap, give ids and titles near 200 characters each.
+        store = proposals_mod.ProposalStore(vault)
+        for i in range(14):
+            p = store.propose_note(ro, title=f'P{i}', body='b', rationale='r', checked_standards=[
+                s['id'] for s in proposals_mod.standards_for(ro, 'notes')])
+            reason = f'rule {i:02d} ' + 'long words about what a note needs ' * 6
+            assert store.reject(p['id'], reason=reason, save_standard=True)['status'] == 'rejected'
+            _reindex(vault)
+        found = proposals_mod.standards_for(ro, 'notes')
+        assert len(found) == 14 and min(len(s['id']) for s in found) > 150
+        agent = agent_mod.Agent(db_path, store, opener=FakeOllama([]))
+        res, _ = agent._run_tool(ro, 'get_standards', {'directory': 'notes'}, 'q')
+        assert [s['id'] for s in res['standards']] == [s['id'] for s in found]
+        assert 'omitted' not in res
+        assert len(json.dumps(res, ensure_ascii=False)) <= proposals_mod.STANDARDS_RESULT_CHARS
+
+    def test_a_huge_title_does_not_push_other_ids_out(self, vault, db_path, ro):
+        _standard(vault, 'a-huge.md', 'T' * 20000)
+        small = _standard(vault, 'b-small.md', 'Cite a source')
+        _reindex(vault)
+        res = proposals_mod.standards_result('notes', proposals_mod.standards_for(ro, 'notes'))
+        assert [s['id'] for s in res['standards']] == ['notes/a-huge.md', small]
+        assert len(json.dumps(res, ensure_ascii=False)) <= proposals_mod.STANDARDS_RESULT_CHARS
+
+    def test_ids_that_cannot_all_fit_are_named_in_the_refusal(self, vault, ro):
+        for i in range(80):
+            _standard(vault, f'{i:02d}-' + 'x' * 190 + '.md', f'Rule {i}')
+        _reindex(vault)
+        found = proposals_mod.standards_for(ro, 'notes')
+        res = proposals_mod.standards_result('notes', found)
+        shown = [s['id'] for s in res['standards']]
+        assert res['omitted'] == 80 - len(shown) > 0
+        assert len(json.dumps(res, ensure_ascii=False)) <= proposals_mod.STANDARDS_RESULT_CHARS
+        store = proposals_mod.ProposalStore(vault)
+        with pytest.raises(proposals_mod.ProposalError) as e:
+            store.propose_note(ro, title='T', body='b', rationale='r', checked_standards=shown)
+        unseen = [s['id'] for s in found if s['id'] not in shown]
+        assert 'Not shown by get_standards: ' + ', '.join(unseen) in str(e.value)
+        p = store.propose_note(ro, title='T', body='b', rationale='r', checked_standards=shown + unseen)
+        assert len(p['checked_standards']) == 80
