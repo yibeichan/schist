@@ -273,6 +273,24 @@ function markedItemContinues(line: string, indent: number, prev: string, blankSe
   return true;
 }
 
+const QUOTE_RE = /^ {0,3}> ?/;
+const MARKED_PARAGRAPH_INTERRUPTS = [
+  /^ {0,3}#{1,6}(?:[ \t\n\r\f\v]|$)/,
+  /^ {0,3}>/,
+  /^ {0,3}(?:`{3,}[^`]*$|~{3,})/,
+  /^ {0,3}(?:[*+-]|1[.)]) /,
+];
+
+/** Whether marked 12 ends a paragraph before `line` (its `paragraph` rule).
+ * Mirrors ingest.py _marked_interrupts_paragraph. */
+function markedInterruptsParagraph(line: string): boolean {
+  const nl = markedTabs(line);
+  if (/^ *$/.test(nl)) return true;
+  if (/^ {0,3}((?:-[\t ]*){3,}|(?:_[ \t]*){3,}|(?:\*[ \t]*){3,})$/.test(nl)) return true;
+  if (MARKED_PARAGRAPH_INTERRUPTS.some((p) => p.test(nl))) return true;
+  return MARKED_HTML_INTERRUPT_RE.test(nl);
+}
+
 /** True for a non-indented line that cannot continue a list item: an ATX
  * heading, a fence, an HTML block start or a thematic break. */
 function closesList(line: string): boolean {
@@ -332,7 +350,7 @@ function htmlBlockEnd(kind: number, tag: string, low: string): boolean {
   return low.includes(HTML_END_MARKERS[kind]);
 }
 
-type LineKind = "" | "header" | "fence" | "html" | "list" | "lazy";
+type LineKind = "" | "header" | "fence" | "html" | "list" | "lazy" | "quote";
 
 /**
  * Classify each line: "" (ordinary), "header" (before `start`), "fence" (a
@@ -343,7 +361,9 @@ type LineKind = "" | "header" | "fence" | "html" | "list" | "lazy";
  *
  * With markedReading, the places where marked (the viewer's renderer)
  * departs from CommonMark follow marked: list items follow marked's own rules
- * (markedItemContinues); only marked's own set of HTML openers interrupts a
+ * (markedItemContinues); a block quote's paragraph absorbs the following
+ * lines until marked's paragraph rule ends it (markedInterruptsParagraph);
+ * only marked's own set of HTML openers interrupts a
  * paragraph; an HTML block of type 2-5 ends right after its end
  * marker, so the rest of that line can open a fence, another HTML block or
  * a list item;
@@ -379,6 +399,7 @@ function scanBlocks(
   let itemIndent = 0;
   let itemPrev = "";
   let itemBlank = false;
+  let quoteLazy = false; // marked reading: a quote's paragraph is absorbing lines
   let prevBlank = true;
   for (let i = 0; i < lines.length; i++) {
     const ln = lines[i];
@@ -447,6 +468,18 @@ function scanBlocks(
         itemIndent = 0;
         endedItem = true;
       }
+      if (quoteLazy) {
+        if (!markedInterruptsParagraph(ln)) {
+          kinds.push("quote");
+          continue;
+        }
+        quoteLazy = false;
+      }
+      const tabbed = markedTabs(ln);
+      const qm = QUOTE_RE.exec(tabbed);
+      // marked reads the rest of a quote line as a paragraph that absorbs the
+      // following lines until something interrupts it.
+      if (qm) quoteLazy = qm[0].length < tabbed.length;
     } else if (listOpen && !blank) {
       if (indentWidth(ln) >= 1) {
         // Item content, or the first line after the list when the renderer's

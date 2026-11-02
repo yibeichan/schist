@@ -202,6 +202,49 @@
         1,
         2
       ]
+    },
+    {
+      "name": "marked: a quote's paragraph absorbs lines until an interruption",
+      "body": "> text\n<span>\n    - x\n<script>\n## Connections\n</script>\n\n## Connections",
+      "start": 0,
+      "commonmark": [
+        3,
+        4,
+        5
+      ],
+      "marked": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "marked_any_html": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "name": "marked: a quote holding only a heading still absorbs lazy lines",
+      "body": ">## Connections\n-\tx\n<pre>\n## Connections",
+      "start": 0,
+      "commonmark": [
+        2,
+        3
+      ],
+      "marked": [
+        1,
+        2,
+        3
+      ],
+      "marked_any_html": [
+        1,
+        2,
+        3
+      ]
     }
   ]
 }

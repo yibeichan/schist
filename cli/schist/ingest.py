@@ -298,6 +298,29 @@ def _marked_item_continues(line: str, indent: int, prev: str, blank_seen: bool) 
     return True
 
 
+_QUOTE_RE = re.compile(r' {0,3}> ?')
+_MARKED_PARAGRAPH_INTERRUPTS = (
+    re.compile(r' {0,3}#{1,6}(?:[ \t\n\r\f\v]|$)'),
+    re.compile(r' {0,3}>'),
+    re.compile(r' {0,3}(?:`{3,}[^`]*$|~{3,})'),
+    re.compile(r' {0,3}(?:[*+-]|1[.)]) '),
+)
+
+
+def _marked_interrupts_paragraph(line: str) -> bool:
+    """Whether marked 12 ends a paragraph before `line` (its `paragraph`
+    rule): a blank line, a rule, a heading, a quote, a fence, a bullet or
+    `1.`/`1)` item followed by a space, or one of its HTML openers."""
+    nl = _marked_tabs(line)
+    if not nl.strip(' '):
+        return True
+    if re.fullmatch(r' {0,3}((?:-[\t ]*){3,}|(?:_[ \t]*){3,}|(?:\*[ \t]*){3,})', nl):
+        return True
+    if any(p.match(nl) for p in _MARKED_PARAGRAPH_INTERRUPTS):
+        return True
+    return _MARKED_HTML_INTERRUPT_RE.match(nl) is not None
+
+
 def _closes_list(line: str) -> bool:
     """True for a non-indented line that cannot continue a list item: an ATX
     heading, a fence, an HTML block start or a thematic break."""
@@ -367,8 +390,9 @@ def _scan_blocks(
 ) -> tuple[list[str], str | None]:
     """Classify each line as '' (ordinary), 'header' (before `start`),
     'fence' (a fence delimiter or inside a fenced code block), 'html'
-    (inside an HTML block), 'list' (indented content of a list item) or
-    'lazy' (an indented list marker straight after paragraph text).
+    (inside an HTML block), 'list' (indented content of a list item),
+    'lazy' (an indented list marker straight after paragraph text) or, in
+    the marked reading, 'quote' (a line a block quote's paragraph absorbs).
     Whichever block opens first governs until it closes. Also return what an
     unclosed block still needs at the end: the closing line ('```', '-->',
     '</pre>', ...), '' for an HTML block of type 6 or 7 (a blank line), or
@@ -376,7 +400,9 @@ def _scan_blocks(
 
     With marked_reading, the places where marked (the viewer's renderer)
     departs from CommonMark follow marked: list items follow marked's own
-    rules (_marked_item_continues); only marked's own set of HTML openers
+    rules (_marked_item_continues); a block quote's paragraph absorbs the
+    following lines until marked's paragraph rule ends it
+    (_marked_interrupts_paragraph); only marked's own set of HTML openers
     interrupts a paragraph; an HTML block of type 2-5 ends right
     after its end marker, so the rest of that line can open a fence or
     another HTML block; and a line holding U+2028 or U+2029 is not a
@@ -408,6 +434,7 @@ def _scan_blocks(
     item_indent = 0
     item_prev = ''
     item_blank = False
+    quote_lazy = False  # marked reading: a quote's paragraph is absorbing lines
     prev_blank = True
     for i, ln in enumerate(lines):
         blank = _is_blank(ln)
@@ -467,6 +494,16 @@ def _scan_blocks(
                     continue
                 item_indent = 0
                 ended_item = True
+            if quote_lazy:
+                if not _marked_interrupts_paragraph(ln):
+                    kinds.append('quote')
+                    continue
+                quote_lazy = False
+            qm = _QUOTE_RE.match(_marked_tabs(ln))
+            if qm:
+                # marked reads the rest of a quote line as a paragraph that
+                # absorbs the following lines until something interrupts it.
+                quote_lazy = qm.end() < len(_marked_tabs(ln))
         elif list_open and not blank:
             if _indent_width(ln) >= 1:
                 # Item content, or the first line after the list when the
