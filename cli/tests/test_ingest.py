@@ -2608,3 +2608,56 @@ def test_note_body_offset_agrees_with_python_frontmatter(case: dict) -> None:
         except ValueError:
             lib_body = stripped
     assert normalize_newlines(text[note_body_offset(text):]).strip() == lib_body
+
+
+# Adversarial note bodies of about 1 MB, most of them one line: the
+# connection rule must read each in linear time (R3-17 measured minutes on
+# the chained-HTML lines before). markdown-parser.ts runs the same set in
+# mcp-server/tests/connection-linear.test.ts.
+_M = 1_000_000
+_LINEAR_CASES = {
+    'chained processing instructions': '## Connections\n' + '<? ?>' * (_M // 5) + '\n- extends: a\n',
+    'chained CDATA': '## Connections\n' + '<![CDATA[]]>' * (_M // 12) + '\n',
+    'edge line with a long space run': '## Connections\n- extends: a' + ' ' * _M + 'x\n',
+    'edge line with a colon chain': '## Connections\n- a:' + 'b:' * (_M // 2) + '\n',
+    'edge line with an unclosed quote': '## Connections\n- a: b "' + 'x' * _M + '\n',
+    'edge line with many quote pairs': '## Connections\n- a: b' + ' "' * (_M // 2) + '\n',
+    'bracket line with escapes': '[' + '\\x' * (_M // 2) + '\n## Connections\n- extends: a\n',
+    'rule-like line ending in a letter': '## Connections\n' + '-' * _M + 'x\n',
+    'fence opener with a long info word': '```' + 'a' * _M + '!\n## Connections\n- extends: a\n',
+    'long run of backticks': '`' * _M + 'x!\n## Connections\n',
+    'long indentation before a fence': ' ' * _M + '```x\n## Connections\n',
+    'many edges': '## Connections\n' + '- extends: a\n' * (_M // 13),
+    'unclosed fence over many lines': '```\n' + 'x\n' * (_M // 2),
+}
+
+
+@pytest.mark.parametrize('name', sorted(_LINEAR_CASES))
+def test_connection_rule_is_linear_on_1mb_adversarial_notes(name: str) -> None:
+    """Every reader and writer path, and `schema --validate`'s warnings, on a
+    1 MB note: each well under a second (linear is tens of milliseconds)."""
+    import time
+
+    from schist.commands import _connections_rule_warnings
+    from schist.ingest import connection_body, parse_connections, scan_note_connections
+    from schist.markdown_io import ConnectionWriteError, insert_connection_line
+
+    text = '---\ntitle: t\n---\n' + _LINEAR_CASES[name]
+    steps = {}
+    t = time.perf_counter()
+    parse_connections(connection_body(text))
+    steps['parse'] = time.perf_counter() - t
+    t = time.perf_counter()
+    lines, scan = scan_note_connections(text)
+    steps['scan'] = time.perf_counter() - t
+    t = time.perf_counter()
+    try:
+        insert_connection_line(text, '- extends: new')
+    except ConnectionWriteError:
+        pass
+    steps['insert'] = time.perf_counter() - t
+    t = time.perf_counter()
+    _connections_rule_warnings(Path('n.md'), text, lines, scan)
+    steps['validate warnings'] = time.perf_counter() - t
+    slow = {k: round(v, 3) for k, v in steps.items() if v >= 1.0}
+    assert not slow, slow
