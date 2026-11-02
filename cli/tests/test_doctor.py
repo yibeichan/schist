@@ -5502,3 +5502,54 @@ class TestCheckVaultAccess:
         results = run_doctor(str(vault), None)
         assert any(r.label == "Vault access" and r.status == "FAIL"
                    for r in results)
+
+
+class TestCheckMcpConnectionsRule:
+    """The built MCP server carries CONNECTIONS_RULE_VERSION; doctor warns
+    when it differs from ingest.py's, or is missing (an older server)."""
+
+    def _setup(self, tmp_path: Path, monkeypatch, js: str | None) -> None:
+        dist_dir = tmp_path / "mcp" / "dist"
+        dist_dir.mkdir(parents=True)
+        (dist_dir / "index.js").write_text("// stub\n")
+        if js is not None:
+            (dist_dir / "markdown-parser.js").write_text(js)
+        (tmp_path / ".claude.json").write_text(json.dumps({
+            "mcpServers": {"schist": {"command": "node", "args": [str(dist_dir / "index.js")]}}
+        }))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    def test_pass_when_versions_match(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+        from schist.ingest import CONNECTIONS_RULE_VERSION
+
+        self._setup(tmp_path, monkeypatch, f"export const CONNECTIONS_RULE_VERSION = {CONNECTIONS_RULE_VERSION};\n")
+        r = check_mcp_connections_rule(None)
+        assert r.status == "PASS", r.message
+
+    def test_warn_when_versions_differ(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+        from schist.ingest import CONNECTIONS_RULE_VERSION
+
+        self._setup(tmp_path, monkeypatch, f"export const CONNECTIONS_RULE_VERSION = {CONNECTIONS_RULE_VERSION + 1};\n")
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN"
+        assert f"rule v{CONNECTIONS_RULE_VERSION + 1}" in r.message
+
+    def test_warn_when_server_has_no_version(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+
+        self._setup(tmp_path, monkeypatch, "export function parseConnections() {}\n")
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN"
+        assert "predates the shared" in r.message
+
+    def test_real_source_carries_the_cli_version(self):
+        """The TypeScript source declares the same version as ingest.py, in
+        the form the check reads from the build."""
+        from schist.doctor import _MCP_RULE_VERSION_RE
+        from schist.ingest import CONNECTIONS_RULE_VERSION
+
+        src = (Path(__file__).resolve().parents[2] / "mcp-server" / "src" / "markdown-parser.ts").read_text()
+        m = _MCP_RULE_VERSION_RE.search(src)
+        assert m is not None and int(m.group(1)) == CONNECTIONS_RULE_VERSION

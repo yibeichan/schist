@@ -3262,6 +3262,47 @@ def check_mcp_cli_spawn(vault_path: Optional[str]) -> CheckResult:
     )
 
 
+_MCP_RULE_VERSION_RE = re.compile(r"CONNECTIONS_RULE_VERSION\s*=\s*(\d+)")
+
+
+def check_mcp_connections_rule(vault_path: Optional[str]) -> CheckResult:
+    """The MCP server and this CLI must read `## Connections` sections with
+    the same rule: the server's writers check their output with it and
+    update_note validates the edges it finds, so a server on another rule
+    lets through edges ingest reads differently. Compares the built server's
+    CONNECTIONS_RULE_VERSION (dist/markdown-parser.js) with ingest.py's."""
+    from .ingest import CONNECTIONS_RULE_VERSION
+
+    name = "MCP connection rule"
+    dist_dir = _mcp_dist_dir_from_config(vault_path)
+    if dist_dir is None:
+        return CheckResult("SKIP", name, "skipped (no MCP config)")
+    try:
+        text = (dist_dir / "markdown-parser.js").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return CheckResult("SKIP", name, f"skipped (cannot read {dist_dir / 'markdown-parser.js'})")
+    m = _MCP_RULE_VERSION_RE.search(text)
+    fix = (
+        "Upgrade the MCP server and the CLI together (`npm install -g @schist/mcp-server`, "
+        "or `cd <schist>/mcp-server && npm run build` in a checkout), then restart the MCP client."
+    )
+    if m is None:
+        return CheckResult(
+            "WARN", name,
+            "the MCP server predates the shared ## Connections rule "
+            f"(this CLI uses rule v{CONNECTIONS_RULE_VERSION})",
+            fix=fix,
+        )
+    if int(m.group(1)) != CONNECTIONS_RULE_VERSION:
+        return CheckResult(
+            "WARN", name,
+            f"the MCP server reads ## Connections sections with rule v{m.group(1)}, "
+            f"this CLI with v{CONNECTIONS_RULE_VERSION}",
+            fix=fix,
+        )
+    return CheckResult("PASS", name, f"in sync (rule v{CONNECTIONS_RULE_VERSION})")
+
+
 def check_mcp_schema_alignment(vault_path: Optional[str]) -> CheckResult:
     """Detect MCP-server-vs-ingest schema skew before it surfaces as the
     misleading 'schist-ingest is older than this MCP server' error from
@@ -3822,6 +3863,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_mcp_config(vault_path),
         check_mcp_cli_spawn(vault_path),
         check_mcp_schema_alignment(vault_path),
+        check_mcp_connections_rule(vault_path),
         check_mcp_vocab_alignment(vault_path),
         check_memory_db_path(vault_path),
         check_vault_access(vault_path),
