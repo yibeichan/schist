@@ -1441,3 +1441,16 @@ class TestStandardsReview:
             store.propose_link(ro, source='notes/sub/x.md', target='locking', type='supports', rationale='r')
         assert store.propose_link(ro, source='notes/sub/x.md', target='locking', type='supports',
                                   rationale='r', checked_standards=ids)['checked_standards'] == ids
+
+    def test_an_unreadable_schist_yaml_is_an_error_not_an_exit(self, vault, db_path, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_link(ro, source='notes/sync.md', target='locking', type='supports', rationale='r')
+        (vault / 'schist.yaml').write_text('directories: [unbalanced\n', encoding='utf-8')
+        with pytest.raises(proposals_mod.ProposalError, match='schist.yaml could not be read'):
+            store.reject(p['id'], reason='Too vague', save_standard=True, runner=_never)
+        assert store.get(p['id'])['status'] == proposals_mod.PENDING
+        with pytest.raises(proposals_mod.ProposalError, match='schist.yaml could not be read'):
+            store.propose_note(ro, title='T', body='b', rationale='r')
+        agent = agent_mod.Agent(db_path, store, opener=FakeOllama([]))
+        res, _ = agent._run_tool(ro, 'get_standards', {'directory': 'notes'}, 'q')
+        assert res['error'].startswith('schist.yaml could not be read')

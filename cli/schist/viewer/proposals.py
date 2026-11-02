@@ -129,12 +129,22 @@ def standards_result(directory: str, found: list[dict]) -> dict:
             return res   # nothing left to cut; callers pass a configured directory
 
 
+def configured_directories(vault) -> list:
+    """The vault's configured directories. `commands._directories` exits the
+    process on an unreadable schist.yaml; in the server that would kill the
+    request without a response, so it becomes a ProposalError here."""
+    try:
+        return commands._directories(str(vault))
+    except (SystemExit, Exception) as e:
+        raise ProposalError(f'schist.yaml could not be read: {e or "see the server log"}') from None
+
+
 def _configured_dir(vault, note_id: str) -> str:
     """The configured directory holding a note: the longest one that is a
     prefix of its id, so a link from notes/sub/x.md answers to notes/'s
     standards, the same directories get_standards accepts. '' for a note in
     no configured directory."""
-    dirs = [d for d in commands._directories(str(vault)) if note_id.startswith(f'{d}/')]
+    dirs = [d for d in configured_directories(vault) if note_id.startswith(f'{d}/')]
     return max(dirs, key=len) if dirs else ''
 
 
@@ -307,7 +317,7 @@ class ProposalStore:
         if not body.strip() or len(body) > MAX_BODY:
             raise ProposalError(f'body must be 1-{MAX_BODY} characters')
         directory = str(directory or 'notes').strip().strip('/')
-        allowed = [d for d in commands._directories(str(self.vault))
+        allowed = [d for d in configured_directories(self.vault)
                    if d != 'concepts' and self._writable_dir(d)]
         if directory not in allowed:
             raise ProposalError(f'directory must be one of: {", ".join(allowed) or "(none this spoke can write)"}')
