@@ -1348,11 +1348,15 @@ class TestStandardsReview:
         for i in range(14):
             p = store.propose_note(ro, title=f'P{i}', body='b', rationale='r', checked_standards=[
                 s['id'] for s in proposals_mod.standards_for(ro, 'notes')])
-            reason = f'rule {i:02d} ' + 'long words about what a note needs ' * 6
+            reason = (f'rule {i:02d} ' + 'long words about what a note needs ' * 6 + '\n'
+                      + 'Why it matters, at length. ' * 60)
             assert store.reject(p['id'], reason=reason, save_standard=True)['status'] == 'rejected'
             _reindex(vault)
         found = proposals_mod.standards_for(ro, 'notes')
         assert len(found) == 14 and min(len(s['id']) for s in found) > 150
+        untrimmed = {'standards': [{'id': s['id'], 'title': s['title'], 'body': s['body'][:571]}
+                                   for s in found]}
+        assert len(json.dumps(untrimmed)) > agent_mod.MAX_TOOL_CHARS   # so the fitting is exercised
         agent = agent_mod.Agent(db_path, store, opener=FakeOllama([]))
         res, _ = agent._run_tool(ro, 'get_standards', {'directory': 'notes'}, 'q')
         assert [s['id'] for s in res['standards']] == [s['id'] for s in found]
