@@ -6633,6 +6633,25 @@ describe("connection writers check their own result", () => {
     expect(parseNote(await fs.readFile(path.join(vault, rel), "utf-8")).connections).toEqual([]);
   }, 30000);
 
+  test("update_note refuses a frontmatter patch that would bring in an edge ingest does not index", async () => {
+    // gray-matter ends the frontmatter at `---foo`, ingest (python-frontmatter)
+    // at the later `---`, so gray-matter's body holds a section ingest never
+    // read. Rewriting the note from gray-matter's split would index it.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const original = "---\ntitle: t\n---foo\n## Connections\n- extends: notes/a.md\n# end\n---\nbody\n";
+    const rel = await noteIn(vault, "notes/2026-11-02-split.md", original);
+    expect(parseNote(original).connections).toEqual([]);
+    const res = await update_note(
+      vault,
+      { owner: TEST_AGENT, id: rel, frontmatter_patch: { status: "review" } },
+      config,
+    ) as { error: string; message: string };
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toContain("update_note refused");
+    expect(await fs.readFile(path.join(vault, rel), "utf-8")).toBe(original);
+  }, 30000);
+
   test("add_connection refuses a note the rule indexes nothing from, and writes nothing", async () => {
     const vault = await makeTempVault();
     const config = await loadVaultConfig(vault);
