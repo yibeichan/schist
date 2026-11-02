@@ -356,44 +356,129 @@ export function connectionsSection(
 
 /** True when `body` has a connections heading outside a fence or HTML block. */
 export function hasConnectionsHeading(body: string): boolean {
-  return connectionsSection(splitLinesLikePython(body)) !== null;
+  return connectionsSection(splitConnectionLines(body)) !== null;
+}
+
+/**
+ * Python's str.isspace() set (and its re `\s`): the whitespace
+ * python-frontmatter's text.strip() and FM_BOUNDARY `\s*` use. ingest.py's
+ * PY_WHITESPACE is the same string; schema/frontmatter-boundary-parity.json
+ * pins both. Unlike JS trim(), it has U+001C-U+001F and U+0085 but not U+FEFF.
+ */
+export const PY_WHITESPACE =
+  "\t\n\u000b\u000c\r\u001c\u001d\u001e\u001f \u0085  " +
+  "        " +
+  "       　";
+
+/**
+ * Split on CommonMark line endings only (\n, \r\n, \r), the way a Markdown
+ * renderer does; VT, FF, U+001C-U+001E, NEL, LS and PS stay inside a line. A
+ * final line ending adds no empty line. Every connection reader and writer
+ * splits with this; ingest.py split_connection_lines is its twin.
+ * (splitLinesLikePython stays for the write-time line-boundary guards.)
+ */
+export function splitConnectionLines(text: string): string[] {
+  const lines: string[] = [];
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\n" || ch === "\r") {
+      lines.push(text.slice(start, i));
+      if (ch === "\r" && text[i + 1] === "\n") i++;
+      start = i + 1;
+    }
+  }
+  if (start < text.length) lines.push(text.slice(start));
+  return lines;
+}
+
+type FrontmatterKind = "yaml" | "json" | "toml";
+
+/** If a frontmatter boundary of `kind` starts at line start `p` of `s`,
+ * where python-frontmatter's FM_BOUNDARY match ends, else -1. YAML is
+ * `^-{3,}\s*$` and TOML `^\+{3,}\s*$` (re.MULTILINE: `$` only before "\n"
+ * or at the end); JSON is `^(?:{|})$`. */
+function delimiterMatch(s: string, p: number, kind: FrontmatterKind): number {
+  const n = s.length;
+  if (kind === "json") {
+    return p < n && (s[p] === "{" || s[p] === "}") && (p + 1 === n || s[p + 1] === "\n") ? p + 1 : -1;
+  }
+  const ch = kind === "yaml" ? "-" : "+";
+  let q = p;
+  while (q < n && s[q] === ch) q++;
+  if (q - p < 3) return -1;
+  let e = q;
+  while (e < n && PY_WHITESPACE.includes(s[e])) e++;
+  if (e === n) return n;
+  const lastNl = s.lastIndexOf("\n", e - 1);
+  return lastNl >= q ? lastNl : -1;
 }
 
 /**
  * Length of the frontmatter block at the start of `content`, up to and
- * including its closing line's terminator, delimited exactly as gray-matter
- * (parseNote) delimits it, without parsing the YAML: an optional BOM, `---`
- * not followed by another `-`, an optional language word on the opening
- * line, and the first "\n---" after it; one "\r" and one "\n" after the
- * closing `---` belong to the block. 0 when there is no frontmatter.
+ * including its closing line's terminator: python-frontmatter's rule, which
+ * ingest (the index) uses, written out in ingest.py note_body_offset and
+ * here. Turn CRLF into LF, strip Python whitespace, detect YAML (`---`),
+ * then JSON (`{`), then TOML (`+++`) on the first line, and close at the next
+ * boundary line. 0 when there is no frontmatter (a BOM before `---` means
+ * none) or it is never closed. gray-matter's own split differs on `-----`,
+ * `---foo`, leading blank lines and a BOM, so connection paths slice with
+ * this instead (connectionBody, noteBodyStartLine).
+ * schema/frontmatter-boundary-parity.json pins both languages.
  */
 export function frontmatterLength(content: string): number {
-  const bom = content.charCodeAt(0) === 0xfeff ? 1 : 0;
-  if (!content.startsWith("---", bom) || content.charAt(bom + 3) === "-") return 0;
-  let pos = bom + 3;
-  let str = content.slice(pos);
-  const language = str.slice(0, str.search(/\r?\n/));
-  if (language.trim()) {
-    pos += language.length;
-    str = str.slice(language.length);
+  const norm = content.split("\r\n").join("\n");
+  let lead = 0;
+  while (lead < norm.length && PY_WHITESPACE.includes(norm[lead])) lead++;
+  let end = norm.length;
+  while (end > lead && PY_WHITESPACE.includes(norm[end - 1])) end--;
+  const s = norm.slice(lead, end);
+  let kind: FrontmatterKind | null = null;
+  let first = -1;
+  for (const k of ["yaml", "json", "toml"] as FrontmatterKind[]) {
+    first = delimiterMatch(s, 0, k);
+    if (first !== -1) {
+      kind = k;
+      break;
+    }
   }
-  const close = str.indexOf("\n---");
-  if (close === -1) return content.length;
-  let p = close + 4;
-  if (str[p] === "\r") p++;
-  if (str[p] === "\n") p++;
-  return pos + p;
+  if (kind === null) return 0;
+  let p = s.indexOf("\n", first);
+  while (p !== -1) {
+    const start = p + 1;
+    if (delimiterMatch(s, start, kind) !== -1) {
+      const nl = norm.indexOf("\n", lead + start);
+      const off = nl === -1 ? norm.length : nl + 1;
+      // Map the offset in `norm` back onto `content`: each CRLF before it was
+      // one character shorter in `norm`.
+      let pairs = 0;
+      let i = content.indexOf("\r\n");
+      while (i !== -1 && i - pairs < off) {
+        pairs++;
+        i = content.indexOf("\r\n", i + 2);
+      }
+      return off + pairs;
+    }
+    p = s.indexOf("\n", start);
+  }
+  return 0;
 }
 
-/** Number of splitLinesLikePython lines that belong to the frontmatter
+/** The note body connection parsing reads: the text after the frontmatter's
+ * closing line by frontmatterLength's rule, as ingest reads it. */
+export function connectionBody(content: string): string {
+  return content.slice(frontmatterLength(content));
+}
+
+/** Number of splitConnectionLines lines that belong to the frontmatter
  * (frontmatterLength). Writers pass it as connectionsSection's `start`. */
 export function noteBodyStartLine(content: string): number {
-  return splitLinesLikePython(content.slice(0, frontmatterLength(content))).length;
+  return splitConnectionLines(content.slice(0, frontmatterLength(content))).length;
 }
 
 export function parseConnections(body: string): Connection[] {
   const connections: Connection[] = [];
-  const lines = splitLinesLikePython(body);
+  const lines = splitConnectionLines(body);
   const section = connectionsSection(lines);
   if (section === null) return connections;
   for (let i = section.heading + 1; i < section.end; i++) {
@@ -602,8 +687,13 @@ export function parseNote(content: string): {
   body: string;
   connections: Connection[];
 } {
-  const parsed = matter(patchFrontmatterFlowHashtags(content), YAML_ONLY);
-  const connections = parseConnections(parsed.content);
+  const patched = patchFrontmatterFlowHashtags(content);
+  const parsed = matter(patched, YAML_ONLY);
+  // Connections come from ingest's body slice (connectionBody), not
+  // gray-matter's content, so get_note and the index agree on notes where
+  // the two frontmatter splits differ (`-----`, `---foo`, a BOM, leading
+  // blank lines). `body` stays gray-matter's: writers round-trip it.
+  const connections = parseConnections(connectionBody(patched));
   return {
     metadata: parsed.data as Record<string, unknown>,
     body: parsed.content,
@@ -657,8 +747,9 @@ export function buildConnectionLine(conn: Connection): string {
 
 /**
  * Insert `line` into `content`'s `## Connections` section, creating the
- * section at EOF when no heading line exists. Scans splitLinesLikePython
- * boundaries — the SAME splitter parseConnections and ingest read with —
+ * section at EOF when no heading line exists. Scans splitConnectionLines
+ * boundaries (CommonMark line endings) — the SAME splitter parseConnections
+ * and ingest read with —
  * never an insert regex anchored on a bare "\n". The old regex required
  * `## Connections\n` literally, so a CRLF heading (`## Connections\r\n`,
  * core.autocrlf / Windows checkout) matched nothing, String.replace returned
@@ -670,15 +761,16 @@ export function buildConnectionLine(conn: Connection): string {
  * section. The heading must be exact and outside a fenced code block or
  * HTML block, and only body lines count (connectionsSection and
  * noteBodyStartLine, the rule parseConnections reads with), so a
- * `## Connections` shown in a fence never receives an edge. Output is always "\n"-joined with a single trailing newline,
- * healing CRLF and exotic separators on write like stripConnectionsTo does.
+ * `## Connections` shown in a fence never receives an edge. Output is always
+ * "\n"-joined with a single trailing newline, turning CRLF and CR into LF;
+ * VT, FF, NEL, U+2028 and the like stay inside their line.
  *
  * Byte-identical to the CLI's markdown_io.insert_connection_line;
  * schema/connection-append-parity.json pins both, like #318/#338 did for
  * slugs.
  */
 export function insertConnectionLine(content: string, line: string): string {
-  const lines = splitLinesLikePython(content);
+  const lines = splitConnectionLines(content);
   // Scan only the body: frontmatter lines (a YAML block scalar holding
   // "  ```" or "  ## Connections") must not open a fence or a section.
   const start = noteBodyStartLine(content);
@@ -717,7 +809,7 @@ export function buildNote(
     // fenced code block or HTML block. `content` is a body (no
     // frontmatter). A substring test matched mid-line mentions (prose,
     // code samples) and replaced the text after them (#732).
-    const lines = splitLinesLikePython(content);
+    const lines = splitConnectionLines(content);
     const found = connectionsSection(lines);
     if (found === null) {
       const open = unclosedBlockCloser(lines);

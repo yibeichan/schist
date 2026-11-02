@@ -324,6 +324,27 @@ class TestSchemaCommand:
         ) in out
         assert "All documents valid." in out
 
+    def test_validate_warns_on_edge_joined_by_a_non_markdown_separator(
+        self, tmp_path, capsys,
+    ):
+        """NEL is not a Markdown line ending: the earlier rule split on it and
+        indexed the edge, the current one keeps one line and does not."""
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir()
+        (notes_dir / "n.md").write_bytes(
+            "---\ntitle: N\nstatus: draft\n---\n\nBody\n\n## Connections\x85"
+            "- extends: notes/other\n".encode("utf-8"),
+        )
+        commands.schema(
+            _schema_args(validate=True), str(tmp_path),
+            str(tmp_path / ".schist" / "schist.db"),
+        )
+        out = capsys.readouterr().out
+        assert (
+            'WARN: notes/n.md:8: connection "extends: notes/other" was indexed '
+            "by the earlier ## Connections rule and is not now (edge dropped)"
+        ) in out
+
     def test_validate_reads_the_unstripped_body(self, tmp_path, capsys):
         """python-frontmatter strips the body, which turned an indented first
         line (a code block) into a heading. Both the near-miss warning and the

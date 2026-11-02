@@ -444,27 +444,25 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     expect(entries).toEqual([]);
   }, 30000);
 
-  test("create_note catches a bogus type smuggled across a NEL (U+0085) separator — the split(\"\\n\") bypass (#359)", async () => {
-    // Python ingest's splitlines() breaks on U+0085, so it would index the
-    // bogus edge; the validator must split the same way or the #317 control is
-    // bypassable. `## Connections` and the edge sit on one \n-delimited line.
+  test("a NEL (U+0085) is not a line ending: the joined text is neither validated nor indexed as an edge (#359)", async () => {
+    // Ingest and the validator both split connection lines on CommonMark line
+    // endings only, so `## Connections` and the would-be edge are one line: no
+    // heading, no edge, nothing to validate. A renderer shows one paragraph.
     const vault = await makeTempVault();
     const config = await loadVaultConfig(vault);
 
     const res = await create_note(
       vault,
       {
-        owner: TEST_AGENT, title: "NEL Smuggle",
+        owner: TEST_AGENT, title: "NEL Joined",
         body: "Text.\n\n## Connections\u0085- bogus-type: notes/x.md\n",
       },
       config
-    ) as { error: string; message: string };
+    ) as { id: string; error?: string };
 
-    expect(res.error).toBe("VALIDATION_ERROR");
-    expect(res.message).toMatch(/connection type must be one of/);
-    expect(res.message).toContain('"bogus-type"');
-    const entries = await fs.readdir(path.join(vault, "notes")).catch(() => []);
-    expect(entries).toEqual([]);
+    expect(res.error).toBeUndefined();
+    const written = await fs.readFile(path.join(vault, res.id), "utf-8");
+    expect(parseNote(written).connections).toEqual([]);
   }, 30000);
 
   test("create_note catches a bogus edge smuggled after a valid one via CR on the same physical line (#359)", async () => {

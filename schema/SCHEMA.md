@@ -211,9 +211,16 @@ In the `## Connections` section of a document:
 Multiple connections per document are allowed. One connection per line.
 
 The section is read from the note body: the text after the frontmatter's
-closing `---` line, as written (leading blank lines and indentation kept).
+closing line, as written (leading blank lines and indentation kept).
 Frontmatter lines never count, even a YAML block scalar holding `## Connections`
-or a fence line.
+or a fence line. Where the frontmatter ends follows the parser ingest uses
+(python-frontmatter): after turning CRLF into LF and stripping leading
+whitespace, a first line of three or more `-` (then only whitespace) opens it
+and the next line of three or more `-` closes it, so `-----` closes and
+`---foo` does not. A byte-order mark before the first `---` means the note has
+no frontmatter, and a note whose frontmatter is never closed is all body.
+`schema/frontmatter-boundary-parity.json` pins this rule in the CLI and the
+MCP server.
 
 The section starts at the first line that is exactly `## Connections`: up to
 three leading spaces and trailing spaces or tabs are allowed, but nothing else
@@ -244,10 +251,10 @@ Fenced code blocks and HTML blocks are skipped, following CommonMark 0.31:
 A line inside a fence or HTML block is never the heading, never a connection
 and never ends the section, so a note can show an example `## Connections`
 section in a fence without creating edges. Block quotes and list items are not
-interpreted: their lines are read as top-level lines. Lines are split on the
-same boundaries as Python's `str.splitlines()`, which include characters
-(such as U+2028 and U+0085) that Markdown renderers do not treat as line
-breaks.
+interpreted: their lines are read as top-level lines. Lines end only at
+Markdown line endings (`\n`, `\r\n`, `\r`); a vertical tab, form feed,
+U+001C–U+001E, U+0085, U+2028 or U+2029 stays inside its line, as a renderer
+shows it.
 
 When a note's only `## Connections` is in a fence or HTML block, `schist link`
 and `add_connection` add a real section at the end of the note, first closing

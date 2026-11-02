@@ -36,22 +36,22 @@
     "expected": "## Connections\n- supports: notes/x.md\n- extends: notes/b.md\n## Notes\nBody.\n"
   },
   {
-    "name": "NEL-separated note (#365): edge lands inside the section",
+    "name": "NEL-joined note is one line: new section at end",
     "content": "## Connections\u0085- supports: notes/x.md\u0085## Notes\u0085Body.\n",
     "line": "- extends: notes/b.md",
-    "expected": "## Connections\n- supports: notes/x.md\n- extends: notes/b.md\n## Notes\nBody.\n"
+    "expected": "## Connections\u0085- supports: notes/x.md\u0085## Notes\u0085Body.\n\n## Connections\n\n- extends: notes/b.md\n"
   },
   {
-    "name": "U+2028 line-separator note (#365): edge lands inside the section",
+    "name": "U+2028-joined note is one line: new section at end",
     "content": "## Connections\u2028- supports: notes/x.md\u2028## Notes\u2028Body.",
     "line": "- extends: notes/b.md",
-    "expected": "## Connections\n- supports: notes/x.md\n- extends: notes/b.md\n## Notes\nBody.\n"
+    "expected": "## Connections\u2028- supports: notes/x.md\u2028## Notes\u2028Body.\n\n## Connections\n\n- extends: notes/b.md\n"
   },
   {
-    "name": "vertical-tab and form-feed separators (#365): edge lands inside the section",
+    "name": "VT- and FF-joined note is one line: new section at end",
     "content": "## Connections\u000b- supports: notes/x.md\f## Notes\u000bBody.",
     "line": "- extends: notes/b.md",
-    "expected": "## Connections\n- supports: notes/x.md\n- extends: notes/b.md\n## Notes\nBody.\n"
+    "expected": "## Connections\u000b- supports: notes/x.md\f## Notes\u000bBody.\n\n## Connections\n\n- extends: notes/b.md\n"
   },
   {
     "name": "prose mention of ## Connections mid-line is not a heading: real section created at EOF",

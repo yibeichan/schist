@@ -12,7 +12,12 @@ import tempfile
 
 import frontmatter
 
-from .ingest import connections_section, note_body_start_line, unclosed_block_closer
+from .ingest import (
+    connections_section,
+    note_body_start_line,
+    split_connection_lines,
+    unclosed_block_closer,
+)
 
 # Explicit whitespace set shared verbatim with ingest.py's _SLUG_WS_CHARS and
 # mcp-server's SLUG_WS_CHARS (markdown-parser.ts): the UNION of Python's and
@@ -148,27 +153,22 @@ def write_note(path: str, fm: dict, body: str, exclusive: bool = False,
 def insert_connection_line(content: str, line: str) -> str:
     """Insert a connection line into content's ## Connections section.
 
-    Splits with splitlines() — the SAME boundaries ingest.py:parse_connections
-    reads with — never split('\\n'). split('\\n') left splitlines-only
-    separators (\\v, \\f, NEL, U+2028/U+2029 — which universal-newline reads
-    do NOT translate, unlike \\r/\\r\\n) fused into one giant "line", so the
-    heading was "found" but the next `## ` break wasn't, and the new edge was
-    appended after the following section — where parse_connections silently
-    ignores it (#365). The section gate is the same line-scan the readers use
-    (not a substring test): a mid-line prose mention of "## Connections" is
-    not a heading, so the edge gets a real section instead of landing outside
-    any section. The heading must be exact and outside a fenced code block
-    or HTML block, and only body lines count (ingest.connections_section
-    and note_body_start_line, the rule parse_connections reads with), so a
-    `## Connections` shown in a fence never receives an edge. Output is always
-    '\\n'-joined with a single trailing newline,
-    healing exotic separators on write the way the TS repair paths do.
+    Splits with split_connection_lines (CommonMark line endings: \\n, \\r\\n,
+    \\r), the SAME boundaries ingest.py:parse_connections reads with, so VT,
+    FF, NEL, U+2028 and the other splitlines-only separators stay inside a
+    line, as a renderer shows them. The section gate is the same line-scan
+    the readers use (not a substring test): a mid-line prose mention of
+    "## Connections" is not a heading, so the edge gets a real section
+    instead of landing outside any section. The heading must be exact and
+    outside a fenced code block or HTML block, and only body lines count
+    (ingest.connections_section and note_body_start_line). Output is
+    '\\n'-joined with a single trailing newline.
 
     Byte-identical to mcp-server markdown-parser.ts insertConnectionLine;
     schema/connection-append-parity.json pins both, like #318/#338 did for
     slugs.
     """
-    lines = content.splitlines()
+    lines = split_connection_lines(content)
     # Scan only the body: frontmatter lines (a YAML block scalar holding
     # "  ```" or "  ## Connections") must not open a fence or a section.
     start = note_body_start_line(content)

@@ -642,7 +642,14 @@ export function getNote(vaultRoot: string, id: string): Note | null {
     if (!row) return null;
 
     const body = (row.body as string) ?? "";
-    const connections = parseConnectionsSync(body);
+    // docs.body is python-frontmatter's stripped body, which can read
+    // differently from the raw body ingest takes edges from (an indented first
+    // line loses its indentation). Show only connections the index holds.
+    const indexed = new Set(
+      (db.prepare("SELECT target, type FROM edges WHERE source = ?").all(id) as { target: string; type: string }[])
+        .map((e) => `${e.type}\u0000${e.target}`),
+    );
+    const connections = parseConnectionsSync(body).filter((c) => indexed.has(`${c.type}\u0000${c.target}`));
 
     const conf = row.confidence;
     const note: Note = {

@@ -256,92 +256,44 @@
       ]
     },
     {
-      "name": "VT U+000B boundary",
+      "name": "VT U+000B is not a line ending: no heading, no edge",
       "body": "## Connections\u000b- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": []
     },
     {
-      "name": "FF U+000C boundary",
+      "name": "FF U+000C is not a line ending: no heading, no edge",
       "body": "## Connections\f- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": []
     },
     {
-      "name": "FS U+001C boundary",
+      "name": "FS U+001C is not a line ending: no heading, no edge",
       "body": "## Connections\u001c- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": []
     },
     {
-      "name": "GS U+001D boundary",
+      "name": "GS U+001D is not a line ending: no heading, no edge",
       "body": "## Connections\u001d- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": []
     },
     {
-      "name": "RS U+001E boundary",
+      "name": "RS U+001E is not a line ending: no heading, no edge",
       "body": "## Connections\u001e- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": []
     },
     {
-      "name": "NEL U+0085 boundary",
+      "name": "NEL U+0085 is not a line ending: no heading, no edge",
       "body": "## Connections\u0085- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": []
     },
     {
-      "name": "LS U+2028 boundary",
+      "name": "LS U+2028 is not a line ending: no heading, no edge",
       "body": "## Connections\u2028- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": []
     },
     {
-      "name": "PS U+2029 boundary",
+      "name": "PS U+2029 is not a line ending: no heading, no edge",
       "body": "## Connections\u2029- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": []
     },
     {
       "name": "plain space is NOT a splitlines boundary",
@@ -405,37 +357,19 @@
       ]
     },
     {
-      "name": "section ends at the next ## heading (NEL-separated)",
+      "name": "NEL-joined section and heading stay one line: no edge",
       "body": "## Connections\u0085- extends: note-a\u0085## Other\u0085- supports: note-b",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": []
     },
     {
-      "name": "quoted context survives an NEL boundary",
+      "name": "NEL-joined edge with quoted context stays one line: no edge",
       "body": "## Connections\u0085- extends: note-a \"why\"",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": "why"
-        }
-      ]
+      "edges": []
     },
     {
-      "name": "intro paragraph before an LS-separated section",
+      "name": "LS-joined intro and section stay one line: no edge",
       "body": "Intro.\u2028\u2028## Connections\u2028- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": []
     },
     {
       "name": "single-token bracket reference is skipped by both parsers (#415)",
@@ -980,6 +914,55 @@
     {
       "name": "no frontmatter",
       "text": "## Connections\n- extends: note-a\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "---foo is not a closing line: the section after the real one counts",
+      "text": "---\ntitle: t\n---foo: |\n  ## Connections\n  - extends: fake\n---\n## Connections\n- extends: note-a\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "leading blank line before frontmatter: its lines are not body",
+      "text": "\n---\n## Connections\n- extends: fake\n---\nBody\n",
+      "edges": []
+    },
+    {
+      "name": "closing line of five dashes",
+      "text": "---\ntitle: t\n-----\n## Connections\n- extends: note-a\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "BOM: no frontmatter, so its lines are body lines",
+      "text": "\ufeff---\ntitle: t\n---\n## Connections\n- extends: note-a\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "unclosed frontmatter: the whole text is the body",
+      "text": "---\ntitle: t\n## Connections\n- extends: note-a\n",
       "edges": [
         {
           "type": "extends",

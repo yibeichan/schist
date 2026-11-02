@@ -20,7 +20,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CONNECTION_RE, parseConnections, parseNote } from "../src/markdown-parser.js";
+import { CONNECTION_RE, connectionBody, parseConnections, parseNote } from "../src/markdown-parser.js";
 import { bodyConnectionEdgeLines, stripConnectionsTo } from "../src/tools.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -147,9 +147,29 @@ describe("connection whole-file parity", () => {
     expect(fixture.files.length).toBeGreaterThanOrEqual(6);
   });
 
+  // The vocabulary validator sees exactly the edges ingest will index.
+  for (const c of fixture.files) {
+    test(`validator sees ingest's edges: ${c.name}`, () => {
+      const got = [...bodyConnectionEdgeLines(connectionBody(c.text))].map(({ line }) => {
+        const m = line.match(CONNECTION_RE)!;
+        return { type: m[1], target: m[2], context: m[3] || m[4] || null };
+      });
+      expect(got).toEqual(c.edges);
+    });
+  }
+
   for (const c of fixture.files) {
     test(c.name, () => {
-      const got = parseNote(c.text).connections.map((e) => ({
+      let parsed: ReturnType<typeof parseNote>;
+      try {
+        parsed = parseNote(c.text);
+      } catch {
+        // gray-matter cannot read this note's YAML (e.g. never closed); the
+        // connection slice must still match ingest.
+        expect(parseConnections(connectionBody(c.text)).map((e) => e.target)).toEqual(c.edges.map((e) => e.target));
+        return;
+      }
+      const got = parsed.connections.map((e) => ({
         type: e.type,
         target: e.target,
         context: e.context ?? null,

@@ -22,6 +22,7 @@ from .ingest import (
     note_body_offset,
     parse_connection_lines,
     patch_frontmatter_flow_hashtags,
+    split_connection_lines,
 )
 
 
@@ -484,7 +485,7 @@ def add_concept(args, vault_path: str, db_path: str):
     # Same heading rule as ingest.parse_connections: a `## Connections`
     # shown inside a fenced code block, or a near-miss heading, yields no
     # edges, so it is allowed in a concept body.
-    if connections_heading_index(body.splitlines()) is not None:
+    if connections_heading_index(split_connection_lines(body)) is not None:
         print(
             'Error: concept nodes cannot contain an outgoing '
             '## Connections section',
@@ -859,7 +860,7 @@ def schema(args, vault_path: str, db_path: str):
             raw_text = ''
         body_offset = note_body_offset(raw_text)
         raw_body = raw_text[body_offset:]
-        body_start = len(raw_text[:body_offset].splitlines())
+        body_start = len(split_connection_lines(raw_text[:body_offset]))
         warnings.extend(_connections_rule_warnings(rel, raw_body, body_start))
         is_concept_path = (
             len(rel.parts) > 1
@@ -905,7 +906,7 @@ def schema(args, vault_path: str, db_path: str):
                     f"{rel}: concept frontmatter contains document-only "
                     f"field(s): {', '.join(forbidden)}",
                 )
-            if connections_heading_index(raw_body.splitlines()) is not None:
+            if connections_heading_index(split_connection_lines(raw_body)) is not None:
                 violations.append(
                     f'{rel}: concept nodes cannot have outgoing '
                     '## Connections sections',
@@ -930,15 +931,20 @@ def schema(args, vault_path: str, db_path: str):
 
 def _legacy_connection_lines(body: str) -> list[tuple[int, dict]]:
     """The connection rule before CONNECTIONS_RULE_VERSION 2, kept only so
-    `schema --validate` can show which edges the change adds or drops: any
-    line whose stripped text starts with `## Connections` opened the section,
-    fences were not tracked, and the section ended at the next line whose
-    stripped text starts with `## `. Ingest applied it to python-frontmatter's
-    stripped body. Returns (index in body.splitlines(), edge) pairs."""
+    `schema --validate` can show which edges the change adds or drops: lines
+    split with str.splitlines() (VT, FF, NEL, U+2028 and others included),
+    any line whose stripped text starts with `## Connections` opened the
+    section, fences and HTML blocks were not tracked, and the section ended
+    at the next line whose stripped text starts with `## `. Ingest applied it
+    to python-frontmatter's stripped body. Returns (character offset of the
+    line in `body`, edge) pairs."""
     edges: list[tuple[int, dict]] = []
     in_section = False
-    for i, line in enumerate(body.splitlines()):
-        stripped = line.strip()
+    offset = 0
+    for raw_line in body.splitlines(keepends=True):
+        line_offset = offset
+        offset += len(raw_line)
+        stripped = raw_line.strip()
         if stripped.startswith('## Connections'):
             in_section = True
             continue
@@ -951,7 +957,7 @@ def _legacy_connection_lines(body: str) -> list[tuple[int, dict]]:
             conn_type, target, quoted_ctx, dash_ctx = m.groups()
             if target.startswith('['):
                 continue
-            edges.append((i, {
+            edges.append((line_offset, {
                 'type': conn_type,
                 'target': target,
                 'context': quoted_ctx or dash_ctx or None,
@@ -963,16 +969,18 @@ def _connections_rule_warnings(rel: Path, raw_body: str, body_start: int) -> lis
     """Warn where the current connection rule and the earlier one disagree:
 
     - each line whose stripped text starts with `## Connections` that is not
-      a heading now (near-miss text, indented, in a fence or HTML comment),
+      a heading now (near-miss text, indented, in a fence or HTML block),
       with the reason, from the parser's own helper;
     - each edge the earlier rule indexed and the current one does not
       ("dropped"), and each edge indexed now that was not before ("added"),
-      by running both rules on the note.
+      by running both rules on the note. This covers every part of the
+      change, including lines the earlier rule split on VT, FF, NEL, U+2028
+      and the other separators a renderer keeps inside a line.
 
     `raw_body` is the text after the frontmatter's closing line; `body_start`
     its first line's 0-based index in the file. Line numbers are 1-based in
-    the file, frontmatter included."""
-    body_lines = raw_body.splitlines()
+    the file, frontmatter included, counted on CommonMark line endings."""
+    body_lines = split_connection_lines(raw_body)
     out: list[tuple[int, str]] = []
     for i, reason in connections_heading_near_misses(body_lines):
         out.append((
@@ -981,15 +989,21 @@ def _connections_rule_warnings(rel: Path, raw_body: str, body_start: int) -> lis
             f'heading ({reason})',
         ))
 
-    # Ingest used to read python-frontmatter's stripped body; map its line
-    # indexes back onto the raw body.
-    lead = raw_body[:len(raw_body) - len(raw_body.lstrip())]
-    lead_lines = len((lead + 'x').splitlines()) - 1
+    # The earlier rule read python-frontmatter's stripped body and split it
+    # on every splitlines() boundary; place each of its edges on the
+    # CommonMark line of the raw body that holds it.
+    lead = len(raw_body) - len(raw_body.lstrip())
+
+    def cm_line(offset: int) -> int:
+        return len(split_connection_lines(raw_body[:offset] + 'x')) - 1
 
     def key(idx: int, edge: dict) -> tuple:
         return (idx, edge['type'], edge['target'], edge['context'])
 
-    old = {key(lead_lines + i, e) for i, e in _legacy_connection_lines(raw_body.strip())}
+    old = {
+        key(cm_line(lead + off), e)
+        for off, e in _legacy_connection_lines(raw_body.strip())
+    }
     new = {key(i, e) for i, e in parse_connection_lines(raw_body)}
     for idx, ctype, target, _ctx in old - new:
         out.append((

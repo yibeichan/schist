@@ -2541,3 +2541,56 @@ def test_ingest_reads_connections_from_the_unstripped_body(
     finally:
         conn.close()
     assert rows == [(e["type"], e["target"]) for e in case["edges"]]
+
+
+def _frontmatter_boundary_fixture() -> dict:
+    fixture = _repo_root() / "schema" / "frontmatter-boundary-parity.json"
+    return json.loads(fixture.read_text(encoding="utf-8"))
+
+
+def test_frontmatter_boundary_python_whitespace_is_str_isspace() -> None:
+    from schist.ingest import PY_WHITESPACE
+
+    expected = "".join(c for c in map(chr, range(0x110000)) if c.isspace())
+    assert PY_WHITESPACE == expected
+    assert _frontmatter_boundary_fixture()["python_whitespace"] == expected
+
+
+@pytest.mark.parametrize(
+    "case", _frontmatter_boundary_fixture()["cases"], ids=lambda c: c["name"]
+)
+def test_note_body_offset_matches_shared_boundary_cases(case: dict) -> None:
+    from schist.ingest import note_body_offset
+
+    text = case["text"]
+    assert text[note_body_offset(text):] == case["body"]
+
+
+@pytest.mark.parametrize(
+    "case", _frontmatter_boundary_fixture()["cases"], ids=lambda c: c["name"]
+)
+def test_note_body_offset_agrees_with_python_frontmatter(case: dict) -> None:
+    """note_body_offset writes out python-frontmatter's split; its body,
+    stripped and with CRLF turned into LF, is exactly post.content. TOML is
+    skipped when the toml package (python-frontmatter's TOML handler) is
+    absent: the rule then still treats `+++` lines as frontmatter, which only
+    hides lines from connection parsing."""
+    import frontmatter
+    from frontmatter.util import u
+
+    from schist.ingest import note_body_offset
+
+    text = case["text"]
+    stripped = u(text).strip()
+    handler = frontmatter.detect_format(stripped, frontmatter.handlers)
+    if handler is None and text.lstrip().startswith("+++"):
+        pytest.skip("python-frontmatter has no TOML handler here")
+    if handler is None:
+        lib_body = stripped
+    else:
+        try:
+            _fm, content = handler.split(stripped)
+            lib_body = content.strip()
+        except ValueError:
+            lib_body = stripped
+    assert text[note_body_offset(text):].replace("\r\n", "\n").strip() == lib_body

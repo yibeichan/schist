@@ -108,13 +108,14 @@ def test_inserted_connection_is_indexed_by_ingest(case: dict) -> None:
         ("FF", "\f"),
     ],
 )
-def test_append_connection_edge_is_indexed_on_splitlines_only_separators(
+def test_append_connection_edge_is_indexed_with_non_markdown_separators(
     tmp_path, name: str, sep: str
 ) -> None:
-    """End-to-end #365: universal-newline reads translate \\r/\\r\\n but NOT
-    these separators, so the old split('\\n') fused the note into one line and
-    the appended edge landed after ## Notes — parse_connections then silently
-    ignored it while `schist link` reported success."""
+    """End-to-end #365: the appended edge must be indexed. These separators
+    are not Markdown line endings, so the note is one line with no
+    connections heading (a renderer shows it as one paragraph); the writer
+    adds a real section and ingest indexes the new edge, not the joined
+    one."""
     from schist.ingest import parse_connections
     from schist.markdown_io import append_connection
 
@@ -129,7 +130,7 @@ def test_append_connection_edge_is_indexed_on_splitlines_only_separators(
     edges = parse_connections(note.read_text(encoding="utf-8"))
     pairs = {(e["type"], e["target"]) for e in edges}
     assert ("extends", "notes/b.md") in pairs, f"{name}-separated edge dropped"
-    assert ("supports", "notes/x.md") in pairs
+    assert ("supports", "notes/x.md") not in pairs
 
 
 def test_append_connection_golden_path_and_context(tmp_path) -> None:

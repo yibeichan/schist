@@ -389,35 +389,106 @@ def connections_heading_near_misses(lines: list[str]) -> list[tuple[int, str]]:
     return out
 
 
+# str.isspace() (and Python's re `\s`): the whitespace python-frontmatter's
+# text.strip() and FM_BOUNDARY `\s*` use. markdown-parser.ts carries the same
+# string; schema/frontmatter-boundary-parity.json pins both.
+PY_WHITESPACE = (
+    '\t\n\x0b\x0c\r\x1c\x1d\x1e\x1f \x85\xa0 '
+    '        '
+    '       　'
+)
+
+_CM_LINE_END_RE = re.compile(r'\r\n|\r|\n')
+
+
+def split_connection_lines(text: str) -> list[str]:
+    """Split on CommonMark line endings only (\\n, \\r\\n, \\r), the way a
+    Markdown renderer does. VT, FF, U+001C-U+001E, NEL, LS and PS stay inside
+    a line. A final line ending adds no empty line (like str.splitlines()).
+    Every connection reader and writer splits with this; markdown-parser.ts
+    splitConnectionLines is its twin."""
+    if not text:
+        return []
+    parts = _CM_LINE_END_RE.split(text)
+    if parts[-1] == '':
+        parts.pop()
+    return parts
+
+
+def _delimiter_match(s: str, p: int, kind: str) -> int | None:
+    """If a frontmatter boundary of `kind` starts at line start `p` of `s`,
+    return where python-frontmatter's FM_BOUNDARY match ends, else None.
+    YAML is `^-{3,}\\s*$` and TOML `^\\+{3,}\\s*$` (re.MULTILINE, so `$` is
+    only before "\\n" or at the end); JSON is `^(?:{|})$`."""
+    n = len(s)
+    if kind == 'json':
+        if p < n and s[p] in '{}' and (p + 1 == n or s[p + 1] == '\n'):
+            return p + 1
+        return None
+    ch = '-' if kind == 'yaml' else '+'
+    q = p
+    while q < n and s[q] == ch:
+        q += 1
+    if q - p < 3:
+        return None
+    e = q
+    while e < n and s[e] in PY_WHITESPACE:
+        e += 1
+    if e == n:
+        return n  # greedy `\\s*` reaches the end
+    last_nl = s.rfind('\n', q, e)
+    return None if last_nl == -1 else last_nl
+
+
 def note_body_offset(text: str) -> int:
     """Index in `text` where the note body starts: just after the frontmatter's
-    closing line, located the way ingest's python-frontmatter parse locates it
-    (its handler detection on the stripped text, its FM_BOUNDARY regex). 0
-    when there is no frontmatter. Unlike post.content, the body this gives is
+    closing line. This is python-frontmatter's rule (what ingest parses
+    metadata with), written out so markdown-parser.ts frontmatterLength can
+    match it exactly: turn CRLF into LF, strip str.isspace() whitespace,
+    detect YAML (`---`), then JSON (`{`), then TOML (`+++`) on the first line,
+    and close at the next boundary line. 0 when there is no frontmatter (a
+    BOM before `---` means none) or it is never closed (python-frontmatter
+    then treats the whole text as the body). Unlike post.content, the body is
     not stripped, so a body that opens with an indented line keeps its
-    indentation (an indented code block, as gray-matter and renderers see it).
+    indentation. schema/frontmatter-boundary-parity.json pins this in both
+    languages.
     """
-    stripped = text.strip()
-    lead = len(text) - len(text.lstrip())
-    handler = frontmatter.detect_format(stripped, frontmatter.handlers)
-    if handler is None or handler.FM_BOUNDARY is None:
-        return 0
-    matches = []
-    for m in handler.FM_BOUNDARY.finditer(stripped):
-        matches.append(m)
-        if len(matches) == 2:
+    norm = text.replace('\r\n', '\n')
+    lead = 0
+    while lead < len(norm) and norm[lead] in PY_WHITESPACE:
+        lead += 1
+    end = len(norm)
+    while end > lead and norm[end - 1] in PY_WHITESPACE:
+        end -= 1
+    s = norm[lead:end]
+    for kind in ('yaml', 'json', 'toml'):
+        first = _delimiter_match(s, 0, kind)
+        if first is not None:
             break
-    if len(matches) < 2:
+    else:
         return 0
-    close_start = lead + matches[1].start()
-    nl = text.find('\n', close_start)
-    return len(text) if nl == -1 else nl + 1
+    p = s.find('\n', first)
+    while p != -1:
+        start = p + 1
+        if _delimiter_match(s, start, kind) is not None:
+            nl = norm.find('\n', lead + start)
+            off = len(norm) if nl == -1 else nl + 1
+            # Map the offset in `norm` back onto `text`: each CRLF before it
+            # was one character shorter in `norm`.
+            pairs = 0
+            i = text.find('\r\n')
+            while i != -1 and i - pairs < off:
+                pairs += 1
+                i = text.find('\r\n', i + 2)
+            return off + pairs
+        p = s.find('\n', start)
+    return 0
 
 
 def note_body_start_line(text: str) -> int:
-    """Number of text.splitlines() lines before the body (see
+    """Number of split_connection_lines lines before the body (see
     note_body_offset). Writers pass it as connections_section's `start`."""
-    return len(text[:note_body_offset(text)].splitlines())
+    return len(split_connection_lines(text[:note_body_offset(text)]))
 
 
 def _normalize_concept_slug(value: str) -> str:
@@ -671,9 +742,9 @@ def patch_frontmatter_flow_hashtags(content: str) -> str:
 def parse_connection_lines(body: str) -> list[tuple[int, dict]]:
     """Edges of the ## Connections section of a raw note body (see
     connections_section for the rule), each with its index in
-    body.splitlines()."""
+    split_connection_lines(body)."""
     edges: list[tuple[int, dict]] = []
-    lines = body.splitlines()
+    lines = split_connection_lines(body)
     section = connections_section(lines)
     if section is None:
         return edges

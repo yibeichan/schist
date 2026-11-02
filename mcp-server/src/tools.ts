@@ -11,7 +11,7 @@ import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote, rewriteNote, updateNote, deleteNote, writeMutex, vaultLockWaitMs } from "./git-writer.js";
 import { withVaultLock, VaultLockTimeout, VaultLockFailed } from "./vault-lock.js";
-import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, hasNonYamlOpener, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython, containsLineBoundary, isRoundTrippableTarget, connectionsSection, skippedLineFlags, isConnectionsHeading, isSectionEnd, hasConnectionsHeading, noteBodyStartLine, trimConnectionWs } from "./markdown-parser.js";
+import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, hasNonYamlOpener, CONNECTION_RE, SLUG_WS_CHARS, containsLineBoundary, isRoundTrippableTarget, connectionsSection, skippedLineFlags, isConnectionsHeading, isSectionEnd, hasConnectionsHeading, noteBodyStartLine, trimConnectionWs, splitConnectionLines, connectionBody } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
 import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse, PushFailureClass, ComposeBriefResponse, Note, SearchResult } from "./types.js";
@@ -2629,14 +2629,14 @@ export async function get_note(
 /**
  * Yields each `## Connections` edge line in a raw body that ingest would
  * index. Mirrors cli/schist/ingest.py's parse_connections: the same
- * splitlines() line boundaries (splitLinesLikePython, NOT split("\n") — see
- * #359), the same section rule (connectionsSection: an exact heading, fenced
- * code skipped), the same CONNECTION_RE, and the same
- * bracket-reference skip. Anything else (malformed lines, non-edge lines)
- * is skipped, matching ingest. Lines are yielded trimmed.
+ * CommonMark line endings (splitConnectionLines), the same section rule
+ * (connectionsSection), the same CONNECTION_RE, and the same bracket-reference
+ * skip. Anything else (malformed lines, non-edge lines) is skipped, matching
+ * ingest. Lines are yielded trimmed. Given a whole file, pass
+ * connectionBody(content), ingest's body slice.
  */
 export function* bodyConnectionEdgeLines(body: string): Generator<{ line: string; type: string }> {
-  const lines = splitLinesLikePython(body);
+  const lines = splitConnectionLines(body);
   const section = connectionsSection(lines);
   if (section === null) return;
   for (let i = section.heading + 1; i < section.end; i++) {
@@ -3384,17 +3384,12 @@ export function stripConnectionsTo(content: string, targets: string[]): { conten
   const out: string[] = [];
   let inSection = false;
   let removed = 0;
-  // splitLinesLikePython (not split("\n")): ingest indexed the edge across
-  // whatever splitlines() boundary separated it from the heading, so cascade
-  // repair must recognize the same boundaries or the dangling edge survives
-  // (#359). Reconstruction rejoins with "\n" — repair normalizes exotic line
-  // separators to LF, which is the canonical form create_note/buildNote emit.
-  // splitLinesLikePython keeps no trailing empty segment, so join("\n") on
-  // its output drops the source's terminal newline at BOTH exits below —
-  // cascade repairs then wrote notes without a trailing "\n" (#382; the
-  // push("") special case only healed the emptied-section shape). Repair is
-  // normalizing (see above), so every non-empty result gets the canonical
-  // LF terminator, matching insertConnectionLine's contract.
+  // splitConnectionLines: the CommonMark line endings ingest splits on, so
+  // the lines stripped are exactly the edges ingest indexed. Reconstruction
+  // rejoins with "\n" (CRLF and CR become LF, the form create_note/buildNote
+  // emit). The split keeps no trailing empty segment, so every non-empty
+  // result gets the canonical LF terminator (#382), matching
+  // insertConnectionLine's contract.
   const finalize = (lines: string[]): string => {
     const s = lines.join("\n");
     return s === "" || s.endsWith("\n") ? s : s + "\n";
@@ -3405,7 +3400,7 @@ export function stripConnectionsTo(content: string, targets: string[]): { conten
   // opens a section here, not just the first, as before.
   // `content` is a whole file: frontmatter lines are skipped (noteBodyStartLine)
   // so a YAML block scalar cannot open a fence or a section.
-  const inLines = splitLinesLikePython(content);
+  const inLines = splitConnectionLines(content);
   const bodyStart = noteBodyStartLine(content);
   const inSkipped = skippedLineFlags(inLines, bodyStart);
   for (let idx = 0; idx < inLines.length; idx++) {
@@ -3832,7 +3827,7 @@ export async function update_note(
     // ago, never a line that was never on disk.
     if (args.body !== undefined) {
       const grandfathered = new Set(
-        Array.from(bodyConnectionEdgeLines(parseNote(existing).body), (e) => e.line)
+        Array.from(bodyConnectionEdgeLines(connectionBody(existing)), (e) => e.line)
       );
       const bodyConnError = validateBodyConnectionTypes(args.body, config, grandfathered);
       if (bodyConnError !== null) return bodyConnError;
