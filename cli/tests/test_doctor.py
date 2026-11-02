@@ -5544,6 +5544,70 @@ class TestCheckMcpConnectionsRule:
         assert r.status == "WARN"
         assert "predates the shared" in r.message
 
+    def _dist(self, tmp_path: Path, version: int) -> Path:
+        dist = tmp_path / "pkg" / "dist"
+        dist.mkdir(parents=True)
+        (dist / "index.js").write_text("// stub\n")
+        (dist / "markdown-parser.js").write_text(f"export const CONNECTIONS_RULE_VERSION = {version};\n")
+        return dist
+
+    def _config(self, tmp_path: Path, monkeypatch, entry: dict) -> None:
+        (tmp_path / ".claude.json").write_text(json.dumps({"mcpServers": {"schist": entry}}))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("schist.mcp_locate._npm_global_entry", lambda: None)
+
+    def test_follows_a_symlinked_entry(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+
+        dist = self._dist(tmp_path, 1)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "schist-mcp.js").symlink_to(dist / "index.js")
+        self._config(tmp_path, monkeypatch, {"command": "node", "args": [str(bin_dir / "schist-mcp.js")]})
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "rule v1" in r.message
+
+    def test_finds_a_bare_command_on_path(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+
+        dist = self._dist(tmp_path, 1)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        link = bin_dir / "schist-mcp"
+        link.symlink_to(dist / "index.js")
+        (dist / "index.js").chmod(0o755)
+        monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+        self._config(tmp_path, monkeypatch, {"command": "schist-mcp", "args": []})
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "rule v1" in r.message
+
+    def test_npx_uses_the_npm_global_install(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+
+        dist = self._dist(tmp_path, 1)
+        self._config(tmp_path, monkeypatch, {"command": "npx", "args": ["-y", "@schist/mcp-server"]})
+        monkeypatch.setattr("schist.mcp_locate._npm_global_entry", lambda: dist / "index.js")
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "rule v1" in r.message
+
+    def test_warn_when_the_configured_server_cannot_be_read(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+
+        self._config(tmp_path, monkeypatch, {"command": "node", "args": [str(tmp_path / "gone" / "index.js")]})
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "rule is unknown" in r.message
+
+        dist = self._dist(tmp_path, 2)
+        (dist / "markdown-parser.js").unlink()
+        self._config(tmp_path, monkeypatch, {"command": "node", "args": [str(dist / "index.js")]})
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "cannot read" in r.message
+
     def test_real_source_carries_the_cli_version(self):
         """The TypeScript source declares the same version as ingest.py, in
         the form the check reads from the build."""

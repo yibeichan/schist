@@ -2929,6 +2929,25 @@ def _mcp_dist_dir_from_config(vault_path: Optional[str]) -> Optional[Path]:
     Mirrors `check_mcp_config`'s lookup order so doctor reports against the
     actual deployed dist (not just the source checkout's local build).
     """
+    for entry in _mcp_config_entries(vault_path):
+        args = entry.get("args")
+        if not isinstance(args, list) or not args:
+            continue
+        args0 = Path(str(args[0]))
+        if args0.is_file():
+            return args0.parent
+    return None
+
+
+def _mcp_config_entry(vault_path: Optional[str]) -> Optional[dict]:
+    """The configured schist MCP server entry ({"command", "args", ...}) of
+    the first config file that has one, or None."""
+    return next(_mcp_config_entries(vault_path), None)
+
+
+def _mcp_config_entries(vault_path: Optional[str]):
+    """Each config file's schist MCP server entry, in `check_mcp_config`'s
+    order."""
     candidates = [
         Path.home() / ".claude.json",
         Path.home() / ".claude" / "settings.json",
@@ -2971,12 +2990,53 @@ def _mcp_dist_dir_from_config(vault_path: Optional[str]) -> Optional[Path]:
                     break
         if not entry:
             continue
-        args = entry.get("args")
-        if not isinstance(args, list) or not args:
-            continue
-        args0 = Path(str(args[0]))
-        if args0.is_file():
-            return args0.parent
+        yield entry
+
+
+def _mcp_server_dist_dir(entry: dict) -> Optional[Path]:
+    """The dist/ directory of the server `entry` starts, or None when it
+    cannot be found. Follows symlinks: `node <link>` where the link points
+    into dist/, and a bare command (a bin link on PATH, found with
+    shutil.which and resolved). `npx` and a command whose target has no
+    dist/ fall back to the npm global install (`npm root -g`)."""
+    def dist_of(path: Path) -> Optional[Path]:
+        try:
+            real = path.expanduser().resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        if not real.is_file():
+            return None
+        for d in (real.parent, real.parent.parent, real.parent.parent.parent):
+            if (d / "markdown-parser.js").is_file():
+                return d
+            if (d / "dist" / "markdown-parser.js").is_file():
+                return d / "dist"
+        return real.parent
+
+    command = str(entry.get("command") or "")
+    args = entry.get("args") if isinstance(entry.get("args"), list) else []
+    base = Path(command).name
+    if base in ("node", "node.exe", "nodejs") or not command:
+        for a in args:
+            a = str(a)
+            if a.startswith("-"):
+                continue
+            found = dist_of(Path(a))
+            if found is not None:
+                return found
+            break
+        return None
+    if base not in ("npx", "npx.cmd"):
+        on_path = shutil.which(command) if os.sep not in command else command
+        if on_path:
+            found = dist_of(Path(on_path))
+            if found is not None:
+                return found
+    from .mcp_locate import _npm_global_entry
+
+    npm = _npm_global_entry()
+    if npm is not None and npm.is_file():
+        return npm.resolve().parent
     return None
 
 
@@ -3274,18 +3334,33 @@ def check_mcp_connections_rule(vault_path: Optional[str]) -> CheckResult:
     from .ingest import CONNECTIONS_RULE_VERSION
 
     name = "MCP connection rule"
-    dist_dir = _mcp_dist_dir_from_config(vault_path)
-    if dist_dir is None:
-        return CheckResult("SKIP", name, "skipped (no MCP config)")
-    try:
-        text = (dist_dir / "markdown-parser.js").read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return CheckResult("SKIP", name, f"skipped (cannot read {dist_dir / 'markdown-parser.js'})")
-    m = _MCP_RULE_VERSION_RE.search(text)
     fix = (
         "Upgrade the MCP server and the CLI together (`npm install -g @schist/mcp-server`, "
         "or `cd <schist>/mcp-server && npm run build` in a checkout), then restart the MCP client."
     )
+    entry = _mcp_config_entry(vault_path)
+    if entry is None:
+        return CheckResult("SKIP", name, "skipped (no MCP config)")
+    # A configured server whose rule cannot be read is reported, not
+    # skipped: an old server is exactly the skew this check is for.
+    dist_dir = _mcp_server_dist_dir(entry)
+    if dist_dir is None:
+        return CheckResult(
+            "WARN", name,
+            "cannot find the configured MCP server's files "
+            f"(command {entry.get('command')!r}), so its ## Connections rule is unknown",
+            fix=fix,
+        )
+    try:
+        text = (dist_dir / "markdown-parser.js").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return CheckResult(
+            "WARN", name,
+            f"cannot read {dist_dir / 'markdown-parser.js'}, so the configured MCP server's "
+            "## Connections rule is unknown",
+            fix=fix,
+        )
+    m = _MCP_RULE_VERSION_RE.search(text)
     if m is None:
         return CheckResult(
             "WARN", name,

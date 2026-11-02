@@ -311,7 +311,8 @@ always visible there.
 The rule has a version, `CONNECTIONS_RULE_VERSION` in `cli/schist/ingest.py`
 and the same constant in the MCP server. `schist doctor` warns when a
 hand-provisioned `.schist/ingest.py` hook copy or the configured MCP server
-carries a different version.
+carries a different version, or when the configured server's files cannot be
+found or read (it follows symlinks, a command on `PATH` and `npm root -g`).
 
 ### Implicit Concept Edges
 
