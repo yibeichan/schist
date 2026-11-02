@@ -9,8 +9,17 @@ file under <vault>/.schist/proposals/, which is gitignored, so filing one
 changes nothing in the vault. Approving a proposal runs the ordinary
 `schist add` / `schist link` command, which validates it, takes the vault
 write lock and commits; the spoke's usual sync then pushes it. Rejecting one
-only marks it. A proposal whose command failed stays listed with the
-command's output, and can be approved again or rejected.
+only marks it, unless the reviewer saves the reason as a standard. A proposal
+whose command failed stays listed with the command's output, and can be
+approved again or rejected.
+
+Standards: a rejection's reason can be saved as a standard, an ordinary note
+written by `schist add` into the rejected proposal's directory and tagged
+`standard` and `applies-to:<directory>`. Before filing into a directory, the
+agent must read that directory's standards (agent.get_standards) and name each
+one in `checked_standards`; a proposal that leaves one out is refused, so a
+reason given once is checked on every later proposal. Archiving a standard
+note retires it.
 
 On a spoke, a proposal may only target a path this spoke's identity can
 write under vault.yaml, by the hub's own scope rule (pre_receive.derive_scope
@@ -41,6 +50,9 @@ from ..spoke_config import is_spoke, load_spoke_config
 
 MAX_TITLE = 200
 MAX_BODY = 50_000
+MAX_REASON = 2_000
+MAX_STANDARD_CHARS = 2_000   # of each standard's body, as shown to the agent
+STANDARD_TAG = 'standard'
 APPROVE_TIMEOUT_S = 120
 PENDING, APPROVED, REJECTED, FAILED = 'pending', 'approved', 'rejected', 'failed'
 OPEN = (PENDING, FAILED)   # still awaiting a decision
@@ -48,6 +60,45 @@ OPEN = (PENDING, FAILED)   # still awaiting a decision
 
 class ProposalError(Exception):
     pass
+
+
+def applies_tag(directory: str) -> str:
+    return f'applies-to:{directory}'
+
+
+def standards_for(db, directory: str) -> list[dict]:
+    """The standards a proposal into `directory` must be checked against:
+    notes tagged both `standard` and `applies-to:<directory>`, not archived,
+    oldest id first."""
+    rows = db.execute(
+        "SELECT id, title, body FROM docs d"
+        " WHERE EXISTS (SELECT 1 FROM json_each(d.tags) WHERE value = ?)"
+        "   AND EXISTS (SELECT 1 FROM json_each(d.tags) WHERE value = ?)"
+        "   AND COALESCE(d.status, '') != 'archived'"
+        " ORDER BY d.id",
+        (STANDARD_TAG, applies_tag(directory))).fetchall()
+    return [{'id': r[0], 'title': r[1], 'body': (r[2] or '')[:MAX_STANDARD_CHARS]}
+            for r in rows]
+
+
+def _directory_of(p: dict) -> str:
+    """The directory a proposal writes into: the new note's, or for a link the
+    source note's, which `schist link` rewrites."""
+    if p['kind'] == 'create':
+        return p['args']['directory']
+    return p['args']['source'].split('/', 1)[0]
+
+
+def _require_checked(db, directory: str, checked) -> list[str]:
+    required = [s['id'] for s in standards_for(db, directory)]
+    named = set(_clean_list(checked, 'checked_standards entry'))
+    missing = [sid for sid in required if sid not in named]
+    if missing:
+        raise ProposalError(
+            f'{directory}/ has standards this proposal was not checked against: '
+            f'{", ".join(missing)}. Call get_standards with directory {directory!r}, make the '
+            'proposal meet each one, and list every id in checked_standards')
+    return required
 
 
 def _clean_list(values, what: str) -> list[str]:
@@ -172,7 +223,8 @@ class ProposalStore:
     # -- filing (called by the agent) ---------------------------------------
 
     def propose_note(self, db, *, title: str, body: str, rationale: str, question: str = '',
-                     directory: str = 'notes', tags=None, concepts=None) -> dict:
+                     directory: str = 'notes', tags=None, concepts=None,
+                     checked_standards=None) -> dict:
         title = str(title or '').strip()
         body = str(body or '')
         if not title or len(title) > MAX_TITLE or markdown_io.contains_line_boundary(title):
@@ -190,7 +242,8 @@ class ProposalStore:
         unknown = [c for c in concepts if c not in known]
         if unknown:
             raise ProposalError(f'unknown concept slugs: {", ".join(unknown)}; use find_concepts')
-        target = f'{directory}/{date.today().isoformat()}-{markdown_io.slugify(title)}.md'
+        checked = _require_checked(db, directory, checked_standards)
+        target =f'{directory}/{date.today().isoformat()}-{markdown_io.slugify(title)}.md'
         fm = [f'title: {title}', 'status: draft']
         if tags:
             fm.append(f'tags: [{", ".join(tags)}]')
@@ -198,12 +251,13 @@ class ProposalStore:
             fm.append(f'concepts: [{", ".join(concepts)}]')
         diff = '\n'.join(f'+{line}' for line in ['---', *fm, '---', '', *body.splitlines()])
         return self._new('create', target=target, title=title, rationale=str(rationale or ''),
-                         question=str(question or ''), diff=diff,
+                         question=str(question or ''), diff=diff, checked_standards=checked,
                          args={'title': title, 'body': body, 'directory': directory,
                                'tags': tags, 'concepts': concepts})
 
     def propose_link(self, db, *, source: str, target: str, type: str, rationale: str,
-                     question: str = '', context: str | None = None) -> dict:
+                     question: str = '', context: str | None = None,
+                     checked_standards=None) -> dict:
         source, target, link_type = (str(x or '').strip() for x in (source, target, type))
         src = db.execute('SELECT title FROM docs WHERE id = ?', (source,)).fetchone()
         if src is None:
@@ -218,11 +272,12 @@ class ProposalStore:
         if any(markdown_io.contains_line_boundary(x) for x in (source, target)):
             raise ProposalError('ids may not contain line breaks')
         self.check_writable(source)   # `schist link` rewrites and commits the source note
+        checked = _require_checked(db, source.split('/', 1)[0], checked_standards)
         context = markdown_io.sanitize_context(context) if context else None
         line = f'- {link_type}: {target}' + (f' "{context}"' if context else '')
         return self._new('link', target=source, title=f'{src[0]} —{link_type}→ {tgt[0]}',
                          rationale=str(rationale or ''), question=str(question or ''),
-                         diff=f'@@ {source} · ## Connections @@\n+{line}',
+                         diff=f'@@ {source} · ## Connections @@\n+{line}', checked_standards=checked,
                          args={'source': source, 'target': target, 'type': link_type,
                                'context': context})
 
@@ -276,11 +331,51 @@ class ProposalStore:
             p['status'] = APPROVED if r.returncode == 0 else FAILED
             return self._save(p)
 
-    def reject(self, pid: str) -> dict:
+    def reject(self, pid: str, reason: str = '', save_standard: bool = False,
+               runner=subprocess.run) -> dict:
+        """Reject a proposal, keeping the reviewer's reason. With save_standard
+        the reason is also written as a standard note first; if that write
+        fails the proposal stays open, so the reviewer can try again."""
+        reason = str(reason or '').strip()
+        if len(reason) > MAX_REASON:
+            raise ProposalError(f'reason must be at most {MAX_REASON} characters')
+        if save_standard and not reason:
+            raise ProposalError('a standard needs a reason')
         with self._lock:
             p = self.get(pid)
             if p['status'] not in OPEN:
                 raise ProposalError(f'proposal {pid} is already {p["status"]}')
+            if reason:
+                p['reason'] = reason
+            if save_standard:
+                outcome = self._save_standard(p, reason, runner)
+                p['standard'] = outcome
+                if outcome['status'] == 'failed':
+                    return self._save(p)
             p['status'] = REJECTED
             p['decided_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
             return self._save(p)
+
+    def _save_standard(self, p: dict, reason: str, runner) -> dict:
+        directory = _directory_of(p)
+        self.check_writable(f'{directory}/x.md')   # vault.yaml may have changed since filing
+        first = reason.splitlines()[0].strip()
+        title = first if len(first) <= MAX_TITLE else first[:MAX_TITLE - 1].rstrip() + '…'
+        when = datetime.now(timezone.utc).date().isoformat()
+        body = (f'{reason}\n\nRecorded on {when} when the reviewer rejected a proposal: '
+                f'"{p["title"]}" ({p["kind"]}, {p["target"]}).\n')
+        cmd = [sys.executable, '-m', 'schist', f'--vault={self.vault}', f'--db={self.db_path}',
+               'add', f'--title={title}', f'--dir={directory}',
+               f'--tags={STANDARD_TAG},{applies_tag(directory)}']
+        try:
+            r = runner(cmd, input=body, capture_output=True, text=True, timeout=APPROVE_TIMEOUT_S)
+        except OSError as e:
+            return {'status': 'failed', 'output': f'could not run schist: {e}'}
+        except subprocess.TimeoutExpired:
+            # Possibly committed: reject anyway rather than invite a duplicate.
+            return {'status': 'unknown', 'output': (
+                f'timed out after {APPROVE_TIMEOUT_S} s; the standard may already be '
+                f'committed in {directory}/. Check before adding it again.')}
+        output = ((r.stdout or '') + (r.stderr or ''))[-2000:]
+        return {'status': 'saved' if r.returncode == 0 else 'failed',
+                'directory': directory, 'output': output}

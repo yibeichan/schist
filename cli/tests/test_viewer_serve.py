@@ -1079,3 +1079,192 @@ class TestOllamaPortOwner:
         st = self._agent(vault, db_path, tmp_path, v4_rows=[('0100007F', 11434, '0A', os.getuid() + 1)],
                          url='http://gpu-node.example:11434').status()
         assert st['available'] is True
+
+
+# ---------------------------------------------------------------------------
+# Standards: a rejection's reason, kept and checked on later proposals
+# ---------------------------------------------------------------------------
+
+def _standard(vault: Path, name: str, title: str, directory: str = 'notes',
+              status: str = 'draft', extra_tags: tuple = ()) -> str:
+    tags = ', '.join(('standard', f'applies-to:{directory}', *extra_tags))
+    (vault / 'notes' / name).write_text(
+        f'---\ntitle: {title}\nstatus: {status}\ntags: [{tags}]\n---\n\n{title}. More detail.\n',
+        encoding='utf-8')
+    return f'notes/{name}'
+
+
+def _reindex(vault: Path) -> None:
+    # A spoke's post-commit hook refreshes the index; the fixture vault has none.
+    from schist import ingest
+    ingest.ingest(str(vault), str(vault / '.schist' / 'schist.db'))
+
+
+class TestStandards:
+    def test_standards_for_matches_both_tags_and_skips_archived(self, vault, ro):
+        a = _standard(vault, 'std-a.md', 'Cite a source')
+        _standard(vault, 'std-old.md', 'Retired rule', status='archived')
+        _standard(vault, 'std-papers.md', 'Papers only', directory='papers')
+        (vault / 'notes' / 'tagged-only.md').write_text(
+            '---\ntitle: Not a standard\ntags: [applies-to:notes]\n---\n\nx\n', encoding='utf-8')
+        _reindex(vault)
+        found = proposals_mod.standards_for(ro, 'notes')
+        assert [s['id'] for s in found] == [a]
+        assert found[0]['title'] == 'Cite a source' and 'More detail' in found[0]['body']
+        assert proposals_mod.standards_for(ro, 'decisions') == []
+
+    def test_a_proposal_must_name_every_standard_of_its_directory(self, vault, ro):
+        a = _standard(vault, 'std-a.md', 'Cite a source')
+        b = _standard(vault, 'std-b.md', 'One topic per note')
+        _reindex(vault)
+        store = proposals_mod.ProposalStore(vault)
+        with pytest.raises(proposals_mod.ProposalError, match='std-a.md, notes/std-b.md'):
+            store.propose_note(ro, title='T', body='b', rationale='r')
+        with pytest.raises(proposals_mod.ProposalError, match=r'not checked against: notes/std-b\.md\.'):
+            store.propose_note(ro, title='T', body='b', rationale='r', checked_standards=[a, 'made/up.md'])
+        p = store.propose_note(ro, title='T', body='b', rationale='r', checked_standards=[b, a])
+        assert p['checked_standards'] == [a, b]
+        assert [x['id'] for x in store.list()] == [p['id']]
+
+    def test_a_link_is_checked_against_its_source_directory(self, vault, ro):
+        a = _standard(vault, 'std-a.md', 'Say why two notes connect')
+        _reindex(vault)
+        store = proposals_mod.ProposalStore(vault)
+        with pytest.raises(proposals_mod.ProposalError, match='notes/ has standards'):
+            store.propose_link(ro, source='notes/sync.md', target='locking', type='supports', rationale='r')
+        p = store.propose_link(ro, source='notes/sync.md', target='locking', type='supports',
+                               rationale='r', checked_standards=[a])
+        assert p['checked_standards'] == [a]
+
+    def test_no_standards_means_no_requirement(self, vault, ro):
+        p = proposals_mod.ProposalStore(vault).propose_note(ro, title='T', body='b', rationale='r')
+        assert p['checked_standards'] == []
+
+    def test_reject_with_a_reason_keeps_it_and_writes_nothing(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        head = _git(vault, 'rev-parse', 'HEAD')
+        p = store.propose_note(ro, title='No', body='b', rationale='r')
+        done = store.reject(p['id'], reason='  Too vague  ', runner=_never)
+        assert done['status'] == proposals_mod.REJECTED and done['reason'] == 'Too vague'
+        assert 'standard' not in done
+        assert _git(vault, 'rev-parse', 'HEAD') == head
+
+    def test_saved_standard_is_committed_and_gates_the_next_proposal(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='Unsourced claim', body='b', rationale='r')
+        reason = 'Every claim cites the note it came from\nA claim without a citation is a guess.'
+        done = store.reject(p['id'], reason=reason, save_standard=True)
+        assert done['status'] == proposals_mod.REJECTED, done.get('standard')
+        assert done['standard']['status'] == 'saved' and done['standard']['directory'] == 'notes'
+        assert _git(vault, 'status', '--porcelain') == ''          # committed
+        written = list((vault / 'notes').glob('*every-claim-cites-the-note-it-came-from.md'))
+        assert len(written) == 1
+        text = written[0].read_text(encoding='utf-8')
+        assert 'standard' in text and 'applies-to:notes' in text
+        assert 'A claim without a citation is a guess.' in text and '"Unsourced claim"' in text
+        _reindex(vault)
+        sid = f'notes/{written[0].name}'
+        with pytest.raises(proposals_mod.ProposalError, match='not checked against'):
+            store.propose_note(ro, title='Next', body='b', rationale='r')
+        assert store.propose_note(ro, title='Next', body='b', rationale='r',
+                                  checked_standards=[sid])['checked_standards'] == [sid]
+
+    def test_a_failed_standard_leaves_the_proposal_open(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='No', body='b', rationale='r')
+        boom = lambda *a, **k: subprocess.CompletedProcess(a, 1, '', 'lock busy')
+        done = store.reject(p['id'], reason='Too vague', save_standard=True, runner=boom)
+        assert done['status'] == proposals_mod.PENDING
+        assert done['standard']['status'] == 'failed' and 'lock busy' in done['standard']['output']
+        assert [x['id'] for x in store.list()] == [p['id']]
+        assert store.reject(p['id'], reason='Too vague', save_standard=True)['status'] == proposals_mod.REJECTED
+
+    def test_a_timed_out_standard_still_rejects(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='No', body='b', rationale='r')
+
+        def hang(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, kw['timeout'])
+        done = store.reject(p['id'], reason='Too vague', save_standard=True, runner=hang)
+        assert done['status'] == proposals_mod.REJECTED
+        assert done['standard']['status'] == 'unknown' and 'Check before adding it again' in done['standard']['output']
+
+    def test_reason_rules(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='No', body='b', rationale='r')
+        with pytest.raises(proposals_mod.ProposalError, match='needs a reason'):
+            store.reject(p['id'], reason='   ', save_standard=True, runner=_never)
+        with pytest.raises(proposals_mod.ProposalError, match='at most'):
+            store.reject(p['id'], reason='x' * (proposals_mod.MAX_REASON + 1), runner=_never)
+        assert store.get(p['id'])['status'] == proposals_mod.PENDING
+
+    def test_a_long_first_line_is_cut_for_the_title(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='No', body='b', rationale='r')
+        seen = {}
+
+        def record(cmd, **kw):
+            seen['cmd'], seen['input'] = cmd, kw['input']
+            return subprocess.CompletedProcess(cmd, 0, '', '')
+        store.reject(p['id'], reason='-' + 'w' * 300, save_standard=True, runner=record)
+        title = next(a for a in seen['cmd'] if a.startswith('--title='))[len('--title='):]
+        assert len(title) == proposals_mod.MAX_TITLE and title.endswith('…') and title.startswith('-')
+        assert '--tags=standard,applies-to:notes' in seen['cmd'] and '--dir=notes' in seen['cmd']
+        assert seen['input'].startswith('-' + 'w' * 300)
+
+    def test_saving_a_standard_rechecks_the_acl(self, vault, ro):
+        _acl(vault, ['notes'])
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='T', body='b', rationale='r')
+        _acl(vault, ['papers'])
+        with pytest.raises(proposals_mod.ProposalError, match='hub would refuse'):
+            store.reject(p['id'], reason='Too vague', save_standard=True, runner=_never)
+        assert store.get(p['id'])['status'] == proposals_mod.PENDING
+        # A plain rejection writes nothing, so the ACL does not apply to it.
+        assert store.reject(p['id'], reason='Too vague', runner=_never)['status'] == proposals_mod.REJECTED
+
+    def test_agent_get_standards_tool(self, vault, db_path, ro):
+        a = _standard(vault, 'std-a.md', 'Cite a source')
+        _reindex(vault)
+        agent = agent_mod.Agent(db_path, proposals_mod.ProposalStore(vault), opener=FakeOllama([]))
+        res, event = agent._run_tool(ro, 'get_standards', {'directory': '/notes/'}, 'q')
+        assert res['directory'] == 'notes' and [s['id'] for s in res['standards']] == [a]
+        assert event['text'] == 'reading standards for notes/ → 1'
+        res, _ = agent._run_tool(ro, 'propose_note', {'title': 'T', 'body': 'b', 'rationale': 'r'}, 'q')
+        assert 'not checked against' in res['error']
+        res, event = agent._run_tool(ro, 'propose_note', {'title': 'T', 'body': 'b', 'rationale': 'r',
+                                                          'checked_standards': [a]}, 'q')
+        assert 'filed' in res and event['type'] == 'proposal'
+        assert 'get_standards' in agent_mod.SYSTEM_PROMPT
+        assert 'get_standards' in {t['function']['name'] for t in agent_mod.TOOLS}
+
+    def test_reject_with_a_standard_over_http(self, server, ro):
+        srv, base = server
+        hdr = {'X-Schist-Agent': '1'}
+        p = srv.store.propose_note(ro, title='Via http', body='b', rationale='r')
+        for bad in ({'reason': 5}, {'reason': 'x', 'save_standard': 'yes'}):
+            code, body = _req(base + f'/api/proposals/{p["id"]}/reject', 'POST', hdr, bad)
+            assert code == 400 and json.loads(body)['ok'] is False
+        code, body = _req(base + f'/api/proposals/{p["id"]}/reject', 'POST', hdr,
+                          {'reason': 'Link to the source', 'save_standard': True})
+        out = json.loads(body)
+        assert code == 200 and out['ok'] is True and out['status'] == 'rejected'
+        assert out['standard']['status'] == 'saved' and out['rebuilding'] is True
+        # A plain rejection with no body still works, as from an older page.
+        _reindex(srv.vault)
+        sid = proposals_mod.standards_for(ro, 'notes')[0]['id']
+        q = srv.store.propose_note(ro, title='Plain', body='b', rationale='r', checked_standards=[sid])
+        code, body = _req(base + f'/api/proposals/{q["id"]}/reject', 'POST', hdr)
+        assert code == 200 and json.loads(body)['status'] == 'rejected'
+
+    def test_a_failed_standard_is_not_ok_over_http(self, server, ro, monkeypatch):
+        srv, base = server
+        p = srv.store.propose_note(ro, title='Via http', body='b', rationale='r')
+        real = srv.store.reject
+        monkeypatch.setattr(srv.store, 'reject', lambda pid, **kw: real(
+            pid, runner=lambda *a, **k: subprocess.CompletedProcess(a, 1, '', 'boom'), **kw))
+        code, body = _req(base + f'/api/proposals/{p["id"]}/reject', 'POST', {'X-Schist-Agent': '1'},
+                          {'reason': 'Too vague', 'save_standard': True})
+        out = json.loads(body)
+        assert code == 200 and out['ok'] is False and out['status'] == 'pending'
+        assert out['standard']['status'] == 'failed' and out['rebuilding'] is False
