@@ -214,14 +214,21 @@ The rule that reads the section is deliberately strict. It indexes a
 connection only where the viewer shows it as a top-level list item under the
 `## Connections` heading, and when a note holds Markdown whose rendering the
 rule does not follow, it indexes no connection from that note at all and says
-why (see below). Ingest, the MCP server and the CLI share the rule, and
-`schema/connection-line-parity.json` pins it in both languages; a test runs
-marked 12.0.2, the renderer the viewer loads, over those cases and thousands of
-generated notes and checks every connection the rule reads against it.
+why (see below). The viewer shows raw HTML written in a note as text, so no
+tag in a note can hide or move what follows it. Ingest, the MCP server and the
+CLI share the rule, and `schema/connection-line-parity.json` pins it in both
+languages. Two tests check every connection the rule reads, over those cases
+and thousands of generated notes: one against the tokens of marked 12.0.2, the
+renderer the viewer loads, and one against the page the viewer's own rendering
+code produces (marked, the HTML escaping and DOMPurify).
 
-**What is read.** The note body: CRLF and CR become LF (as when a file is read
-in text mode), the text after the frontmatter's closing line, without leading
-and trailing blank lines. Ingest stores exactly this text in the index, and the
+**What is read.** The note file is read as UTF-8; a file that is not valid
+UTF-8 is skipped by ingest (nothing is indexed from it), and the MCP server's
+tools refuse to read or write it. The note body: CRLF and CR become LF (as when
+a file is read in text mode), the text after the frontmatter's closing line,
+without leading and trailing blank lines. Before the YAML frontmatter is
+parsed, unquoted `#tags` in its flow lists are quoted; this touches only the
+frontmatter lines, never the body. Ingest stores exactly this text in the index, and the
 viewer renders it unchanged. Frontmatter lines never count, even a YAML block
 scalar holding `## Connections`. Where the frontmatter ends follows the parser
 ingest uses (python-frontmatter): after stripping leading whitespace, a first
@@ -245,8 +252,8 @@ The type must start with a letter or digit, and a target starting with `[` (a
 bracket reference) is not a connection. Indented lines, such as an item nested
 under a connection, are not connections.
 
-**Fenced code** is skipped when it is unambiguous: an opening line of spaces,
-three or more backticks or tildes and an optional info word (letters, digits,
+**Fenced code** is skipped when it is unambiguous: an opening line of at most
+three spaces, three or more backticks or tildes and an optional info word (letters, digits,
 `_+.#-`), closed by the first later line with the same spaces and the same
 run, with every line between blank or indented at least as much and none
 starting with ```` ``` ```` or `~~~`. Lines in such a fence are never the
@@ -259,7 +266,7 @@ of the body to the end of the section, it has:
 - a line holding a vertical tab, form feed, U+001C to U+001F, U+0085, U+2028 or
   U+2029 (some readers break lines there and Markdown does not);
 - a line starting with ```` ``` ```` or `~~~` that is not part of a fence as
-  above;
+  above (including one indented four or more spaces);
 - a line starting with `<` (HTML);
 - a line starting with `[` that could open a link reference definition (its
   first unescaped `]` is followed by `:`, comes after another `[`, or is
@@ -271,7 +278,9 @@ or, inside the section:
 - a line indented by a tab or four or more spaces;
 - a line made only of `-`, `=`, `*`, `_`, `+`, `|`, `:` and whitespace (a
   setext heading underline, a thematic break or a table delimiter row);
-- a list marker followed by a tab or four or more spaces.
+- a list marker followed by a tab or four or more spaces;
+- a list item whose content, past any nested list markers, starts with `#` or
+  `>` (a heading or block quote inside the item).
 
 "Starting with" means after any spaces and tabs. `schist schema --validate`
 warns about such a note with the line and the reason; the MCP server's
@@ -288,9 +297,18 @@ section's last non-blank line; a note without a section gets one at the end.
 Adding a connection to a note the rule indexes nothing from is refused with the
 line and the reason, so the note can be fixed first.
 
+`update_note` exempts out-of-vocabulary connection types only for connections
+the index already holds for the note (from the index's edges table; nothing is
+exempt when the index cannot be read).
+
 The viewer's note panel lists every connection the index holds for the note,
 from the index rather than from the rendered body, so an indexed connection is
 always visible there.
+
+The rule has a version, `CONNECTIONS_RULE_VERSION` in `cli/schist/ingest.py`
+and the same constant in the MCP server. `schist doctor` warns when a
+hand-provisioned `.schist/ingest.py` hook copy or the configured MCP server
+carries a different version.
 
 ### Implicit Concept Edges
 
