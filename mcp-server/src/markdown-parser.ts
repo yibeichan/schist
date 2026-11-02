@@ -551,6 +551,14 @@ function readings(lines: string[], start: number): LineKind[][] {
   ];
 }
 
+/** Per reading (CommonMark, marked, marked with any HTML interrupting a
+ * paragraph), per line: true when that reading puts the line before `start`,
+ * in a fence, in an HTML block or in a list item.
+ * schema/connection-reading-parity.json pins each reading in both languages. */
+export function connectionLineReadings(lines: string[], start = 0): boolean[][] {
+  return readings(lines, start).map((r) => r.map((k) => k !== ""));
+}
+
 export function skippedLineFlags(lines: string[], start = 0): boolean[] {
   const rs = readings(lines, start);
   return lines.map((_l, i) => rs.some((r) => r[i] !== ""));

@@ -2594,3 +2594,25 @@ def test_note_body_offset_agrees_with_python_frontmatter(case: dict) -> None:
         except ValueError:
             lib_body = stripped
     assert text[note_body_offset(text):].replace("\r\n", "\n").strip() == lib_body
+
+
+def _connection_reading_cases() -> list[dict]:
+    fixture = _repo_root() / "schema" / "connection-reading-parity.json"
+    return json.loads(fixture.read_text(encoding="utf-8"))["cases"]
+
+
+def test_connection_reading_fixture_is_nontrivial() -> None:
+    assert len(_connection_reading_cases()) >= 10
+
+
+@pytest.mark.parametrize("case", _connection_reading_cases(), ids=lambda c: c["name"])
+def test_connection_line_readings_match_shared_cases(case: dict) -> None:
+    """Each reading of the connection rule (CommonMark, marked, marked with
+    any HTML interrupting a paragraph) skips the same lines in both
+    languages; markdown-parser.ts connectionLineReadings runs the same
+    cases."""
+    from schist.ingest import connection_line_readings, split_connection_lines
+
+    readings = connection_line_readings(split_connection_lines(case["body"]), case["start"])
+    got = [[i for i, skipped in enumerate(r) if skipped] for r in readings]
+    assert got == [case["commonmark"], case["marked"], case["marked_any_html"]]

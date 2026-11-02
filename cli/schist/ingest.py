@@ -565,6 +565,15 @@ def _readings(lines: list[str], start: int) -> list[list[str]]:
     ]
 
 
+def connection_line_readings(lines: list[str], start: int = 0) -> list[list[bool]]:
+    """Per reading (CommonMark, marked, marked with any HTML interrupting a
+    paragraph), per line: True when that reading puts the line before
+    `start`, in a fence, in an HTML block or in a list item.
+    schema/connection-reading-parity.json pins each reading in both
+    languages."""
+    return [[k != '' for k in r] for r in _readings(lines, start)]
+
+
 def skipped_line_flags(lines: list[str], start: int = 0) -> list[bool]:
     """Per line: True for a line before `start` (frontmatter), a fence
     delimiter, or a line inside a fenced code block, an HTML block or a list

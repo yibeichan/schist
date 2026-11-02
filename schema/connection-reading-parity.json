@@ -1,0 +1,207 @@
+{
+  "description": "Pins each reading of the connection rule in cli/schist/ingest.py connection_line_readings and mcp-server/src/markdown-parser.ts connectionLineReadings: for each body, the 0-based line indexes (split on CommonMark line endings) that the CommonMark reading, the marked reading and the marked reading with any HTML interrupting a paragraph skip (before `start`, in a fence, HTML block or list item). Consumed by cli/tests/test_ingest.py and mcp-server/tests/connection-reading-parity.test.ts.",
+  "cases": [
+    {
+      "name": "CommonMark: an indented line in a list item is skipped",
+      "body": "- item\n  ## Connections\n- extends: a",
+      "start": 0,
+      "commonmark": [
+        1
+      ],
+      "marked": [
+        1
+      ],
+      "marked_any_html": [
+        1
+      ]
+    },
+    {
+      "name": "CommonMark: a fence opened in a list item ignores a shallower closer",
+      "body": "1) item\n\t```\n  ```\n## Connections",
+      "start": 0,
+      "commonmark": [
+        1,
+        2,
+        3
+      ],
+      "marked": [
+        1,
+        2,
+        3
+      ],
+      "marked_any_html": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "an HTML pre block ends only at its own close tag",
+      "body": "<pre>\n</script>\n## Connections",
+      "start": 0,
+      "commonmark": [
+        0,
+        1,
+        2
+      ],
+      "marked": [
+        0,
+        1,
+        2
+      ],
+      "marked_any_html": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "name": "marked: a line holding U+2028 is not an ATX heading",
+      "body": "x\n## Other \u2028y\n<span>\n## Connections",
+      "start": 0,
+      "commonmark": [
+        2,
+        3
+      ],
+      "marked": [],
+      "marked_any_html": [
+        2,
+        3
+      ]
+    },
+    {
+      "name": "marked: an uppercase tag does not interrupt a paragraph",
+      "body": "text\n<DIV>\n## Connections",
+      "start": 0,
+      "commonmark": [
+        1,
+        2
+      ],
+      "marked": [],
+      "marked_any_html": [
+        1,
+        2
+      ]
+    },
+    {
+      "name": "an empty quote line ends a paragraph",
+      "body": "> \n<span>\n## Connections",
+      "start": 0,
+      "commonmark": [
+        1,
+        2
+      ],
+      "marked": [
+        1,
+        2
+      ],
+      "marked_any_html": [
+        1,
+        2
+      ]
+    },
+    {
+      "name": "an indented list marker after paragraph text is skipped",
+      "body": "text\n - a\n  ## Connections",
+      "start": 0,
+      "commonmark": [
+        1,
+        2
+      ],
+      "marked": [
+        1
+      ],
+      "marked_any_html": [
+        1
+      ]
+    },
+    {
+      "name": "marked: list item continuation follows marked's indent",
+      "body": "   - d\n- \n    - x\n<!-- x -->\n   ## Connections\n## Connections",
+      "start": 0,
+      "commonmark": [
+        2,
+        3
+      ],
+      "marked": [
+        2,
+        3,
+        4
+      ],
+      "marked_any_html": [
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "name": "marked: an HTML declaration ends at > and the rest opens a fence",
+      "body": "<!DOCTYPE x\n> ```\n## Connections",
+      "start": 0,
+      "commonmark": [
+        0,
+        1
+      ],
+      "marked": [
+        0,
+        1,
+        2
+      ],
+      "marked_any_html": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "name": "marked: '- ' alone starts no list",
+      "body": "- \n  ```\n    ```\n## Connections",
+      "start": 0,
+      "commonmark": [
+        1,
+        2
+      ],
+      "marked": [
+        1,
+        2,
+        3
+      ],
+      "marked_any_html": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "any-HTML reading: a type 7 tag after paragraph text opens a block",
+      "body": "text\n<span>\n## Connections",
+      "start": 0,
+      "commonmark": [],
+      "marked": [],
+      "marked_any_html": [
+        1,
+        2
+      ]
+    },
+    {
+      "name": "frontmatter lines before start are skipped",
+      "body": "---\ntitle: t\n---\n## Connections",
+      "start": 3,
+      "commonmark": [
+        0,
+        1,
+        2
+      ],
+      "marked": [
+        0,
+        1,
+        2
+      ],
+      "marked_any_html": [
+        0,
+        1,
+        2
+      ]
+    }
+  ]
+}
