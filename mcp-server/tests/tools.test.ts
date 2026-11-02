@@ -1059,7 +1059,7 @@ describe("create_concept", () => {
         owner: TEST_AGENT,
         slug: "after-fence",
         title: "After Fence",
-        body: "definition\n\n```\ncode\n```\n\n  ## Connections\n- extends: concepts/other",
+        body: "definition\n\n```\ncode\n```\n\n## Connections\n- extends: concepts/other",
       },
       config,
     ) as { error: string; message: string };
@@ -6587,4 +6587,144 @@ esac
     await run(vault);
     expect(await aborts(abortLog)).toBe(1);
   }, 60000);
+});
+
+// Every writer reads back what it is about to write with the connection rule
+// and refuses unless the note's indexed edges come out exactly as meant.
+describe("connection writers check their own result", () => {
+  async function noteIn(vault: string, rel: string, text: string): Promise<string> {
+    await fs.mkdir(path.join(vault, path.dirname(rel)), { recursive: true });
+    await fs.writeFile(path.join(vault, rel), text, "utf-8");
+    return rel;
+  }
+
+  test("update_note does not grandfather an edge from lone-CR frontmatter, and keeps that frontmatter", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const original = "---\rtitle: Legacy\rsummary: |\r  ## Connections\r  - badtype: notes/x.md\r---\rBody\r";
+    const rel = await noteIn(vault, "notes/2026-11-02-cr.md", original);
+
+    const bad = await update_note(
+      vault,
+      { owner: TEST_AGENT, id: rel, body: "Body\n\n## Connections\n\n- badtype: notes/x.md\n" },
+      config,
+    ) as { error: string };
+    expect(bad.error).toBe("VALIDATION_ERROR");
+    expect(await fs.readFile(path.join(vault, rel), "utf-8")).toBe(original);
+
+    const ok = await update_note(vault, { owner: TEST_AGENT, id: rel, body: "New body\n" }, config) as { error?: string };
+    expect(ok.error).toBeUndefined();
+    const written = await fs.readFile(path.join(vault, rel), "utf-8");
+    expect(parseNote(written).metadata.title).toBe("Legacy");
+    expect(written).not.toContain("\r");
+  }, 30000);
+
+  test("update_note: an edge in a section the rule does not read is not indexed, and the response says so", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const rel = await noteIn(vault, "notes/2026-11-02-pi.md", "---\ntitle: PI\n---\nProse.\n");
+    const res = await update_note(
+      vault,
+      { owner: TEST_AGENT, id: rel, body: "Prose.\n\n## Connections\n1.     \n<? ?>\n   - badtype: notes/evil.md\n" },
+      config,
+    ) as { error?: string; connectionsWarning?: string };
+    expect(res.error).toBeUndefined();
+    expect(res.connectionsWarning).toContain("no connections are indexed from this note: line 7");
+    expect(parseNote(await fs.readFile(path.join(vault, rel), "utf-8")).connections).toEqual([]);
+  }, 30000);
+
+  test("add_connection refuses a note the rule indexes nothing from, and writes nothing", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const original = "---\ntitle: Div\n---\n<div>\n\n## Connections\n- extends: notes/a.md\n";
+    const rel = await noteIn(vault, "notes/2026-11-02-div.md", original);
+    const res = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: rel, target: "notes/b.md", type: "extends" },
+      config,
+    ) as { error: string; message: string };
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toContain('line 4: the line starts with "<" (HTML)');
+    expect(await fs.readFile(path.join(vault, rel), "utf-8")).toBe(original);
+  }, 30000);
+
+  test("add_connection after a section whose next heading is indented adds exactly one edge", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const rel = await noteIn(
+      vault,
+      "notes/2026-11-02-next.md",
+      "---\ntitle: Next\n---\n## Connections\n- extends: notes/a.md\n\nSee also:\n\n  ## Other\n- supports: notes/x.md\n",
+    );
+    const res = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: rel, target: "notes/z.md", type: "extends" },
+      config,
+    ) as { error?: string };
+    expect(res.error).toBeUndefined();
+    const got = parseNote(await fs.readFile(path.join(vault, rel), "utf-8")).connections.map((c) => c.target);
+    expect(got).toEqual(["notes/a.md", "notes/z.md"]);
+  }, 30000);
+
+  test("create_note refuses connections that the body would keep from being indexed", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const res = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT,
+        title: "Unclosed",
+        body: "Example:\n\n~~~~\ncode\n",
+        connections: [{ target: "notes/a.md", type: "extends" }],
+      },
+      config,
+    ) as { error: string; message: string };
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toContain("Nothing was written");
+    expect(await fs.readdir(path.join(vault, "notes")).catch(() => [])).toEqual([]);
+  }, 30000);
+
+  test("create_note returns a warning when its body's section is not read", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const res = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Quote", body: "Prose.\n\n## Connections\n> - extends: notes/a.md\n" },
+      config,
+    ) as { error?: string; connectionsWarning?: string };
+    expect(res.error).toBeUndefined();
+    expect(res.connectionsWarning).toContain("a block quote in the Connections section");
+  }, 30000);
+});
+
+describe("stripConnectionsTo checks its result", () => {
+  test("an edge after a heading the rule ends the section at is not touched", async () => {
+    const { stripConnectionsTo } = await import("../src/tools.js");
+    const text = "---\ntitle: t\n---\n## Connections\n- extends: dead\n#\tOther\n- supports: dead \"kept\"\n";
+    const { content, removed } = stripConnectionsTo(text, ["dead"]);
+    expect(removed).toBe(1);
+    expect(content).toBe("---\ntitle: t\n---\n\n#\tOther\n- supports: dead \"kept\"\n");
+  });
+
+  test("a note with HTML in its section is left alone", async () => {
+    const { stripConnectionsTo } = await import("../src/tools.js");
+    const text =
+      "---\ntitle: t\n---\n## Connections\n- extends: dead\ntext\n<x-y>\n## Other\n\n- supports: dead \"kept in Other\"\n";
+    expect(stripConnectionsTo(text, ["dead"])).toEqual({ content: text, removed: 0 });
+  });
+
+  test("removing an edge never promotes a nested line", async () => {
+    const { stripConnectionsTo } = await import("../src/tools.js");
+    const text = "---\ntitle: t\n---\n## Connections\n- extends: dead\n  - extends: hidden\n";
+    const { content, removed } = stripConnectionsTo(text, ["dead"]);
+    expect(removed).toBe(1);
+    expect(parseNote(content).connections).toEqual([]);
+  });
+
+  test("a removal that would bring a later section's edges in is refused", async () => {
+    const { stripConnectionsTo } = await import("../src/tools.js");
+    const { ConnectionWriteError } = await import("../src/markdown-parser.js");
+    const text = "---\ntitle: t\n---\n## Connections\n- extends: dead\n\n## Connections\n- extends: other\n";
+    expect(() => stripConnectionsTo(text, ["dead"])).toThrow(ConnectionWriteError);
+  });
 });

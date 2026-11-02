@@ -642,9 +642,10 @@ export function getNote(vaultRoot: string, id: string): Note | null {
     if (!row) return null;
 
     const body = (row.body as string) ?? "";
-    // docs.body is python-frontmatter's stripped body, which can read
-    // differently from the raw body ingest takes edges from (an indented first
-    // line loses its indentation). Show only connections the index holds.
+    // docs.body is the text ingest read the edges from (connection_body), so
+    // reading it again gives the indexed edges; show only connections the
+    // edges table holds as well, so a stale or older index never shows an
+    // edge it does not have.
     const indexed = new Set(
       (db.prepare("SELECT target, type FROM edges WHERE source = ?").all(id) as { target: string; type: string }[])
         .map((e) => `${e.type}\u0000${e.target}`),

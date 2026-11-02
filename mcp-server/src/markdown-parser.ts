@@ -114,47 +114,68 @@ export function isRoundTrippableTarget(target: string): boolean {
 }
 
 /**
- * The connections section rule, shared by every reader and writer of a
- * note's `## Connections` section: parseConnections and insertConnectionLine
- * here, buildNote's section replace, and tools.ts's body validator, concept
- * check and delete-cascade repair. Mirrors cli/schist/ingest.py's
- * connections_section and friends; the body cases in
- * schema/connection-line-parity.json and the writer cases in
- * schema/connection-append-parity.json pin the two.
+ * The connections rule, shared by every reader and writer of a note's
+ * `## Connections` section: parseConnections and insertConnectionLine here,
+ * buildNote's section replace, and tools.ts's body validator, concept check
+ * and delete-cascade repair. Mirrors cli/schist/ingest.py scan_connections
+ * and friends, where the rule is written out in full;
+ * schema/connection-line-parity.json pins the two, and
+ * tests/connection-marked.test.ts checks every edge either reader finds
+ * against marked 12.0.2, the renderer the viewer uses.
  *
- * The rule reads the note body (gray-matter's content, which is not
- * stripped). Writers scanning a whole file skip the frontmatter lines first
- * (noteBodyStartLine).
- * - A heading is a line of 0-3 spaces, then exactly `## Connections`, then
- *   optional spaces or tabs. Four spaces or a tab make an indented code block.
- * - A fence opens on a line of 0-3 spaces then 3+ backticks (with no backtick
- *   in the rest of the line) or 3+ tildes, and closes on a later line of 0-3
- *   spaces, then the same character at least as many times, then optional
- *   spaces or tabs. HTML blocks follow CommonMark 0.31 section 4.6 (types 1-7,
- *   HTML_BLOCK_STARTS; type 7 cannot interrupt a paragraph). Whichever block
- *   opens first governs until it closes; an unclosed one runs to the end.
- *   Lines in a fence or HTML block are never a heading, never an edge, and
- *   never end the section. Once a list item opens, its indented lines are
- *   skipped the same way (listOpen in scanBlocks). A line starting with `>`
- *   (a block quote) is never a heading or an edge.
- * - The section ends at the next other line of 0-3 spaces, then `## `, then
- *   text (SECTION_END_RE).
- * - An edge line starts with 0-3 spaces, `-` and a space
- *   (EDGE_PREFIX_RE), then matches CONNECTION_RE once trimmed with the
- *   explicit SLUG_WS_CHARS set (not trim(), whose whitespace differs from
- *   Python's str.strip()).
- * - Lines end only at CommonMark line endings (splitConnectionLines).
+ * The rule is conservative by construction: it indexes an edge only where
+ * the viewer shows it as a top-level list item under the `## Connections`
+ * heading, and when a note holds Markdown whose rendering the rule does not
+ * follow, it indexes nothing from that note and reports why
+ * (ConnectionScan.problem).
+ * - Text: CRLF and CR become LF (normalizeNewlines); the body is
+ *   connectionBody(file).
+ * - Heading: exactly `## Connections` at column 0, then optional spaces or
+ *   tabs, outside a fence. The section ends at the next ATX heading of any
+ *   level (0-3 spaces, 1-6 `#`, whitespace or end of line).
+ * - Fence: spaces, 3+ backticks or tildes, an optional info word of ASCII
+ *   letters, digits and `_+.#-`, optional spaces; closed by the same spaces
+ *   and run; lines between blank or starting with the same spaces, and none
+ *   starting (after spaces and tabs) with ``` or ~~~.
+ * - Problems from the body start to the section end: a non-Markdown line
+ *   separator (VT, FF, U+001C-U+001F, NEL, LS, PS); any other line starting
+ *   with ``` or ~~~; a line starting with `<`; a line starting with `[` that
+ *   could open a link reference definition. In the section also: `>`, a
+ *   line indented by a tab or 4+ spaces, a line of only `-=*_+|:` and
+ *   whitespace, a list marker followed by a tab or 4+ spaces, a fence
+ *   indented 4+ spaces.
+ * - Edge line: `-` at column 0, 1-3 spaces, CONNECTION_RE on the trimmed
+ *   line, a type starting with an ASCII letter or digit, a target not
+ *   starting with `[`.
+ * Every step is one pass over the lines.
  */
-const CONNECTIONS_HEADING_RE = /^ {0,3}## Connections[ \t]*$/;
-const SECTION_END_RE = /^ {0,3}## [ \t]*[^ \t]/;
+const CONNECTIONS_HEADING_RE = /^## Connections[ \t]*$/;
+const SECTION_END_RE = new RegExp(`^ {0,3}#{1,6}(?:${WS_CLASS}|$)`);
+const FENCE_OPEN_RE = /^( *)(`{3,}|~{3,})[A-Za-z0-9_+.#-]* *$/;
+const FENCE_LIKE_RE = /^[ \t]*(?:```|~~~)/;
+const LIST_MARKER_WS_RE = /^[ \t]*(?:[-+*]|[0-9]{1,9}[.)])([ \t]+)/;
+const EDGE_PREFIX_RE = /^- {1,3}[^ \t]/;
+const NON_MARKDOWN_SEPARATOR_RE = /[\u000b\u000c\u001c-\u001f\u0085\u2028\u2029]/;
+const RULE_LINE_RE = /^[-=*_+|: \t]+$/;
+const ASCII_ALNUM_RE = /^[A-Za-z0-9]/;
 
-/** True when `line` (already split) has the shape of a connections heading.
- * It says nothing about fences or HTML blocks; connectionsSection checks both. */
+/** What the connection rule finds in a list of lines; see ingest.py
+ * ConnectionScan. `heading` is -1 when there is none. */
+export interface ConnectionScan {
+  heading: number;
+  end: number;
+  edges: { index: number; connection: Connection }[];
+  problem: { index: number; reason: string } | null;
+}
+
+/** True when `line` (already split) has the shape of the connections
+ * heading. It says nothing about fences; scanConnections checks them. */
 export function isConnectionsHeading(line: string): boolean {
   return CONNECTIONS_HEADING_RE.test(line);
 }
 
-/** True when `line` has the shape of a `## ` heading that ends a section. */
+/** True when `line` has the shape of an ATX heading, which ends a
+ * connections section. */
 export function isSectionEnd(line: string): boolean {
   return SECTION_END_RE.test(line);
 }
@@ -168,479 +189,205 @@ export function trimConnectionWs(text: string): string {
   return text.slice(a, b);
 }
 
-const FENCE_OPEN_RE = /^ {0,3}(?:(`{3,})[^`]*|(~{3,})[^\n\r]*)$/;
-const FENCE_CLOSE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
-
-// CommonMark 0.31 HTML blocks (spec section 4.6). Patterns run on the line
-// with ASCII letters lowercased (asciiLower), never the /i flag, so the case
-// rule matches ingest.py's (Python's re.IGNORECASE folds U+017F to "s").
-const HTML_BLOCK_6_TAGS =
-  "address|article|aside|base|basefont|blockquote|body|caption|center|col|" +
-  "colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|" +
-  "footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|" +
-  "legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|" +
-  "param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|" +
-  "track|ul";
-const HTML_ATTR =
-  `[ \\t]+[a-z_:][a-z0-9_.:-]*` +
-  `(?:[ \\t]*=[ \\t]*(?:[^ \\t"'=<>\`]+|'[^']*'|"[^"]*"))?`;
-// [type, start pattern]; types 1-5 end at a line containing their end marker
-// (htmlBlockEnd), types 6 and 7 before a blank line.
-const HTML_BLOCK_STARTS: [number, RegExp][] = [
-  [1, /^ {0,3}<(script|pre|style|textarea)(?:[ \t]|>|$)/],
-  [2, /^ {0,3}<!--/],
-  [3, /^ {0,3}<\?/],
-  [4, /^ {0,3}<![a-z]/],
-  [5, /^ {0,3}<!\[cdata\[/],
-  [6, new RegExp(`^ {0,3}</?(?:${HTML_BLOCK_6_TAGS})(?:[ \\t]|/?>|$)`)],
-  [7, new RegExp(
-    `^ {0,3}(?:<(?!(?:script|style|pre|textarea)(?:[ \\t/>]|$))` +
-    `[a-z][a-z0-9-]*(?:${HTML_ATTR})*[ \\t]*/?>` +
-    `|</(?!(?:script|style|pre|textarea)[ \\t>])[a-z][a-z0-9-]*[ \\t]*>)[ \\t]*$`,
-  )],
-];
-const HTML_END_MARKERS: Record<number, string> = { 2: "-->", 3: "?>", 4: ">", 5: "]]>" };
-const ATX_HEADING_RE = /^ {0,3}#{1,6}(?:[ \t]|$)/;
-const LIST_MARKER_RE = /^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|$)/;
-const THEMATIC_BREAK_RE = /^ {0,3}([-*_])[ \t]*(?:\1[ \t]*){2,}$/;
-const EDGE_PREFIX_RE = /^ {0,3}- /;
-
-function asciiLower(line: string): string {
-  return line.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+/** Turn CRLF and CR into LF, as Python's text-mode file reads (ingest's)
+ * do. Every connection reader and writer starts here, and note files are
+ * read through readNoteText so the server sees what ingest sees. */
+export function normalizeNewlines(text: string): string {
+  return text.replace(/\r\n?/g, "\n");
 }
 
-/** Columns of leading spaces and tabs (a tab advances to the next multiple
- * of 4), as CommonMark measures indentation. */
-function indentWidth(line: string): number {
-  let width = 0;
-  for (const ch of line) {
-    if (ch === " ") width += 1;
-    else if (ch === "\t") width += 4 - (width % 4);
-    else break;
+/** Python's str.strip(" \t") == "": a blank line. */
+export function isBlank(line: string): boolean {
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] !== " " && line[i] !== "\t") return false;
   }
-  return width;
-}
-
-function isBlank(line: string): boolean {
-  return /^[ \t]*$/.test(line);
-}
-
-const EMPTY_QUOTE_RE = /^ {0,3}>[ \t]*$/;
-// The HTML that interrupts a paragraph in marked 12 (its `paragraph` rule):
-// lowercase type 6 tags followed by spaces, the end, `>` or `/>`, and the
-// type 1 and 2 openers, at the start of the line (no indentation), as written
-// (case-sensitive).
-const MARKED_HTML_INTERRUPT_RE = new RegExp(
-  `^(?:</?(?:${HTML_BLOCK_6_TAGS})(?: +|$|/?>)|<(?:script|pre|style|textarea|!--))`,
-);
-const MARKED_ITEM_RE = /^( {0,3}(?:[*+-]|[0-9]{1,9}[.)]))((?:[\t ][^\n]*)?)$/;
-
-/** marked's lexer turns leading tabs (after any spaces) into four spaces each
- * before it reads blocks. */
-function markedTabs(line: string): string {
-  return line.replace(/^( *)(\t+)/, (_m, sp: string, tabs: string) => sp + "    ".repeat(tabs.length));
-}
-
-/** [indent, first content line] of the list item marked starts at `line`, or
- * [0, ""] when it starts none. Mirrors ingest.py _marked_item_start. */
-function markedItemStart(line: string, inList = false): [number, string] {
-  const m = MARKED_ITEM_RE.exec(markedTabs(line));
-  // marked's list rule needs the bullet alone or followed by a space or tab
-  // and at least one more character, so "- " starts no list; inside a list
-  // (inList: the line ended the previous item) it is an item.
-  if (!m || (m[2].length === 1 && !inList)) return [0, ""];
-  let n = (m[2] + "\n").search(/[^ ]/);
-  n = n > 4 ? 1 : n;
-  const first = m[2].replace(/^\t+/, (t) => "   ".repeat(t.length));
-  return [n + m[1].length, first.slice(n)];
-}
-
-/** Whether marked keeps `line` inside the open list item (marked 12
- * Tokenizer.list). Mirrors ingest.py _marked_item_continues. */
-function markedItemContinues(line: string, indent: number, prev: string, blankSeen: boolean): boolean {
-  const nl = markedTabs(line);
-  const k = Math.min(3, indent - 1);
-  const begins = [new RegExp(`^ {0,${k}}(?:\`\`\`|~~~)`), new RegExp(`^ {0,${k}}#`)];
-  if (begins.some((b) => b.test(nl))) return false;
-  if (new RegExp(`^ {0,${k}}(?:[*+-]|[0-9]{1,9}[.)])(?:[ \t][^\n]*)?$`).test(nl)) return false;
-  const hr = new RegExp(`^ {0,${k}}((?:- *){3,}|(?:_ *){3,}|(?:\\* *){3,})$`);
-  if (hr.test(nl)) return false;
-  if (!nl.trim()) return true;
-  if (nl.search(/[^ ]/) >= indent) return true;
-  if (blankSeen) return false;
-  if (prev && prev.search(/[^ ]/) >= 4) return false;
-  if (begins.some((b) => b.test(prev)) || hr.test(prev)) return false;
   return true;
 }
 
-const QUOTE_RE = /^ {0,3}> ?/;
-const MARKED_PARAGRAPH_INTERRUPTS = [
-  /^ {0,3}#{1,6}(?:[ \t\n\r\f\v]|$)/,
-  /^ {0,3}>/,
-  /^ {0,3}(?:`{3,}[^`]*$|~{3,})/,
-  /^ {0,3}(?:[*+-]|1[.)]) /,
-];
-
-/** Whether marked 12 ends a paragraph before `line` (its `paragraph` rule).
- * Mirrors ingest.py _marked_interrupts_paragraph. */
-function markedInterruptsParagraph(line: string): boolean {
-  const nl = markedTabs(line);
-  if (/^ *$/.test(nl)) return true;
-  if (/^ {0,3}((?:-[\t ]*){3,}|(?:_[ \t]*){3,}|(?:\*[ \t]*){3,})$/.test(nl)) return true;
-  if (MARKED_PARAGRAPH_INTERRUPTS.some((p) => p.test(nl))) return true;
-  return MARKED_HTML_INTERRUPT_RE.test(nl);
+/** Python's str.lstrip(" \t") */
+function lstripSpaceTab(line: string): string {
+  let i = 0;
+  while (i < line.length && (line[i] === " " || line[i] === "\t")) i++;
+  return line.slice(i);
 }
 
-/** True for a non-indented line that cannot continue a list item: an ATX
- * heading, a fence, an HTML block start or a thematic break. */
-function closesList(line: string): boolean {
-  if (ATX_HEADING_RE.test(line) || FENCE_OPEN_RE.test(line) || THEMATIC_BREAK_RE.test(line)) return true;
-  return startsHtmlBlock(line);
-}
-
-function startsHtmlBlock(line: string): boolean {
-  const low = asciiLower(line);
-  return HTML_BLOCK_STARTS.some(([, pattern]) => pattern.test(low));
-}
-
-/** The text after the end marker of an HTML block of type 2-5 on `line`
- * (marked ends the block there and reads on). */
-function afterHtmlEnd(kind: number, line: string, searchFrom: number): string {
-  const marker = HTML_END_MARKERS[kind];
-  const idx = line.indexOf(marker, searchFrom);
-  return idx === -1 ? "" : line.slice(idx + marker.length);
-}
-
-/** Under the marked reading, what the rest of a line after an HTML end
- * marker opens. An HTML block of type 2-5 that also ends inside `rest` hands
- * its own rest on. Mirrors ingest.py _open_in_rest. */
-function openInRest(rest: string): { fenceChar: string; fenceLen: number; htmlKind: number; htmlTag: string } {
-  const none = { fenceChar: "", fenceLen: 0, htmlKind: 0, htmlTag: "" };
-  for (let guard = 0; guard <= rest.length; guard++) {
-    const m = FENCE_OPEN_RE.exec(rest);
-    if (m) {
-      const run = m[1] ?? m[2];
-      return { fenceChar: run[0], fenceLen: run.length, htmlKind: 0, htmlTag: "" };
-    }
-    const low = asciiLower(rest);
-    let next: string | null = null;
-    for (const [kind, pattern] of HTML_BLOCK_STARTS) {
-      const hm = pattern.exec(low);
-      if (hm) {
-        const tag = kind === 1 ? hm[1] : "";
-        if (kind === 6 || kind === 7 || !htmlBlockEnd(kind, tag, low)) {
-          return { fenceChar: "", fenceLen: 0, htmlKind: kind, htmlTag: tag };
-        }
-        if (kind === 1) return none;
-        next = afterHtmlEnd(kind, rest, hm.index + 2);
-        break;
-      }
-    }
-    if (next === null) return none;
-    rest = next;
-  }
-  return none;
-}
-
-function htmlBlockEnd(kind: number, tag: string, low: string): boolean {
-  // Only the opener's own close tag: CommonMark accepts any of the four, but
-  // marked (the viewer's renderer) needs the matching one, and the stricter
-  // end only keeps the block open longer.
-  if (kind === 1) return low.includes(`</${tag}>`);
-  return low.includes(HTML_END_MARKERS[kind]);
-}
-
-type LineKind = "" | "header" | "fence" | "html" | "list" | "lazy" | "quote";
-
-/**
- * Classify each line: "" (ordinary), "header" (before `start`), "fence" (a
- * fence delimiter or inside a fenced code block) or "html" (inside an HTML
- * block). Whichever block opens first governs until it closes. `closer` is
- * what an unclosed block still needs at the end: its closing line, "" (a
- * blank line) for HTML block types 6 and 7, or null when nothing is open.
- *
- * With markedReading, the places where marked (the viewer's renderer)
- * departs from CommonMark follow marked: list items follow marked's own rules
- * (markedItemContinues); a block quote's paragraph absorbs the following
- * lines until marked's paragraph rule ends it (markedInterruptsParagraph);
- * only marked's own set of HTML openers interrupts a
- * paragraph; an HTML block of type 2-5 ends right after its end
- * marker, so the rest of that line can open a fence, another HTML block or
- * a list item;
- * and a line holding U+2028 or U+2029 is not a heading, a rule or a type 7
- * HTML start. With anyHtmlInterrupts as well, an HTML block of any type may
- * start right after paragraph text: marked also ends paragraphs in places
- * neither rule set predicts (a line followed by a `-` line can read as a
- * table), and starting the block there only skips more. connectionsSection skips
- * a line when either reading skips it. Mirrors ingest.py _scan_blocks.
- */
-function scanBlocks(
-  lines: string[],
-  start = 0,
-  markedReading = false,
-  anyHtmlInterrupts = false,
-): { kinds: LineKind[]; closer: string | null } {
-  const kinds: LineKind[] = [];
-  let fenceChar = "";
-  let fenceLen = 0;
-  let fenceIndent = 0; // opener's indentation for a fence opened in a list item
-  let htmlKind = 0;
-  let htmlTag = "";
-  let inParagraph = false;
-  // List items: once a list marker line opens a list, an indented line is
-  // list-item content, never a top-level heading, edge or section end. The
-  // list closes at a non-indented line after a blank line, or at a
-  // non-indented heading, fence, HTML block or thematic break. Stricter than
-  // CommonMark's content-column rule on purpose (renderers differ there): it
-  // only ever skips more lines. Mirrors ingest.py _scan_blocks.
-  let listOpen = false;
-  // The marked reading follows marked's own list-item rules instead
-  // (markedItemStart, markedItemContinues).
-  let itemIndent = 0;
-  let itemPrev = "";
-  let itemBlank = false;
-  let quoteLazy = false; // marked reading: a quote's paragraph is absorbing lines
-  let prevBlank = true;
-  for (let i = 0; i < lines.length; i++) {
-    const ln = lines[i];
-    const blank = isBlank(ln);
-    const wasBlank = prevBlank;
-    prevBlank = blank;
-    const listBefore = markedReading ? itemIndent !== 0 : listOpen;
-    if (i < start) {
-      kinds.push("header");
-      continue;
-    }
-    if (fenceChar) {
-      kinds.push("fence");
-      // A fence opened inside a list item closes only at a closer at least as
-      // indented; a shallower fence line ends the item and opens a new fence
-      // for a renderer, so keeping this one open only skips more.
-      const m = fenceIndent
-        ? (indentWidth(ln) >= fenceIndent ? FENCE_CLOSE_RE.exec(ln.replace(/^[ \t]+/, "")) : null)
-        : FENCE_CLOSE_RE.exec(ln);
-      if (m && m[1][0] === fenceChar && m[1].length >= fenceLen) {
-        fenceChar = "";
-        fenceLen = 0;
-      }
-      continue;
-    }
-    if (htmlKind) {
-      if (htmlKind === 6 || htmlKind === 7) {
-        if (isBlank(ln)) {
-          htmlKind = 0;
-          kinds.push("");
-          inParagraph = false;
-        } else {
-          kinds.push("html");
-        }
-        continue;
-      }
-      kinds.push("html");
-      if (htmlBlockEnd(htmlKind, htmlTag, asciiLower(ln))) {
-        const ended = htmlKind;
-        htmlKind = 0;
-        if (markedReading && ended !== 1) {
-          const rest = afterHtmlEnd(ended, ln, 0);
-          ({ fenceChar, fenceLen, htmlKind, htmlTag } = openInRest(rest));
-          fenceIndent = 0;
-          if (!fenceChar && !htmlKind) {
-            [itemIndent, itemPrev] = markedItemStart(rest);
-            itemBlank = false;
-          }
-        }
-      }
-      continue;
-    }
-    // marked's heading, rule and type 7 HTML patterns stop at U+2028 and
-    // U+2029 (JS `.` and `$`), so to marked such a line is none of these.
-    const lineSep = markedReading && (ln.includes("\u2028") || ln.includes("\u2029"));
-    let probe = ln;
-    let endedItem = false;
-    if (markedReading) {
-      if (itemIndent) {
-        if (markedItemContinues(ln, itemIndent, itemPrev, itemBlank)) {
-          kinds.push("list");
-          if (!ln.trim()) itemBlank = true;
-          itemPrev = markedTabs(ln).slice(itemIndent);
-          continue;
-        }
-        itemIndent = 0;
-        endedItem = true;
-      }
-      if (quoteLazy) {
-        if (!markedInterruptsParagraph(ln)) {
-          kinds.push("quote");
-          continue;
-        }
-        quoteLazy = false;
-      }
-      const tabbed = markedTabs(ln);
-      const qm = QUOTE_RE.exec(tabbed);
-      // marked reads the rest of a quote line as a paragraph that absorbs the
-      // following lines until something interrupts it.
-      if (qm) quoteLazy = qm[0].length < tabbed.length;
-    } else if (listOpen && !blank) {
-      if (indentWidth(ln) >= 1) {
-        // Item content, or the first line after the list when the renderer's
-        // content column is deeper: never a heading or an edge. A fence or
-        // HTML block opened here still opens one (at any indentation).
-        probe = ln.replace(/^[ \t]+/, "");
-        const lowProbe = asciiLower(probe);
-        if (!(FENCE_OPEN_RE.test(probe) ||
-              HTML_BLOCK_STARTS.some(([kind, pattern]) => kind !== 7 && pattern.test(lowProbe)))) {
-          kinds.push("list");
-          continue;
-        }
-      } else if ((wasBlank && !LIST_MARKER_RE.test(ln)) || closesList(ln)) {
-        listOpen = false;
-      }
-    }
-    const m = FENCE_OPEN_RE.exec(probe);
-    if (m) {
-      const run = m[1] ?? m[2];
-      fenceChar = run[0];
-      fenceLen = run.length;
-      fenceIndent = probe !== ln ? indentWidth(ln) : 0;
-      kinds.push("fence");
-      inParagraph = false;
-      continue;
-    }
-    const low = asciiLower(probe);
-    let opened = false;
-    for (const [kind, pattern] of HTML_BLOCK_STARTS) {
-      if (kind === 7 && (lineSep || (inParagraph && !listBefore && !anyHtmlInterrupts))) {
-        continue; // type 7 cannot interrupt a paragraph
-      }
-      if (markedReading && inParagraph && !listBefore && !anyHtmlInterrupts &&
-          !MARKED_HTML_INTERRUPT_RE.test(probe)) {
-        break; // marked: only these (case-sensitive) interrupt one
-      }
-      const hm = pattern.exec(low);
-      if (hm) {
-        kinds.push("html");
-        opened = true;
-        inParagraph = false;
-        htmlTag = kind === 1 ? hm[1] : "";
-        if (kind === 6 || kind === 7 || !htmlBlockEnd(kind, htmlTag, low)) {
-          htmlKind = kind;
-        } else if (markedReading && kind !== 1) {
-          const rest = afterHtmlEnd(kind, probe, hm.index + 2);
-          ({ fenceChar, fenceLen, htmlKind, htmlTag } = openInRest(rest));
-          fenceIndent = 0;
-          if (!fenceChar && !htmlKind) {
-            [itemIndent, itemPrev] = markedItemStart(rest);
-            itemBlank = false;
-          }
-        }
-        break;
-      }
-    }
-    if (opened) continue;
-    if (inParagraph && !listOpen && indentWidth(ln) >= 1 && indentWidth(ln) <= 3 && LIST_MARKER_RE.test(ln)) {
-      // An indented list marker right after paragraph text: marked can read
-      // it as part of a setext heading's text ("text\n - a\n-"), so it is
-      // never an edge, and the paragraph goes on.
-      kinds.push("lazy");
-      listOpen = true; // marked may read it as a list; skip its content
-      if (markedReading) {
-        [itemIndent, itemPrev] = markedItemStart(ln, endedItem);
-        itemBlank = false;
-      }
-      continue;
-    }
-    kinds.push("");
-    if (LIST_MARKER_RE.test(ln) && !THEMATIC_BREAK_RE.test(ln)) listOpen = true;
-    if (markedReading && !THEMATIC_BREAK_RE.test(ln)) {
-      [itemIndent, itemPrev] = markedItemStart(ln, endedItem);
-      itemBlank = false;
-    }
-    if (isBlank(ln) || EMPTY_QUOTE_RE.test(ln) || (!lineSep && (ATX_HEADING_RE.test(ln) || THEMATIC_BREAK_RE.test(ln)))) {
-      inParagraph = false;
-    } else if (!inParagraph && indentWidth(ln) >= 4) {
-      // an indented code line, not a paragraph
-    } else {
-      inParagraph = true;
+/** If lines[i] opens a fence the rule accepts, the index of its closing
+ * line, else -1. */
+function fenceEnd(lines: string[], i: number): number {
+  const m = FENCE_OPEN_RE.exec(lines[i]);
+  if (m === null) return -1;
+  const prefix = m[1];
+  const run = m[2];
+  for (let j = i + 1; j < lines.length; j++) {
+    const ln = lines[j];
+    if (isBlank(ln)) continue;
+    if (!ln.startsWith(prefix)) return -1;
+    if (FENCE_LIKE_RE.test(ln)) {
+      const rest = ln.slice(prefix.length);
+      if (rest.startsWith(run) && /^ *$/.test(rest.slice(run.length))) return j;
+      return -1;
     }
   }
-  let closer: string | null = null;
-  if (fenceChar) closer = fenceChar.repeat(fenceLen);
-  else if (htmlKind === 1) closer = `</${htmlTag}>`;
-  else if (htmlKind >= 2 && htmlKind <= 5) closer = HTML_END_MARKERS[htmlKind];
-  else if (htmlKind === 6 || htmlKind === 7) closer = "";
-  return { kinds, closer };
+  return -1;
 }
 
-/** Per line: true for a line before `start` (frontmatter), a fence
- * delimiter, or a line inside a fenced code block, an HTML block or a list
- * item, under either the CommonMark or the marked reading (scanBlocks). */
-/** Line kinds under each reading: CommonMark, marked, and marked with HTML
- * blocks allowed to interrupt any paragraph. Mirrors ingest.py _readings. */
-function readings(lines: string[], start: number): LineKind[][] {
-  return [
-    scanBlocks(lines, start).kinds,
-    scanBlocks(lines, start, true).kinds,
-    scanBlocks(lines, start, true, true).kinds,
-  ];
+/** For a line starting with `[`: false only when its first unescaped `]`
+ * comes before any other `[` and is not followed by `:`. ingest.py
+ * _may_open_definition is its twin. */
+function mayOpenDefinition(s: string): boolean {
+  let i = 1;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === "\\") {
+      i += 2;
+      continue;
+    }
+    if (c === "[") return true;
+    if (c === "]") return s[i + 1] === ":";
+    i++;
+  }
+  return true;
 }
 
-/** Per reading (CommonMark, marked, marked with any HTML interrupting a
- * paragraph), per line: true when that reading puts the line before `start`,
- * in a fence, in an HTML block or in a list item.
- * schema/connection-reading-parity.json pins each reading in both languages. */
-export function connectionLineReadings(lines: string[], start = 0): boolean[][] {
-  return readings(lines, start).map((r) => r.map((k) => k !== ""));
+function hex4(ch: string): string {
+  return ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, "0");
 }
 
-export function skippedLineFlags(lines: string[], start = 0): boolean[] {
-  const rs = readings(lines, start);
-  return lines.map((_l, i) => rs.some((r) => r[i] !== ""));
-}
-
-/** What a fence or HTML block still open after the last line needs before a
- * writer adds a heading or edge at the end: its closing line, "" (a blank
- * line) for HTML block types 6 and 7, or null when nothing is open. */
-export function unclosedBlockCloser(lines: string[], start = 0): string | null {
-  return scanBlocks(lines, start).closer;
+/** Why `line` stops a note's edges from being indexed, or null. ingest.py
+ * _line_problem is its twin; the reasons are the same strings. */
+function lineProblem(line: string, inSection: boolean): string | null {
+  const sep = NON_MARKDOWN_SEPARATOR_RE.exec(line);
+  if (sep !== null) {
+    return (
+      `the line holds U+${hex4(sep[0])}, which some readers take as a ` +
+      "line break and Markdown does not"
+    );
+  }
+  const s = lstripSpaceTab(line);
+  if (s.startsWith("```") || s.startsWith("~~~")) {
+    return (
+      "a fence the connection rule does not follow (it must open and " +
+      "close with the same run at the same indentation, with an info " +
+      "word of letters, digits and _+.#- only)"
+    );
+  }
+  if (s.startsWith("<")) return 'the line starts with "<" (HTML)';
+  if (s.startsWith("[") && mayOpenDefinition(s)) {
+    return 'the line starts like a link reference definition ("[label]:")';
+  }
+  if (!inSection || s === "") return null;
+  if (s.startsWith(">")) return "a block quote in the Connections section";
+  const lead = line.slice(0, line.length - s.length);
+  if (lead.includes("\t") || lead.length >= 4) {
+    return "a line indented by a tab or 4+ spaces in the Connections section";
+  }
+  if (RULE_LINE_RE.test(s)) {
+    return (
+      'a line of only "-", "=", "*", "_", "+", "|" or ":" in the ' +
+      "Connections section (a heading underline, rule or table)"
+    );
+  }
+  const m = LIST_MARKER_WS_RE.exec(line);
+  if (m !== null && (m[1].includes("\t") || m[1].length >= 4)) {
+    return "a list marker followed by a tab or 4+ spaces in the Connections section";
+  }
+  return null;
 }
 
 /**
- * Locate the first connections section in `lines`, ignoring lines before
- * `start` (a writer passes noteBodyStartLine): the heading index, the end
- * index (the `## ` line that closes the section, or lines.length), and the
- * skipped flags; lines between heading and end whose flag is true are in a
- * fence, HTML block or list item and must be skipped. A line counts as a
- * heading or an edge only when every reading (readings) leaves it alone; a
- * `## ` line ends the section when any does, which only ends it sooner.
- * Null when no heading sits outside all of these.
+ * The edge `line` carries under the connection rule, or null: `-` at column
+ * 0, 1-3 spaces, CONNECTION_RE on the line trimmed with trimConnectionWs, a
+ * type starting with an ASCII letter or digit, and a target that is not a
+ * bracket reference (`[moltbook]`, `[[wiki-note]]`, #415). ingest.py
+ * connection_line_edge applies the same test.
  */
-export function connectionsSection(
-  lines: string[],
-  start = 0,
-): { heading: number; end: number; skipped: boolean[] } | null {
-  const rs = readings(lines, start);
-  const skipped = lines.map((_l, i) => rs.some((r) => r[i] !== ""));
+export function connectionLineMatch(line: string): RegExpMatchArray | null {
+  if (!EDGE_PREFIX_RE.test(line)) return null;
+  const match = trimConnectionWs(line).match(CONNECTION_RE);
+  if (!match || !ASCII_ALNUM_RE.test(match[1]) || match[2].startsWith("[")) return null;
+  return match;
+}
+
+/** Apply the connection rule to `lines` (LF-split), ignoring lines before
+ * `start` (a writer passes noteBodyStartLine). One pass. ingest.py
+ * scan_connections is its twin. */
+export function scanConnections(lines: string[], start = 0): ConnectionScan {
+  const n = lines.length;
   let heading = -1;
-  for (let i = 0; i < lines.length; i++) {
-    if (!skipped[i] && isConnectionsHeading(lines[i])) {
-      heading = i;
-      break;
-    }
-  }
-  if (heading === -1) return null;
-  let end = lines.length;
-  for (let i = heading + 1; i < lines.length; i++) {
-    if (rs.some((r) => r[i] === "") && isSectionEnd(lines[i])) {
+  let end = n;
+  let edges: ConnectionScan["edges"] = [];
+  let problem: ConnectionScan["problem"] = null;
+  let i = start;
+  scan: while (i < n) {
+    const line = lines[i];
+    const inSection = heading !== -1;
+    if (inSection && isSectionEnd(line)) {
       end = i;
       break;
     }
+    const close = fenceEnd(lines, i);
+    if (close !== -1) {
+      if (inSection && line.length - line.replace(/^ +/, "").length >= 4) {
+        problem = { index: i, reason: "a fence indented 4+ spaces in the Connections section" };
+        break;
+      }
+      for (let j = i; j <= close; j++) {
+        if (NON_MARKDOWN_SEPARATOR_RE.test(lines[j])) {
+          problem = { index: j, reason: lineProblem(lines[j], false)! };
+          break scan;
+        }
+      }
+      i = close + 1;
+      continue;
+    }
+    if (!inSection && isConnectionsHeading(line)) {
+      heading = i;
+      i++;
+      continue;
+    }
+    const reason = lineProblem(line, inSection);
+    if (reason !== null) {
+      problem = { index: i, reason };
+      break;
+    }
+    if (inSection) {
+      const m = connectionLineMatch(line);
+      if (m) {
+        edges.push({
+          index: i,
+          connection: { type: m[1], target: m[2], context: m[3] || m[4] || undefined },
+        });
+      }
+    }
+    i++;
   }
-  return { heading, end, skipped };
+  if (problem !== null) {
+    edges = [];
+    if (heading === -1) {
+      for (let k = problem.index + 1; k < n; k++) {
+        if (isConnectionsHeading(lines[k])) {
+          heading = k;
+          break;
+        }
+      }
+    }
+    end = n;
+    if (heading !== -1) {
+      for (let k = Math.max(heading, problem.index) + 1; k < n; k++) {
+        if (isSectionEnd(lines[k])) {
+          end = k;
+          break;
+        }
+      }
+    }
+  }
+  return { heading, end, edges, problem };
 }
 
-/** True when `body` has a connections heading outside a fence or HTML block. */
+/** True when `body` has a connections heading line (found even after a
+ * problem, so a concept body with one is refused either way). */
 export function hasConnectionsHeading(body: string): boolean {
-  return connectionsSection(splitConnectionLines(body)) !== null;
+  return scanConnections(splitConnectionLines(normalizeNewlines(body))).heading !== -1;
 }
 
 /**
@@ -702,7 +449,9 @@ function delimiterMatch(s: string, p: number, kind: FrontmatterKind): number {
  * Length of the frontmatter block at the start of `content`, up to and
  * including its closing line's terminator: python-frontmatter's rule, which
  * ingest (the index) uses, written out in ingest.py note_body_offset and
- * here. Turn CRLF into LF, strip Python whitespace, detect YAML (`---`),
+ * here. Turn CRLF and CR into LF (normalizeNewlines; Python's text-mode
+ * read does the same before ingest sees the file), strip Python whitespace,
+ * detect YAML (`---`),
  * then JSON (`{`), then TOML (`+++`) on the first line, and close at the next
  * boundary line. 0 when there is no frontmatter (a BOM before `---` means
  * none) or it is never closed. gray-matter's own split differs on `-----`,
@@ -711,7 +460,8 @@ function delimiterMatch(s: string, p: number, kind: FrontmatterKind): number {
  * schema/frontmatter-boundary-parity.json pins both languages.
  */
 export function frontmatterLength(content: string): number {
-  const norm = content.split("\r\n").join("\n");
+  // CR alone becomes LF too (same length, so offsets map back as below).
+  const norm = normalizeNewlines(content);
   let lead = 0;
   while (lead < norm.length && PY_WHITESPACE.includes(norm[lead])) lead++;
   let end = norm.length;
@@ -748,53 +498,43 @@ export function frontmatterLength(content: string): number {
   return 0;
 }
 
-/** The note body connection parsing reads: the text after the frontmatter's
- * closing line by frontmatterLength's rule, as ingest reads it. */
+/** The note body the connection rule reads, and the text ingest stores in
+ * docs.body for the viewer to render: CRLF and CR turned into LF, the text
+ * after the frontmatter's closing line (frontmatterLength), without leading
+ * and trailing blank lines (lines of only spaces and tabs). ingest.py
+ * connection_body is its twin. */
 export function connectionBody(content: string): string {
-  return content.slice(frontmatterLength(content));
+  const text = normalizeNewlines(content);
+  const lines = text.slice(frontmatterLength(text)).split("\n");
+  let a = 0;
+  let b = lines.length;
+  while (a < b && isBlank(lines[a])) a++;
+  while (b > a && isBlank(lines[b - 1])) b--;
+  return lines.slice(a, b).join("\n");
 }
 
 /** Number of splitConnectionLines lines that belong to the frontmatter
- * (frontmatterLength). Writers pass it as connectionsSection's `start`. */
+ * (frontmatterLength). Writers pass it as scanConnections's `start`. */
 export function noteBodyStartLine(content: string): number {
   return splitConnectionLines(content.slice(0, frontmatterLength(content))).length;
 }
 
-/**
- * The edge a body line carries under the connection rule, or null: the line
- * must start with 0-3 spaces, "-" and a space (EDGE_PREFIX_RE; a tab or 4+
- * spaces make code, and marked reads "-<tab>" after a quote as quote text),
- * and, trimmed with trimConnectionWs, match
- * CONNECTION_RE,
- * and a bracket reference (`[moltbook]`, `[[wiki-note]]`) is skipped (#415).
- * ingest.py parse_connection_lines applies the same test.
- */
-export function connectionLineMatch(line: string): RegExpMatchArray | null {
-  if (!EDGE_PREFIX_RE.test(line)) return null;
-  const stripped = trimConnectionWs(line);
-  const match = stripped.match(CONNECTION_RE);
-  if (!match || match[2].startsWith("[")) return null;
-  return match;
+/** The connection rule applied to a whole note file's text: its lines
+ * (LF-split after normalizeNewlines) and the scan of its body, with line
+ * indexes into those lines. Writers use this; it finds the same edges as
+ * parseConnections(connectionBody(text)). ingest.py scan_note_connections
+ * is its twin. */
+export function scanNoteConnections(content: string): { lines: string[]; scan: ConnectionScan } {
+  const text = normalizeNewlines(content);
+  const lines = splitConnectionLines(text);
+  return { lines, scan: scanConnections(lines, noteBodyStartLine(text)) };
 }
 
-/** Edges of a raw body's `## Connections` section, each with its index in
- * splitConnectionLines(body). ingest.py parse_connection_lines is its twin. */
+/** Edges of a note body's `## Connections` section, each with its index in
+ * splitConnectionLines(normalizeNewlines(body)); empty when the rule finds a
+ * problem. ingest.py parse_connection_lines is its twin. */
 export function parseConnectionLines(body: string): { index: number; connection: Connection }[] {
-  const out: { index: number; connection: Connection }[] = [];
-  const lines = splitConnectionLines(body);
-  const section = connectionsSection(lines);
-  if (section === null) return out;
-  for (let i = section.heading + 1; i < section.end; i++) {
-    if (section.skipped[i]) continue;
-    const match = connectionLineMatch(lines[i]);
-    if (match) {
-      out.push({
-        index: i,
-        connection: { type: match[1], target: match[2], context: match[3] || match[4] || undefined },
-      });
-    }
-  }
-  return out;
+  return scanConnections(splitConnectionLines(normalizeNewlines(body))).edges;
 }
 
 export function parseConnections(body: string): Connection[] {
@@ -982,19 +722,32 @@ export function parseNote(content: string): {
   metadata: Record<string, unknown>;
   body: string;
   connections: Connection[];
+  connectionsProblem: { line: number; reason: string } | null;
 } {
-  const patched = patchFrontmatterFlowHashtags(content);
+  // CRLF and CR become LF first, as ingest's text-mode read does, so the
+  // frontmatter split and the connections are ingest's.
+  const patched = patchFrontmatterFlowHashtags(normalizeNewlines(content));
   const parsed = matter(patched, YAML_ONLY);
-  // Connections come from ingest's body slice (connectionBody), not
-  // gray-matter's content, so get_note and the index agree on notes where
-  // the two frontmatter splits differ (`-----`, `---foo`, a BOM, leading
-  // blank lines). `body` stays gray-matter's: writers round-trip it.
-  const connections = parseConnections(connectionBody(patched));
+  // Connections come from ingest's reading of the file (scanNoteConnections,
+  // the same edges as connectionBody + parseConnections), not gray-matter's
+  // content, so get_note and the index agree on notes where the two
+  // frontmatter splits differ (`-----`, `---foo`, a BOM, leading blank
+  // lines). `body` stays gray-matter's: writers round-trip it.
+  const { scan } = scanNoteConnections(patched);
   return {
     metadata: parsed.data as Record<string, unknown>,
     body: parsed.content,
-    connections,
+    connections: scan.edges.map((e) => e.connection),
+    connectionsProblem: connectionsProblemOf(scan),
   };
+}
+
+/** A scan's problem as the tools report it (1-based line in the scanned
+ * lines), or null when the problem does not matter: there is no
+ * Connections heading, so nothing would be indexed anyway. */
+export function connectionsProblemOf(scan: ConnectionScan): { line: number; reason: string } | null {
+  if (scan.problem === null || scan.heading === -1) return null;
+  return { line: scan.problem.index + 1, reason: scan.problem.reason };
 }
 
 function sanitizeContext(context: string): string {
@@ -1041,94 +794,145 @@ export function buildConnectionLine(conn: Connection): string {
   return line;
 }
 
-/**
- * Insert `line` into `content`'s `## Connections` section, creating the
- * section at EOF when no heading line exists. Scans splitConnectionLines
- * boundaries (CommonMark line endings) — the SAME splitter parseConnections
- * and ingest read with —
- * never an insert regex anchored on a bare "\n". The old regex required
- * `## Connections\n` literally, so a CRLF heading (`## Connections\r\n`,
- * core.autocrlf / Windows checkout) matched nothing, String.replace returned
- * the content unchanged, writeNote deduped the no-op, and add_connection
- * reported success while the edge was silently dropped (#366) — the same
- * shape as the missing-trailing-newline drop (#295). The heading gate is a
- * line-scan, not a substring test, so a mid-line prose mention of
- * "## Connections" gets a real section instead of an edge outside any
- * section. The heading must be exact and outside a fenced code block or
- * HTML block, and only body lines count (connectionsSection and
- * noteBodyStartLine, the rule parseConnections reads with), so a
- * `## Connections` shown in a fence never receives an edge. Output is always
- * "\n"-joined with a single trailing newline, turning CRLF and CR into LF;
- * VT, FF, NEL, U+2028 and the like stay inside their line.
- *
- * Byte-identical to the CLI's markdown_io.insert_connection_line;
- * schema/connection-append-parity.json pins both, like #318/#338 did for
- * slugs.
- */
-export function insertConnectionLine(content: string, line: string): string {
-  const lines = splitConnectionLines(content);
-  // Scan only the body: frontmatter lines (a YAML block scalar holding
-  // "  ```" or "  ## Connections") must not open a fence or a section.
-  const start = noteBodyStartLine(content);
-  const section = connectionsSection(lines, start);
-  if (section === null) {
-    // When the body ends inside an unclosed fence or HTML block, the new
-    // heading would land inside it too, so close it first.
-    // A type 6/7 HTML block ("" closer) is ended by the blank line below.
-    const open = unclosedBlockCloser(lines, start);
-    const closer = open ? "\n" + open : "";
-    return content.trimEnd() + closer + "\n\n## Connections\n\n" + line + "\n";
-  }
-  if (section.end < lines.length) {
-    lines.splice(section.end, 0, line);
-  } else {
-    // The section runs to EOF. If it ends inside an unclosed fence or HTML
-    // block, close it (a blank line for HTML types 6 and 7) so the appended
-    // edge is outside it.
-    const open = unclosedBlockCloser(lines, start);
-    if (open !== null) lines.push(open);
-    lines.push(line);
-  }
-  return lines.join("\n") + "\n";
+/** A write that would leave the note's indexed edges different from what
+ * the writer meant: refused, nothing written. normalizeError turns it into
+ * a VALIDATION_ERROR. */
+export class ConnectionWriteError extends Error {
+  readonly error = "VALIDATION_ERROR";
 }
 
+function edgeKey(c: Connection): string {
+  return `${c.type}\u0000${c.target}\u0000${c.context ?? ""}`;
+}
+
+/** True when `a` and `b` hold the same edges, counting repeats. */
+export function sameEdges(a: Connection[], b: Connection[]): boolean {
+  if (a.length !== b.length) return false;
+  const count = new Map<string, number>();
+  for (const c of a) count.set(edgeKey(c), (count.get(edgeKey(c)) ?? 0) + 1);
+  for (const c of b) {
+    const k = edgeKey(c);
+    const v = count.get(k) ?? 0;
+    if (v === 0) return false;
+    count.set(k, v - 1);
+  }
+  return true;
+}
+
+function describeEdges(edges: Connection[]): string {
+  return edges.length === 0 ? "none" : edges.map((c) => `${c.type}: ${c.target}`).join(", ");
+}
+
+/** Throw ConnectionWriteError unless the note file `text` reads exactly
+ * `expected` under the connection rule. Every writer runs this on what it is
+ * about to write. ingest.py's writers (markdown_io) do the same. */
+export function verifyNoteConnections(text: string, expected: Connection[], action: string): void {
+  const { scan } = scanNoteConnections(text);
+  const got = scan.edges.map((e) => e.connection);
+  if (sameEdges(got, expected)) return;
+  const problem = connectionsProblemOf(scan);
+  throw new ConnectionWriteError(
+    `${action} refused: the note would be indexed with connections ` +
+    `[${describeEdges(got)}], not [${describeEdges(expected)}]` +
+    (problem ? `; line ${problem.line}: ${problem.reason}, so no connections are indexed from this note` : "") +
+    ". Nothing was written.",
+  );
+}
+
+/** The edge a connection line the writers build carries, or a
+ * ConnectionWriteError when the rule would not read it as one. */
+export function edgeOfLine(line: string): Connection {
+  const m = connectionLineMatch(line);
+  if (!m) throw new ConnectionWriteError(`"${line}" is not a line the connection rule reads as an edge. Nothing was written.`);
+  return { type: m[1], target: m[2], context: m[3] || m[4] || undefined };
+}
+
+/** Drop trailing blank lines (spaces and tabs only). */
+function trimTrailingBlankLines(lines: string[]): string[] {
+  let b = lines.length;
+  while (b > 0 && isBlank(lines[b - 1])) b--;
+  return lines.slice(0, b);
+}
+
+/**
+ * Insert `line` into `content`'s `## Connections` section after its last
+ * non-blank line, or add the section at the end of the note when there is
+ * none. Reads with scanNoteConnections (the rule ingest reads with, from the
+ * body only: a YAML block scalar holding "## Connections" is never a
+ * section). Output is "\n"-joined with a single trailing newline; CRLF and
+ * CR become LF.
+ *
+ * The result is checked: it must read as the note's edges plus the new one,
+ * or ConnectionWriteError is thrown and nothing is written (for instance
+ * when the note holds Markdown the rule does not follow, so no edge of it is
+ * indexed).
+ *
+ * Byte-identical to the CLI's markdown_io.insert_connection_line;
+ * schema/connection-append-parity.json pins both.
+ */
+export function insertConnectionLine(content: string, line: string): string {
+  const added = edgeOfLine(line);
+  const { lines, scan } = scanNoteConnections(content);
+  const before = scan.edges.map((e) => e.connection);
+  let out: string;
+  if (scan.problem !== null) {
+    throw new ConnectionWriteError(
+      `adding the connection refused: line ${scan.problem.index + 1}: ${scan.problem.reason}; ` +
+      "the connection rule indexes no connections from this note, so the new one would not be " +
+      "indexed either. Edit the note first. Nothing was written.",
+    );
+  }
+  if (scan.heading === -1) {
+    out = trimTrailingBlankLines(lines).join("\n") + "\n\n## Connections\n\n" + line + "\n";
+  } else {
+    let last = scan.heading;
+    for (let i = scan.heading + 1; i < scan.end; i++) if (!isBlank(lines[i])) last = i;
+    const insert = last === scan.heading ? ["", line] : [line];
+    out = [...lines.slice(0, last + 1), ...insert, ...lines.slice(last + 1)].join("\n") + "\n";
+  }
+  verifyNoteConnections(out, [...before, added], "adding the connection");
+  return out;
+}
+
+/**
+ * Serialize a note. With `connections`, the body's `## Connections` section
+ * (found by the connection rule) is replaced by them, or added at the end.
+ * The result is checked: it must read as exactly `connections`, or, without
+ * them, as the edges `body` holds; otherwise ConnectionWriteError is thrown.
+ */
 export function buildNote(
   metadata: Record<string, unknown>,
   body: string,
   connections?: Connection[]
 ): string {
   let content = body;
+  let expected: Connection[];
   if (connections && connections.length > 0) {
-    const connectionLines = connections.map(buildConnectionLine).join("\n");
-    // The section is found by connectionsSection, the same rule as
-    // parseConnections and insertConnectionLine: an exact heading outside a
-    // fenced code block or HTML block. `content` is a body (no
-    // frontmatter). A substring test matched mid-line mentions (prose,
-    // code samples) and replaced the text after them (#732).
-    const lines = splitConnectionLines(content);
-    const found = connectionsSection(lines);
-    if (found === null) {
-      const open = unclosedBlockCloser(lines);
-      const closer = open ? "\n" + open : "";
-      content = content.trimEnd() + closer + `\n\n## Connections\n\n${connectionLines}\n`;
+    const connectionLines = connections.map(buildConnectionLine);
+    expected = connectionLines.map(edgeOfLine);
+    const lines = splitConnectionLines(normalizeNewlines(content));
+    const found = scanConnections(lines);
+    if (found.heading === -1) {
+      content = trimTrailingBlankLines(lines).join("\n") + `\n\n## Connections\n\n${connectionLines.join("\n")}\n`;
     } else {
-      const start = found.heading;
-      const end = found.end;
-      const section = ["## Connections", "", ...connectionLines.split("\n"), ""];
-      content = [...lines.slice(0, start), ...section, ...lines.slice(end)].join("\n");
-      if (end === lines.length) content = content.trimEnd() + "\n";
+      const section = ["## Connections", "", ...connectionLines, ""];
+      content = [...lines.slice(0, found.heading), ...section, ...lines.slice(found.end)].join("\n");
+      if (found.end === lines.length) content = content.trimEnd() + "\n";
     }
+  } else {
+    expected = parseConnections(content);
   }
   // Hand gray-matter a file object, not a string: given a string,
   // matter.stringify first parses it as a note with the default engines, so a
   // body that opens with `---js` would be evaluated and a body that opens with
   // a YAML block would be merged into the frontmatter.
-  const out = matter.stringify({ content }, metadata, YAML_ONLY);
+  let out = matter.stringify({ content }, metadata, YAML_ONLY);
   // With no metadata gray-matter writes no frontmatter block, and a body that
   // opens with `---` would become the note's first line: read back as its
   // frontmatter, or refused by the hub. An empty block keeps it body text.
   if (Object.keys(metadata).length === 0 && /^\uFEFF*---/.test(content)) {
-    return `---\n---\n${out}`;
+    out = `---\n---\n${out}`;
   }
+  verifyNoteConnections(out, expected, "writing the note");
   return out;
 }

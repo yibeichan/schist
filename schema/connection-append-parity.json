@@ -1,9 +1,9 @@
 [
   {
-    "name": "golden path: insert before the next heading",
+    "name": "golden path: insert after the section's last non-blank line",
     "content": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n\n## Notes\nBody.\n",
     "line": "- extends: notes/b.md",
-    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n\n- extends: notes/b.md\n## Notes\nBody.\n"
+    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n- extends: notes/b.md\n\n## Notes\nBody.\n"
   },
   {
     "name": "section at EOF: append at end",
@@ -27,7 +27,7 @@
     "name": "CRLF note (#366): heading matches, output normalized to LF",
     "content": "---\r\ntitle: A\r\n---\r\n\r\n## Connections\r\n\r\n- supports: notes/x.md\r\n\r\n## Notes\r\nBody.\r\n",
     "line": "- extends: notes/b.md",
-    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n\n- extends: notes/b.md\n## Notes\nBody.\n"
+    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n- extends: notes/b.md\n\n## Notes\nBody.\n"
   },
   {
     "name": "CR-only note (classic Mac): heading matches, output normalized to LF",
@@ -36,22 +36,22 @@
     "expected": "## Connections\n- supports: notes/x.md\n- extends: notes/b.md\n## Notes\nBody.\n"
   },
   {
-    "name": "NEL-joined note is one line: new section at end",
+    "name": "NEL in the note is a problem: refused",
     "content": "## Connections\u0085- supports: notes/x.md\u0085## Notes\u0085Body.\n",
     "line": "- extends: notes/b.md",
-    "expected": "## Connections\u0085- supports: notes/x.md\u0085## Notes\u0085Body.\n\n## Connections\n\n- extends: notes/b.md\n"
+    "expected": null
   },
   {
-    "name": "U+2028-joined note is one line: new section at end",
+    "name": "U+2028 in the note is a problem: refused",
     "content": "## Connections\u2028- supports: notes/x.md\u2028## Notes\u2028Body.",
     "line": "- extends: notes/b.md",
-    "expected": "## Connections\u2028- supports: notes/x.md\u2028## Notes\u2028Body.\n\n## Connections\n\n- extends: notes/b.md\n"
+    "expected": null
   },
   {
-    "name": "VT- and FF-joined note is one line: new section at end",
+    "name": "VT and FF in the note are a problem: refused",
     "content": "## Connections\u000b- supports: notes/x.md\f## Notes\u000bBody.",
     "line": "- extends: notes/b.md",
-    "expected": "## Connections\u000b- supports: notes/x.md\f## Notes\u000bBody.\n\n## Connections\n\n- extends: notes/b.md\n"
+    "expected": null
   },
   {
     "name": "prose mention of ## Connections mid-line is not a heading: real section created at EOF",
@@ -60,16 +60,16 @@
     "expected": "See the ## Connections spec.\n\n## Connections\n\n- extends: notes/b.md\n"
   },
   {
-    "name": "indented heading is honored, like both readers honor it",
+    "name": "indented heading is not read: new section at end",
     "content": "  ## Connections\n- supports: notes/x.md\n## Notes\n",
     "line": "- extends: notes/b.md",
-    "expected": "  ## Connections\n- supports: notes/x.md\n- extends: notes/b.md\n## Notes\n"
+    "expected": "  ## Connections\n- supports: notes/x.md\n## Notes\n\n## Connections\n\n- extends: notes/b.md\n"
   },
   {
-    "name": "blank lines before the next heading: insert after them, still inside the section",
+    "name": "blank lines before the next heading: insert before them",
     "content": "## Connections\n- supports: notes/x.md\n\n\n## Notes\n",
     "line": "- extends: notes/b.md",
-    "expected": "## Connections\n- supports: notes/x.md\n\n\n- extends: notes/b.md\n## Notes\n"
+    "expected": "## Connections\n- supports: notes/x.md\n- extends: notes/b.md\n\n\n## Notes\n"
   },
   {
     "name": "empty content: section created after the documented leading blank pair",
@@ -81,7 +81,7 @@
     "name": "line with quoted context payload is inserted verbatim",
     "content": "## Connections\n",
     "line": "- refutes: notes/c.md \"disagrees on mechanism\"",
-    "expected": "## Connections\n- refutes: notes/c.md \"disagrees on mechanism\"\n"
+    "expected": "## Connections\n\n- refutes: notes/c.md \"disagrees on mechanism\"\n"
   },
   {
     "name": "heading only inside a closed fence: new section at end",
@@ -90,10 +90,10 @@
     "expected": "---\ntitle: A\n---\n\nExample:\n```\n## Connections\n- supports: notes/x.md\n```\n\n## Connections\n\n- extends: notes/b.md\n"
   },
   {
-    "name": "heading only inside an unclosed fence: fence closed, new section at end",
+    "name": "an unclosed fence is a problem: refused",
     "content": "---\ntitle: A\n---\n\n```\n## Connections\n- supports: notes/x.md\n",
     "line": "- extends: notes/b.md",
-    "expected": "---\ntitle: A\n---\n\n```\n## Connections\n- supports: notes/x.md\n```\n\n## Connections\n\n- extends: notes/b.md\n"
+    "expected": null
   },
   {
     "name": "near-miss heading text: new section at end",
@@ -111,25 +111,25 @@
     "name": "real section after a fenced example: insert into the real section",
     "content": "---\ntitle: A\n---\n\n```\n## Connections\n## Notes\n```\n\n## Connections\n\n- supports: notes/x.md\n\n## Notes\nBody.\n",
     "line": "- extends: notes/b.md",
-    "expected": "---\ntitle: A\n---\n\n```\n## Connections\n## Notes\n```\n\n## Connections\n\n- supports: notes/x.md\n\n- extends: notes/b.md\n## Notes\nBody.\n"
+    "expected": "---\ntitle: A\n---\n\n```\n## Connections\n## Notes\n```\n\n## Connections\n\n- supports: notes/x.md\n- extends: notes/b.md\n\n## Notes\nBody.\n"
   },
   {
-    "name": "fenced ## heading inside the section does not end it",
+    "name": "fenced ## heading inside the section does not end it; the edge goes after the fence",
     "content": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n~~~\n## Not a heading\n~~~\n\n## Notes\nBody.\n",
     "line": "- extends: notes/b.md",
-    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n~~~\n## Not a heading\n~~~\n\n- extends: notes/b.md\n## Notes\nBody.\n"
+    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n~~~\n## Not a heading\n~~~\n- extends: notes/b.md\n\n## Notes\nBody.\n"
   },
   {
-    "name": "section ending in an unclosed fence: fence closed before the edge",
+    "name": "a section ending in an unclosed fence: refused",
     "content": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n````\ncode\n",
     "line": "- extends: notes/b.md",
-    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n````\ncode\n````\n- extends: notes/b.md\n"
+    "expected": null
   },
   {
     "name": "CRLF exact heading: insert and normalize to LF",
     "content": "---\r\ntitle: A\r\n---\r\n\r\n## Connections\r\n\r\n- supports: notes/x.md\r\n\r\n## Notes\r\n",
     "line": "- extends: notes/b.md",
-    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n\n- extends: notes/b.md\n## Notes\n"
+    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n- extends: notes/b.md\n\n## Notes\n"
   },
   {
     "name": "fence line in a frontmatter block scalar: insert into the body section",
@@ -150,33 +150,99 @@
     "expected": "---\ntitle: t\n---\n\n    ## Connections\n    - extends: notes/x.md\n\n## Connections\n\n- extends: notes/b.md\n"
   },
   {
-    "name": "heading inside an HTML comment: new section at end",
+    "name": "heading inside an HTML comment: refused",
     "content": "---\ntitle: A\n---\n\n<!--\n## Connections\n- supports: notes/x.md\n-->\n",
     "line": "- extends: notes/b.md",
-    "expected": "---\ntitle: A\n---\n\n<!--\n## Connections\n- supports: notes/x.md\n-->\n\n## Connections\n\n- extends: notes/b.md\n"
+    "expected": null
   },
   {
-    "name": "unclosed HTML comment: closed before the new section",
+    "name": "unclosed HTML comment: refused",
     "content": "---\ntitle: A\n---\n\n<!--\n## Connections\n",
     "line": "- extends: notes/b.md",
-    "expected": "---\ntitle: A\n---\n\n<!--\n## Connections\n-->\n\n## Connections\n\n- extends: notes/b.md\n"
+    "expected": null
   },
   {
-    "name": "section ending in an open HTML type 6 block: blank line before the edge",
+    "name": "section ending in an HTML block: refused",
     "content": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n<div>\nhtml\n",
     "line": "- extends: notes/b.md",
-    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n<div>\nhtml\n\n- extends: notes/b.md\n"
+    "expected": null
   },
   {
-    "name": "section ending in an unclosed pre block: closed before the edge",
+    "name": "section ending in a pre block: refused",
     "content": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n<pre>\ncode\n",
     "line": "- extends: notes/b.md",
-    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n<pre>\ncode\n</pre>\n- extends: notes/b.md\n"
+    "expected": null
   },
   {
-    "name": "U+001F before ## inside the section: insert after it",
+    "name": "U+001F in the section: refused",
     "content": "---\ntitle: A\n---\n\n## Connections\n- supports: notes/x.md\n\u001f## P\n- supports: notes/y.md\n",
     "line": "- extends: notes/b.md",
-    "expected": "---\ntitle: A\n---\n\n## Connections\n- supports: notes/x.md\n\u001f## P\n- supports: notes/y.md\n- extends: notes/b.md\n"
+    "expected": null
+  },
+  {
+    "name": "R3-10: a closing fence with a trailing space closes the fence: section after it",
+    "content": "~~~\ncode\n~~~ \n",
+    "line": "- extends: zz9",
+    "expected": "~~~\ncode\n~~~ \n\n## Connections\n\n- extends: zz9\n"
+  },
+  {
+    "name": "R3-10: a closing fence with U+3000 after it: refused",
+    "content": "```\ncode\n```\u3000",
+    "line": "- extends: zz9",
+    "expected": null
+  },
+  {
+    "name": "R3-10: a closing fence with U+001C after it: refused",
+    "content": "~~~\ncode\n~~~\u001c\n",
+    "line": "- extends: zz9",
+    "expected": null
+  },
+  {
+    "name": "R3-10: a last line that strips to an HTML opener: refused",
+    "content": "<style\f\n\n",
+    "line": "- extends: zz9",
+    "expected": null
+  },
+  {
+    "name": "R3-14: a fence open only in marked: refused",
+    "content": "<? ?>```\n",
+    "line": "- extends: zz9",
+    "expected": null
+  },
+  {
+    "name": "R3-14: a fence in a list item with a tab: refused",
+    "content": "- \n\t```\n",
+    "line": "- extends: zz9",
+    "expected": null
+  },
+  {
+    "name": "R3-14: an unclosed indented fence in a list item: refused",
+    "content": "2)\n  ~~~~\n",
+    "line": "- extends: zz9",
+    "expected": null
+  },
+  {
+    "name": "R3-15: an indented heading after the section: the edge goes after the last line, the next section stays out",
+    "content": "## Connections\n- extends: a\n\nSee also:\n\n  ## Other\n- refs: x\n",
+    "line": "- extends: zz9",
+    "expected": "## Connections\n- extends: a\n\nSee also:\n- extends: zz9\n\n  ## Other\n- refs: x\n"
+  },
+  {
+    "name": "a note with a problem before its section: refused",
+    "content": "<div>\n\n## Connections\n- extends: a\n",
+    "line": "- extends: zz9",
+    "expected": null
+  },
+  {
+    "name": "trailing blank lines before a new section are dropped",
+    "content": "Body.\n\n  \n\t\n",
+    "line": "- extends: zz9",
+    "expected": "Body.\n\n## Connections\n\n- extends: zz9\n"
+  },
+  {
+    "name": "a section with only a blank line: the edge goes after the heading and a blank line",
+    "content": "## Connections\n\n## Notes\n",
+    "line": "- extends: zz9",
+    "expected": "## Connections\n\n- extends: zz9\n\n## Notes\n"
   }
 ]

@@ -107,54 +107,112 @@ CONNECTION_RE = re.compile(
     f'(?:{_WS_CLASS}+"([^"]*)")?(?:{_WS_CLASS}+—{_WS_CLASS}+([^\\n\\r]*))?$'
 )
 
-# The connections section rule, shared by every reader and writer of a note's
+# The connections rule, shared by every reader and writer of a note's
 # `## Connections` section (parse_connections here; markdown_io's insert and
 # append; the concept checks and `schist schema --validate` in commands.py).
 # It lives in ingest.py, not markdown_io, because the bare-script hook copy of
 # this file cannot import markdown_io. mcp-server/src/markdown-parser.ts
-# mirrors it (connectionsSection and friends); the body cases in
-# schema/connection-line-parity.json and the writer cases in
-# schema/connection-append-parity.json pin the two.
+# mirrors it (scanConnections and friends); schema/connection-line-parity.json
+# pins the two, and mcp-server/tests/connection-marked.test.ts checks every
+# edge either reader finds against marked 12.0.2, the renderer the viewer
+# uses.
 #
-# The rule reads the note body: the raw text after the frontmatter's closing
-# line (note_body_offset), never python-frontmatter's stripped post.content.
-# - A heading is a line of 0-3 spaces, then exactly `## Connections`, then
-#   optional spaces or tabs. Four spaces or a tab make an indented code block.
-# - A fence opens on a line of 0-3 spaces then 3+ backticks (with no backtick
-#   in the rest of the line) or 3+ tildes, and closes on a later line of 0-3
-#   spaces, then the same character at least as many times, then optional
-#   spaces or tabs. HTML blocks follow CommonMark 0.31 section 4.6 (types 1-7,
-#   _HTML_BLOCK_STARTS; type 7 cannot interrupt a paragraph). Whichever block
-#   opens first governs until it closes; an unclosed one runs to the end.
-#   Lines in a fence or HTML block are never a heading, never an edge, and
-#   never end the section. Once a list item opens, its indented lines are
-#   skipped the same way (list_open in _scan_blocks). A line starting with
-#   `>` (a block quote) is never a heading or an edge.
-# - The section ends at the next other line of 0-3 spaces, then `## `, then
-#   text (SECTION_END_RE).
-# - An edge line starts with 0-3 spaces, `-` and a space
-#   (_EDGE_PREFIX_RE), then matches CONNECTION_RE once trimmed with the
-#   explicit _SLUG_WS_CHARS set (not str.strip(), whose whitespace differs
-#   from JS trim()).
-# - Lines end only at CommonMark line endings (split_connection_lines).
+# The rule is conservative by construction. It indexes an edge only where
+# the viewer shows it as a top-level list item under the `## Connections`
+# heading, and when a note holds Markdown whose rendering the rule does not
+# follow, it indexes nothing from that note and reports why
+# (ConnectionScan.problem; `schist schema --validate` and the MCP server's
+# get_note show it, and the writers refuse to edit the section).
+#
+# The rule reads the note body as connection_body returns it: CRLF and CR
+# become LF, the text after the frontmatter's closing line (note_body_offset),
+# without leading and trailing blank lines. Ingest stores exactly that text
+# in docs.body, and the viewer renders it unchanged. Lines are split on LF.
+# - The heading is the first line that is exactly `## Connections` at column
+#   0, optionally followed by spaces or tabs, outside a fence.
+# - The section ends at the next line of 0-3 spaces, 1-6 `#`, then whitespace
+#   (_SLUG_WS_CHARS) or the end of the line: any ATX heading, of any level,
+#   empty or not. Otherwise it runs to the end of the body.
+# - A fence opens on a line of spaces, then 3+ backticks or 3+ tildes, then
+#   an optional info word of ASCII letters, digits and `_+.#-`, then optional
+#   spaces. It closes on the first later line that is the same spaces and the
+#   same run, then optional spaces; every line between must be blank or start
+#   with the same spaces, and none may start, after spaces and tabs, with
+#   ``` or ~~~. Lines from opener to closer are never a heading, an edge or a
+#   section end. In the section, an opener indented 4+ spaces is a problem.
+# - Problems, from the body start to the end of the section: a line holding
+#   U+000B, U+000C, U+001C-U+001F, U+0085, U+2028 or U+2029; a line that
+#   starts, after spaces and tabs, with ``` or ~~~ and is not part of a
+#   fence as above; a line that starts, after spaces and tabs, with `<`; a
+#   line that starts, after spaces and tabs, with `[` unless its first
+#   unescaped `]` comes before any other `[` and is not followed by `:` (so
+#   it cannot open a link reference definition, whose label and title can
+#   run over later lines).
+# - Problems inside the section, outside fences: a line that starts, after
+#   spaces and tabs, with `>`; a non-blank line indented by a tab or 4+
+#   spaces; a non-blank line made only of `-`, `=`, `*`, `_`, `+`, `|`, `:`,
+#   spaces and tabs (setext underlines, thematic breaks, table delimiter
+#   rows); a list marker followed by a tab or 4+ spaces.
+# - An edge line, in the section and outside fences: `-` at column 0, 1-3
+#   spaces, then text that, trimmed with the explicit _SLUG_WS_CHARS set,
+#   matches CONNECTION_RE with a type that starts with an ASCII letter or
+#   digit and a target that does not start with `[`.
+#
+# Every step is one pass over the lines, so reading a note is linear in its
+# size.
 #
 # CONNECTIONS_RULE_VERSION is bumped whenever this rule changes; `schist
 # doctor` compares it against a hand-provisioned .schist/ingest.py hook copy.
 CONNECTIONS_RULE_VERSION = 2
 CONNECTIONS_HEADING_TEXT = '## Connections'
-_CONNECTIONS_HEADING_RE = re.compile(r' {0,3}## Connections[ \t]*')
-SECTION_END_RE = re.compile(r' {0,3}## [ \t]*[^ \t]')
+_CONNECTIONS_HEADING_RE = re.compile(r'## Connections[ \t]*')
+_SECTION_END_RE = re.compile(f' {{0,3}}#{{1,6}}(?:{_WS_CLASS}|$)')
+_FENCE_OPEN_RE = re.compile(r'( *)(`{3,}|~{3,})[A-Za-z0-9_+.#-]* *')
+_FENCE_LIKE_RE = re.compile(r'[ \t]*(?:```|~~~)')
+_LIST_MARKER_WS_RE = re.compile(r'[ \t]*(?:[-+*]|[0-9]{1,9}[.)])([ \t]+)')
+_EDGE_PREFIX_RE = re.compile(r'- {1,3}[^ \t]')
+# Characters a renderer reads as a line break or that Python's
+# str.splitlines() splits on, but a Markdown line does not end at.
+_NON_MARKDOWN_SEPARATORS = '\x0b\x0c\x1c\x1d\x1e\x1f\x85\u2028\u2029'
+_NON_MARKDOWN_SEPARATOR_RE = re.compile(f'[{_NON_MARKDOWN_SEPARATORS}]')
+_RULE_LINE_CHARS = frozenset('-=*_+|: \t')
+_ASCII_ALNUM = frozenset(
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+)
+
+
+class ConnectionScan:
+    """What the connection rule finds in a list of lines.
+
+    heading: index of the `## Connections` heading, or None. When a problem
+        comes before it, the first later line of that shape.
+    end: index of the line that ends the section, or len(lines).
+    edges: (line index, {'type', 'target', 'context'}) for each edge line,
+        always empty when `problem` is set.
+    problem: (line index, reason) for the first line that stops the note's
+        edges from being indexed, or None.
+    """
+
+    __slots__ = ('heading', 'end', 'edges', 'problem')
+
+    def __init__(self, heading, end, edges, problem):
+        self.heading = heading
+        self.end = end
+        self.edges = edges
+        self.problem = problem
+
 
 def is_connections_heading(line: str) -> bool:
-    """True when `line` (already split, no terminator) has the shape of a
-    connections heading. It says nothing about fences or HTML blocks;
-    connections_section checks both."""
+    """True when `line` (already split, no terminator) has the shape of the
+    connections heading. It says nothing about fences; scan_connections
+    checks them."""
     return _CONNECTIONS_HEADING_RE.fullmatch(line) is not None
 
 
 def is_section_end(line: str) -> bool:
-    """True when `line` has the shape of a `## ` heading that ends a section."""
-    return SECTION_END_RE.match(line) is not None
+    """True when `line` has the shape of an ATX heading, which ends a
+    connections section."""
+    return _SECTION_END_RE.match(line) is not None
 
 
 def trim_connection_ws(text: str) -> str:
@@ -162,528 +220,203 @@ def trim_connection_ws(text: str) -> str:
     return text.strip(_SLUG_WS_CHARS)
 
 
-_FENCE_OPEN_RE = re.compile(r' {0,3}(?:(`{3,})[^`]*|(~{3,})[^\n\r]*)')
-_FENCE_CLOSE_RE = re.compile(r' {0,3}(`{3,}|~{3,})[ \t]*')
-
-# CommonMark 0.31 HTML blocks (spec section 4.6). Patterns run on the line
-# with ASCII letters lowercased (_ascii_lower), never re.IGNORECASE, whose
-# Unicode case folding (U+017F matches "s") differs from JS's /i.
-_HTML_BLOCK_6_TAGS = (
-    'address|article|aside|base|basefont|blockquote|body|caption|center|col|'
-    'colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|'
-    'footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|'
-    'legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|'
-    'param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|'
-    'track|ul'
-)
-_HTML_ATTR = (
-    r'[ \t]+[a-z_:][a-z0-9_.:-]*'
-    r'(?:[ \t]*=[ \t]*(?:[^ \t"\'=<>`]+|\'[^\']*\'|"[^"]*"))?'
-)
-# (type, start pattern, end marker or None for "ends before a blank line")
-_HTML_BLOCK_STARTS = (
-    (1, re.compile(r' {0,3}<(script|pre|style|textarea)(?:[ \t]|>|$)'), None),
-    (2, re.compile(r' {0,3}<!--'), '-->'),
-    (3, re.compile(r' {0,3}<\?'), '?>'),
-    (4, re.compile(r' {0,3}<![a-z]'), '>'),
-    (5, re.compile(r' {0,3}<!\[cdata\['), ']]>'),
-    (6, re.compile(rf' {{0,3}}</?(?:{_HTML_BLOCK_6_TAGS})(?:[ \t]|/?>|$)'), None),
-    (7, re.compile(
-        rf' {{0,3}}(?:<(?!(?:script|style|pre|textarea)(?:[ \t/>]|$))'
-        rf'[a-z][a-z0-9-]*(?:{_HTML_ATTR})*[ \t]*/?>'
-        rf'|</(?!(?:script|style|pre|textarea)[ \t>])[a-z][a-z0-9-]*[ \t]*>)[ \t]*$'
-    ), None),
-)
-_ATX_HEADING_RE = re.compile(r' {0,3}#{1,6}(?:[ \t]|$)')
-_LIST_MARKER_RE = re.compile(r' {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|$)')
-_THEMATIC_BREAK_RE = re.compile(r' {0,3}([-*_])[ \t]*(?:\1[ \t]*){2,}')
-_EDGE_PREFIX_RE = re.compile(r' {0,3}- ')
-_ASCII_LOWER = str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
+def normalize_newlines(text: str) -> str:
+    """Turn CRLF and CR into LF, as Python's text-mode file reads do. Every
+    connection reader and writer starts here, and the MCP server reads note
+    files the same way (markdown-parser.ts normalizeNewlines)."""
+    return text.replace('\r\n', '\n').replace('\r', '\n')
 
 
-def _ascii_lower(line: str) -> str:
-    return line.translate(_ASCII_LOWER)
+def _fence_end(lines: list[str], i: int) -> int | None:
+    """If lines[i] opens a fence the rule accepts, the index of its closing
+    line, else None."""
+    m = _FENCE_OPEN_RE.fullmatch(lines[i])
+    if m is None:
+        return None
+    prefix, run = m.group(1), m.group(2)
+    for j in range(i + 1, len(lines)):
+        ln = lines[j]
+        if ln.strip(' \t') == '':
+            continue
+        if not ln.startswith(prefix):
+            return None
+        if _FENCE_LIKE_RE.match(ln):
+            rest = ln[len(prefix):]
+            if rest.startswith(run) and rest[len(run):].strip(' ') == '':
+                return j
+            return None
+    return None
 
 
-def _indent_width(line: str) -> int:
-    """Columns of leading spaces and tabs (a tab advances to the next
-    multiple of 4), as CommonMark measures indentation."""
-    width = 0
-    for ch in line:
-        if ch == ' ':
-            width += 1
-        elif ch == '\t':
-            width += 4 - width % 4
-        else:
-            break
-    return width
-
-
-def _is_blank(line: str) -> bool:
-    return line.strip(' \t') == ''
-
-
-_EMPTY_QUOTE_RE = re.compile(r' {0,3}>[ \t]*')
-# The HTML that interrupts a paragraph in marked 12 (its `paragraph` rule):
-# lowercase type 6 tags followed by spaces, the end, `>` or `/>`, and the
-# type 1 and 2 openers, at the start of the line (no indentation), as
-# written (case-sensitive).
-_MARKED_HTML_INTERRUPT_RE = re.compile(
-    rf'(?:</?(?:{_HTML_BLOCK_6_TAGS})(?: +|$|/?>)'
-    r'|<(?:script|pre|style|textarea|!--))'
-)
-# JS String.prototype.trim()'s whitespace, for marked's `!line.trim()` tests:
-# the shared union without U+001C-U+001F and U+0085.
-_JS_WHITESPACE = ''.join(
-    c for c in _SLUG_WS_CHARS if c not in '\x1c\x1d\x1e\x1f\x85'
-)
-_MARKED_ITEM_RE = re.compile(r'( {0,3}(?:[*+-]|[0-9]{1,9}[.)]))((?:[\t ][^\n]*)?)')
-
-
-def _marked_tabs(line: str) -> str:
-    """marked's lexer turns leading tabs (after any spaces) into four spaces
-    each before it reads blocks."""
-    m = re.match(r'( *)(\t+)', line)
-    return line if m is None else m.group(1) + '    ' * len(m.group(2)) + line[m.end():]
-
-
-def _marked_item_start(line: str, in_list: bool = False) -> tuple[int, str]:
-    """(indent, first content line) of the list item marked starts at
-    `line`, or (0, '') when it starts none. marked: indent is the bullet's
-    length plus the spaces after it (a tab counts as none; more than 4 count
-    as 1)."""
-    m = _MARKED_ITEM_RE.fullmatch(_marked_tabs(line))
-    if m is None or (len(m.group(2)) == 1 and not in_list):
-        # marked's list rule needs the bullet alone or followed by a space or
-        # tab and at least one more character, so "- " starts no list; inside
-        # a list (in_list: the line ended the previous item) it is an item.
-        return 0, ''
-    rest = m.group(2) + '\n'
-    n = len(rest) - len(rest.lstrip(' '))
-    n = 1 if n > 4 else n
-    first = re.sub(r'^\t+', lambda t: '   ' * len(t.group(0)), m.group(2))
-    return n + len(m.group(1)), first[n:]
-
-
-def _marked_item_continues(line: str, indent: int, prev: str, blank_seen: bool) -> bool:
-    """Whether marked keeps `line` inside the open list item (marked 12
-    Tokenizer.list): it ends the item at a fence, heading, bullet or rule
-    indented less than `indent` (at most 3 spaces), keeps a line indented at
-    least `indent` or blank, and otherwise keeps it only as a lazy paragraph
-    line (no blank line yet, and the previous content line was paragraph
-    text)."""
-    nl = _marked_tabs(line)
-    k = min(3, indent - 1)
-    begins = (
-        rf' {{0,{k}}}(?:```|~~~)',
-        rf' {{0,{k}}}#',
-    )
-    if any(re.match(b, nl) for b in begins):
-        return False
-    if re.match(rf' {{0,{k}}}(?:[*+-]|[0-9]{{1,9}}[.)])(?:[ \t][^\n]*)?$', nl):
-        return False
-    hr = rf' {{0,{k}}}((?:- *){{3,}}|(?:_ *){{3,}}|(?:\* *){{3,}})$'
-    if re.match(hr, nl):
-        return False
-    if not nl.strip(_JS_WHITESPACE):
-        return True
-    if len(nl) - len(nl.lstrip(' ')) >= indent:
-        return True
-    if blank_seen:
-        return False
-    if prev and len(prev) - len(prev.lstrip(' ')) >= 4:
-        return False
-    if any(re.match(b, prev) for b in begins) or re.match(hr, prev):
-        return False
+def _may_open_definition(s: str) -> bool:
+    """For a line starting with `[`: False only when its first unescaped
+    `]` comes before any other `[` and is not followed by `:`, so the line
+    cannot start a link reference definition (whose label may run onto later
+    lines). `[text](url)` and `[text] more` are safe; `[label]: /url`,
+    `[a [b]`, `[a\\]` and `[open` are not."""
+    i = 1
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c == '\\':
+            i += 2
+            continue
+        if c == '[':
+            return True
+        if c == ']':
+            return s[i + 1:i + 2] == ':'
+        i += 1
     return True
 
 
-_QUOTE_RE = re.compile(r' {0,3}> ?')
-_MARKED_PARAGRAPH_INTERRUPTS = (
-    re.compile(r' {0,3}#{1,6}(?:[ \t\n\r\f\v]|$)'),
-    re.compile(r' {0,3}>'),
-    re.compile(r' {0,3}(?:`{3,}[^`]*$|~{3,})'),
-    re.compile(r' {0,3}(?:[*+-]|1[.)]) '),
-)
-
-
-def _marked_interrupts_paragraph(line: str) -> bool:
-    """Whether marked 12 ends a paragraph before `line` (its `paragraph`
-    rule): a blank line, a rule, a heading, a quote, a fence, a bullet or
-    `1.`/`1)` item followed by a space, or one of its HTML openers."""
-    nl = _marked_tabs(line)
-    if not nl.strip(' '):
-        return True
-    if re.fullmatch(r' {0,3}((?:-[\t ]*){3,}|(?:_[ \t]*){3,}|(?:\*[ \t]*){3,})', nl):
-        return True
-    if any(p.match(nl) for p in _MARKED_PARAGRAPH_INTERRUPTS):
-        return True
-    return _MARKED_HTML_INTERRUPT_RE.match(nl) is not None
-
-
-def _closes_list(line: str) -> bool:
-    """True for a non-indented line that cannot continue a list item: an ATX
-    heading, a fence, an HTML block start or a thematic break."""
-    if _ATX_HEADING_RE.match(line) or _FENCE_OPEN_RE.fullmatch(line):
-        return True
-    if _THEMATIC_BREAK_RE.fullmatch(line):
-        return True
-    return _starts_html_block(line)
-
-
-def _starts_html_block(line: str) -> bool:
-    low = _ascii_lower(line)
-    return any(pattern.match(low) for _kind, pattern, _end in _HTML_BLOCK_STARTS)
-
-
-_HTML_END_MARKERS = {2: '-->', 3: '?>', 4: '>', 5: ']]>'}
-
-
-def _after_html_end(kind: int, line: str, search_from: int) -> str:
-    """The text after the end marker of an HTML block of type 2-5 on `line`
-    (marked ends the block there and reads on)."""
-    marker = _HTML_END_MARKERS[kind]
-    idx = line.find(marker, search_from)
-    return '' if idx == -1 else line[idx + len(marker):]
-
-
-def _open_in_rest(rest: str) -> tuple[str, int, int, str]:
-    """Under the marked reading, what the rest of a line after an HTML end
-    marker opens: (fence char, fence length, HTML block type, HTML tag), all
-    empty when it opens nothing. An HTML block of type 2-5 that also ends
-    inside `rest` hands its own rest on."""
-    for _ in range(len(rest) + 1):
-        m = _FENCE_OPEN_RE.fullmatch(rest)
-        if m:
-            run = m.group(1) or m.group(2)
-            return run[0], len(run), 0, ''
-        low = _ascii_lower(rest)
-        for kind, pattern, _end in _HTML_BLOCK_STARTS:
-            hm = pattern.match(low)
-            if hm:
-                tag = hm.group(1) if kind == 1 else ''
-                if kind in (6, 7) or not _html_block_end(kind, tag, low):
-                    return '', 0, kind, tag
-                if kind == 1:
-                    return '', 0, 0, ''
-                rest = _after_html_end(kind, rest, hm.start() + 2)
-                break
-        else:
-            return '', 0, 0, ''
-    return '', 0, 0, ''
-
-
-def _html_block_end(kind: int, tag: str, low: str) -> bool:
-    """True when `low` (an ASCII-lowercased line) ends an HTML block of type
-    1-5. Types 6 and 7 end before a blank line instead."""
-    if kind == 1:
-        # Only the opener's own close tag. CommonMark accepts any of the four,
-        # but marked (the viewer's renderer) needs the matching one, and the
-        # stricter end only keeps the block open longer.
-        return f'</{tag}>' in low
-    return {2: '-->', 3: '?>', 4: '>', 5: ']]>'}[kind] in low
-
-
-def _scan_blocks(
-    lines: list[str], start: int = 0, marked_reading: bool = False,
-    any_html_interrupts: bool = False,
-) -> tuple[list[str], str | None]:
-    """Classify each line as '' (ordinary), 'header' (before `start`),
-    'fence' (a fence delimiter or inside a fenced code block), 'html'
-    (inside an HTML block), 'list' (indented content of a list item),
-    'lazy' (an indented list marker straight after paragraph text) or, in
-    the marked reading, 'quote' (a line a block quote's paragraph absorbs).
-    Whichever block opens first governs until it closes. Also return what an
-    unclosed block still needs at the end: the closing line ('```', '-->',
-    '</pre>', ...), '' for an HTML block of type 6 or 7 (a blank line), or
-    None when nothing is open.
-
-    With marked_reading, the places where marked (the viewer's renderer)
-    departs from CommonMark follow marked: list items follow marked's own
-    rules (_marked_item_continues); a block quote's paragraph absorbs the
-    following lines until marked's paragraph rule ends it
-    (_marked_interrupts_paragraph); only marked's own set of HTML openers
-    interrupts a paragraph; an HTML block of type 2-5 ends right
-    after its end marker, so the rest of that line can open a fence or
-    another HTML block; and a line holding U+2028 or U+2029 is not a
-    heading, a rule or a type 7 HTML start. With any_html_interrupts as
-    well, an HTML block of any type may start right after paragraph text:
-    marked also ends paragraphs in places neither rule set predicts (a line
-    followed by a `-` line can read as a table), and starting the block
-    there only skips more.
-    connections_section skips a line when either reading skips it."""
-    kinds: list[str] = []
-    fence_char = ''
-    fence_len = 0
-    fence_indent = 0  # opener's indentation for a fence opened in a list item
-    html_kind = 0   # open HTML block type, 0 when none
-    html_tag = ''
-    in_paragraph = False
-    # List items: once a list marker line opens a list, an indented line is
-    # list-item content (a nested item, a continuation, code in the item),
-    # never a top-level heading, edge or section end, so it is skipped. The
-    # list closes at a non-indented line after a blank line, or at a
-    # non-indented heading, fence, HTML block or thematic break. This is
-    # deliberately stricter than CommonMark's content-column rule, which
-    # renderers apply differently (marked treats "-<tab>a" then " - b" as
-    # one item): it only ever skips more lines.
-    list_open = False
-    # The marked reading follows marked's own list-item rules instead
-    # (_marked_item_start, _marked_item_continues): the item's indent, the
-    # previous content line, and whether a blank line was seen in it.
-    item_indent = 0
-    item_prev = ''
-    item_blank = False
-    quote_lazy = False  # marked reading: a quote's paragraph is absorbing lines
-    prev_blank = True
-    for i, ln in enumerate(lines):
-        blank = _is_blank(ln)
-        was_blank, prev_blank = prev_blank, blank
-        list_before = bool(item_indent) if marked_reading else list_open
-        if i < start:
-            kinds.append('header')
-            continue
-        if fence_char:
-            kinds.append('fence')
-            if fence_indent:
-                # Opened inside a list item: only a closer at least as indented
-                # closes it. A shallower fence line ends the item and opens a
-                # new fence for a renderer, so keeping this one open only
-                # skips more.
-                m = (_FENCE_CLOSE_RE.fullmatch(ln.lstrip(' \t'))
-                     if _indent_width(ln) >= fence_indent else None)
-            else:
-                m = _FENCE_CLOSE_RE.fullmatch(ln)
-            if m and m.group(1)[0] == fence_char and len(m.group(1)) >= fence_len:
-                fence_char = ''
-                fence_len = 0
-            continue
-        if html_kind:
-            if html_kind in (6, 7):
-                if _is_blank(ln):
-                    html_kind = 0
-                    kinds.append('')
-                    in_paragraph = False
-                else:
-                    kinds.append('html')
-                continue
-            kinds.append('html')
-            if _html_block_end(html_kind, html_tag, _ascii_lower(ln)):
-                ended = html_kind
-                html_kind = 0
-                if marked_reading and ended != 1:
-                    rest = _after_html_end(ended, ln, 0)
-                    fence_char, fence_len, html_kind, html_tag = _open_in_rest(rest)
-                    fence_indent = 0
-                    if not fence_char and not html_kind:
-                        item_indent, item_prev = _marked_item_start(rest)
-                        item_blank = False
-            continue
-        # marked's heading, rule and type 7 HTML patterns stop at U+2028 and
-        # U+2029 (JS `.` and `$`), so to marked such a line is none of these.
-        line_sep = marked_reading and ('\u2028' in ln or '\u2029' in ln)
-        probe = ln
-        ended_item = False
-        if marked_reading:
-            if item_indent:
-                if _marked_item_continues(ln, item_indent, item_prev, item_blank):
-                    kinds.append('list')
-                    if not ln.strip(_JS_WHITESPACE):
-                        item_blank = True
-                    item_prev = _marked_tabs(ln)[item_indent:]
-                    continue
-                item_indent = 0
-                ended_item = True
-            if quote_lazy:
-                if not _marked_interrupts_paragraph(ln):
-                    kinds.append('quote')
-                    continue
-                quote_lazy = False
-            qm = _QUOTE_RE.match(_marked_tabs(ln))
-            if qm:
-                # marked reads the rest of a quote line as a paragraph that
-                # absorbs the following lines until something interrupts it.
-                quote_lazy = qm.end() < len(_marked_tabs(ln))
-        elif list_open and not blank:
-            if _indent_width(ln) >= 1:
-                # Item content, or the first line after the list when the
-                # renderer's content column is deeper: either way never a
-                # heading or an edge. A fence or HTML block opened here still
-                # opens one (at any indentation), which only skips more.
-                probe = ln.lstrip(' \t')
-                if not (_FENCE_OPEN_RE.fullmatch(probe) or any(
-                        pattern.match(_ascii_lower(probe))
-                        for kind, pattern, _end in _HTML_BLOCK_STARTS if kind != 7)):
-                    kinds.append('list')
-                    continue
-            elif (was_blank and not _LIST_MARKER_RE.match(ln)) or _closes_list(ln):
-                list_open = False
-        m = _FENCE_OPEN_RE.fullmatch(probe)
-        if m:
-            run = m.group(1) or m.group(2)
-            fence_char = run[0]
-            fence_len = len(run)
-            fence_indent = _indent_width(ln) if probe is not ln else 0
-            kinds.append('fence')
-            in_paragraph = False
-            continue
-        low = _ascii_lower(probe)
-        opened = False
-        for kind, pattern, _end in _HTML_BLOCK_STARTS:
-            if kind == 7 and (line_sep or (in_paragraph and not list_before
-                                           and not any_html_interrupts)):
-                continue  # type 7 cannot interrupt a paragraph
-            if (marked_reading and in_paragraph and not list_before
-                    and not any_html_interrupts
-                    and not _MARKED_HTML_INTERRUPT_RE.match(probe)):
-                break  # marked: only these (case-sensitive) interrupt one
-            hm = pattern.match(low)
-            if hm:
-                kinds.append('html')
-                opened = True
-                in_paragraph = False
-                html_tag = hm.group(1) if kind == 1 else ''
-                if kind in (6, 7) or not _html_block_end(kind, html_tag, low):
-                    html_kind = kind
-                elif marked_reading and kind != 1:
-                    rest = _after_html_end(kind, probe, hm.start() + 2)
-                    fence_char, fence_len, html_kind, html_tag = _open_in_rest(rest)
-                    fence_indent = 0
-                    if not fence_char and not html_kind:
-                        item_indent, item_prev = _marked_item_start(rest)
-                        item_blank = False
-                break
-        if opened:
-            continue
-        if (in_paragraph and not list_open and 1 <= _indent_width(ln) <= 3
-                and _LIST_MARKER_RE.match(ln)):
-            # An indented list marker right after paragraph text: marked can
-            # read it as part of a setext heading's text ("text\n - a\n-"),
-            # so it is never an edge, and the paragraph goes on.
-            kinds.append('lazy')
-            list_open = True  # marked may read it as a list; skip its content
-            if marked_reading:
-                item_indent, item_prev = _marked_item_start(ln, ended_item)
-                item_blank = False
-            continue
-        kinds.append('')
-        if _LIST_MARKER_RE.match(ln) and not _THEMATIC_BREAK_RE.fullmatch(ln):
-            list_open = True
-        if marked_reading and not _THEMATIC_BREAK_RE.fullmatch(ln):
-            item_indent, item_prev = _marked_item_start(ln, ended_item)
-            item_blank = False
-        if (_is_blank(ln) or _EMPTY_QUOTE_RE.fullmatch(ln) or (not line_sep and (
-                _ATX_HEADING_RE.match(ln) or _THEMATIC_BREAK_RE.fullmatch(ln)))):
-            in_paragraph = False
-        elif not in_paragraph and _indent_width(ln) >= 4:
-            pass  # an indented code line, not a paragraph
-        else:
-            in_paragraph = True
-    if fence_char:
-        closer: str | None = fence_char * fence_len
-    elif html_kind == 1:
-        closer = f'</{html_tag}>'
-    elif html_kind in (2, 3, 4, 5):
-        closer = {2: '-->', 3: '?>', 4: '>', 5: ']]>'}[html_kind]
-    elif html_kind in (6, 7):
-        closer = ''
-    else:
-        closer = None
-    return kinds, closer
-
-
-def _readings(lines: list[str], start: int) -> list[list[str]]:
-    """Line kinds under each reading: CommonMark, marked, and marked with
-    HTML blocks allowed to interrupt any paragraph."""
-    return [
-        _scan_blocks(lines, start)[0],
-        _scan_blocks(lines, start, marked_reading=True)[0],
-        _scan_blocks(lines, start, marked_reading=True, any_html_interrupts=True)[0],
-    ]
-
-
-def connection_line_readings(lines: list[str], start: int = 0) -> list[list[bool]]:
-    """Per reading (CommonMark, marked, marked with any HTML interrupting a
-    paragraph), per line: True when that reading puts the line before
-    `start`, in a fence, in an HTML block or in a list item.
-    schema/connection-reading-parity.json pins each reading in both
-    languages."""
-    return [[k != '' for k in r] for r in _readings(lines, start)]
-
-
-def skipped_line_flags(lines: list[str], start: int = 0) -> list[bool]:
-    """Per line: True for a line before `start` (frontmatter), a fence
-    delimiter, or a line inside a fenced code block, an HTML block or a list
-    item, under either the CommonMark or the marked reading (_scan_blocks)."""
-    readings = _readings(lines, start)
-    return [any(r[i] != '' for r in readings) for i in range(len(lines))]
-
-
-def unclosed_block_closer(lines: list[str], start: int = 0) -> str | None:
-    """What a fence or HTML block still open after the last line needs before
-    a writer adds a heading or edge at the end: its closing line ('````',
-    '-->', '</pre>', ...), '' (a blank line) for HTML block types 6 and 7, or
-    None when nothing is open."""
-    return _scan_blocks(lines, start)[1]
-
-
-def connections_section(
-    lines: list[str], start: int = 0,
-) -> tuple[int, int, list[bool]] | None:
-    """Locate the first connections section in `lines`, ignoring lines before
-    `start` (a writer passes the frontmatter's line count).
-
-    Returns (heading index, end index, skipped flags). `end` is the index of
-    the `## ` line that closes the section, or len(lines). Lines between
-    heading and end whose flag is True are in a fence, HTML block or list
-    item and must be skipped. A line counts as a heading or an edge only when
-    every reading (_readings) leaves it alone; a `## ` line ends the section
-    when any does, which only ends it sooner. Returns None when
-    no heading sits outside all of these.
-    """
-    readings = _readings(lines, start)
-    skipped = [any(r[i] != '' for r in readings) for i in range(len(lines))]
-    heading = None
-    for i, ln in enumerate(lines):
-        if not skipped[i] and is_connections_heading(ln):
-            heading = i
-            break
-    if heading is None:
+def _line_problem(line: str, in_section: bool) -> str | None:
+    """Why `line` stops a note's edges from being indexed, or None. Fences
+    are handled by scan_connections before this is called."""
+    if _NON_MARKDOWN_SEPARATOR_RE.search(line):
+        ch = _NON_MARKDOWN_SEPARATOR_RE.search(line).group(0)
+        return (
+            f'the line holds U+{ord(ch):04X}, which some readers take as a '
+            'line break and Markdown does not'
+        )
+    s = line.lstrip(' \t')
+    if s.startswith('```') or s.startswith('~~~'):
+        return (
+            'a fence the connection rule does not follow (it must open and '
+            'close with the same run at the same indentation, with an info '
+            'word of letters, digits and _+.#- only)'
+        )
+    if s.startswith('<'):
+        return 'the line starts with "<" (HTML)'
+    if s.startswith('[') and _may_open_definition(s):
+        return 'the line starts like a link reference definition ("[label]:")'
+    if not in_section or s == '':
         return None
-    end = len(lines)
-    for i in range(heading + 1, len(lines)):
-        if any(r[i] == '' for r in readings) and is_section_end(lines[i]):
+    if s.startswith('>'):
+        return 'a block quote in the Connections section'
+    lead = line[:len(line) - len(s)]
+    if '\t' in lead or len(lead) >= 4:
+        return 'a line indented by a tab or 4+ spaces in the Connections section'
+    if all(c in _RULE_LINE_CHARS for c in s):
+        return (
+            'a line of only "-", "=", "*", "_", "+", "|" or ":" in the '
+            'Connections section (a heading underline, rule or table)'
+        )
+    m = _LIST_MARKER_WS_RE.match(line)
+    if m is not None:
+        ws = m.group(1)
+        if '\t' in ws or len(ws) >= 4:
+            return (
+                'a list marker followed by a tab or 4+ spaces in the '
+                'Connections section'
+            )
+    return None
+
+
+def connection_line_edge(line: str) -> dict | None:
+    """The edge `line` carries under the connection rule, or None: `-` at
+    column 0, 1-3 spaces, then CONNECTION_RE on the trimmed line, a type that
+    starts with an ASCII letter or digit, and a target that is not a bracket
+    reference (`[moltbook]`, `[[wiki-note]]`, #415). Whether the line is in a
+    section is scan_connections's business."""
+    if not _EDGE_PREFIX_RE.match(line):
+        return None
+    m = CONNECTION_RE.match(trim_connection_ws(line))
+    if m is None:
+        return None
+    conn_type, target, quoted_ctx, dash_ctx = m.groups()
+    if conn_type[0] not in _ASCII_ALNUM or target.startswith('['):
+        return None
+    return {
+        'type': conn_type,
+        'target': target,
+        'context': quoted_ctx or dash_ctx or None,
+    }
+
+
+def scan_connections(lines: list[str], start: int = 0) -> ConnectionScan:
+    """Apply the connection rule to `lines` (LF-split, see
+    normalize_newlines), ignoring lines before `start` (a writer passes the
+    frontmatter's line count, note_body_start_line). One pass."""
+    n = len(lines)
+    heading = None
+    end = n
+    edges: list[tuple[int, dict]] = []
+    problem = None
+    i = start
+    while i < n:
+        line = lines[i]
+        in_section = heading is not None
+        if in_section and is_section_end(line):
             end = i
             break
-    return heading, end, skipped
+        close = _fence_end(lines, i)
+        if close is not None:
+            if in_section and len(line) - len(line.lstrip(' ')) >= 4:
+                problem = (i, 'a fence indented 4+ spaces in the Connections section')
+                break
+            for j in range(i, close + 1):
+                if _NON_MARKDOWN_SEPARATOR_RE.search(lines[j]):
+                    problem = (j, _line_problem(lines[j], False))
+                    break
+            if problem is not None:
+                break
+            i = close + 1
+            continue
+        if not in_section and is_connections_heading(line):
+            heading = i
+            i += 1
+            continue
+        reason = _line_problem(line, in_section)
+        if reason is not None:
+            problem = (i, reason)
+            break
+        if in_section:
+            edge = connection_line_edge(line)
+            if edge is not None:
+                edges.append((i, edge))
+        i += 1
+    if problem is not None:
+        edges = []
+        if heading is None:
+            # Report whether a heading follows, so the problem can be shown.
+            for k in range(problem[0] + 1, n):
+                if is_connections_heading(lines[k]):
+                    heading = k
+                    break
+        end = n
+        if heading is not None:
+            for k in range(max(heading, problem[0]) + 1, n):
+                if is_section_end(lines[k]):
+                    end = k
+                    break
+    return ConnectionScan(heading, end, edges, problem)
 
 
-def connections_heading_index(lines: list[str]) -> int | None:
-    """Index of the first connections heading outside a fence, or None."""
-    section = connections_section(lines)
-    return None if section is None else section[0]
+def has_connections_heading(body: str) -> bool:
+    """True when `body` has a connections heading line (found even after a
+    problem, so a concept body with one is refused either way).
+    markdown-parser.ts hasConnectionsHeading is its twin."""
+    return scan_connections(split_connection_lines(normalize_newlines(body))).heading is not None
 
 
-def connections_heading_near_misses(lines: list[str]) -> list[tuple[int, str]]:
+def connections_heading_near_misses(
+    lines: list[str], heading: int | None = None,
+) -> list[tuple[int, str]]:
     """Lines whose stripped text starts with `## Connections` (the earlier,
-    looser heading rule) that the current rule does not take as a heading,
-    each with the reason. `schist schema --validate` warns on these."""
-    readings = _readings(lines, 0)
-    kinds = [next((r[i] for r in readings if r[i]), '') for i in range(len(lines))]
+    looser heading rule) that the current rule does not take as the heading,
+    each with the reason. `heading` is the heading scan_connections found on
+    the same lines (or None). `schist schema --validate` warns on these."""
     out: list[tuple[int, str]] = []
     for i, ln in enumerate(lines):
         if not ln.strip().startswith(CONNECTIONS_HEADING_TEXT):
             continue
-        if kinds[i] == 'fence':
-            out.append((i, 'inside a fenced code block'))
-            continue
-        if kinds[i] == 'html':
-            out.append((i, 'inside an HTML block'))
-            continue
-        if kinds[i] == 'list':
-            out.append((i, 'indented inside a list item'))
-            continue
         if is_connections_heading(ln):
+            if heading is None or i < heading:
+                out.append((i, 'inside a fenced code block'))
+            elif i > heading:
+                out.append((
+                    i, 'a later ## Connections heading; only the first section is read',
+                ))
             continue
         indent = ln[:len(ln) - len(ln.lstrip())]
         if indent.strip(' \t'):
@@ -693,12 +426,8 @@ def connections_heading_near_misses(lines: list[str]) -> list[tuple[int, str]]:
                 f'starts with U+{ord(odd):04X}, which is not a space or tab, '
                 'so the line is not a heading',
             ))
-        elif '\t' in indent or len(indent) > 3:
-            out.append((
-                i,
-                'indented by 4 or more spaces or by a tab (an indented code '
-                'block, not a heading)',
-            ))
+        elif indent:
+            out.append((i, 'indented (the heading must start at column 0)'))
         else:
             out.append((
                 i, f"heading text is not exactly '{CONNECTIONS_HEADING_TEXT}'",
@@ -761,7 +490,9 @@ def note_body_offset(text: str) -> int:
     """Index in `text` where the note body starts: just after the frontmatter's
     closing line. This is python-frontmatter's rule (what ingest parses
     metadata with), written out so markdown-parser.ts frontmatterLength can
-    match it exactly: turn CRLF into LF, strip str.isspace() whitespace,
+    match it exactly: turn CRLF and CR into LF (as a text-mode file read
+    does; ingest and the MCP server read note files that way, see
+    normalize_newlines), strip str.isspace() whitespace,
     detect YAML (`---`), then JSON (`{`), then TOML (`+++`) on the first line,
     and close at the next boundary line. 0 when there is no frontmatter (a
     BOM before `---` means none) or it is never closed (python-frontmatter
@@ -770,7 +501,8 @@ def note_body_offset(text: str) -> int:
     indentation. schema/frontmatter-boundary-parity.json pins this in both
     languages.
     """
-    norm = text.replace('\r\n', '\n')
+    # CR alone becomes LF too (same length, so offsets map back as below).
+    norm = normalize_newlines(text)
     lead = 0
     while lead < len(norm) and norm[lead] in PY_WHITESPACE:
         lead += 1
@@ -804,7 +536,7 @@ def note_body_offset(text: str) -> int:
 
 def note_body_start_line(text: str) -> int:
     """Number of split_connection_lines lines before the body (see
-    note_body_offset). Writers pass it as connections_section's `start`."""
+    note_body_offset). Writers pass it as scan_connections's `start`."""
     return len(split_connection_lines(text[:note_body_offset(text)]))
 
 
@@ -1056,39 +788,44 @@ def patch_frontmatter_flow_hashtags(content: str) -> str:
     return '\n'.join(patched_lines) if patched else content
 
 
+def scan_note_connections(text: str) -> tuple[list[str], ConnectionScan]:
+    """The connection rule applied to a whole note file's text: its lines
+    (LF-split after normalize_newlines) and the scan of its body, with line
+    indexes into those lines. Writers use this; it finds the same edges as
+    parse_connections(connection_body(text))."""
+    text = normalize_newlines(text)
+    lines = split_connection_lines(text)
+    return lines, scan_connections(lines, note_body_start_line(text))
+
+
+def connection_body(text: str) -> str:
+    """The note body the connection rule reads, and the text ingest stores in
+    docs.body for the viewer to render: CRLF and CR turned into LF, the text
+    after the frontmatter's closing line (note_body_offset), without leading
+    and trailing blank lines (lines of only spaces and tabs). Nothing else is
+    stripped, so the viewer renders the lines the rule read.
+    markdown-parser.ts connectionBody is its twin."""
+    text = normalize_newlines(text)
+    lines = text[note_body_offset(text):].split('\n')
+    a, b = 0, len(lines)
+    while a < b and lines[a].strip(' \t') == '':
+        a += 1
+    while b > a and lines[b - 1].strip(' \t') == '':
+        b -= 1
+    return '\n'.join(lines[a:b])
+
+
 def parse_connection_lines(body: str) -> list[tuple[int, dict]]:
-    """Edges of the ## Connections section of a raw note body (see
-    connections_section for the rule), each with its index in
-    split_connection_lines(body)."""
-    edges: list[tuple[int, dict]] = []
-    lines = split_connection_lines(body)
-    section = connections_section(lines)
-    if section is None:
-        return edges
-    heading, end, skipped = section
-    for i in range(heading + 1, end):
-        if skipped[i] or not _EDGE_PREFIX_RE.match(lines[i]):
-            continue
-        stripped = trim_connection_ws(lines[i])
-        m = CONNECTION_RE.match(stripped)
-        if m:
-            conn_type, target, quoted_ctx, dash_ctx = m.groups()
-            context = quoted_ctx or dash_ctx or None
-            # Skip bracket references like [Moltbook, Jan 2026]
-            if target.startswith('['):
-                continue
-            edges.append((i, {
-                'type': conn_type,
-                'target': target,
-                'context': context,
-            }))
-    return edges
+    """Edges of the ## Connections section of a note body (see
+    scan_connections for the rule), each with its index in
+    split_connection_lines(normalize_newlines(body)). Empty when the rule
+    finds a problem."""
+    return scan_connections(split_connection_lines(normalize_newlines(body))).edges
 
 
 def parse_connections(body: str) -> list[dict]:
-    """Extract connections from the ## Connections section of a raw note
-    body: the text after the frontmatter's closing line (note_body_offset),
-    not python-frontmatter's stripped post.content."""
+    """Extract connections from the ## Connections section of a note body,
+    as connection_body returns it."""
     return [edge for _i, edge in parse_connection_lines(body)]
 
 
@@ -1320,11 +1057,12 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
             patched_text = patch_frontmatter_flow_hashtags(raw_text)
             post = frontmatter.loads(patched_text)
             meta = post.metadata
-            body = post.content
-            # Connections are read from the raw body, not post.content:
-            # python-frontmatter strips it, which would turn an indented
-            # first line (a code block) into a heading. See note_body_offset.
-            raw_body = patched_text[note_body_offset(patched_text):]
+            # docs.body and the connections come from one text,
+            # connection_body, not python-frontmatter's post.content: its
+            # strip() would turn an indented first line (a code block) into
+            # a heading, and the viewer renders docs.body, so it must show
+            # the lines the edges were read from.
+            body = connection_body(patched_text)
 
             # Per-file edge counter, folded into the total only after RELEASE —
             # a rolled-back file must not inflate the printed count. Concepts
@@ -1525,7 +1263,7 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
                     file_edges += result.rowcount
 
             # Parse and insert edges
-            for edge in parse_connections(raw_body):
+            for edge in parse_connections(body):
                 try:
                     conn.execute(
                         'INSERT OR IGNORE INTO edges (source, target, type, context) VALUES (?, ?, ?, ?)',

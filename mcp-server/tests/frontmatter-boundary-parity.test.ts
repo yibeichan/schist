@@ -17,7 +17,7 @@ import { PY_WHITESPACE, connectionBody, frontmatterLength } from "../src/markdow
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-type BoundaryCase = { name: string; text: string; body: string };
+type BoundaryCase = { name: string; text: string; body: string; connection_body: string };
 const fixture = JSON.parse(
   readFileSync(path.resolve(__dirname, "..", "..", "schema", "frontmatter-boundary-parity.json"), "utf-8"),
 ) as { python_whitespace: string; cases: BoundaryCase[] };
@@ -34,7 +34,7 @@ describe("frontmatter boundary parity", () => {
   for (const c of fixture.cases) {
     test(c.name, () => {
       expect(c.text.slice(frontmatterLength(c.text))).toBe(c.body);
-      expect(connectionBody(c.text)).toBe(c.body);
+      expect(connectionBody(c.text)).toBe(c.connection_body);
     });
   }
 });

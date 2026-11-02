@@ -11,7 +11,8 @@ import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote, rewriteNote, updateNote, deleteNote, writeMutex, vaultLockWaitMs } from "./git-writer.js";
 import { withVaultLock, VaultLockTimeout, VaultLockFailed } from "./vault-lock.js";
-import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, hasNonYamlOpener, SLUG_WS_CHARS, containsLineBoundary, isRoundTrippableTarget, connectionsSection, skippedLineFlags, isConnectionsHeading, isSectionEnd, hasConnectionsHeading, noteBodyStartLine, trimConnectionWs, splitConnectionLines, connectionBody, connectionLineMatch } from "./markdown-parser.js";
+import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, hasNonYamlOpener, SLUG_WS_CHARS, containsLineBoundary, isRoundTrippableTarget, hasConnectionsHeading, trimConnectionWs, splitConnectionLines, connectionBody, normalizeNewlines, scanConnections, scanNoteConnections, connectionsProblemOf, verifyNoteConnections, isBlank } from "./markdown-parser.js";
+import type { Connection } from "./types.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
 import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse, PushFailureClass, ComposeBriefResponse, Note, SearchResult } from "./types.js";
@@ -293,6 +294,27 @@ async function resolvesInsideVault(vaultRoot: string, relPath: string): Promise<
  * JSON.stringify always produces { error, message } — Error.message is
  * non-enumerable and would otherwise be silently dropped.
  */
+/**
+ * Read a note file the way ingest does: UTF-8, with CRLF and CR turned into
+ * LF (Python's text-mode read_text). Every path that reads a note's
+ * frontmatter or connections goes through this, so the server and the index
+ * split a note at the same line endings.
+ */
+export async function readNoteText(filePath: string): Promise<string> {
+  return normalizeNewlines(await fs.readFile(filePath, "utf-8"));
+}
+
+/** The warning a tool returns when the connection rule indexes no edges
+ * from a note that has a `## Connections` heading. */
+function connectionsWarning(problem: { line: number; reason: string } | null): string | undefined {
+  if (problem === null) return undefined;
+  return (
+    `no connections are indexed from this note: line ${problem.line}: ${problem.reason}. ` +
+    "The connection rule reads a ## Connections section only when the note holds Markdown " +
+    "it follows exactly; see schema/SCHEMA.md."
+  );
+}
+
 function normalizeError(e: unknown, fallbackCode = "GIT_ERROR"): ToolError {
   // Already a plain ToolError shape (thrown by git-writer / assertPathSafe)
   if (
@@ -2586,7 +2608,7 @@ export async function get_note(
 
     let content: string;
     try {
-      content = await fs.readFile(realTarget, "utf-8");
+      content = await readNoteText(realTarget);
     } catch (e: unknown) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") {
         return { error: "NOT_FOUND", message: `Note not found: ${args.id}` } satisfies ToolError;
@@ -2595,8 +2617,9 @@ export async function get_note(
     }
 
     const { parseNote } = await import("./markdown-parser.js");
-    const { metadata, body, connections } = parseNote(content);
+    const { metadata, body, connections, connectionsProblem } = parseNote(content);
     const meta = metadata as Record<string, unknown>;
+    const warning = connectionsWarning(connectionsProblem);
 
     const confidence = meta.confidence;
     const fileRef = meta.file_ref;
@@ -2612,6 +2635,7 @@ export async function get_note(
       concepts: stringEntries(meta.concepts),
       body,
       connections,
+      ...(warning !== undefined ? { connections_warning: warning } : {}),
       ...(confidence === "low" || confidence === "medium" || confidence === "high"
         ? { confidence }
         : {}),
@@ -2627,23 +2651,15 @@ export async function get_note(
 }
 
 /**
- * Yields each `## Connections` edge line in a raw body that ingest would
- * index. Mirrors cli/schist/ingest.py's parse_connections: the same
- * CommonMark line endings (splitConnectionLines), the same section rule
- * (connectionsSection), the same CONNECTION_RE, and the same bracket-reference
- * skip. Anything else (malformed lines, non-edge lines) is skipped, matching
- * ingest. Lines are yielded trimmed. Given a whole file, pass
- * connectionBody(content), ingest's body slice.
+ * Yields each `## Connections` edge line in a note body that ingest would
+ * index: the connection rule's edges (scanConnections), nothing when the
+ * rule finds a problem, as in ingest. Lines are yielded trimmed. Given a
+ * whole file, pass connectionBody(content), ingest's body.
  */
 export function* bodyConnectionEdgeLines(body: string): Generator<{ line: string; type: string }> {
-  const lines = splitConnectionLines(body);
-  const section = connectionsSection(lines);
-  if (section === null) return;
-  for (let i = section.heading + 1; i < section.end; i++) {
-    if (section.skipped[i]) continue; // in a fence or HTML block — ingest skips it
-    const m = connectionLineMatch(lines[i]); // malformed or bracket lines: null, as in ingest
-    if (!m) continue;
-    yield { line: trimConnectionWs(lines[i]), type: m[1] };
+  const lines = splitConnectionLines(normalizeNewlines(body));
+  for (const { index, connection } of scanConnections(lines).edges) {
+    yield { line: trimConnectionWs(lines[index]), type: connection.type };
   }
 }
 
@@ -3068,12 +3084,14 @@ export async function create_note(
     // failure is included too — either case is a real signal the agent
     // should see, so we don't try to distinguish.
     const syncWarning = await readSyncWarning(vaultRoot);
+    const createdWarning = connectionsWarning(connectionsProblemOf(scanNoteConnections(noteContent).scan));
     return {
       id: relPath,
       path: relPath,
       commitSha: result.commitSha,
       ...(result.commitWarning ? { commitWarning: result.commitWarning } : {}),
       ...(syncWarning !== undefined ? { syncWarning } : {}),
+      ...(createdWarning !== undefined ? { connectionsWarning: createdWarning } : {}),
     };
   } catch (e: unknown) {
     return normalizeError(e, "GIT_ERROR");
@@ -3266,7 +3284,7 @@ export async function add_connection(
 
     let content: string;
     try {
-      content = await fs.readFile(filePath, "utf-8");
+      content = await readNoteText(filePath);
     } catch {
       return { error: "NOT_FOUND", message: `Source note not found: ${args.source}` } satisfies ToolError;
     }
@@ -3370,93 +3388,39 @@ export function normalizeConceptSlug(value: string): string {
 }
 
 /**
- * Remove every `## Connections` line in `content` whose target matches any of
- * `targets`. Returns the rewritten content and the count removed. Used by
- * delete_note's cascade path to repair notes that linked to a deleted note.
- * Matching uses markdown-parser's connectionLineMatch (the edge-line test
- * parseConnections and ingest apply; group 2 = target) so the lines we strip
- * are exactly the edges ingest produced.
+ * Remove every edge line of `content`'s `## Connections` section whose
+ * target matches any of `targets`. Returns the rewritten content and the
+ * count removed. Used by delete_note's cascade path to repair notes that
+ * linked to a deleted note. The lines removed are exactly the edges the
+ * connection rule reads (scanNoteConnections, ingest's rule): a note the
+ * rule indexes nothing from is left alone. A section left with no
+ * non-blank line is removed with its heading.
+ *
+ * The result is checked: it must read as the note's edges minus the removed
+ * ones, or ConnectionWriteError is thrown and the repair is not written.
+ * Output is "\n"-joined with a single trailing newline (CRLF and CR become
+ * LF), insertConnectionLine's contract.
  */
 export function stripConnectionsTo(content: string, targets: string[]): { content: string; removed: number } {
   const targetSet = new Set(targets);
-  const out: string[] = [];
-  let inSection = false;
-  let removed = 0;
-  // splitConnectionLines: the CommonMark line endings ingest splits on, so
-  // the lines stripped are exactly the edges ingest indexed. Reconstruction
-  // rejoins with "\n" (CRLF and CR become LF, the form create_note/buildNote
-  // emit). The split keeps no trailing empty segment, so every non-empty
-  // result gets the canonical LF terminator (#382), matching
-  // insertConnectionLine's contract.
-  const finalize = (lines: string[]): string => {
-    const s = lines.join("\n");
-    return s === "" || s.endsWith("\n") ? s : s + "\n";
-  };
-  // Section boundaries follow connectionsSection's rule (exact heading,
-  // fenced code never a heading, an edge, or a section end), so only lines
-  // ingest indexed as edges are removed. Every exact heading outside a fence
-  // opens a section here, not just the first, as before.
-  // `content` is a whole file: frontmatter lines are skipped (noteBodyStartLine)
-  // so a YAML block scalar cannot open a fence or a section.
-  const inLines = splitConnectionLines(content);
-  const bodyStart = noteBodyStartLine(content);
-  const inSkipped = skippedLineFlags(inLines, bodyStart);
-  for (let idx = 0; idx < inLines.length; idx++) {
-    const line = inLines[idx];
-    if (inSkipped[idx]) {
-      out.push(line);
-      continue;
-    }
-    if (isConnectionsHeading(line)) {
-      inSection = true;
-      out.push(line);
-      continue;
-    }
-    if (inSection && isSectionEnd(line)) {
-      inSection = false;
-      out.push(line);
-      continue;
-    }
-    if (inSection) {
-      // The same edge-line test ingest applies (prefix, CONNECTION_RE).
-      const m = connectionLineMatch(line);
-      if (m && targetSet.has(m[2])) {
-        removed++;
-        continue;
-      }
-    }
-    out.push(line);
+  const { lines, scan } = scanNoteConnections(content);
+  const drop = new Set(scan.edges.filter((e) => targetSet.has(e.connection.target)).map((e) => e.index));
+  if (drop.size === 0) return { content, removed: 0 };
+  const kept = scan.edges.filter((e) => !drop.has(e.index)).map((e) => e.connection);
+  let out = lines.filter((_l, i) => !drop.has(i));
+  const heading = scan.heading;
+  const end = scan.end - drop.size;
+  if (out.slice(heading + 1, end).every(isBlank)) {
+    // Nothing left in the section: drop it, keeping one blank line as the
+    // separator before what follows (or the file's trailing newline, #280).
+    const before = out.slice(0, heading);
+    while (before.length > 0 && isBlank(before[before.length - 1])) before.pop();
+    out = [...before, "", ...out.slice(end)];
   }
-  if (removed === 0) return { content: finalize(out), removed };
-
-  // `out` is scanned again: removing an edge line (a list item) can change
-  // which lines read as list content.
-  const outSkipped = skippedLineFlags(out, bodyStart);
-  const cleaned: string[] = [];
-  for (let i = 0; i < out.length; i++) {
-    if (outSkipped[i] || !isConnectionsHeading(out[i])) {
-      cleaned.push(out[i]);
-      continue;
-    }
-
-    let j = i + 1;
-    while (j < out.length && out[j].trim() === "") j++;
-    if (j >= out.length || (!outSkipped[j] && isSectionEnd(out[j]))) {
-      while (cleaned.length > 0 && cleaned[cleaned.length - 1].trim() === "") cleaned.pop();
-      // Push a single "" either way: as the blank separator before the next
-      // section (j < out.length), or — when Connections was the last section
-      // (j >= out.length) — as the terminal element that join("\n") turns back
-      // into the file's trailing newline (#280; finalize below now also
-      // guarantees the terminator for every other shape).
-      cleaned.push("");
-      i = j - 1;
-      continue;
-    }
-
-    cleaned.push(out[i]);
-  }
-
-  return { content: finalize(cleaned), removed };
+  let text = out.join("\n");
+  if (text !== "" && !text.endsWith("\n")) text += "\n";
+  verifyNoteConnections(text, kept, "removing connections to the deleted note");
+  return { content: text, removed: drop.size };
 }
 
 /**
@@ -3482,7 +3446,13 @@ function stripConceptRefs(content: string, targets: string[]): { content: string
   for (const [key, value] of Object.entries(newMeta)) {
     if (value instanceof Date) newMeta[key] = value.toISOString().split("T")[0];
   }
-  return { content: buildNote(newMeta, body), changed: true };
+  const out = buildNote(newMeta, body);
+  verifyNoteConnections(
+    out,
+    scanNoteConnections(content).scan.edges.map((e) => e.connection),
+    "removing the concept from the note's frontmatter",
+  );
+  return { content: out, changed: true };
 }
 
 /**
@@ -3585,6 +3555,7 @@ export async function delete_note(
     // refuses, or frontmatter the YAML parser cannot read.
     const nonYaml: string[] = [];
     const parseErrors: Array<{ relPath: string; message: string }> = [];
+    const stripErrors: Array<{ relPath: string; message: string }> = [];
     if (args.cascade === true && inbound.length > 0) {
       const sources = [...new Set(inbound.map((e) => e.source))];
       for (const source of sources) {
@@ -3597,7 +3568,7 @@ export async function delete_note(
         if (!(await resolvesInsideVault(vaultRoot, source))) continue;
         let content: string;
         try {
-          content = await fs.readFile(path.join(vaultRoot, source), "utf-8");
+          content = await readNoteText(path.join(vaultRoot, source));
         } catch {
           // Source vanished since the index was built — nothing to repair.
           continue;
@@ -3606,7 +3577,16 @@ export async function delete_note(
         // `concepts:` frontmatter entry (ingest derives `references` edges from
         // both; repairing only the body would let the next ingest resurrect a
         // deleted concept — see stripConceptRefs).
-        const { content: bodyStripped, removed } = stripConnectionsTo(content, refTokens);
+        let bodyStripped: string;
+        let removed: number;
+        try {
+          ({ content: bodyStripped, removed } = stripConnectionsTo(content, refTokens));
+        } catch (e: unknown) {
+          // The strip would change the note's edges in a way it did not
+          // mean to (stripConnectionsTo checks its own result).
+          stripErrors.push({ relPath: source, message: e instanceof Error ? e.message : String(e) });
+          continue;
+        }
         if (hasNonYamlOpener(content)) {
           // The hub refuses any pushed note whose first line is `---` plus a
           // language name (`---js`, `---yaml`, #781), and a body repair keeps
@@ -3639,7 +3619,10 @@ export async function delete_note(
       // scopes the caller can't write (which the hub pre-receive would then
       // reject anyway). Refuse the whole cascade if any linker is out of scope.
       if (acl !== null) {
-        const denied = [...repairs.map((r) => r.relPath), ...nonYaml, ...parseErrors.map((p) => p.relPath)]
+        const denied = [
+          ...repairs.map((r) => r.relPath), ...nonYaml, ...parseErrors.map((p) => p.relPath),
+          ...stripErrors.map((p) => p.relPath),
+        ]
           .filter((rel) => !canWrite(acl, aclIdentity, deriveScope(rel)));
         if (denied.length > 0) {
           return {
@@ -3651,6 +3634,15 @@ export async function delete_note(
         }
       }
 
+      if (stripErrors.length > 0) {
+        return {
+          error: "VALIDATION_ERROR",
+          message:
+            "Cascade cannot remove the connections safely from: " +
+            stripErrors.map((p) => `${p.relPath} (${p.message})`).join("; ") +
+            " Edit each file directly, commit, then retry the delete.",
+        } satisfies ToolError;
+      }
       if (nonYaml.length > 0 || parseErrors.length > 0) {
         const parts: string[] = [];
         if (nonYaml.length > 0) {
@@ -3675,7 +3667,7 @@ export async function delete_note(
 
     let title = args.id;
     try {
-      title = (parseNote(await fs.readFile(filePath, "utf-8")).metadata.title as string) || args.id;
+      title = (parseNote(await readNoteText(filePath)).metadata.title as string) || args.id;
     } catch {
       // fall back to id for the commit subject
     }
@@ -3806,7 +3798,7 @@ export async function update_note(
 
     let existing: string;
     try {
-      existing = await fs.readFile(filePath, "utf-8");
+      existing = await readNoteText(filePath);
     } catch {
       return { error: "NOT_FOUND", message: `Note not found: ${args.id}` } satisfies ToolError;
     }
@@ -3859,6 +3851,7 @@ export async function update_note(
     // the write lock (see updateNote). Computing it here from `existing` (read
     // before the lock) would let a concurrent delete + rewrite resurrect a
     // just-deleted note with stale content. #119.
+    let written: string | undefined;
     const transform = (current: string): string => {
       const { metadata, body } = parseNote(current);
       const mergedBody = args.body !== undefined ? args.body : body;
@@ -3882,7 +3875,17 @@ export async function update_note(
       }
       // No connections arg: mergedBody already carries its own `## Connections`
       // section, so buildNote must not re-append one.
-      return buildNote(mergedMeta, mergedBody);
+      const out = buildNote(mergedMeta, mergedBody);
+      // The written note must index exactly the edges the type check above
+      // saw (the new body's), or, for a frontmatter-only patch, the edges the
+      // note had: never edges that check did not see.
+      const expected: Connection[] =
+        args.body !== undefined
+          ? scanConnections(splitConnectionLines(normalizeNewlines(args.body))).edges.map((e) => e.connection)
+          : scanNoteConnections(current).scan.edges.map((e) => e.connection);
+      verifyNoteConnections(out, expected, "update_note");
+      written = out;
+      return out;
     };
 
     // Commit subject from the same in-lock read the content is built from.
@@ -3894,9 +3897,12 @@ export async function update_note(
     triggerSpokePush(vaultRoot);
 
     const syncWarning = await readSyncWarning(vaultRoot);
+    const writtenWarning =
+      written === undefined ? undefined : connectionsWarning(connectionsProblemOf(scanNoteConnections(written).scan));
     return {
       id: args.id,
       updated: result.committed,
+      ...(writtenWarning !== undefined ? { connectionsWarning: writtenWarning } : {}),
       commitSha: result.commitSha,
       ...(result.commitWarning ? { commitWarning: result.commitWarning } : {}),
       ...(syncWarning !== undefined ? { syncWarning } : {}),

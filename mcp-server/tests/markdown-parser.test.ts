@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseNote, buildNote, buildConnectionLine, parseConnections, isRoundTrippableTarget, SLUG_WS_CHARS } from "../src/markdown-parser.js";
+import { ConnectionWriteError } from "../src/markdown-parser.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -126,11 +127,12 @@ describe("markdown-parser", () => {
     expect(built.trimEnd().endsWith("```\n\n## Connections\n\n- supports: notes/a.md")).toBe(true);
   });
 
-  test("buildNote closes an unclosed fence before adding the section", () => {
+  test("buildNote refuses to add a section after an unclosed fence", () => {
+    // The connection rule indexes nothing from a note with an unclosed
+    // fence, so the new section's edges would not be indexed.
     const body = ["Example:", "", "~~~~", "## Connections"].join("\n");
-    const built = buildNote({ title: "t" }, body, [{ target: "notes/a.md", type: "supports" }]);
-    expect(parseNote(built).connections.map((c) => c.target)).toEqual(["notes/a.md"]);
-    expect(built).toContain("## Connections\n~~~~\n\n## Connections\n\n- supports: notes/a.md");
+    expect(() => buildNote({ title: "t" }, body, [{ target: "notes/a.md", type: "supports" }]))
+      .toThrow(ConnectionWriteError);
   });
 
   test("buildNote replaces only the real section, past a fenced ## line", () => {

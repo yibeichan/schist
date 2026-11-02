@@ -183,8 +183,10 @@ class TestSchemaCommand:
     @pytest.mark.parametrize("line,reason", [
         ("## Connections (x)", "heading text is not exactly '## Connections'"),
         ("## Connections to Our Vault", "heading text is not exactly '## Connections'"),
-        ("    ## Connections", "indented by 4 or more spaces or by a tab"),
-        ("\t## Connections", "indented by 4 or more spaces or by a tab"),
+        ("    ## Connections", "indented (the heading must start at column 0)"),
+        ("\t## Connections", "indented (the heading must start at column 0)"),
+        (" ## Connections", "indented (the heading must start at column 0)"),
+        ("   ## Connections", "indented (the heading must start at column 0)"),
     ])
     def test_validate_warns_on_near_miss_connections_heading(
         self, tmp_path, capsys, line, reason,
@@ -229,27 +231,27 @@ class TestSchemaCommand:
         assert "inside a fenced code block" in out
         assert "All documents valid." in out
 
-    @pytest.mark.parametrize("line", [" ## Connections", "   ## Connections"])
-    def test_validate_does_not_warn_on_heading_indented_one_to_three_spaces(
-        self, tmp_path, capsys, line,
-    ):
+    def test_validate_warns_on_a_later_connections_heading(self, tmp_path, capsys):
         notes_dir = tmp_path / "notes"
         notes_dir.mkdir()
-        (notes_dir / "ok.md").write_text(
-            f"---\ntitle: Ok\nstatus: draft\n---\n\nBody\n\n{line}\n"
-            "- extends: notes/other\n",
+        (notes_dir / "two.md").write_text(
+            "---\ntitle: Two\nstatus: draft\n---\n\n## Connections\n"
+            "- extends: notes/a\n\n## Connections\n- extends: notes/b\n",
             encoding="utf-8",
         )
         commands.schema(
             _schema_args(validate=True), str(tmp_path),
             str(tmp_path / ".schist" / "schist.db"),
         )
-        assert capsys.readouterr().out.strip() == "All documents valid."
+        out = capsys.readouterr().out
+        assert "WARN: notes/two.md:9: " in out
+        assert "only the first section is read" in out
 
     @pytest.mark.parametrize("line,reason", [
-        (" ## Connections (x)", "heading text is not exactly '## Connections'"),
+        ("## Connections (x)", "heading text is not exactly '## Connections'"),
+        (" ## Connections (x)", "indented (the heading must start at column 0)"),
         ("\u00a0## Connections", "starts with U+00A0, which is not a space or tab"),
-        ("  \t## Connections", "indented by 4 or more spaces or by a tab"),
+        ("  \t## Connections", "indented (the heading must start at column 0)"),
     ])
     def test_validate_names_the_right_reason(self, tmp_path, capsys, line, reason):
         notes_dir = tmp_path / "notes"
@@ -266,7 +268,7 @@ class TestSchemaCommand:
         assert f"WARN: notes/r.md:8: " in out
         assert reason in out
 
-    def test_validate_warns_on_heading_in_html_div_block(self, tmp_path, capsys):
+    def test_validate_warns_when_a_note_indexes_no_connections(self, tmp_path, capsys):
         notes_dir = tmp_path / "notes"
         notes_dir.mkdir()
         (notes_dir / "d.md").write_text(
@@ -279,8 +281,10 @@ class TestSchemaCommand:
             str(tmp_path / ".schist" / "schist.db"),
         )
         out = capsys.readouterr().out
-        assert "WARN: notes/d.md:7: " in out
-        assert "inside an HTML block" in out
+        assert (
+            'WARN: notes/d.md:6: no connections are indexed from this note: '
+            'the line starts with "<" (HTML)'
+        ) in out
 
     def test_validate_warns_on_heading_in_html_comment(self, tmp_path, capsys):
         notes_dir = tmp_path / "notes"
@@ -295,8 +299,7 @@ class TestSchemaCommand:
             str(tmp_path / ".schist" / "schist.db"),
         )
         out = capsys.readouterr().out
-        assert "WARN: notes/c.md:7: " in out
-        assert "inside an HTML block" in out
+        assert "WARN: notes/c.md:6: no connections are indexed from this note" in out
         assert "WARN: notes/c.md:8: " in out and "(edge dropped)" in out
 
     def test_validate_warns_on_gained_edge_after_fenced_heading(
@@ -363,7 +366,7 @@ class TestSchemaCommand:
         out = capsys.readouterr().out
         assert "cannot have outgoing" not in out
         assert "concepts/indented.md:5: " in out
-        assert "indented by 4 or more spaces" in out
+        assert "indented (the heading must start at column 0)" in out
         assert "(edge dropped)" in out
 
     def test_validate_does_not_warn_on_exact_connections_heading(
@@ -372,7 +375,7 @@ class TestSchemaCommand:
         notes_dir = tmp_path / "notes"
         notes_dir.mkdir()
         (notes_dir / "exact.md").write_text(
-            "---\ntitle: Exact\nstatus: draft\n---\n\nBody\n\n  ## Connections  \n"
+            "---\ntitle: Exact\nstatus: draft\n---\n\nBody\n\n## Connections  \n"
             "- extends: notes/other\n",
             encoding="utf-8",
         )

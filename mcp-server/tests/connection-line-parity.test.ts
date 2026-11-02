@@ -20,8 +20,18 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CONNECTION_RE, connectionBody, parseConnections, parseNote } from "../src/markdown-parser.js";
-import { bodyConnectionEdgeLines, stripConnectionsTo } from "../src/tools.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import {
+  CONNECTION_RE,
+  connectionBody,
+  normalizeNewlines,
+  parseConnections,
+  parseNote,
+  scanConnections,
+  splitConnectionLines,
+} from "../src/markdown-parser.js";
+import { bodyConnectionEdgeLines, readNoteText, stripConnectionsTo } from "../src/tools.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -32,8 +42,8 @@ type LineCase = {
   expected: { type: string; target: string; context: string | null } | null;
 };
 type BodyEdge = { type: string; target: string; context: string | null };
-type BodyCase = { name: string; body: string; edges: BodyEdge[] };
-type FileCase = { name: string; text: string; edges: BodyEdge[] };
+type BodyCase = { name: string; body: string; edges: BodyEdge[]; problem: number | null };
+type FileCase = { name: string; text: string; body: string; edges: BodyEdge[] };
 type ParityFixture = { lines: LineCase[]; bodies: BodyCase[]; files: FileCase[] };
 
 function loadFixture(): ParityFixture {
@@ -78,6 +88,8 @@ describe("connection-body splitter parity (#359)", () => {
         context: e.context ?? null,
       }));
       expect(got).toEqual(c.edges);
+      const scan = scanConnections(splitConnectionLines(normalizeNewlines(c.body)));
+      expect(scan.problem === null ? null : scan.problem.index).toBe(c.problem);
     });
   }
 
@@ -158,6 +170,25 @@ describe("connection whole-file parity", () => {
     });
   }
 
+  // File I/O parity: the note's bytes on disk, read the way the server reads
+  // notes (readNoteText), give the body ingest stores in docs.body (the
+  // text the viewer renders) and the edges ingest indexes.
+  // cli/tests/test_ingest.py runs the same files through a real ingest.
+  for (const c of fixture.files) {
+    test(`read from disk: ${c.name}`, async () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "schist-file-parity-"));
+      try {
+        const file = path.join(dir, "note.md");
+        writeFileSync(file, Buffer.from(c.text, "utf-8"));
+        const text = await readNoteText(file);
+        expect(connectionBody(text)).toBe(c.body);
+        expect(parseConnections(connectionBody(text)).map((e) => e.target)).toEqual(c.edges.map((e) => e.target));
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
   for (const c of fixture.files) {
     test(c.name, () => {
       let parsed: ReturnType<typeof parseNote>;
@@ -200,10 +231,11 @@ describe("delete cascade on whole files", () => {
     expect(content).toBe("---\ntitle: t\n---\n## Connections\n- extends: a\n\ufeff## P\n");
   });
 
-  test("an edge-looking line in an HTML block inside the section is kept", () => {
+  test("a note the rule indexes nothing from is left alone", () => {
     const text = "---\ntitle: t\n---\n\n## Connections\n- extends: a\n<div>\n- extends: a\n\n- extends: b\n";
+    expect(parseNote(text).connections).toEqual([]);
     const { content, removed } = stripConnectionsTo(text, ["a"]);
-    expect(removed).toBe(1);
-    expect(content).toBe("---\ntitle: t\n---\n\n## Connections\n<div>\n- extends: a\n\n- extends: b\n");
+    expect(removed).toBe(0);
+    expect(content).toBe(text);
   });
 });

@@ -6,6 +6,7 @@
 
 import errno
 import os
+from collections import Counter
 import re
 import stat
 import tempfile
@@ -13,10 +14,10 @@ import tempfile
 import frontmatter
 
 from .ingest import (
-    connections_section,
-    note_body_start_line,
-    split_connection_lines,
-    unclosed_block_closer,
+    connection_line_edge,
+    normalize_newlines,
+    parse_connections,
+    scan_note_connections,
 )
 
 # Explicit whitespace set shared verbatim with ingest.py's _SLUG_WS_CHARS and
@@ -63,11 +64,12 @@ LINE_BOUNDARY_CHARS = '\n\x0b\x0c\r\x1c\x1d\x1e\x85\u2028\u2029'
 def contains_line_boundary(text: str) -> bool:
     """True when `text` would split into more than one line on read.
 
-    Derived from str.splitlines() itself — the SAME splitter
-    insert_connection_line and ingest.parse_connections use — so the
-    write-time guard and the read-time splitter can never disagree on what
-    ends a line (the #359 principle; TS gets the same property by sharing
-    LINE_BOUNDARY between containsLineBoundary and splitLinesLikePython).
+    Derived from str.splitlines() itself, whose boundaries include every
+    line ending the connection rule splits on (LF, CR) and the separators it
+    refuses to read (VT, FF, U+001C-U+001E, NEL, U+2028, U+2029), so a
+    guarded value can neither end a line nor make the note unreadable (the
+    #359 principle; TS shares LINE_BOUNDARY between containsLineBoundary and
+    splitLinesLikePython).
     A connection target carrying such a character serializes into
     `- type: target` and splits back into MORE than one line on read, so
     ingest indexes a forged extra edge the caller never wrote (#398/#405).
@@ -143,6 +145,10 @@ def write_note(path: str, fm: dict, body: str, exclusive: bool = False,
     """
     post = frontmatter.Post(body, **fm)
     content = frontmatter.dumps(post) + '\n'
+    # The written note must index the edges its body holds, no others.
+    verify_note_connections(
+        content, parse_connections(normalize_newlines(body)), 'writing the note',
+    )
     if exclusive:
         with open(path, 'x', encoding='utf-8') as f:
             f.write(content)
@@ -150,51 +156,90 @@ def write_note(path: str, fm: dict, body: str, exclusive: bool = False,
         _atomic_write(path, content, vault_root=vault_root)
 
 
-def insert_connection_line(content: str, line: str) -> str:
-    """Insert a connection line into content's ## Connections section.
+class ConnectionWriteError(ValueError):
+    """A write that would leave the note's indexed edges different from what
+    the writer meant. Raised before anything is written."""
 
-    Splits with split_connection_lines (CommonMark line endings: \\n, \\r\\n,
-    \\r), the SAME boundaries ingest.py:parse_connections reads with, so VT,
-    FF, NEL, U+2028 and the other splitlines-only separators stay inside a
-    line, as a renderer shows them. The section gate is the same line-scan
-    the readers use (not a substring test): a mid-line prose mention of
-    "## Connections" is not a heading, so the edge gets a real section
-    instead of landing outside any section. The heading must be exact and
-    outside a fenced code block or HTML block, and only body lines count
-    (ingest.connections_section and note_body_start_line). Output is
-    '\\n'-joined with a single trailing newline.
+
+def _edge_key(edge: dict) -> tuple:
+    return (edge['type'], edge['target'], edge['context'] or '')
+
+
+def _describe_edges(edges: list[dict]) -> str:
+    return ', '.join(f"{e['type']}: {e['target']}" for e in edges) or 'none'
+
+
+def verify_note_connections(text: str, expected: list[dict], action: str) -> None:
+    """Raise ConnectionWriteError unless the note file `text` reads exactly
+    `expected` (as a multiset) under ingest's connection rule. Every writer
+    runs this on what it is about to write; markdown-parser.ts
+    verifyNoteConnections is its twin and words the error the same way."""
+    _lines, scan = scan_note_connections(text)
+    got = [e for _i, e in scan.edges]
+    if Counter(map(_edge_key, got)) == Counter(map(_edge_key, expected)):
+        return
+    problem = ''
+    if scan.problem is not None and scan.heading is not None:
+        problem = (
+            f'; line {scan.problem[0] + 1}: {scan.problem[1]}, so no '
+            'connections are indexed from this note'
+        )
+    raise ConnectionWriteError(
+        f'{action} refused: the note would be indexed with connections '
+        f'[{_describe_edges(got)}], not [{_describe_edges(expected)}]'
+        f'{problem}. Nothing was written.'
+    )
+
+
+def _is_blank(line: str) -> bool:
+    return line.strip(' \t') == ''
+
+
+def insert_connection_line(content: str, line: str) -> str:
+    """Insert a connection line into content's ## Connections section, after
+    its last non-blank line, or add the section at the end of the note when
+    there is none. Reads with ingest.scan_note_connections (the rule ingest
+    indexes with, on body lines only, so a YAML block scalar holding
+    "## Connections" is never a section). Output is '\\n'-joined with a
+    single trailing newline; CRLF and CR become LF.
+
+    The result is checked: it must read as the note's edges plus the new one,
+    or ConnectionWriteError is raised and nothing is written (for instance
+    when the note holds Markdown the rule does not follow, so no edge of it
+    is indexed).
 
     Byte-identical to mcp-server markdown-parser.ts insertConnectionLine;
-    schema/connection-append-parity.json pins both, like #318/#338 did for
-    slugs.
+    schema/connection-append-parity.json pins both.
     """
-    lines = split_connection_lines(content)
-    # Scan only the body: frontmatter lines (a YAML block scalar holding
-    # "  ```" or "  ## Connections") must not open a fence or a section.
-    start = note_body_start_line(content)
-    section = connections_section(lines, start)
-    if section is None:
-        # Create section at end. Blank line after the heading matches the
-        # MCP server's create-path shape so both writers mint one format.
-        # When the body ends inside an unclosed fence or HTML block, the
-        # new heading would land inside it too, so close it first.
-        # A type 6/7 HTML block ('' closer) is ended by the blank line below.
-        closer = unclosed_block_closer(lines, start)
-        closer = '\n' + closer if closer else ''
-        return (content.rstrip() + closer
-                + '\n\n## Connections\n\n' + line + '\n')
-    _heading, end, _skipped = section
-    if end < len(lines):
-        lines.insert(end, line)
+    added = connection_line_edge(line)
+    if added is None:
+        raise ConnectionWriteError(
+            f'"{line}" is not a line the connection rule reads as an edge. '
+            'Nothing was written.'
+        )
+    lines, scan = scan_note_connections(content)
+    before = [e for _i, e in scan.edges]
+    if scan.problem is not None:
+        raise ConnectionWriteError(
+            f'adding the connection refused: line {scan.problem[0] + 1}: '
+            f'{scan.problem[1]}; the connection rule indexes no connections '
+            'from this note, so the new one would not be indexed either. '
+            'Edit the note first. Nothing was written.'
+        )
+    if scan.heading is None:
+        kept = list(lines)
+        while kept and _is_blank(kept[-1]):
+            kept.pop()
+        out = '\n'.join(kept) + '\n\n## Connections\n\n' + line + '\n'
     else:
-        # The section runs to EOF. If it ends inside an unclosed fence or
-        # HTML block, close it (a blank line for HTML types 6 and 7) so the
-        # appended edge is outside it.
-        closer = unclosed_block_closer(lines, start)
-        if closer is not None:
-            lines.append(closer)
-        lines.append(line)
-    return '\n'.join(lines) + '\n'
+        last = scan.heading
+        for i in range(scan.heading + 1, scan.end):
+            if not _is_blank(lines[i]):
+                last = i
+        insert = ['', line] if last == scan.heading else [line]
+        out = '\n'.join(lines[:last + 1] + insert + lines[last + 1:]) + '\n'
+    verify_note_connections(out, before + [added], 'adding the connection')
+    return out
 
 
 def _atomic_write(path: str, content: str, vault_root: str | None = None) -> None:

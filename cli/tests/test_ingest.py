@@ -373,7 +373,12 @@ def test_parse_connections_matches_shared_body_parity_cases(case: dict) -> None:
     type smuggled across such a separator bypass the #317 vocabulary check
     while ingest still indexed the edge (#359). These whole-body cases pin the
     splitters together across languages."""
-    from schist.ingest import parse_connections
+    from schist.ingest import (
+        normalize_newlines,
+        parse_connections,
+        scan_connections,
+        split_connection_lines,
+    )
 
     edges = parse_connections(case["body"])
     got = [
@@ -381,6 +386,8 @@ def test_parse_connections_matches_shared_body_parity_cases(case: dict) -> None:
         for e in edges
     ]
     assert got == case["edges"]
+    scan = scan_connections(split_connection_lines(normalize_newlines(case["body"])))
+    assert (None if scan.problem is None else scan.problem[0]) == case["problem"]
 
 
 def test_ingest_deduplicates_implicit_concept_edges(tmp_path: Path) -> None:
@@ -2518,11 +2525,13 @@ def test_connection_file_parity_fixture_is_nontrivial() -> None:
 def test_ingest_reads_connections_from_the_unstripped_body(
     tmp_path: Path, case: dict,
 ) -> None:
-    """Ingest reads connections from the raw text after the frontmatter's
-    closing line, the body TS parseNote (gray-matter) sees, not
-    python-frontmatter's stripped post.content; frontmatter lines never open
-    a fence or a section. The same whole-file cases run through TS
-    parseNote in connection-line-parity.test.ts."""
+    """Ingest reads connections from connection_body (the text after the
+    frontmatter's closing line, with CRLF and CR as LF), not
+    python-frontmatter's stripped post.content, and stores that same text in
+    docs.body for the viewer; frontmatter lines never open a fence or a
+    section. The file is written as bytes and read the way ingest reads
+    notes. The same cases run through readNoteText in
+    connection-line-parity.test.ts."""
     from schist.ingest import ingest
 
     vault = tmp_path / "vault"
@@ -2538,9 +2547,12 @@ def test_ingest_reads_connections_from_the_unstripped_body(
         rows = conn.execute(
             "SELECT type, target FROM edges WHERE type != 'references' ORDER BY rowid",
         ).fetchall()
+        (body,) = conn.execute("SELECT body FROM docs").fetchone()
     finally:
         conn.close()
     assert rows == [(e["type"], e["target"]) for e in case["edges"]]
+    # docs.body, which the viewer renders, is the text the edges came from.
+    assert body == case["body"]
 
 
 def _frontmatter_boundary_fixture() -> dict:
@@ -2560,10 +2572,11 @@ def test_frontmatter_boundary_python_whitespace_is_str_isspace() -> None:
     "case", _frontmatter_boundary_fixture()["cases"], ids=lambda c: c["name"]
 )
 def test_note_body_offset_matches_shared_boundary_cases(case: dict) -> None:
-    from schist.ingest import note_body_offset
+    from schist.ingest import connection_body, note_body_offset
 
     text = case["text"]
     assert text[note_body_offset(text):] == case["body"]
+    assert connection_body(text) == case["connection_body"]
 
 
 @pytest.mark.parametrize(
@@ -2571,17 +2584,18 @@ def test_note_body_offset_matches_shared_boundary_cases(case: dict) -> None:
 )
 def test_note_body_offset_agrees_with_python_frontmatter(case: dict) -> None:
     """note_body_offset writes out python-frontmatter's split; its body,
-    stripped and with CRLF turned into LF, is exactly post.content. TOML is
-    skipped when the toml package (python-frontmatter's TOML handler) is
-    absent: the rule then still treats `+++` lines as frontmatter, which only
-    hides lines from connection parsing."""
+    stripped and with CRLF and CR turned into LF, is exactly post.content of
+    the text as a text-mode read returns it (ingest reads files that way).
+    TOML is skipped when the toml package (python-frontmatter's TOML handler)
+    is absent: the rule then still treats `+++` lines as frontmatter, which
+    only hides lines from connection parsing."""
     import frontmatter
     from frontmatter.util import u
 
-    from schist.ingest import note_body_offset
+    from schist.ingest import normalize_newlines, note_body_offset
 
     text = case["text"]
-    stripped = u(text).strip()
+    stripped = u(normalize_newlines(text)).strip()
     handler = frontmatter.detect_format(stripped, frontmatter.handlers)
     if handler is None and text.lstrip().startswith("+++"):
         pytest.skip("python-frontmatter has no TOML handler here")
@@ -2593,26 +2607,4 @@ def test_note_body_offset_agrees_with_python_frontmatter(case: dict) -> None:
             lib_body = content.strip()
         except ValueError:
             lib_body = stripped
-    assert text[note_body_offset(text):].replace("\r\n", "\n").strip() == lib_body
-
-
-def _connection_reading_cases() -> list[dict]:
-    fixture = _repo_root() / "schema" / "connection-reading-parity.json"
-    return json.loads(fixture.read_text(encoding="utf-8"))["cases"]
-
-
-def test_connection_reading_fixture_is_nontrivial() -> None:
-    assert len(_connection_reading_cases()) >= 10
-
-
-@pytest.mark.parametrize("case", _connection_reading_cases(), ids=lambda c: c["name"])
-def test_connection_line_readings_match_shared_cases(case: dict) -> None:
-    """Each reading of the connection rule (CommonMark, marked, marked with
-    any HTML interrupting a paragraph) skips the same lines in both
-    languages; markdown-parser.ts connectionLineReadings runs the same
-    cases."""
-    from schist.ingest import connection_line_readings, split_connection_lines
-
-    readings = connection_line_readings(split_connection_lines(case["body"]), case["start"])
-    got = [[i for i, skipped in enumerate(r) if skipped] for r in readings]
-    assert got == [case["commonmark"], case["marked"], case["marked_any_html"]]
+    assert normalize_newlines(text[note_body_offset(text):]).strip() == lib_body

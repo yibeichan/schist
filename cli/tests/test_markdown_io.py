@@ -71,31 +71,36 @@ def test_insert_connection_line_matches_shared_parity_cases(case: dict) -> None:
     '\\n'-joined content, so an edge written by either language lands where
     BOTH readers (ingest.py parse_connections / TS parseConnections) index it.
     """
-    from schist.markdown_io import insert_connection_line
+    from schist.markdown_io import ConnectionWriteError, insert_connection_line
 
-    assert insert_connection_line(case["content"], case["line"]) == case["expected"]
+    if case["expected"] is None:
+        with pytest.raises(ConnectionWriteError):
+            insert_connection_line(case["content"], case["line"])
+    else:
+        assert insert_connection_line(case["content"], case["line"]) == case["expected"]
 
 
 @pytest.mark.parametrize(
     "case", _connection_append_parity_cases(), ids=lambda c: c["name"]
 )
 def test_inserted_connection_is_indexed_by_ingest(case: dict) -> None:
-    """Writers agree with the reader: ingest's view of `expected` (the raw
-    body after the frontmatter, connections_section's rule) holds the edge
-    the writer inserted, so the write is never reported as done while the
-    edge goes unindexed. TS checks the same through parseNote."""
+    """Writers agree with the reader: ingest's view of `expected`
+    (connection_body, the connection rule) holds exactly the note's edges
+    plus the one the writer inserted, so the write is never reported as done
+    while the edge goes unindexed or another edge appears. TS checks the same
+    through parseNote."""
     from schist.ingest import (
-        CONNECTION_RE,
-        note_body_offset,
+        connection_body,
+        connection_line_edge,
         parse_connections,
         patch_frontmatter_flow_hashtags,
     )
 
-    m = CONNECTION_RE.match(case["line"])
-    assert m is not None
-    raw = patch_frontmatter_flow_hashtags(case["expected"])
-    edges = parse_connections(raw[note_body_offset(raw):])
-    assert (m.group(1), m.group(2)) in {(e["type"], e["target"]) for e in edges}
+    if case["expected"] is None:
+        pytest.skip("the writer refuses this note")
+    before = parse_connections(connection_body(patch_frontmatter_flow_hashtags(case["content"])))
+    after = parse_connections(connection_body(patch_frontmatter_flow_hashtags(case["expected"])))
+    assert after == before + [connection_line_edge(case["line"])]
 
 
 @pytest.mark.parametrize(
@@ -108,29 +113,22 @@ def test_inserted_connection_is_indexed_by_ingest(case: dict) -> None:
         ("FF", "\f"),
     ],
 )
-def test_append_connection_edge_is_indexed_with_non_markdown_separators(
+def test_append_connection_refuses_non_markdown_separators(
     tmp_path, name: str, sep: str
 ) -> None:
-    """End-to-end #365: the appended edge must be indexed. These separators
-    are not Markdown line endings, so the note is one line with no
-    connections heading (a renderer shows it as one paragraph); the writer
-    adds a real section and ingest indexes the new edge, not the joined
-    one."""
-    from schist.ingest import parse_connections
-    from schist.markdown_io import append_connection
+    """End-to-end #365: these separators are not Markdown line endings, and
+    some readers break lines there, so the connection rule indexes nothing
+    from a note that holds one before or in its section. append_connection
+    refuses (the new edge would not be indexed) and leaves the file as it
+    was."""
+    from schist.markdown_io import ConnectionWriteError, append_connection
 
     note = tmp_path / "note.md"
-    note.write_text(
-        f"## Connections{sep}- supports: notes/x.md{sep}## Notes{sep}Body.",
-        encoding="utf-8",
-        newline="",
-    )
-    append_connection(str(note), "extends", "notes/b.md")
-
-    edges = parse_connections(note.read_text(encoding="utf-8"))
-    pairs = {(e["type"], e["target"]) for e in edges}
-    assert ("extends", "notes/b.md") in pairs, f"{name}-separated edge dropped"
-    assert ("supports", "notes/x.md") not in pairs
+    text = f"## Connections{sep}- supports: notes/x.md{sep}## Notes{sep}Body."
+    note.write_text(text, encoding="utf-8", newline="")
+    with pytest.raises(ConnectionWriteError, match=f"U\\+{ord(sep):04X}"):
+        append_connection(str(note), "extends", "notes/b.md")
+    assert note.read_text(encoding="utf-8", newline="") == text, f"{name}: file changed"
 
 
 def test_append_connection_golden_path_and_context(tmp_path) -> None:

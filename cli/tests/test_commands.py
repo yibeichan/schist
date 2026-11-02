@@ -162,7 +162,7 @@ class TestAddConcept:
         assert note["body"] == body
 
     @pytest.mark.parametrize("body", [
-        "definition\n\n  ## Connections\n\n- extends: concepts/other",
+        "definition\n\n## Connections\n\n- extends: concepts/other",
         "definition\n\n```\ncode\n```\n\n## Connections\n- extends: concepts/other",
     ])
     def test_rejects_real_connections_section_outside_fence(
