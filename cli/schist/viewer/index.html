@@ -466,12 +466,18 @@ SPDX-License-Identifier: Apache-2.0
     return e;
   }
 
+  // ── Markdown rendering (mcp-server/tests/connection-dom.test.ts runs the
+  // code between this line and "end of Markdown rendering") ──────────────
   // Note bodies and agent answers are Markdown. They are the one place vault
   // text becomes HTML, and only after DOMPurify sanitizes marked's output: no
   // scripts, event handlers or javascript: URLs survive. Only HTML is kept
   // (no SVG or MathML), and images, media, embeds and the legacy background
   // attribute are dropped, so rendering never fetches from another host; the
   // page's Content-Security-Policy blocks any such fetch that gets past this.
+  // Raw HTML written in a note (marked's html tokens, block and inline) is
+  // shown as text, never parsed, so a tag in a note cannot hide, collapse or
+  // re-title what follows it (an unclosed <textarea>, <details> or <!--
+  // would otherwise swallow the rest of the note, Connections included).
   // Links open in a new tab without a referrer. If either library failed to
   // load, the body is shown as plain text.
   const SANITIZE = {
@@ -479,6 +485,20 @@ SPDX-License-Identifier: Apache-2.0
     FORBID_TAGS: ["img", "picture", "source", "video", "audio", "iframe", "object", "embed", "style", "form", "input", "button"],
     FORBID_ATTR: ["style", "srcset", "background"],
   };
+  function escapeHtml(text) {
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  const markdown = window.marked
+    ? new marked.Marked({
+        gfm: true,
+        breaks: false,
+        renderer: {
+          html(html, block) {
+            return block ? `<p>${escapeHtml(html)}</p>\n` : escapeHtml(html);
+          },
+        },
+      })
+    : null;
   if (window.DOMPurify) {
     DOMPurify.addHook("afterSanitizeAttributes", elem => {
       if (elem.tagName === "A" && elem.hasAttribute("href")) {
@@ -487,10 +507,15 @@ SPDX-License-Identifier: Apache-2.0
       }
     });
   }
+  // What renderBody writes into the page, as a string (for the tests).
+  function markdownToHtml(text) {
+    return DOMPurify.sanitize(markdown.parse(text), SANITIZE);
+  }
+  // ── end of Markdown rendering ─────────────────────────────────────────────
   function renderBody(target, text) {
-    if (window.marked && window.DOMPurify) {
+    if (markdown && window.DOMPurify) {
       target.classList.remove("plain");
-      target.innerHTML = DOMPurify.sanitize(marked.parse(text, { gfm: true, breaks: false }), SANITIZE);
+      target.innerHTML = DOMPurify.sanitize(markdown.parse(text), SANITIZE);
     } else {
       target.classList.add("plain");
       target.textContent = text;
