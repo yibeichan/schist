@@ -73,6 +73,17 @@ async function makeTempVault(extraYaml = ""): Promise<string> {
   return dir;
 }
 
+/** A minimal index holding `edges` as ingest would have indexed them, for
+ * update_note's grandfathering, which reads the index's edges table. */
+function seedIndexEdges(vault: string, edges: { source: string; target: string; type: string }[]): void {
+  fsSync.mkdirSync(path.join(vault, ".schist"), { recursive: true });
+  const db = new Database(path.join(vault, ".schist", "schist.db"));
+  db.exec("CREATE TABLE IF NOT EXISTS edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, target TEXT NOT NULL, type TEXT NOT NULL, context TEXT, UNIQUE(source, target, type))");
+  const ins = db.prepare("INSERT OR IGNORE INTO edges (source, target, type) VALUES (?, ?, ?)");
+  for (const e of edges) ins.run(e.source, e.target, e.type);
+  db.close();
+}
+
 async function makeTempSpokeVault(): Promise<string> {
   const vault = await makeTempVault();
   await fs.writeFile(path.join(vault, ".gitignore"), ".schist/\n");
@@ -568,6 +579,7 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     const config = await loadVaultConfig(vault);
     const rel = "notes/2026-07-13-legacy-edge.md";
     await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    seedIndexEdges(vault, [{ source: rel, target: "notes/x.md", type: "legacy-type" }]);
     await fs.writeFile(
       path.join(vault, rel),
       "---\ntitle: Legacy Edge\n---\n\nOriginal prose.\n\n## Connections\n\n- legacy-type: notes/x.md\n",
@@ -618,6 +630,7 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     const config = await loadVaultConfig(vault);
     const rel = "notes/2026-07-13-new-bad-edge.md";
     await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    seedIndexEdges(vault, [{ source: rel, target: "notes/x.md", type: "legacy-type" }]);
     const original =
       "---\ntitle: New Bad Edge\n---\n\nProse.\n\n## Connections\n\n- legacy-type: notes/x.md\n";
     await fs.writeFile(path.join(vault, rel), original, "utf-8");
@@ -646,6 +659,7 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     const config = await loadVaultConfig(vault);
     const rel = "notes/2026-07-13-dup-vs-new.md";
     await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    seedIndexEdges(vault, [{ source: rel, target: "notes/x.md", type: "legacy-type" }]);
     const original =
       "---\ntitle: Dup Vs New\n---\n\nProse.\n\n## Connections\n\n- legacy-type: notes/x.md\n";
     await fs.writeFile(path.join(vault, rel), original, "utf-8");
@@ -685,6 +699,7 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     const config = await loadVaultConfig(vault);
     const rel = "notes/2026-07-13-indent-edge.md";
     await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    seedIndexEdges(vault, [{ source: rel, target: "notes/x.md", type: "legacy-type" }]);
     await fs.writeFile(
       path.join(vault, rel),
       "---\ntitle: Indent Edge\n---\n\nProse.\n\n## Connections\n\n- legacy-type: notes/x.md\n",
@@ -6649,6 +6664,53 @@ describe("connection writers check their own result", () => {
     ) as { error: string; message: string };
     expect(res.error).toBe("VALIDATION_ERROR");
     expect(res.message).toContain("update_note refused");
+    expect(await fs.readFile(path.join(vault, rel), "utf-8")).toBe(original);
+  }, 30000);
+
+  test("a note that is not valid UTF-8 is refused by get_note, update_note and add_connection", async () => {
+    // Ingest skips such a note (Python's read_text raises), so none of its
+    // lines are indexed edges, and nothing may be grandfathered or rewritten.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const rel = "notes/2026-11-02-bytes.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    const bytes = Buffer.from("---\ntitle: Legacy\n---\n\xff\n\n## Connections\n- badtype: notes/x.md\n", "latin1");
+    await fs.writeFile(path.join(vault, rel), bytes);
+
+    const got = await get_note(vault, { id: rel }, config) as { error: string; message: string };
+    expect(got.error).toBe("VALIDATION_ERROR");
+    expect(got.message).toContain("not valid UTF-8");
+    const upd = await update_note(
+      vault,
+      { owner: TEST_AGENT, id: rel, body: "Body\n\n## Connections\n\n- badtype: notes/x.md\n" },
+      config,
+    ) as { error: string; message: string };
+    expect(upd.error).toBe("VALIDATION_ERROR");
+    const add = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: rel, target: "notes/other.md", type: "extends" },
+      config,
+    ) as { error: string; message: string };
+    expect(add.error).toBe("VALIDATION_ERROR");
+    expect(add.message).toContain("not valid UTF-8");
+    expect(Buffer.compare(await fs.readFile(path.join(vault, rel)), bytes)).toBe(0);
+  }, 30000);
+
+  test("update_note grandfathers nothing when the index holds no such edge, whatever the file's frontmatter", async () => {
+    // A `----` closer once let the frontmatter hashtag patch run over the
+    // body, so ingest and the server read this edge differently.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const original = "---\ntitle: Legacy\n----\n\n## Connections\n- badtype: notes/x.md \"[#a]\"\n";
+    const rel = await noteIn(vault, "notes/2026-11-02-patch.md", original);
+    expect(parseNote(original).connections.map((c) => c.type)).toEqual(["badtype"]);
+    const res = await update_note(
+      vault,
+      { owner: TEST_AGENT, id: rel, body: "Body\n\n## Connections\n\n- badtype: notes/x.md \"[#a]\"\n" },
+      config,
+    ) as { error: string; message: string };
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toContain('"badtype"');
     expect(await fs.readFile(path.join(vault, rel), "utf-8")).toBe(original);
   }, 30000);
 

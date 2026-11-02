@@ -11,7 +11,7 @@ import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote, rewriteNote, updateNote, deleteNote, writeMutex, vaultLockWaitMs } from "./git-writer.js";
 import { withVaultLock, VaultLockTimeout, VaultLockFailed } from "./vault-lock.js";
-import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, hasNonYamlOpener, SLUG_WS_CHARS, containsLineBoundary, isRoundTrippableTarget, hasConnectionsHeading, trimConnectionWs, splitConnectionLines, connectionBody, normalizeNewlines, scanConnections, scanNoteConnections, connectionsProblemOf, verifyNoteConnections, isBlank } from "./markdown-parser.js";
+import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, hasNonYamlOpener, SLUG_WS_CHARS, containsLineBoundary, isRoundTrippableTarget, hasConnectionsHeading, trimConnectionWs, splitConnectionLines, normalizeNewlines, scanConnections, scanNoteConnections, connectionsProblemOf, verifyNoteConnections, isBlank, decodeNoteBytes, NoteDecodeError } from "./markdown-parser.js";
 import type { Connection } from "./types.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
@@ -295,13 +295,13 @@ async function resolvesInsideVault(vaultRoot: string, relPath: string): Promise<
  * non-enumerable and would otherwise be silently dropped.
  */
 /**
- * Read a note file the way ingest does: UTF-8, with CRLF and CR turned into
- * LF (Python's text-mode read_text). Every path that reads a note's
- * frontmatter or connections goes through this, so the server and the index
- * split a note at the same line endings.
+ * Read a note file the way ingest does: strict UTF-8 (an invalid byte throws
+ * NoteDecodeError, as Python's read_text raises and ingest skips the note),
+ * with CRLF and CR turned into LF (text-mode read_text). Every path that
+ * reads a note's frontmatter or connections goes through this.
  */
 export async function readNoteText(filePath: string): Promise<string> {
-  return normalizeNewlines(await fs.readFile(filePath, "utf-8"));
+  return decodeNoteBytes(await fs.readFile(filePath), path.basename(filePath));
 }
 
 /** The warning a tool returns when the connection rule indexes no edges
@@ -2656,10 +2656,12 @@ export async function get_note(
  * rule finds a problem, as in ingest. Lines are yielded trimmed. Given a
  * whole file, pass connectionBody(content), ingest's body.
  */
-export function* bodyConnectionEdgeLines(body: string): Generator<{ line: string; type: string }> {
+export function* bodyConnectionEdgeLines(
+  body: string,
+): Generator<{ line: string; type: string; target: string }> {
   const lines = splitConnectionLines(normalizeNewlines(body));
   for (const { index, connection } of scanConnections(lines).edges) {
-    yield { line: trimConnectionWs(lines[index]), type: connection.type };
+    yield { line: trimConnectionWs(lines[index]), type: connection.type, target: connection.target };
   }
 }
 
@@ -2669,22 +2671,22 @@ export function* bodyConnectionEdgeLines(body: string): Generator<{ line: string
  * `connections`). Exactly the lines ingest would index as edges are the
  * lines checked here (see bodyConnectionEdgeLines).
  *
- * #363: `grandfathered` (trimmed connection lines already present in the
- * note's current on-disk body) exempts pre-existing edges from the
+ * #363: `grandfathered` (`${type}\u0000${target}` keys of the edges the
+ * index holds for the note) exempts pre-existing edges from the
  * vocabulary check. A note authored before the vocabulary existed (or via
  * the Python CLI, or a direct git edit) may carry an out-of-vocabulary
  * type; without the exemption, every full-body update_note — even one
  * touching unrelated prose — would hard-fail until that line is fixed.
- * Only lines NOT in the current body are new edges and stay hard errors.
+ * Edges the index does not hold are new and stay hard errors.
  */
 function validateBodyConnectionTypes(
   body: string,
   config: VaultConfig,
   grandfathered?: ReadonlySet<string>
 ): ToolError | null {
-  for (const { line, type } of bodyConnectionEdgeLines(body)) {
+  for (const { line, type, target } of bodyConnectionEdgeLines(body)) {
     if (config.connectionTypes.includes(type)) continue;
-    if (grandfathered?.has(line)) continue; // pre-existing edge — #363
+    if (grandfathered?.has(`${type}\u0000${target}`)) continue; // indexed edge — #363
     return {
       error: "VALIDATION_ERROR",
       message:
@@ -3285,7 +3287,8 @@ export async function add_connection(
     let content: string;
     try {
       content = await readNoteText(filePath);
-    } catch {
+    } catch (e: unknown) {
+      if (e instanceof NoteDecodeError) return normalizeError(e);
       return { error: "NOT_FOUND", message: `Source note not found: ${args.source}` } satisfies ToolError;
     }
 
@@ -3799,7 +3802,8 @@ export async function update_note(
     let existing: string;
     try {
       existing = await readNoteText(filePath);
-    } catch {
+    } catch (e: unknown) {
+      if (e instanceof NoteDecodeError) return normalizeError(e);
       return { error: "NOT_FOUND", message: `Note not found: ${args.id}` } satisfies ToolError;
     }
 
@@ -3816,9 +3820,12 @@ export async function update_note(
     // racing rewrite can at worst re-allow a line that was on disk moments
     // ago, never a line that was never on disk.
     if (args.body !== undefined) {
-      const grandfathered = new Set(
-        Array.from(bodyConnectionEdgeLines(connectionBody(existing)), (e) => e.line)
-      );
+      // Grandfather only edges the index holds for this note (ingest's own
+      // record), never lines re-read from the file: a reading of the file
+      // that differs from ingest's would grandfather an edge ingest never
+      // indexed. Without a readable index nothing is grandfathered, so a new
+      // out-of-vocabulary type is refused.
+      const grandfathered = sqliteReader.tryIndexedEdgeKeys(vaultRoot, args.id) ?? new Set<string>();
       const bodyConnError = validateBodyConnectionTypes(args.body, config, grandfathered);
       if (bodyConnError !== null) return bodyConnError;
     }

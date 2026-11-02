@@ -2629,6 +2629,8 @@ _LINEAR_CASES = {
     'long indentation before a fence': ' ' * _M + '```x\n## Connections\n',
     'many edges': '## Connections\n' + '- extends: a\n' * (_M // 13),
     'unclosed fence over many lines': '```\n' + 'x\n' * (_M // 2),
+    # R4-5: the frontmatter hashtag patch on one long flow-collection line.
+    'frontmatter flow list of hashtags': '\x00HASHTAGS',
 }
 
 
@@ -2639,11 +2641,23 @@ def test_connection_rule_is_linear_on_1mb_adversarial_notes(name: str) -> None:
     import time
 
     from schist.commands import _connections_rule_warnings
-    from schist.ingest import connection_body, parse_connections, scan_note_connections
+    from schist.ingest import (
+        connection_body,
+        parse_connections,
+        patch_frontmatter_flow_hashtags,
+        scan_note_connections,
+    )
     from schist.markdown_io import ConnectionWriteError, insert_connection_line
 
-    text = '---\ntitle: t\n---\n' + _LINEAR_CASES[name]
+    body = _LINEAR_CASES[name]
+    if body == '\x00HASHTAGS':
+        text = '---\ntags: [' + '#,' * (_M // 2) + ']\n---\nx\n'
+    else:
+        text = '---\ntitle: t\n---\n' + body
     steps = {}
+    t = time.perf_counter()
+    patch_frontmatter_flow_hashtags(text)
+    steps['hashtag patch'] = time.perf_counter() - t
     t = time.perf_counter()
     parse_connections(connection_body(text))
     steps['parse'] = time.perf_counter() - t
@@ -2661,3 +2675,30 @@ def test_connection_rule_is_linear_on_1mb_adversarial_notes(name: str) -> None:
     steps['validate warnings'] = time.perf_counter() - t
     slow = {k: round(v, 3) for k, v in steps.items() if v >= 1.0}
     assert not slow, slow
+
+
+@pytest.mark.parametrize(
+    "case", _connection_parity_fixture()["byte_files"], ids=lambda c: c["name"]
+)
+def test_ingest_reads_note_bytes_as_shared_cases(tmp_path: Path, case: dict) -> None:
+    """A note's bytes, through ingest's own read (read_text, UTF-8): an
+    undecodable note is skipped (no docs row, no edges). The MCP server's
+    readNoteText refuses the same bytes (connection-line-parity.test.ts)."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    (vault / "notes").mkdir(parents=True)
+    (vault / "notes" / "2026-11-02-bytes.md").write_bytes(bytes.fromhex(case["hex"]))
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    ingest(str(vault), str(db))
+    conn = sqlite3.connect(db)
+    try:
+        docs = conn.execute("SELECT count(*) FROM docs").fetchone()[0]
+        rows = conn.execute(
+            "SELECT type, target FROM edges WHERE type != 'references' ORDER BY rowid",
+        ).fetchall()
+    finally:
+        conn.close()
+    assert docs == (1 if case["decodes"] else 0)
+    assert rows == [(e["type"], e["target"]) for e in case["edges"]]

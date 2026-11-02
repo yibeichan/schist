@@ -133,7 +133,7 @@ export function isRoundTrippableTarget(target: string): boolean {
  * - Heading: exactly `## Connections` at column 0, then optional spaces or
  *   tabs, outside a fence. The section ends at the next ATX heading of any
  *   level (0-3 spaces, 1-6 `#`, whitespace or end of line).
- * - Fence: spaces, 3+ backticks or tildes, an optional info word of ASCII
+ * - Fence: 0-3 spaces, 3+ backticks or tildes, an optional info word of ASCII
  *   letters, digits and `_+.#-`, optional spaces; closed by the same spaces
  *   and run; lines between blank or starting with the same spaces, and none
  *   starting (after spaces and tabs) with ``` or ~~~.
@@ -142,18 +142,27 @@ export function isRoundTrippableTarget(target: string): boolean {
  *   with ``` or ~~~; a line starting with `<`; a line starting with `[` that
  *   could open a link reference definition. In the section also: `>`, a
  *   line indented by a tab or 4+ spaces, a line of only `-=*_+|:` and
- *   whitespace (SLUG_WS_CHARS at either end ignored), a list marker followed by a tab or 4+ spaces, a fence
- *   indented 4+ spaces.
+ *   whitespace (SLUG_WS_CHARS at either end ignored), a list marker
+ *   followed by a tab or 4+ spaces or by content starting with `#` or `>`.
+ *   A fence-like line indented 4+ spaces is never a fence, so it is a
+ *   problem anywhere.
  * - Edge line: `-` at column 0, 1-3 spaces, CONNECTION_RE on the trimmed
  *   line, a type starting with an ASCII letter or digit, a target not
  *   starting with `[`.
  * Every step is one pass over the lines.
  */
+/** The connection rule's version, equal to cli/schist/ingest.py's
+ * CONNECTIONS_RULE_VERSION (tests/connection-rule-version.test.ts pins the
+ * two). `schist doctor` reads it from the built server to report a server
+ * and CLI that read ## Connections sections differently. */
+export const CONNECTIONS_RULE_VERSION = 2;
+
 const CONNECTIONS_HEADING_RE = /^## Connections[ \t]*$/;
 const SECTION_END_RE = new RegExp(`^ {0,3}#{1,6}(?:${WS_CLASS}|$)`);
-const FENCE_OPEN_RE = /^( *)(`{3,}|~{3,})[A-Za-z0-9_+.#-]* *$/;
+const FENCE_OPEN_RE = /^( {0,3})(`{3,}|~{3,})[A-Za-z0-9_+.#-]* *$/;
 const FENCE_LIKE_RE = /^[ \t]*(?:```|~~~)/;
 const LIST_MARKER_WS_RE = /^[ \t]*(?:[-+*]|[0-9]{1,9}[.)])([ \t]+)/;
+const LIST_MARKER_WS_STICKY = /[ \t]*(?:[-+*]|[0-9]{1,9}[.)])([ \t]+)/y;
 const EDGE_PREFIX_RE = /^- {1,3}[^ \t]/;
 const NON_MARKDOWN_SEPARATOR_RE = /[\u000b\u000c\u001c-\u001f\u0085\u2028\u2029]/;
 const RULE_LINE_RE = /^[-=*_+|: \t]+$/;
@@ -194,6 +203,32 @@ export function trimConnectionWs(text: string): string {
  * read through readNoteText so the server sees what ingest sees. */
 export function normalizeNewlines(text: string): string {
   return text.replace(/\r\n?/g, "\n");
+}
+
+// UTF-8 with no replacement: an invalid byte throws, as Python's
+// read_text(encoding="utf-8") raises (ingest then skips the note). ignoreBOM
+// keeps a leading U+FEFF in the text, as Python's "utf-8" codec does.
+const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/** A note file that is not valid UTF-8. Ingest skips such a note (no docs
+ * row, no edges), so tools refuse to read connections from it or write it. */
+export class NoteDecodeError extends Error {
+  readonly error = "VALIDATION_ERROR";
+}
+
+/** Decode a note file's bytes the way ingest reads them (strict UTF-8), with
+ * CRLF and CR turned into LF. `name` is used in the error message. */
+export function decodeNoteBytes(bytes: Uint8Array, name: string): string {
+  let text: string;
+  try {
+    text = STRICT_UTF8.decode(bytes);
+  } catch {
+    throw new NoteDecodeError(
+      `${name} is not valid UTF-8, so ingest skips it and indexes nothing from it; ` +
+      "re-save the file as UTF-8 first. Nothing was written.",
+    );
+  }
+  return normalizeNewlines(text);
 }
 
 /** Python's str.strip(" \t") == "": a blank line. */
@@ -266,9 +301,10 @@ function lineProblem(line: string, inSection: boolean): string | null {
   const s = lstripSpaceTab(line);
   if (s.startsWith("```") || s.startsWith("~~~")) {
     return (
-      "a fence the connection rule does not follow (it must open and " +
-      "close with the same run at the same indentation, with an info " +
-      "word of letters, digits and _+.#- only)"
+      "a fence the connection rule does not follow (it must open with at " +
+      "most 3 spaces of indentation and close with the same run at the " +
+      "same indentation, with an info word of letters, digits and _+.#- " +
+      "only)"
     );
   }
   if (s.startsWith("<")) return 'the line starts with "<" (HTML)';
@@ -293,6 +329,18 @@ function lineProblem(line: string, inSection: boolean): string | null {
   const m = LIST_MARKER_WS_RE.exec(line);
   if (m !== null && (m[1].includes("\t") || m[1].length >= 4)) {
     return "a list marker followed by a tab or 4+ spaces in the Connections section";
+  }
+  if (m !== null) {
+    // Past nested markers too (`- - ## x` is a heading in an item).
+    let pos = m[0].length;
+    for (;;) {
+      LIST_MARKER_WS_STICKY.lastIndex = pos;
+      const nested = LIST_MARKER_WS_STICKY.exec(line);
+      if (nested === null) break;
+      pos = LIST_MARKER_WS_STICKY.lastIndex;
+    }
+    if (line[pos] !== "#" && line[pos] !== ">") return null;
+    return "a list item that holds a heading or a block quote in the Connections section";
   }
   return null;
 }
@@ -330,10 +378,6 @@ export function scanConnections(lines: string[], start = 0): ConnectionScan {
     }
     const close = fenceEnd(lines, i);
     if (close !== -1) {
-      if (inSection && line.length - line.replace(/^ +/, "").length >= 4) {
-        problem = { index: i, reason: "a fence indented 4+ spaces in the Connections section" };
-        break;
-      }
       for (let j = i; j <= close; j++) {
         if (NON_MARKDOWN_SEPARATOR_RE.test(lines[j])) {
           problem = { index: j, reason: lineProblem(lines[j], false)! };
@@ -544,7 +588,10 @@ export function parseConnections(body: string): Connection[] {
   return parseConnectionLines(body).map((e) => e.connection);
 }
 
-const HASHTAG_AT_START_RE = /^#[^\s,\]\}]+/u;
+// A `#tag` in a flow collection: `#`, then characters other than the shared
+// whitespace union (not JS's own \s), `,`, `]` and `}`. Sticky, matched at
+// a position. ingest.py _FLOW_HASHTAG_RE is its twin.
+const FLOW_HASHTAG_RE = new RegExp(`#[^${SLUG_WS_CHARS},\\]\\}]+`, "y");
 
 // A quote (' or ") only *opens* a quoted scalar when it sits where a node can
 // start: at the beginning of the value, or right after a flow indicator
@@ -635,7 +682,8 @@ function quoteFlowHashtags(line: string): string {
       continue;
     }
     if (ch === "#" && flowDepth > 0) {
-      const match = line.slice(i).match(HASHTAG_AT_START_RE);
+      FLOW_HASHTAG_RE.lastIndex = i;
+      const match = FLOW_HASHTAG_RE.exec(line);
       if (match) {
         result += `"${match[0]}"`;
         i += match[0].length - 1;
@@ -651,27 +699,24 @@ function quoteFlowHashtags(line: string): string {
   return result;
 }
 
+/** Quote `#tags` in YAML flow collections of the frontmatter before YAML
+ * parsing: only the text before frontmatterLength (python-frontmatter's
+ * split, which ingest uses), and only when it is YAML. The body is never
+ * changed. ingest.py patch_frontmatter_flow_hashtags is its twin. */
 function patchFrontmatterFlowHashtags(content: string): string {
-  const lines = content.split("\n");
-  let inFrontmatter = false;
+  const offset = frontmatterLength(content);
+  const head = content.slice(0, offset);
+  let lead = 0;
+  while (lead < head.length && PY_WHITESPACE.includes(head[lead])) lead++;
+  if (!head.startsWith("---", lead)) return content;
+  const lines = head.split("\n");
   let patched = false;
-  const patchedLines = lines.map((line, i) => {
-    if (i === 0 && line.trim() === "---") {
-      inFrontmatter = true;
-      return line;
-    }
-    if (inFrontmatter && line.trim() === "---") {
-      inFrontmatter = false;
-      return line;
-    }
-    if (!inFrontmatter) return line;
-
+  const patchedLines = lines.map((line) => {
     const next = quoteFlowHashtags(line);
     if (next !== line) patched = true;
     return next;
   });
-
-  return patched ? patchedLines.join("\n") : content;
+  return patched ? patchedLines.join("\n") + content.slice(offset) : content;
 }
 
 // Python's bytes.strip() whitespace: space, \t, \n, \r, \v, \f. Not JS
@@ -919,8 +964,12 @@ export function buildNote(
       content = trimTrailingBlankLines(lines).join("\n") + `\n\n## Connections\n\n${connectionLines.join("\n")}\n`;
     } else {
       const section = ["## Connections", "", ...connectionLines, ""];
-      content = [...lines.slice(0, found.heading), ...section, ...lines.slice(found.end)].join("\n");
-      if (found.end === lines.length) content = content.trimEnd() + "\n";
+      const out = [...lines.slice(0, found.heading), ...section, ...lines.slice(found.end)];
+      // At the end of the note, drop trailing blank lines (spaces and tabs
+      // only, never JS trimEnd()'s wider set) and end with one newline.
+      content = found.end === lines.length
+        ? trimTrailingBlankLines(out).join("\n") + "\n"
+        : out.join("\n");
     }
   } else {
     expected = parseConnections(content);

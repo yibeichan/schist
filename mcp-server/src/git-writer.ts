@@ -10,6 +10,7 @@ import * as path from "path";
 import { randomBytes } from "crypto";
 import { load as yamlLoad } from "js-yaml";
 import { withVaultLock, VaultLockTimeout, VaultLockFailed, type VaultLockHandle } from "./vault-lock.js";
+import { decodeNoteBytes } from "./markdown-parser.js";
 
 const execFile = promisify(execFileCb);
 const WRITE_TIMEOUT_ERROR = Object.assign(
@@ -1114,12 +1115,15 @@ async function replaceNote(
       // handler's pre-lock read — e.g. a concurrent delete_note committed in the
       // window — abort with NOT_FOUND rather than resurrecting it from stale
       // content. #119.
-      let read: string;
+      let bytes: Buffer;
       try {
-        read = await fs.readFile(absPath, "utf-8");
+        bytes = await fs.readFile(absPath);
       } catch {
         throw { error: "NOT_FOUND", message: `Note not found: ${relPath}` };
       }
+      // Strict UTF-8, as ingest reads the note: an undecodable note is
+      // refused (NoteDecodeError) rather than rewritten with U+FFFD.
+      const read = decodeNoteBytes(bytes, relPath);
       current = read;
       await atomicWriteFile(absPath, transform(read), vaultRoot);
     }
@@ -1188,9 +1192,11 @@ export async function deleteNote(
           const absPath = path.resolve(vaultRoot, r.relPath);
           let current: string;
           try {
-            current = await fs.readFile(absPath, "utf-8");
+            current = decodeNoteBytes(await fs.readFile(absPath), r.relPath);
           } catch {
-            continue; // vanished: nothing to repair
+            // Vanished, or not valid UTF-8 (ingest indexes nothing from such
+            // a note): nothing to repair.
+            continue;
           }
           const next = r.transform(current);
           if (next === current) continue;

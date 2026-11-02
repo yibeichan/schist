@@ -231,6 +231,23 @@ class TestSchemaCommand:
         assert "inside a fenced code block" in out
         assert "All documents valid." in out
 
+    def test_validate_calls_a_fenced_example_after_the_section_fenced(self, tmp_path, capsys):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir()
+        (notes_dir / "x.md").write_text(
+            "---\ntitle: t\n---\n## Connections\n- extends: a\n\n## Example\n\n```\n"
+            "## Connections\n- extends: b\n```\n",
+            encoding="utf-8",
+        )
+        commands.schema(
+            _schema_args(validate=True), str(tmp_path),
+            str(tmp_path / ".schist" / "schist.db"),
+        )
+        out = capsys.readouterr().out
+        assert "WARN: notes/x.md:10: " in out
+        assert "inside a fenced code block, so it is not a heading" in out
+        assert "a later ## Connections heading" not in out
+
     def test_validate_warns_on_a_later_connections_heading(self, tmp_path, capsys):
         notes_dir = tmp_path / "notes"
         notes_dir.mkdir()

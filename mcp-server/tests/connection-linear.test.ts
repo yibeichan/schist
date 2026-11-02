@@ -9,7 +9,7 @@
  * delete cascade, so a slow one stalls the event loop. cli/tests/test_ingest.py
  * runs the same set against ingest.py.
  */
-import { connectionBody, insertConnectionLine, parseConnections, scanNoteConnections } from "../src/markdown-parser.js";
+import { connectionBody, insertConnectionLine, parseConnections, parseNote, scanNoteConnections } from "../src/markdown-parser.js";
 import { bodyConnectionEdgeLines, stripConnectionsTo } from "../src/tools.js";
 
 const M = 1_000_000;
@@ -28,6 +28,8 @@ const CASES: Record<string, string> = {
   "many edges": "## Connections\n" + "- extends: a\n".repeat(Math.floor(M / 13)),
   "unclosed fence over many lines": "```\n" + "x\n".repeat(M / 2),
 };
+// The frontmatter hashtag patch (parseNote) on one long flow-collection line.
+const HASHTAGS = "---\ntags: [" + "#,".repeat(M / 2) + "]\n---\nx\n";
 
 function time(fn: () => unknown): number {
   const t0 = performance.now();
@@ -39,6 +41,10 @@ function time(fn: () => unknown): number {
   return performance.now() - t0;
 }
 
+test("the frontmatter hashtag patch is linear on a 1 MB flow list", () => {
+  expect(time(() => parseNote(HASHTAGS))).toBeLessThan(1000);
+});
+
 describe("the connection rule is linear on 1 MB adversarial notes", () => {
   for (const [name, body] of Object.entries(CASES)) {
     test(name, () => {
@@ -49,6 +55,7 @@ describe("the connection rule is linear on 1 MB adversarial notes", () => {
         insert: time(() => insertConnectionLine(text, "- extends: new")),
         strip: time(() => stripConnectionsTo(text, ["a"])),
         validator: time(() => [...bodyConnectionEdgeLines(connectionBody(text))]),
+        parseNote: time(() => parseNote(text)),
       };
       const slow = Object.fromEntries(Object.entries(steps).filter(([, ms]) => ms >= 1000));
       expect(slow).toEqual({});

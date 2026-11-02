@@ -50,7 +50,6 @@ except ImportError:  # pragma: no cover — running as a bare script (a legacy
 
 SKIP_DIRS = {'.git', '.schist'}
 ROOT_SUPPORT_DOCS = {'readme.md', 'schema.md', 'tags.md', 'conventions.md'}
-HASHTAG_AT_START_RE = re.compile(r'^#[^\s,\]\}]+')
 # CONNECTION_RE is defined below _SLUG_WS_CHARS — it is built from the same
 # explicit whitespace class (#338).
 
@@ -133,13 +132,14 @@ CONNECTION_RE = re.compile(
 # - The section ends at the next line of 0-3 spaces, 1-6 `#`, then whitespace
 #   (_SLUG_WS_CHARS) or the end of the line: any ATX heading, of any level,
 #   empty or not. Otherwise it runs to the end of the body.
-# - A fence opens on a line of spaces, then 3+ backticks or 3+ tildes, then
+# - A fence opens on a line of 0-3 spaces, then 3+ backticks or 3+ tildes, then
 #   an optional info word of ASCII letters, digits and `_+.#-`, then optional
 #   spaces. It closes on the first later line that is the same spaces and the
 #   same run, then optional spaces; every line between must be blank or start
 #   with the same spaces, and none may start, after spaces and tabs, with
 #   ``` or ~~~. Lines from opener to closer are never a heading, an edge or a
-#   section end. In the section, an opener indented 4+ spaces is a problem.
+#   section end. An opener indented 4+ spaces is not skipped (after a
+#   paragraph marked reads it as paragraph text), so it is a problem.
 # - Problems, from the body start to the end of the section: a line holding
 #   U+000B, U+000C, U+001C-U+001F, U+0085, U+2028 or U+2029; a line that
 #   starts, after spaces and tabs, with ``` or ~~~ and is not part of a
@@ -153,7 +153,8 @@ CONNECTION_RE = re.compile(
 #   spaces; a non-blank line made only of `-`, `=`, `*`, `_`, `+`, `|`, `:`,
 #   spaces and tabs, ignoring _SLUG_WS_CHARS at either end (setext
 #   underlines, thematic breaks, table delimiter rows); a list marker
-#   followed by a tab or 4+ spaces.
+#   followed by a tab or 4+ spaces; a list marker whose content starts with
+#   `#` or `>` (a heading or block quote inside the item).
 # - An edge line, in the section and outside fences: `-` at column 0, 1-3
 #   spaces, then text that, trimmed with the explicit _SLUG_WS_CHARS set,
 #   matches CONNECTION_RE with a type that starts with an ASCII letter or
@@ -168,7 +169,7 @@ CONNECTIONS_RULE_VERSION = 2
 CONNECTIONS_HEADING_TEXT = '## Connections'
 _CONNECTIONS_HEADING_RE = re.compile(r'## Connections[ \t]*')
 _SECTION_END_RE = re.compile(f' {{0,3}}#{{1,6}}(?:{_WS_CLASS}|$)')
-_FENCE_OPEN_RE = re.compile(r'( *)(`{3,}|~{3,})[A-Za-z0-9_+.#-]* *')
+_FENCE_OPEN_RE = re.compile(r'( {0,3})(`{3,}|~{3,})[A-Za-z0-9_+.#-]* *')
 _FENCE_LIKE_RE = re.compile(r'[ \t]*(?:```|~~~)')
 _LIST_MARKER_WS_RE = re.compile(r'[ \t]*(?:[-+*]|[0-9]{1,9}[.)])([ \t]+)')
 _EDGE_PREFIX_RE = re.compile(r'- {1,3}[^ \t]')
@@ -282,9 +283,10 @@ def _line_problem(line: str, in_section: bool) -> str | None:
     s = line.lstrip(' \t')
     if s.startswith('```') or s.startswith('~~~'):
         return (
-            'a fence the connection rule does not follow (it must open and '
-            'close with the same run at the same indentation, with an info '
-            'word of letters, digits and _+.#- only)'
+            'a fence the connection rule does not follow (it must open with at '
+            'most 3 spaces of indentation and close with the same run at the '
+            'same indentation, with an info word of letters, digits and _+.#- '
+            'only)'
         )
     if s.startswith('<'):
         return 'the line starts with "<" (HTML)'
@@ -311,6 +313,17 @@ def _line_problem(line: str, in_section: bool) -> str | None:
         if '\t' in ws or len(ws) >= 4:
             return (
                 'a list marker followed by a tab or 4+ spaces in the '
+                'Connections section'
+            )
+        # Past nested markers too (`- - ## x` is a heading in an item).
+        pos = m.end()
+        nested = _LIST_MARKER_WS_RE.match(line, pos)
+        while nested is not None:
+            pos = nested.end()
+            nested = _LIST_MARKER_WS_RE.match(line, pos)
+        if line[pos:].startswith(('#', '>')):
+            return (
+                'a list item that holds a heading or a block quote in the '
                 'Connections section'
             )
     return None
@@ -355,9 +368,6 @@ def scan_connections(lines: list[str], start: int = 0) -> ConnectionScan:
             break
         close = _fence_end(lines, i)
         if close is not None:
-            if in_section and len(line) - len(line.lstrip(' ')) >= 4:
-                problem = (i, 'a fence indented 4+ spaces in the Connections section')
-                break
             for j in range(i, close + 1):
                 if _NON_MARKDOWN_SEPARATOR_RE.search(lines[j]):
                     problem = (j, _line_problem(lines[j], False))
@@ -403,6 +413,21 @@ def has_connections_heading(body: str) -> bool:
     return scan_connections(split_connection_lines(normalize_newlines(body))).heading is not None
 
 
+def _fenced_lines(lines: list[str]) -> set[int]:
+    """Indexes of the lines inside fences the rule skips (opener to closer),
+    found the way scan_connections finds them. One pass."""
+    out: set[int] = set()
+    i = 0
+    while i < len(lines):
+        close = _fence_end(lines, i)
+        if close is None:
+            i += 1
+            continue
+        out.update(range(i, close + 1))
+        i = close + 1
+    return out
+
+
 def connections_heading_near_misses(
     lines: list[str], heading: int | None = None,
 ) -> list[tuple[int, str]]:
@@ -411,12 +436,15 @@ def connections_heading_near_misses(
     each with the reason. `heading` is the heading scan_connections found on
     the same lines (or None). `schist schema --validate` warns on these."""
     out: list[tuple[int, str]] = []
+    fenced: set[int] | None = None
     for i, ln in enumerate(lines):
         if not ln.strip().startswith(CONNECTIONS_HEADING_TEXT):
             continue
         if is_connections_heading(ln):
-            if heading is None or i < heading:
-                out.append((i, 'inside a fenced code block'))
+            if fenced is None:
+                fenced = _fenced_lines(lines)
+            if heading is None or i < heading or i in fenced:
+                out.append((i, 'inside a fenced code block, so it is not a heading'))
             elif i > heading:
                 out.append((
                     i, 'a later ## Connections heading; only the first section is read',
@@ -678,6 +706,12 @@ def _concept_axis_rank(rel: Path) -> int:
     return CONCEPT_AXIS_NONE
 
 
+# A `#tag` in a flow collection: `#`, then characters other than the shared
+# whitespace union (not either engine's own \s), `,`, `]` and `}`. Matched at
+# a position (match(line, i)), never on a slice, so the patch is linear.
+_FLOW_HASHTAG_RE = re.compile(f'#[^{re.escape(_SLUG_WS_CHARS)},\\]\\}}]+')
+
+
 def _opens_quoted_scalar(last_significant: str) -> bool:
     return last_significant in {'', '[', '{', ',', ':'}
 
@@ -752,7 +786,7 @@ def _quote_flow_hashtags(line: str) -> str:
             i += 1
             continue
         if ch == '#' and flow_depth > 0:
-            match = HASHTAG_AT_START_RE.match(line[i:])
+            match = _FLOW_HASHTAG_RE.match(line, i)
             if match:
                 tag = match.group(0)
                 result.append(f'"{tag}"')
@@ -769,27 +803,23 @@ def _quote_flow_hashtags(line: str) -> str:
 
 
 def patch_frontmatter_flow_hashtags(content: str) -> str:
-    """Mirror mcp-server parseNote's pre-patch before frontmatter parsing."""
-    lines = content.split('\n')
-    in_fm = False
-    patched = False
-    patched_lines = []
-    for i, ln in enumerate(lines):
-        if i == 0 and ln.strip() == '---':
-            in_fm = True
-            patched_lines.append(ln)
-            continue
-        if in_fm and ln.strip() == '---':
-            in_fm = False
-            patched_lines.append(ln)
-            continue
-        if in_fm:
-            next_ln = _quote_flow_hashtags(ln)
-            patched = patched or next_ln != ln
-            ln = next_ln
-        patched_lines.append(ln)
+    """Quote `#tags` in YAML flow collections of the frontmatter before YAML
+    parsing; mcp-server parseNote applies the same patch.
 
-    return '\n'.join(patched_lines) if patched else content
+    Only the frontmatter is patched: the text before note_body_offset (the
+    rule python-frontmatter splits by), and only when it is YAML (`---`).
+    The body is never changed, so the connections and docs.body come from
+    the note's own text, as every MCP server path reads it.
+    markdown-parser.ts patchFrontmatterFlowHashtags is its twin."""
+    offset = note_body_offset(content)
+    head = content[:offset]
+    if not head.lstrip(PY_WHITESPACE).startswith('---'):
+        return content
+    lines = head.split('\n')
+    patched_lines = [_quote_flow_hashtags(ln) for ln in lines]
+    if patched_lines == lines:
+        return content
+    return '\n'.join(patched_lines) + content[offset:]
 
 
 def scan_note_connections(text: str) -> tuple[list[str], ConnectionScan]:

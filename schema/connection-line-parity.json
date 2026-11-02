@@ -1,5 +1,5 @@
 {
-  "description": "Pins the connection rule in cli/schist/ingest.py (CONNECTION_RE, scan_connections, connection_body) and mcp-server/src/markdown-parser.ts (the same names in camelCase). `lines`: CONNECTION_RE on one line. `bodies`: the edges a body yields and the 0-based line of the first problem (null when there is none; a problem means no edges). `files`: whole note files, written to disk as UTF-8 bytes and read back the way each side reads notes (Python read_text, TS readNoteText); `body` is connection_body of the text, which ingest stores in docs.body for the viewer, and `edges` what ingest indexes. mcp-server/tests/connection-marked.test.ts also checks every body and file here against marked 12.0.2.",
+  "description": "Pins the connection rule in cli/schist/ingest.py (CONNECTION_RE, scan_connections, connection_body) and mcp-server/src/markdown-parser.ts (the same names in camelCase). `lines`: CONNECTION_RE on one line. `bodies`: the edges a body yields and the 0-based line of the first problem (null when there is none; a problem means no edges). `files`: whole note files, written to disk as UTF-8 bytes and read back the way each side reads notes (Python read_text, TS readNoteText); `body` is connection_body of the text, which ingest stores in docs.body for the viewer, and `edges` what ingest indexes. mcp-server/tests/connection-marked.test.ts also checks every body and file here against marked 12.0.2. `byte_files`: note files given as bytes (hex): whether they decode as UTF-8 (ingest skips a note that does not; the MCP server refuses it) and the edges ingest indexes.",
   "lines": [
     {
       "name": "plain edge",
@@ -1486,6 +1486,384 @@
       "body": "## Connections\n- extends: p\n|-\u3000\n- extends: z\n",
       "edges": [],
       "problem": 2
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (1)",
+      "body": "## Connections\n- extends: a\n- extends: b\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "b",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (2)",
+      "body": "## Connections\n- extends: a\n- <style>\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (3)",
+      "body": "## Connections\n- extends: a \u2014 <textarea>\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": "<textarea>"
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (4)",
+      "body": "Intro <details>\n\n## Connections\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (5)",
+      "body": "## Connections\n- extends: a\n\nx <h2>Other</h2>\n\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (6)",
+      "body": "## Connections\n- extends: a \"<template>\"\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": "<template>"
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (7)",
+      "body": "x <select>\n\n## Connections\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (8)",
+      "body": "## Connections\n- extends: a\n- x <xmp>\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (9)",
+      "body": "## Connections\n- extends: a\n- x <noscript>\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (10)",
+      "body": "Intro <plaintext>\n\n## Connections\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (11)",
+      "body": "## Connections\n- extends: a\n  more <style>\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (12)",
+      "body": "## Connections\n- extends: a\n- x <title>\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (13)",
+      "body": "## Connections\n- extends: a\n- x <iframe>\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (14)",
+      "body": "## Connections\n- extends: <svg><style>\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "<svg><style>",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (15)",
+      "body": "Intro <textarea>\n\n## Connections\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-4: a list item holding a heading or quote (1)",
+      "body": "## Connections\n- extends: a\n- ## Other\n- extends: evil\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "R4-4: a list item holding a heading or quote (2)",
+      "body": "## Connections\n- extends: a\n\n* # Rejected links\n\n- extends: evil\n",
+      "edges": [],
+      "problem": 3
+    },
+    {
+      "name": "R4-4: a list item holding a heading or quote (3)",
+      "body": "## Connections\n- extends: a\n- > ## Other\n- extends: evil\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "R4-2: block HTML in a quote or list item (1)",
+      "body": "> <!--\n\n## Connections\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: block HTML in a quote or list item (2)",
+      "body": "- <!--\n\n## Connections\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: block HTML in a quote or list item (3)",
+      "body": "## Connections\n- extends: a\n- <!--\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: block HTML in a quote or list item (4)",
+      "body": "1. > <![CDATA[\n\n## Connections\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: block HTML in a quote or list item (5)",
+      "body": "> <?\n\n## Connections\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: an indented backtick pair after a paragraph (1)",
+      "body": "para\n    ```\n    <textarea>\n    ```\n\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R4-2: an indented backtick pair after a paragraph (2)",
+      "body": "para\n    ```\n    <!-- -->\n    ```\n\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R4-2: an indented backtick pair after a paragraph (3)",
+      "body": "- a\n    ```\n    <textarea>\n    ```\n\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R4-2: an indented tilde pair after a paragraph (1)",
+      "body": "para\n    ~~~\n    <textarea>\n    ~~~\n\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R4-2: an indented tilde pair after a paragraph (2)",
+      "body": "> q\n    ~~~\n    <textarea>\n    ~~~\n\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R4-4: a heading in a nested item",
+      "body": "## Connections\n- extends: a\n- - # x\n- extends: b\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "R4-4: a heading after a nested marker and spaces",
+      "body": "## Connections\n- extends: p\n-   - ## Other ]\n- extends: z\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "R4-2: a fence pair indented 4 spaces is not skipped",
+      "body": "text\n    ```\n    x\n    ```\n## Connections\n- extends: a\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "a fence pair indented 3 spaces is skipped",
+      "body": "   ```\n   ## Connections\n   ```\n## Connections\n- extends: a\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        }
+      ],
+      "problem": null
     }
   ],
   "files": [
@@ -1665,6 +2043,115 @@
         {
           "type": "extends",
           "target": "shown",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "R4-1: the hashtag patch changes only the frontmatter (1)",
+      "text": "---\ntitle: t\n----\n\n## Connections\n- badtype: notes/x.md \"[#a]\"\n",
+      "body": "## Connections\n- badtype: notes/x.md \"[#a]\"",
+      "edges": [
+        {
+          "type": "badtype",
+          "target": "notes/x.md",
+          "context": "[#a]"
+        }
+      ]
+    },
+    {
+      "name": "R4-1: the hashtag patch changes only the frontmatter (2)",
+      "text": "---\ntitle: t\n----\nintro\n---\ufeff\n\n## Connections\n- extends: a \"[#b]\"\n",
+      "body": "intro\n---\ufeff\n\n## Connections\n- extends: a \"[#b]\"",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": "[#b]"
+        }
+      ]
+    },
+    {
+      "name": "R4-1: the hashtag patch changes only the frontmatter (3)",
+      "text": "---\ntitle: t\n----\n\n## Connections\n- extends: a{#b}\n- extends: c \u2014 see [#d]\n",
+      "body": "## Connections\n- extends: a{#b}\n- extends: c \u2014 see [#d]",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a{#b}",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "c",
+          "context": "see [#d]"
+        }
+      ]
+    },
+    {
+      "name": "R4-1: the hashtag patch changes only the frontmatter (4)",
+      "text": "---\ntitle: t\n----\n[#a\\] x\n\n## Connections\n- extends: a\n",
+      "body": "[#a\\] x\n\n## Connections\n- extends: a",
+      "edges": []
+    },
+    {
+      "name": "R4-1: the hashtag patch changes only the frontmatter (5)",
+      "text": "\ufeff---\ntitle: t\n## Connections\n- badtype: x \"[#a]\"\n## Other\n---\n",
+      "body": "\ufeff---\ntitle: t\n## Connections\n- badtype: x \"[#a]\"\n## Other\n---",
+      "edges": [
+        {
+          "type": "badtype",
+          "target": "x",
+          "context": "[#a]"
+        }
+      ]
+    },
+    {
+      "name": "R4-1: the hashtag patch changes only the frontmatter (6)",
+      "text": "---\ntitle: Legacy\nstatus: draft\n----\nintro\n---\ufeff\n\n## Connections\n- badtype: notes/x.md \"[#b]\"\n",
+      "body": "intro\n---\ufeff\n\n## Connections\n- badtype: notes/x.md \"[#b]\"",
+      "edges": [
+        {
+          "type": "badtype",
+          "target": "notes/x.md",
+          "context": "[#b]"
+        }
+      ]
+    },
+    {
+      "name": "R4-1: the hashtag patch changes only the frontmatter (7)",
+      "text": "---\ntags: [#a, #b]\n---\n## Connections\n- extends: x \"[#c]\"\n",
+      "body": "## Connections\n- extends: x \"[#c]\"",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "x",
+          "context": "[#c]"
+        }
+      ]
+    }
+  ],
+  "byte_files": [
+    {
+      "name": "R4-3: an invalid UTF-8 byte: ingest skips the note",
+      "hex": "2d2d2d0a7469746c653a204c65676163790a2d2d2d0aff0a0a232320436f6e6e656374696f6e730a2d20626164747970653a206e6f7465732f782e6d640a",
+      "decodes": false,
+      "edges": []
+    },
+    {
+      "name": "R4-3: a lone continuation byte in a connection line",
+      "hex": "232320436f6e6e656374696f6e730a2d20657874656e64733a206180620a",
+      "decodes": false,
+      "edges": []
+    },
+    {
+      "name": "a UTF-8 byte-order mark is kept, so the note has no frontmatter",
+      "hex": "efbbbf2d2d2d0a7469746c653a20740a2d2d2d0a232320436f6e6e656374696f6e730a2d20657874656e64733a20610a",
+      "decodes": true,
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
           "context": null
         }
       ]

@@ -32,6 +32,7 @@ import {
   splitConnectionLines,
 } from "../src/markdown-parser.js";
 import { bodyConnectionEdgeLines, readNoteText, stripConnectionsTo } from "../src/tools.js";
+import { NoteDecodeError } from "../src/markdown-parser.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -44,7 +45,8 @@ type LineCase = {
 type BodyEdge = { type: string; target: string; context: string | null };
 type BodyCase = { name: string; body: string; edges: BodyEdge[]; problem: number | null };
 type FileCase = { name: string; text: string; body: string; edges: BodyEdge[] };
-type ParityFixture = { lines: LineCase[]; bodies: BodyCase[]; files: FileCase[] };
+type ByteCase = { name: string; hex: string; decodes: boolean; edges: BodyEdge[] };
+type ParityFixture = { lines: LineCase[]; bodies: BodyCase[]; files: FileCase[]; byte_files: ByteCase[] };
 
 function loadFixture(): ParityFixture {
   const fixturePath = path.resolve(__dirname, "..", "..", "schema", "connection-line-parity.json");
@@ -183,6 +185,35 @@ describe("connection whole-file parity", () => {
         const text = await readNoteText(file);
         expect(connectionBody(text)).toBe(c.body);
         expect(parseConnections(connectionBody(text)).map((e) => e.target)).toEqual(c.edges.map((e) => e.target));
+        // The writers' and get_note's reading of the same file (parseNote
+        // applies the frontmatter hashtag patch, as ingest does).
+        try {
+          expect(parseNote(text).connections.map((e) => e.target)).toEqual(c.edges.map((e) => e.target));
+        } catch (e) {
+          if (e instanceof Error && e.name === "YAMLException") return; // gray-matter cannot read it
+          throw e;
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  // Note bytes: readNoteText decodes strictly, as ingest's read_text does,
+  // and refuses a note ingest skips. cli/tests/test_ingest.py runs the same
+  // bytes through a real ingest.
+  for (const c of fixture.byte_files) {
+    test(`bytes from disk: ${c.name}`, async () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "schist-byte-parity-"));
+      try {
+        const file = path.join(dir, "note.md");
+        writeFileSync(file, Buffer.from(c.hex, "hex"));
+        if (!c.decodes) {
+          await expect(readNoteText(file)).rejects.toBeInstanceOf(NoteDecodeError);
+          return;
+        }
+        const got = parseNote(await readNoteText(file)).connections.map((e) => e.target);
+        expect(got).toEqual(c.edges.map((e) => e.target));
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
