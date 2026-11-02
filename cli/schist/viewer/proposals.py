@@ -129,16 +129,21 @@ def standards_result(directory: str, found: list[dict]) -> dict:
             return res   # nothing left to cut; callers pass a configured directory
 
 
-def _parent_dir(note_id: str) -> str:
-    return note_id.rsplit('/', 1)[0] if '/' in note_id else ''
+def _configured_dir(vault, note_id: str) -> str:
+    """The configured directory holding a note: the longest one that is a
+    prefix of its id, so a link from notes/sub/x.md answers to notes/'s
+    standards, the same directories get_standards accepts. '' for a note in
+    no configured directory."""
+    dirs = [d for d in commands._directories(str(vault)) if note_id.startswith(f'{d}/')]
+    return max(dirs, key=len) if dirs else ''
 
 
-def _directory_of(p: dict) -> str:
+def _directory_of(vault, p: dict) -> str:
     """The directory a proposal writes into: the new note's, or for a link the
-    source note's, which `schist link` rewrites."""
+    configured directory of the source note, which `schist link` rewrites."""
     if p['kind'] == 'create':
         return p['args']['directory']
-    return _parent_dir(p['args']['source'])
+    return _configured_dir(vault, p['args']['source'])
 
 
 def _one_line(text: str) -> str:
@@ -155,21 +160,18 @@ def _require_checked(db, directory: str, checked) -> list[str]:
     named = {str(c).strip() for c in checked}
     missing = [sid for sid in required if sid not in named]
     if missing:
+        # Name the missing ids (as many as fit under the tool cut): a refusal
+        # that hides them has locked the agent out of a directory whenever
+        # get_standards could not show one.
+        listed, rest = [], list(missing)
+        while rest and len(', '.join(listed + rest[:1])) <= MAX_UNSEEN_CHARS:
+            listed.append(rest.pop(0))
         msg = (f'{directory}/ has {len(required)} standard(s) and this proposal names '
-               f'{len(required) - len(missing)} of them. Call get_standards with directory '
-               f'{directory!r}, make the proposal meet each one, and list every id it returns '
-               'in checked_standards')
-        found = standards_for(db, directory)
-        shown = {s['id'] for s in standards_result(directory, found)['standards']}
-        unseen = [sid for sid in missing if sid not in shown]
-        if unseen:   # too many to list in get_standards: name them here
-            listed, rest = [], list(unseen)
-            while rest and len(', '.join(listed + rest[:1])) <= MAX_UNSEEN_CHARS:
-                listed.append(rest.pop(0))
-            msg += f'. Not shown by get_standards: {", ".join(listed)}'
-            msg += (f', and {len(rest)} more that do not fit here either; {directory}/ has '
-                    'too many standards to check, so ask the user to archive some'
-                    if rest else '; read_note each one')
+               f'{len(required) - len(missing)} of them. Missing: {", ".join(listed)}')
+        msg += (f', and {len(rest)} more that do not fit here; {directory}/ has too many '
+                'standards to check, so ask the user to archive some' if rest else '')
+        msg += (f'. Read each one (get_standards with directory {directory!r}, or read_note), '
+                'make the proposal meet it, and list every id in checked_standards')
         raise ProposalError(msg)
     return required
 
@@ -345,7 +347,7 @@ class ProposalStore:
         if any(markdown_io.contains_line_boundary(x) for x in (source, target)):
             raise ProposalError('ids may not contain line breaks')
         self.check_writable(source)   # `schist link` rewrites and commits the source note
-        checked = _require_checked(db, _parent_dir(source), checked_standards)
+        checked = _require_checked(db, _configured_dir(self.vault, source), checked_standards)
         context = markdown_io.sanitize_context(context) if context else None
         line = f'- {link_type}: {target}' + (f' "{context}"' if context else '')
         return self._new('link', target=source, title=f'{src[0]} —{link_type}→ {tgt[0]}',
@@ -430,7 +432,7 @@ class ProposalStore:
             return self._save(p)
 
     def _save_standard(self, p: dict, reason: str, runner) -> dict:
-        directory = _directory_of(p)
+        directory = _directory_of(self.vault, p)
         self.check_writable(f'{directory}/x.md')   # vault.yaml may have changed since filing
         # The prefix keeps the slug non-empty (a reason in CJK or punctuation
         # only) and the title from starting with a date, both of which

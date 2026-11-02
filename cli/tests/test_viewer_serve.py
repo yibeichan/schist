@@ -1120,7 +1120,7 @@ class TestStandards:
         store = proposals_mod.ProposalStore(vault)
         with pytest.raises(proposals_mod.ProposalError, match='has 2 standard.s. and this proposal names 0') as e:
             store.propose_note(ro, title='T', body='b', rationale='r')
-        assert 'std-a' not in str(e.value)          # the agent must read them, not copy ids
+        assert 'Missing: notes/std-a.md, notes/std-b.md' in str(e.value)
         with pytest.raises(proposals_mod.ProposalError, match='names 1 of them'):
             store.propose_note(ro, title='T', body='b', rationale='r', checked_standards=[a, 'made/up.md'])
         p = store.propose_note(ro, title='T', body='b', rationale='r', checked_standards=[b, a])
@@ -1384,7 +1384,7 @@ class TestStandardsReview:
         with pytest.raises(proposals_mod.ProposalError) as e:
             store.propose_note(ro, title='T', body='b', rationale='r', checked_standards=shown)
         unseen = [s['id'] for s in found if s['id'] not in shown]
-        assert 'Not shown by get_standards: ' + ', '.join(unseen) in str(e.value)
+        assert 'Missing: ' + ', '.join(unseen) in str(e.value)
         p = store.propose_note(ro, title='T', body='b', rationale='r', checked_standards=shown + unseen)
         assert len(p['checked_standards']) == 80
 
@@ -1420,4 +1420,24 @@ class TestStandardsReview:
             proposals_mod.ProposalStore(vault).propose_note(ro, title='T', body='b', rationale='r')
         msg = str(e.value)
         assert len(json.dumps({'error': msg}, ensure_ascii=False)) < agent_mod.MAX_TOOL_CHARS
-        assert 'more that do not fit here either' in msg and 'archive some' in msg
+        assert 'more that do not fit here' in msg and 'archive some' in msg
+
+    def test_a_nested_note_answers_to_its_configured_directory(self, vault, db_path, ro):
+        # A link from notes/sub/x.md once looked for standards in notes/sub,
+        # which get_standards refuses, so the agent could never name them.
+        (vault / 'notes' / 'sub').mkdir()
+        (vault / 'notes' / 'sub' / 'x.md').write_text('---\ntitle: Nested\n---\n\nx\n', encoding='utf-8')
+        _reindex(vault)
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_link(ro, source='notes/sub/x.md', target='locking', type='supports', rationale='r')
+        done = store.reject(p['id'], reason='Say why they connect', save_standard=True)
+        assert done['standard']['status'] == 'saved' and done['standard']['directory'] == 'notes'
+        _reindex(vault)
+        agent = agent_mod.Agent(db_path, store, opener=FakeOllama([]))
+        res, _ = agent._run_tool(ro, 'get_standards', {'directory': 'notes'}, 'q')
+        ids = [s['id'] for s in res['standards']]
+        assert len(ids) == 1 and ids[0].startswith('notes/') and ids[0].count('/') == 1
+        with pytest.raises(proposals_mod.ProposalError, match='notes/ has 1 standard'):
+            store.propose_link(ro, source='notes/sub/x.md', target='locking', type='supports', rationale='r')
+        assert store.propose_link(ro, source='notes/sub/x.md', target='locking', type='supports',
+                                  rationale='r', checked_standards=ids)['checked_standards'] == ids
