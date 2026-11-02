@@ -172,6 +172,14 @@ describe("delete cascade on whole files", () => {
     expect(stripConnectionsTo(text, ["a"]).removed).toBe(0);
   });
 
+  test("U+FEFF before ## does not end the section, as for the reader", () => {
+    const text = "---\ntitle: t\n---\n## Connections\n- extends: a\n\ufeff## P\n- extends: b\n";
+    expect(parseNote(text).connections.map((e) => e.target)).toEqual(["a", "b"]);
+    const { content, removed } = stripConnectionsTo(text, ["b"]);
+    expect(removed).toBe(1);
+    expect(content).toBe("---\ntitle: t\n---\n## Connections\n- extends: a\n\ufeff## P\n");
+  });
+
   test("an edge-looking line in an HTML block inside the section is kept", () => {
     const text = "---\ntitle: t\n---\n\n## Connections\n- extends: a\n<div>\n- extends: a\n\n- extends: b\n";
     const { content, removed } = stripConnectionsTo(text, ["a"]);
