@@ -476,10 +476,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         standard = p.get('standard') or {}
         committed = p['status'] == proposals_mod.APPROVED or standard.get('status') == 'saved'
         ok = p['status'] in (proposals_mod.APPROVED, proposals_mod.REJECTED)
-        # An approved proposal or a saved standard is a new commit: rebuild in
-        # the background so the site (and the agent's index) shows it. If a
-        # rebuild is already running it may have started before the commit,
-        # so the page asks for another instead.
+        # An approved proposal or a saved standard is a new commit: rebuild the
+        # site in the background so it shows it. The build does not reindex;
+        # the agent sees a new standard once the index has it (a spoke's
+        # post-commit hook refreshes it). If a rebuild is already running it
+        # may have started before the commit, so the page asks for another.
         rebuilding = committed and srv.build_lock.acquire(blocking=False)
         if rebuilding:
             def run():

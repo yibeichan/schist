@@ -36,6 +36,7 @@ DEFAULT_OLLAMA_URL = 'http://127.0.0.1:11434'
 MAX_ROUNDS = 8            # tool-call rounds per question
 MAX_NOTE_CHARS = 6000     # body text one read_note returns
 MAX_TOOL_CHARS = 12000    # any one tool result sent back to the model
+STANDARDS_BODY_CHARS = 8000   # all standard bodies in one get_standards, shared evenly
 KEEP_ALIVE = '5m'         # Ollama unloads the model after this much idle time
 INDEX_WAIT_S = 15         # how long a tool waits for a reindex to finish
 
@@ -415,8 +416,16 @@ class Agent:
         if name == 'get_standards':
             directory = str(args.get('directory', '') or 'notes').strip().strip('/')
             found = proposals_mod.standards_for(db, directory)
+            # Every id and title fits; bodies share a budget, so the result is
+            # not cut at MAX_TOOL_CHARS partway through the list.
+            share = STANDARDS_BODY_CHARS // max(1, len(found))
+            for s in found:
+                if len(s['body']) > share:
+                    s['body'] = s['body'][:share]
+                    s['truncated'] = True
             res = {'directory': directory, 'standards': found,
-                   'note': ('meet each standard and pass every id as checked_standards'
+                   'note': ('meet each standard and pass every id as checked_standards; '
+                            'read_note a truncated one for its full text'
                             if found else 'no standards for this directory; pass []')}
             return res, {'type': 'step', 'text': f'reading standards for {directory}/ → {len(found)}'}
         if name in ('propose_note', 'propose_link'):

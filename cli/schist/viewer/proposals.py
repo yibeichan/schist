@@ -68,17 +68,26 @@ def applies_tag(directory: str) -> str:
 
 def standards_for(db, directory: str) -> list[dict]:
     """The standards a proposal into `directory` must be checked against:
-    notes tagged both `standard` and `applies-to:<directory>`, not archived,
-    oldest id first."""
+    notes directly in that directory tagged both `standard` and
+    `applies-to:<directory>`, not archived, oldest id first. Only a note in
+    the directory itself counts, so a writer confined to another directory
+    cannot set rules for this one (on a hub, the directory's write scope
+    decides who may add or retire its standards)."""
+    prefix = f'{directory}/'
     rows = db.execute(
         "SELECT id, title, body FROM docs d"
-        " WHERE EXISTS (SELECT 1 FROM json_each(d.tags) WHERE value = ?)"
+        " WHERE substr(d.id, 1, ?) = ? AND instr(substr(d.id, ? + 1), '/') = 0"
+        "   AND EXISTS (SELECT 1 FROM json_each(d.tags) WHERE value = ?)"
         "   AND EXISTS (SELECT 1 FROM json_each(d.tags) WHERE value = ?)"
         "   AND COALESCE(d.status, '') != 'archived'"
         " ORDER BY d.id",
-        (STANDARD_TAG, applies_tag(directory))).fetchall()
+        (len(prefix), prefix, len(prefix), STANDARD_TAG, applies_tag(directory))).fetchall()
     return [{'id': r[0], 'title': r[1], 'body': (r[2] or '')[:MAX_STANDARD_CHARS]}
             for r in rows]
+
+
+def _parent_dir(note_id: str) -> str:
+    return note_id.rsplit('/', 1)[0] if '/' in note_id else ''
 
 
 def _directory_of(p: dict) -> str:
@@ -86,18 +95,28 @@ def _directory_of(p: dict) -> str:
     source note's, which `schist link` rewrites."""
     if p['kind'] == 'create':
         return p['args']['directory']
-    return p['args']['source'].split('/', 1)[0]
+    return _parent_dir(p['args']['source'])
+
+
+def _one_line(text: str) -> str:
+    """Collapse every line break (\\n, \\r, U+2028, …) and run of spaces."""
+    return ' '.join(str(text).split())
 
 
 def _require_checked(db, directory: str, checked) -> list[str]:
     required = [s['id'] for s in standards_for(db, directory)]
-    named = set(_clean_list(checked, 'checked_standards entry'))
+    if checked is None:
+        checked = []
+    elif isinstance(checked, str):
+        checked = checked.split(',')
+    named = {str(c).strip() for c in checked}
     missing = [sid for sid in required if sid not in named]
     if missing:
         raise ProposalError(
-            f'{directory}/ has standards this proposal was not checked against: '
-            f'{", ".join(missing)}. Call get_standards with directory {directory!r}, make the '
-            'proposal meet each one, and list every id in checked_standards')
+            f'{directory}/ has {len(required)} standard(s) and this proposal names '
+            f'{len(required) - len(missing)} of them. Call get_standards with directory '
+            f'{directory!r}, make the proposal meet each one, and list every id it returns '
+            'in checked_standards')
     return required
 
 
@@ -243,7 +262,7 @@ class ProposalStore:
         if unknown:
             raise ProposalError(f'unknown concept slugs: {", ".join(unknown)}; use find_concepts')
         checked = _require_checked(db, directory, checked_standards)
-        target =f'{directory}/{date.today().isoformat()}-{markdown_io.slugify(title)}.md'
+        target = f'{directory}/{date.today().isoformat()}-{markdown_io.slugify(title)}.md'
         fm = [f'title: {title}', 'status: draft']
         if tags:
             fm.append(f'tags: [{", ".join(tags)}]')
@@ -272,7 +291,7 @@ class ProposalStore:
         if any(markdown_io.contains_line_boundary(x) for x in (source, target)):
             raise ProposalError('ids may not contain line breaks')
         self.check_writable(source)   # `schist link` rewrites and commits the source note
-        checked = _require_checked(db, source.split('/', 1)[0], checked_standards)
+        checked = _require_checked(db, _parent_dir(source), checked_standards)
         context = markdown_io.sanitize_context(context) if context else None
         line = f'- {link_type}: {target}' + (f' "{context}"' if context else '')
         return self._new('link', target=source, title=f'{src[0]} —{link_type}→ {tgt[0]}',
@@ -359,11 +378,18 @@ class ProposalStore:
     def _save_standard(self, p: dict, reason: str, runner) -> dict:
         directory = _directory_of(p)
         self.check_writable(f'{directory}/x.md')   # vault.yaml may have changed since filing
-        first = reason.splitlines()[0].strip()
-        title = first if len(first) <= MAX_TITLE else first[:MAX_TITLE - 1].rstrip() + '…'
+        # The prefix keeps the slug non-empty (a reason in CJK or punctuation
+        # only) and the title from starting with a date, both of which
+        # `schist add` refuses.
+        title = 'Standard: ' + _one_line(reason.splitlines()[0])
+        if len(title) > MAX_TITLE:
+            title = title[:MAX_TITLE - 1].rstrip() + '…'
         when = datetime.now(timezone.utc).date().isoformat()
+        # The proposal's title comes from note titles other writers control:
+        # one line only, so it cannot add headings or Connections lines to a
+        # note committed under the reviewer's name.
         body = (f'{reason}\n\nRecorded on {when} when the reviewer rejected a proposal: '
-                f'"{p["title"]}" ({p["kind"]}, {p["target"]}).\n')
+                f'"{_one_line(p["title"])}" ({p["kind"]}, {_one_line(p["target"])}).\n')
         cmd = [sys.executable, '-m', 'schist', f'--vault={self.vault}', f'--db={self.db_path}',
                'add', f'--title={title}', f'--dir={directory}',
                f'--tags={STANDARD_TAG},{applies_tag(directory)}']
@@ -373,7 +399,7 @@ class ProposalStore:
             return {'status': 'failed', 'output': f'could not run schist: {e}'}
         except subprocess.TimeoutExpired:
             # Possibly committed: reject anyway rather than invite a duplicate.
-            return {'status': 'unknown', 'output': (
+            return {'status': 'unknown', 'directory': directory, 'output': (
                 f'timed out after {APPROVE_TIMEOUT_S} s; the standard may already be '
                 f'committed in {directory}/. Check before adding it again.')}
         output = ((r.stdout or '') + (r.stderr or ''))[-2000:]
