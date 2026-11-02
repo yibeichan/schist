@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **The viewer's note panel can be resized.** Drag the thin handle on the panel's left edge, or focus it and press Left or Right (20 px per press). The width stays between 280 px and 80% of the window, is re-clamped when the window resizes, is remembered per browser in `localStorage` (the viewer still works when storage is blocked), and double-clicking the handle restores the default 320 px. Pointer events are used, so mouse, touch and pen all work.
+- **The viewer's note panel can be resized.** Drag the thin handle on the panel's left edge, or focus it and press Left or Right (20 px per press). The width stays between 280 px and 80% of the graph area beside the sidebar, is re-clamped when the window resizes, is remembered per browser in `localStorage` (the viewer still works when storage is blocked), and double-clicking the handle restores the default 320 px. Pointer events are used, so mouse, touch and pen all work.
 
 ### Changed
 - **`--vault` and `--db` can follow the subcommand.** `schist doctor --vault ~/vault`, `schist add --vault ~/vault --title …` and `schist sync push --vault ~/vault` failed with "unrecognized arguments", because both options were accepted only before the subcommand, yet the README's quick start and the guides wrote them after it. Every subcommand now accepts them in either place; given in both, the one after the subcommand wins, and `SCHIST_VAULT_PATH` still applies when neither is given.
