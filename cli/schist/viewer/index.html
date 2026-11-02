@@ -180,6 +180,8 @@ SPDX-License-Identifier: Apache-2.0
     #detail-connections h3 { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
     .conn-item { font-size: 12px; padding: 5px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
     .conn-item:hover { color: var(--accent); }
+    .conn-item:disabled { cursor: default; }
+    .conn-item:disabled:hover { color: inherit; }
     .conn-type { font-size: 10px; color: var(--accent); margin-right: 6px; }
 
     /* Tooltip */
@@ -765,11 +767,13 @@ SPDX-License-Identifier: Apache-2.0
     // Use store body (full text) — documents[].body is truncated for lunr indexing only
     renderBody(document.getElementById("detail-body"), meta.body || node.description || "");
 
-    const outgoing = links.filter(l => l.source === id || (l.source && l.source.id === id));
+    // Outgoing: every edge the index holds for this note (store edges), not
+    // only those whose target is a node, so the panel shows each indexed
+    // connection however the body renders. Incoming: graph links.
     const incoming = links.filter(l => l.target === id || (l.target && l.target.id === id));
     const allConns = [
-      ...outgoing.map(l => ({ dir: "→", peer: l.target?.id || l.target, type: l.type })),
-      ...incoming.map(l => ({ dir: "←", peer: l.source?.id || l.source, type: l.type })),
+      ...(meta.edges || []).map(e => ({ dir: "→", peer: e.peer, name: e.target, type: e.type, context: e.context })),
+      ...incoming.map(l => ({ dir: "←", peer: l.source?.id || l.source, type: l.type, context: l.context })),
     ];
 
     const connEl = document.getElementById("detail-connections");
@@ -782,8 +786,10 @@ SPDX-License-Identifier: Apache-2.0
         row.type = "button";
         row.setAttribute("data-id", c.peer);
         row.appendChild(txt("span", `${c.dir} ${c.type}`, "conn-type"));
-        row.appendChild(document.createTextNode(peer?.label || c.peer));
-        row.addEventListener("click", () => selectNode(c.peer));
+        row.appendChild(document.createTextNode(peer?.label || c.name || c.peer));
+        if (c.context) row.title = c.context;
+        if (peer) row.addEventListener("click", () => selectNode(c.peer));
+        else row.disabled = true;
         connFrag.appendChild(row);
       }
       connEl.replaceChildren(connFrag);
