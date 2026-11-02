@@ -1414,6 +1414,8 @@ class TestCheckIngestAvailableStaleHandCopy:
 
     def test_pass_when_354_window_copy_has_env_utils_sibling(self, tmp_path):
         """The #354-window copy WITH the env_utils.py sibling works — no WARN."""
+        from schist.ingest import CONNECTIONS_RULE_VERSION
+
         window_copy = (
             "#!/usr/bin/env python3\n"
             "try:\n"
@@ -1421,6 +1423,8 @@ class TestCheckIngestAvailableStaleHandCopy:
             "except ImportError:\n"
             "    from env_utils import env_flag\n"
             "from index_contract import INDEX_SCHEMA_VERSION\n"
+            # Keeps this case about env_utils, not the connection rule.
+            f"CONNECTIONS_RULE_VERSION = {CONNECTIONS_RULE_VERSION}\n"
         )
         vault = self._vault_with_copy(
             tmp_path, with_sibling=True, script_text=window_copy
@@ -1432,6 +1436,37 @@ class TestCheckIngestAvailableStaleHandCopy:
         with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
             r = check_ingest_available(str(vault))
         assert r.status == "PASS", r.message
+
+    def test_warn_when_copy_has_no_connections_rule_version(self, tmp_path):
+        """A copy from before the exact, fence-aware ## Connections rule has
+        no CONNECTIONS_RULE_VERSION and indexes edges the CLI and MCP server
+        no longer write or see."""
+        vault = self._vault_with_copy(tmp_path, with_sibling=True)
+        script = tmp_path / ".schist" / "ingest.py"
+        text = script.read_text()
+        assert "\nCONNECTIONS_RULE_VERSION = " in text  # fixture guard
+        script.write_text(text.replace("\nCONNECTIONS_RULE_VERSION = ", "\nOTHER_VERSION = "))
+        with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
+            r = check_ingest_available(str(vault))
+        assert r.status == "WARN"
+        assert "has no CONNECTIONS_RULE_VERSION" in r.message
+        assert "refresh the hook copy" in r.message
+
+    def test_warn_when_copy_has_older_connections_rule_version(self, tmp_path):
+        import re as _re
+
+        vault = self._vault_with_copy(tmp_path, with_sibling=True)
+        script = tmp_path / ".schist" / "ingest.py"
+        text, n = _re.subn(
+            r"^CONNECTIONS_RULE_VERSION = \d+", "CONNECTIONS_RULE_VERSION = 1",
+            script.read_text(), flags=_re.MULTILINE,
+        )
+        assert n == 1
+        script.write_text(text)
+        with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
+            r = check_ingest_available(str(vault))
+        assert r.status == "WARN"
+        assert "rule v1" in r.message
 
     def test_pass_when_current_copy_lacks_env_utils_sibling(self, tmp_path):
         """The CURRENT ingest.py defines the env_flag fallback inline, so a

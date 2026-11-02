@@ -610,6 +610,383 @@
       "name": "CRLF fenced heading is not a heading",
       "body": "```\r\n## Connections\r\n- extends: note-a\r\n```\r\n",
       "edges": []
+    },
+    {
+      "name": "backtick opener with a backtick in its info string is not a fence",
+      "body": "``` a`b\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "fence after a non-fence backtick line hides the heading",
+      "body": "``` a`b\n```\n## Connections\n- extends: fake\n```",
+      "edges": []
+    },
+    {
+      "name": "tilde opener may have a backtick in its info string",
+      "body": "~~~ a`b\n## Connections\n- extends: fake\n~~~",
+      "edges": []
+    },
+    {
+      "name": "HTML type 1 pre block hides lines until its close tag",
+      "body": "<pre>\n## Connections\n- extends: fake\n</pre>\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "HTML type 1 is case-insensitive and may end on its start line",
+      "body": "<SCRIPT type=\"x\">var a;</Script>\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "HTML type 1 unclosed runs to the end",
+      "body": "<textarea>\n## Connections\n- extends: fake",
+      "edges": []
+    },
+    {
+      "name": "HTML type 2 multi-line comment hides a section",
+      "body": "<!--\n## Connections\n- extends: fake\n-->",
+      "edges": []
+    },
+    {
+      "name": "HTML type 2 one-line comment then a real section",
+      "body": "<!-- note -->\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "HTML type 2 comment inside a section hides an edge line",
+      "body": "## Connections\n- extends: note-a\n<!--\n- extends: fake\n## Notes\n-->\n- related: note-b",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "related",
+          "target": "note-b",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "HTML type 3 processing instruction",
+      "body": "<?xml version=\"1.0\"\n## Connections\n- extends: fake\n?>\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "HTML type 4 declaration",
+      "body": "<!DOCTYPE html\n## Connections\n- extends: fake\n>\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "HTML type 5 CDATA",
+      "body": "<![CDATA[\n## Connections\n- extends: fake\n]]>\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "HTML type 6 div ends at a blank line, then a real section",
+      "body": "<div>\n## Connections\n- extends: fake\n\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "HTML type 6 closing tag with attributes and uppercase",
+      "body": "</DIV class=\"x\">\n## Connections\n- extends: fake",
+      "edges": []
+    },
+    {
+      "name": "HTML type 6 can interrupt a paragraph",
+      "body": "Some text\n<table>\n## Connections\n- extends: fake",
+      "edges": []
+    },
+    {
+      "name": "HTML type 7 open tag alone on a line",
+      "body": "<span>\n## Connections\n- extends: fake",
+      "edges": []
+    },
+    {
+      "name": "HTML type 7 tag with attributes",
+      "body": "<x-card data-a=\"1\" hidden>\n## Connections\n- extends: fake\n\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "HTML type 7 cannot interrupt a paragraph",
+      "body": "Some text\n<span>\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "HTML type 7 needs the tag alone on the line",
+      "body": "<span> text\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "div then fence: the HTML block governs until its blank line",
+      "body": "<div>\n```\n</div>\n\n```\n## Connections\n- extends: fake\n```",
+      "edges": []
+    },
+    {
+      "name": "fence then div: the fence governs until it closes",
+      "body": "```\n<div>\n```\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "HTML block inside a section skips lines until the blank line",
+      "body": "## Connections\n- extends: note-a\n<div>\n- extends: fake\n## Notes\n\n- related: note-b",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "related",
+          "target": "note-b",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "long s is not an ASCII letter for HTML tag names",
+      "body": "<\u017fcript>\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "U+001F before ## does not end the section",
+      "body": "## Connections\n- extends: note-a\n\u001f## P\n- extends: note-b",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "note-b",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "U+FEFF before ## does not end the section",
+      "body": "## Connections\n- extends: note-a\n\ufeff## P\n- extends: note-b",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "note-b",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "section end indented 4 spaces does not end the section",
+      "body": "## Connections\n- extends: note-a\n    ## P\n- extends: note-b",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "note-b",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "section end needs text after ## ",
+      "body": "## Connections\n- extends: note-a\n## \n- extends: note-b",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "note-b",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "edge lines trim U+001F and U+FEFF alike",
+      "body": "## Connections\n\u001f- extends: note-a\n\ufeff- extends: note-b",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "note-b",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "heading indented 1 space is a heading",
+      "body": " ## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "NBSP before the heading is not a heading",
+      "body": "\u00a0## Connections\n- extends: fake",
+      "edges": []
+    },
+    {
+      "name": "indented first body line is an indented code block",
+      "body": "    ## Connections\n    - extends: fake",
+      "edges": []
+    }
+  ],
+  "files": [
+    {
+      "name": "indented first body line after frontmatter is code, not a heading",
+      "text": "---\ntitle: x\n---\n\n    ## Connections\n    - extends: fake\n",
+      "edges": []
+    },
+    {
+      "name": "indented fence as the first body line is not a fence",
+      "text": "---\ntitle: x\n---\n    ```\n## Connections\n- extends: note-a\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "fence line in a frontmatter block scalar does not open a fence",
+      "text": "---\ntitle: t\nsummary: |\n  ```\n---\n## Connections\n- extends: note-a\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "heading in a frontmatter block scalar is not a heading",
+      "text": "---\ntitle: t\nsummary: |\n  ## Connections\n  - extends: fake\n---\nBody\n",
+      "edges": []
+    },
+    {
+      "name": "frontmatter fence then body fence: the body governs",
+      "text": "---\ntitle: t\nsummary: |\n  ```\n---\n```\n## Connections\n- extends: fake\n```\nprose\n",
+      "edges": []
+    },
+    {
+      "name": "CRLF file",
+      "text": "---\r\ntitle: t\r\n---\r\n\r\n## Connections\r\n- extends: note-a\r\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "no frontmatter",
+      "text": "## Connections\n- extends: note-a\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
     }
   ]
 }

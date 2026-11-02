@@ -16,7 +16,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { insertConnectionLine } from "../src/markdown-parser.js";
+import { CONNECTION_RE, insertConnectionLine, parseNote } from "../src/markdown-parser.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,6 +39,16 @@ describe("connection-append parity (#365/#366)", () => {
   for (const c of cases) {
     test(c.name, () => {
       expect(insertConnectionLine(c.content, c.line)).toBe(c.expected);
+    });
+  }
+
+  // Writers agree with the reader: parseNote's view of `expected` holds the
+  // inserted edge. cli/tests/test_markdown_io.py checks ingest's view.
+  for (const c of cases) {
+    test(`inserted edge is read back: ${c.name}`, () => {
+      const m = c.line.match(CONNECTION_RE)!;
+      const got = parseNote(c.expected).connections.map((e) => `${e.type} ${e.target}`);
+      expect(got).toContain(`${m[1]} ${m[2]}`);
     });
   }
 });

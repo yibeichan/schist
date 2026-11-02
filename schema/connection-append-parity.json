@@ -130,5 +130,53 @@
     "content": "---\r\ntitle: A\r\n---\r\n\r\n## Connections\r\n\r\n- supports: notes/x.md\r\n\r\n## Notes\r\n",
     "line": "- extends: notes/b.md",
     "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n\n- extends: notes/b.md\n## Notes\n"
+  },
+  {
+    "name": "fence line in a frontmatter block scalar: insert into the body section",
+    "content": "---\ntitle: t\nsummary: |\n  ```\n---\n## Connections\n- extends: notes/a.md\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: t\nsummary: |\n  ```\n---\n## Connections\n- extends: notes/a.md\n- extends: notes/b.md\n"
+  },
+  {
+    "name": "heading in a frontmatter block scalar: new section at end",
+    "content": "---\ntitle: t\nsummary: |\n  ## Connections\n  - extends: notes/x.md\n---\nBody\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: t\nsummary: |\n  ## Connections\n  - extends: notes/x.md\n---\nBody\n\n## Connections\n\n- extends: notes/b.md\n"
+  },
+  {
+    "name": "indented first body line is code: new section at end",
+    "content": "---\ntitle: t\n---\n\n    ## Connections\n    - extends: notes/x.md\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: t\n---\n\n    ## Connections\n    - extends: notes/x.md\n\n## Connections\n\n- extends: notes/b.md\n"
+  },
+  {
+    "name": "heading inside an HTML comment: new section at end",
+    "content": "---\ntitle: A\n---\n\n<!--\n## Connections\n- supports: notes/x.md\n-->\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\n\n<!--\n## Connections\n- supports: notes/x.md\n-->\n\n## Connections\n\n- extends: notes/b.md\n"
+  },
+  {
+    "name": "unclosed HTML comment: closed before the new section",
+    "content": "---\ntitle: A\n---\n\n<!--\n## Connections\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\n\n<!--\n## Connections\n-->\n\n## Connections\n\n- extends: notes/b.md\n"
+  },
+  {
+    "name": "section ending in an open HTML type 6 block: blank line before the edge",
+    "content": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n<div>\nhtml\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n<div>\nhtml\n\n- extends: notes/b.md\n"
+  },
+  {
+    "name": "section ending in an unclosed pre block: closed before the edge",
+    "content": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n<pre>\ncode\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\n\n## Connections\n\n- supports: notes/x.md\n<pre>\ncode\n</pre>\n- extends: notes/b.md\n"
+  },
+  {
+    "name": "U+001F before ## inside the section: insert after it",
+    "content": "---\ntitle: A\n---\n\n## Connections\n- supports: notes/x.md\n\u001f## P\n- supports: notes/y.md\n",
+    "line": "- extends: notes/b.md",
+    "expected": "---\ntitle: A\n---\n\n## Connections\n- supports: notes/x.md\n\u001f## P\n- supports: notes/y.md\n- extends: notes/b.md\n"
   }
 ]

@@ -2502,3 +2502,42 @@ def test_ingest_entrypoint_reports_a_broken_install_cleanly(
     assert "no content directories configured" in err
     assert "reinstall the CLI" in err
     assert "Traceback" not in err
+
+
+def _connection_file_parity_cases() -> list[dict]:
+    return _connection_parity_fixture()["files"]
+
+
+def test_connection_file_parity_fixture_is_nontrivial() -> None:
+    assert len(_connection_file_parity_cases()) >= 6
+
+
+@pytest.mark.parametrize(
+    "case", _connection_file_parity_cases(), ids=lambda c: c["name"]
+)
+def test_ingest_reads_connections_from_the_unstripped_body(
+    tmp_path: Path, case: dict,
+) -> None:
+    """Ingest reads connections from the raw text after the frontmatter's
+    closing line, the body TS parseNote (gray-matter) sees, not
+    python-frontmatter's stripped post.content; frontmatter lines never open
+    a fence or a section. The same whole-file cases run through TS
+    parseNote in connection-line-parity.test.ts."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    (vault / "notes").mkdir(parents=True)
+    (vault / "notes" / "2026-06-08-case.md").write_bytes(case["text"].encode("utf-8"))
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute(
+            "SELECT type, target FROM edges WHERE type != 'references' ORDER BY rowid",
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows == [(e["type"], e["target"]) for e in case["edges"]]

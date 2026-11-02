@@ -121,75 +121,224 @@ export function isRoundTrippableTarget(target: string): boolean {
  * schema/connection-line-parity.json and the writer cases in
  * schema/connection-append-parity.json pin the two.
  *
+ * The rule reads the note body (gray-matter's content, which is not
+ * stripped). Writers scanning a whole file skip the frontmatter lines first
+ * (noteBodyStartLine).
  * - A heading is a line of 0-3 spaces, then exactly `## Connections`, then
  *   optional spaces or tabs. Four spaces or a tab make an indented code block.
- * - A fence opens on a line of 0-3 spaces then 3+ backticks or 3+ tildes, and
- *   closes on a later line of 0-3 spaces, then the same character at least as
- *   many times, then optional spaces or tabs. An unclosed fence runs to the
- *   end. Fence lines and lines inside a fence are never a heading, never an
- *   edge, and never end the section.
- * - The section ends at the next line outside a fence whose trimmed text
- *   starts with `## `.
+ * - A fence opens on a line of 0-3 spaces then 3+ backticks (with no backtick
+ *   in the rest of the line) or 3+ tildes, and closes on a later line of 0-3
+ *   spaces, then the same character at least as many times, then optional
+ *   spaces or tabs. HTML blocks follow CommonMark 0.31 section 4.6 (types 1-7,
+ *   HTML_BLOCK_STARTS; type 7 cannot interrupt a paragraph). Whichever block
+ *   opens first governs until it closes; an unclosed one runs to the end.
+ *   Lines in a fence or HTML block are never a heading, never an edge, and
+ *   never end the section. Container blocks (block quotes, list items) are
+ *   not interpreted: their lines are read as top-level lines.
+ * - The section ends at the next other line of 0-3 spaces, then `## `, then
+ *   text (SECTION_END_RE).
+ * - Edge lines are trimmed with the explicit SLUG_WS_CHARS set, not trim(),
+ *   whose whitespace differs from Python's str.strip() (U+001F, U+FEFF).
  */
 const CONNECTIONS_HEADING_RE = /^ {0,3}## Connections[ \t]*$/;
-const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})/;
-const FENCE_CLOSE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+const SECTION_END_RE = /^ {0,3}## [ \t]*[^ \t]/;
 
 /** True when `line` (already split) has the shape of a connections heading.
- * It says nothing about fences; connectionsSection checks both. */
+ * It says nothing about fences or HTML blocks; connectionsSection checks both. */
 export function isConnectionsHeading(line: string): boolean {
   return CONNECTIONS_HEADING_RE.test(line);
 }
 
-function scanFences(lines: string[]): { flags: boolean[]; open: string } {
-  const flags: boolean[] = [];
+/** True when `line` has the shape of a `## ` heading that ends a section. */
+export function isSectionEnd(line: string): boolean {
+  return SECTION_END_RE.test(line);
+}
+
+/** Trim the explicit whitespace union shared with ingest.py. Linear. */
+export function trimConnectionWs(text: string): string {
+  let a = 0;
+  let b = text.length;
+  while (a < b && SLUG_WS_CHARS.includes(text[a])) a++;
+  while (b > a && SLUG_WS_CHARS.includes(text[b - 1])) b--;
+  return text.slice(a, b);
+}
+
+const FENCE_OPEN_RE = /^ {0,3}(?:(`{3,})[^`]*|(~{3,}).*)$/;
+const FENCE_CLOSE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+// CommonMark 0.31 HTML blocks (spec section 4.6). Patterns run on the line
+// with ASCII letters lowercased (asciiLower), never the /i flag, so the case
+// rule matches ingest.py's (Python's re.IGNORECASE folds U+017F to "s").
+const HTML_BLOCK_6_TAGS =
+  "address|article|aside|base|basefont|blockquote|body|caption|center|col|" +
+  "colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|" +
+  "footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|" +
+  "legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|" +
+  "param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|" +
+  "track|ul";
+const HTML_ATTR =
+  `[ \\t]+[a-z_:][a-z0-9_.:-]*` +
+  `(?:[ \\t]*=[ \\t]*(?:[^ \\t"'=<>\`]+|'[^']*'|"[^"]*"))?`;
+// [type, start pattern]; types 1-5 end at a line containing their end marker
+// (htmlBlockEnd), types 6 and 7 before a blank line.
+const HTML_BLOCK_STARTS: [number, RegExp][] = [
+  [1, /^ {0,3}<(script|pre|style|textarea)(?:[ \t]|>|$)/],
+  [2, /^ {0,3}<!--/],
+  [3, /^ {0,3}<\?/],
+  [4, /^ {0,3}<![a-z]/],
+  [5, /^ {0,3}<!\[cdata\[/],
+  [6, new RegExp(`^ {0,3}</?(?:${HTML_BLOCK_6_TAGS})(?:[ \\t]|/?>|$)`)],
+  [7, new RegExp(
+    `^ {0,3}(?:<(?!(?:script|style|pre|textarea)(?:[ \\t/>]|$))` +
+    `[a-z][a-z0-9-]*(?:${HTML_ATTR})*[ \\t]*/?>` +
+    `|</(?!(?:script|style|pre|textarea)[ \\t>])[a-z][a-z0-9-]*[ \\t]*>)[ \\t]*$`,
+  )],
+];
+const HTML_TYPE1_ENDS = ["</script>", "</pre>", "</style>", "</textarea>"];
+const HTML_END_MARKERS: Record<number, string> = { 2: "-->", 3: "?>", 4: ">", 5: "]]>" };
+const ATX_HEADING_RE = /^ {0,3}#{1,6}(?:[ \t]|$)/;
+
+function asciiLower(line: string): string {
+  return line.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+}
+
+/** Columns of leading spaces and tabs (a tab advances to the next multiple
+ * of 4), as CommonMark measures indentation. */
+function indentWidth(line: string): number {
+  let width = 0;
+  for (const ch of line) {
+    if (ch === " ") width += 1;
+    else if (ch === "\t") width += 4 - (width % 4);
+    else break;
+  }
+  return width;
+}
+
+function isBlank(line: string): boolean {
+  return /^[ \t]*$/.test(line);
+}
+
+function htmlBlockEnd(kind: number, low: string): boolean {
+  if (kind === 1) return HTML_TYPE1_ENDS.some((end) => low.includes(end));
+  return low.includes(HTML_END_MARKERS[kind]);
+}
+
+type LineKind = "" | "header" | "fence" | "html";
+
+/**
+ * Classify each line: "" (ordinary), "header" (before `start`), "fence" (a
+ * fence delimiter or inside a fenced code block) or "html" (inside an HTML
+ * block). Whichever block opens first governs until it closes. `closer` is
+ * what an unclosed block still needs at the end: its closing line, "" (a
+ * blank line) for HTML block types 6 and 7, or null when nothing is open.
+ */
+function scanBlocks(lines: string[], start = 0): { kinds: LineKind[]; closer: string | null } {
+  const kinds: LineKind[] = [];
   let fenceChar = "";
   let fenceLen = 0;
-  for (const ln of lines) {
-    if (!fenceChar) {
-      const m = FENCE_OPEN_RE.exec(ln);
-      if (m) {
-        fenceChar = m[1][0];
-        fenceLen = m[1].length;
-      }
-      flags.push(m !== null);
+  let htmlKind = 0;
+  let htmlTag = "";
+  let inParagraph = false;
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i];
+    if (i < start) {
+      kinds.push("header");
       continue;
     }
-    flags.push(true);
-    const m = FENCE_CLOSE_RE.exec(ln);
-    if (m && m[1][0] === fenceChar && m[1].length >= fenceLen) {
-      fenceChar = "";
-      fenceLen = 0;
+    if (fenceChar) {
+      kinds.push("fence");
+      const m = FENCE_CLOSE_RE.exec(ln);
+      if (m && m[1][0] === fenceChar && m[1].length >= fenceLen) {
+        fenceChar = "";
+        fenceLen = 0;
+      }
+      continue;
+    }
+    if (htmlKind) {
+      if (htmlKind === 6 || htmlKind === 7) {
+        if (isBlank(ln)) {
+          htmlKind = 0;
+          kinds.push("");
+          inParagraph = false;
+        } else {
+          kinds.push("html");
+        }
+        continue;
+      }
+      kinds.push("html");
+      if (htmlBlockEnd(htmlKind, asciiLower(ln))) htmlKind = 0;
+      continue;
+    }
+    const m = FENCE_OPEN_RE.exec(ln);
+    if (m) {
+      const run = m[1] ?? m[2];
+      fenceChar = run[0];
+      fenceLen = run.length;
+      kinds.push("fence");
+      inParagraph = false;
+      continue;
+    }
+    const low = asciiLower(ln);
+    let opened = false;
+    for (const [kind, pattern] of HTML_BLOCK_STARTS) {
+      if (kind === 7 && inParagraph) continue; // type 7 cannot interrupt a paragraph
+      const hm = pattern.exec(low);
+      if (hm) {
+        kinds.push("html");
+        opened = true;
+        inParagraph = false;
+        htmlTag = kind === 1 ? hm[1] : "";
+        if (kind === 6 || kind === 7 || !htmlBlockEnd(kind, low)) htmlKind = kind;
+        break;
+      }
+    }
+    if (opened) continue;
+    kinds.push("");
+    if (isBlank(ln) || ATX_HEADING_RE.test(ln)) {
+      inParagraph = false;
+    } else if (!inParagraph && indentWidth(ln) >= 4) {
+      // an indented code line, not a paragraph
+    } else {
+      inParagraph = true;
     }
   }
-  return { flags, open: fenceChar.repeat(fenceLen) };
+  let closer: string | null = null;
+  if (fenceChar) closer = fenceChar.repeat(fenceLen);
+  else if (htmlKind === 1) closer = `</${htmlTag}>`;
+  else if (htmlKind >= 2 && htmlKind <= 5) closer = HTML_END_MARKERS[htmlKind];
+  else if (htmlKind === 6 || htmlKind === 7) closer = "";
+  return { kinds, closer };
 }
 
-/** Per line: true for a fence delimiter or a line inside a fence. */
-export function fencedLineFlags(lines: string[]): boolean[] {
-  return scanFences(lines).flags;
+/** Per line: true for a line before `start` (frontmatter), a fence
+ * delimiter, or a line inside a fenced code block or an HTML block. */
+export function skippedLineFlags(lines: string[], start = 0): boolean[] {
+  return scanBlocks(lines, start).kinds.map((k) => k !== "");
 }
 
-/** The delimiter that closes a fence still open after the last line, or ""
- * when every fence is closed. Writers append it before adding a heading or
- * edge at the end, so the new line is not swallowed by the fence. */
-export function unclosedFence(lines: string[]): string {
-  return scanFences(lines).open;
+/** What a fence or HTML block still open after the last line needs before a
+ * writer adds a heading or edge at the end: its closing line, "" (a blank
+ * line) for HTML block types 6 and 7, or null when nothing is open. */
+export function unclosedBlockCloser(lines: string[], start = 0): string | null {
+  return scanBlocks(lines, start).closer;
 }
 
 /**
- * Locate the first connections section in `lines`: the heading index, the
- * end index (the `## ` line that closes the section, or lines.length), and
- * the fenced flags; lines between heading and end whose flag is true must be
- * skipped. Null when no heading sits outside a fence.
+ * Locate the first connections section in `lines`, ignoring lines before
+ * `start` (a writer passes noteBodyStartLine): the heading index, the end
+ * index (the `## ` line that closes the section, or lines.length), and the
+ * skipped flags; lines between heading and end whose flag is true are in a
+ * fence or HTML block and must be skipped. Null when no heading sits outside
+ * both.
  */
 export function connectionsSection(
   lines: string[],
-): { heading: number; end: number; fenced: boolean[] } | null {
-  const fenced = fencedLineFlags(lines);
+  start = 0,
+): { heading: number; end: number; skipped: boolean[] } | null {
+  const skipped = skippedLineFlags(lines, start);
   let heading = -1;
   for (let i = 0; i < lines.length; i++) {
-    if (!fenced[i] && isConnectionsHeading(lines[i])) {
+    if (!skipped[i] && isConnectionsHeading(lines[i])) {
       heading = i;
       break;
     }
@@ -197,17 +346,49 @@ export function connectionsSection(
   if (heading === -1) return null;
   let end = lines.length;
   for (let i = heading + 1; i < lines.length; i++) {
-    if (!fenced[i] && lines[i].trim().startsWith("## ")) {
+    if (!skipped[i] && isSectionEnd(lines[i])) {
       end = i;
       break;
     }
   }
-  return { heading, end, fenced };
+  return { heading, end, skipped };
 }
 
-/** True when `body` has a connections heading outside a fence. */
+/** True when `body` has a connections heading outside a fence or HTML block. */
 export function hasConnectionsHeading(body: string): boolean {
   return connectionsSection(splitLinesLikePython(body)) !== null;
+}
+
+/**
+ * Length of the frontmatter block at the start of `content`, up to and
+ * including its closing line's terminator, delimited exactly as gray-matter
+ * (parseNote) delimits it, without parsing the YAML: an optional BOM, `---`
+ * not followed by another `-`, an optional language word on the opening
+ * line, and the first "\n---" after it; one "\r" and one "\n" after the
+ * closing `---` belong to the block. 0 when there is no frontmatter.
+ */
+export function frontmatterLength(content: string): number {
+  const bom = content.charCodeAt(0) === 0xfeff ? 1 : 0;
+  if (!content.startsWith("---", bom) || content.charAt(bom + 3) === "-") return 0;
+  let pos = bom + 3;
+  let str = content.slice(pos);
+  const language = str.slice(0, str.search(/\r?\n/));
+  if (language.trim()) {
+    pos += language.length;
+    str = str.slice(language.length);
+  }
+  const close = str.indexOf("\n---");
+  if (close === -1) return content.length;
+  let p = close + 4;
+  if (str[p] === "\r") p++;
+  if (str[p] === "\n") p++;
+  return pos + p;
+}
+
+/** Number of splitLinesLikePython lines that belong to the frontmatter
+ * (frontmatterLength). Writers pass it as connectionsSection's `start`. */
+export function noteBodyStartLine(content: string): number {
+  return splitLinesLikePython(content.slice(0, frontmatterLength(content))).length;
 }
 
 export function parseConnections(body: string): Connection[] {
@@ -216,8 +397,8 @@ export function parseConnections(body: string): Connection[] {
   const section = connectionsSection(lines);
   if (section === null) return connections;
   for (let i = section.heading + 1; i < section.end; i++) {
-    if (section.fenced[i]) continue;
-    const stripped = lines[i].trim();
+    if (section.skipped[i]) continue;
+    const stripped = trimConnectionWs(lines[i]);
     const match = stripped.match(CONNECTION_RE);
     if (match) {
       // #415: skip bracket references like `[moltbook]` / `[[wiki-note]]`,
@@ -486,8 +667,9 @@ export function buildConnectionLine(conn: Connection): string {
  * shape as the missing-trailing-newline drop (#295). The heading gate is a
  * line-scan, not a substring test, so a mid-line prose mention of
  * "## Connections" gets a real section instead of an edge outside any
- * section. The heading must be exact and outside a fenced code block
- * (connectionsSection, the rule parseConnections reads with), so a
+ * section. The heading must be exact and outside a fenced code block or
+ * HTML block, and only body lines count (connectionsSection and
+ * noteBodyStartLine, the rule parseConnections reads with), so a
  * `## Connections` shown in a fence never receives an edge. Output is always "\n"-joined with a single trailing newline,
  * healing CRLF and exotic separators on write like stripConnectionsTo does.
  *
@@ -497,21 +679,26 @@ export function buildConnectionLine(conn: Connection): string {
  */
 export function insertConnectionLine(content: string, line: string): string {
   const lines = splitLinesLikePython(content);
-  const section = connectionsSection(lines);
+  // Scan only the body: frontmatter lines (a YAML block scalar holding
+  // "  ```" or "  ## Connections") must not open a fence or a section.
+  const start = noteBodyStartLine(content);
+  const section = connectionsSection(lines, start);
   if (section === null) {
-    // When the only `## Connections` sits in an unclosed fence, the new
-    // heading would land inside that fence too, so close it first.
-    const fence = unclosedFence(lines);
-    const closer = fence ? "\n" + fence : "";
+    // When the body ends inside an unclosed fence or HTML block, the new
+    // heading would land inside it too, so close it first.
+    // A type 6/7 HTML block ("" closer) is ended by the blank line below.
+    const open = unclosedBlockCloser(lines, start);
+    const closer = open ? "\n" + open : "";
     return content.trimEnd() + closer + "\n\n## Connections\n\n" + line + "\n";
   }
   if (section.end < lines.length) {
     lines.splice(section.end, 0, line);
   } else {
-    // The section runs to EOF. If it ends inside an unclosed fence, close
-    // the fence so the appended edge is outside it.
-    const fence = unclosedFence(lines);
-    if (fence) lines.push(fence);
+    // The section runs to EOF. If it ends inside an unclosed fence or HTML
+    // block, close it (a blank line for HTML types 6 and 7) so the appended
+    // edge is outside it.
+    const open = unclosedBlockCloser(lines, start);
+    if (open !== null) lines.push(open);
     lines.push(line);
   }
   return lines.join("\n") + "\n";
@@ -527,13 +714,14 @@ export function buildNote(
     const connectionLines = connections.map(buildConnectionLine).join("\n");
     // The section is found by connectionsSection, the same rule as
     // parseConnections and insertConnectionLine: an exact heading outside a
-    // fenced code block. A substring test matched mid-line mentions (prose,
+    // fenced code block or HTML block. `content` is a body (no
+    // frontmatter). A substring test matched mid-line mentions (prose,
     // code samples) and replaced the text after them (#732).
     const lines = splitLinesLikePython(content);
     const found = connectionsSection(lines);
     if (found === null) {
-      const fence = unclosedFence(lines);
-      const closer = fence ? "\n" + fence : "";
+      const open = unclosedBlockCloser(lines);
+      const closer = open ? "\n" + open : "";
       content = content.trimEnd() + closer + `\n\n## Connections\n\n${connectionLines}\n`;
     } else {
       const start = found.heading;

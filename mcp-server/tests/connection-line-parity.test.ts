@@ -20,7 +20,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CONNECTION_RE, parseConnections } from "../src/markdown-parser.js";
+import { CONNECTION_RE, parseConnections, parseNote } from "../src/markdown-parser.js";
 import { bodyConnectionEdgeLines, stripConnectionsTo } from "../src/tools.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -33,7 +33,8 @@ type LineCase = {
 };
 type BodyEdge = { type: string; target: string; context: string | null };
 type BodyCase = { name: string; body: string; edges: BodyEdge[] };
-type ParityFixture = { lines: LineCase[]; bodies: BodyCase[] };
+type FileCase = { name: string; text: string; edges: BodyEdge[] };
+type ParityFixture = { lines: LineCase[]; bodies: BodyCase[]; files: FileCase[] };
 
 function loadFixture(): ParityFixture {
   const fixturePath = path.resolve(__dirname, "..", "..", "schema", "connection-line-parity.json");
@@ -136,5 +137,45 @@ describe("delete cascade leaves fenced lines alone", () => {
     expect(content).toBe(
       ["## Connections", "```", "- extends: note-a", "## Notes", "```", "- related: note-b", ""].join("\n"),
     );
+  });
+});
+
+describe("connection whole-file parity", () => {
+  // The same cases run through a real ingest in cli/tests/test_ingest.py:
+  // both sides read the raw body after the frontmatter's closing line.
+  test("fixture is present and non-trivial", () => {
+    expect(fixture.files.length).toBeGreaterThanOrEqual(6);
+  });
+
+  for (const c of fixture.files) {
+    test(c.name, () => {
+      const got = parseNote(c.text).connections.map((e) => ({
+        type: e.type,
+        target: e.target,
+        context: e.context ?? null,
+      }));
+      expect(got).toEqual(c.edges);
+    });
+  }
+});
+
+describe("delete cascade on whole files", () => {
+  test("a fence line in a frontmatter block scalar does not hide the edge", () => {
+    const text = "---\ntitle: t\nsummary: |\n  ```\n---\n## Connections\n- extends: a\n- extends: b\n";
+    const { content, removed } = stripConnectionsTo(text, ["a"]);
+    expect(removed).toBe(1);
+    expect(content).toBe("---\ntitle: t\nsummary: |\n  ```\n---\n## Connections\n- extends: b\n");
+  });
+
+  test("a heading in a frontmatter block scalar is not a section", () => {
+    const text = "---\ntitle: t\nsummary: |\n  ## Connections\n  - extends: a\n---\nBody\n";
+    expect(stripConnectionsTo(text, ["a"]).removed).toBe(0);
+  });
+
+  test("an edge-looking line in an HTML block inside the section is kept", () => {
+    const text = "---\ntitle: t\n---\n\n## Connections\n- extends: a\n<div>\n- extends: a\n\n- extends: b\n";
+    const { content, removed } = stripConnectionsTo(text, ["a"]);
+    expect(removed).toBe(1);
+    expect(content).toBe("---\ntitle: t\n---\n\n## Connections\n<div>\n- extends: a\n\n- extends: b\n");
   });
 });

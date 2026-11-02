@@ -16,8 +16,12 @@ from .ingest import (
     SchemaConfigError,
     _normalize_concept_slug,
     _normalize_tag,
+    CONNECTION_RE,
     connections_heading_index,
     connections_heading_near_misses,
+    note_body_offset,
+    parse_connection_lines,
+    patch_frontmatter_flow_hashtags,
 )
 
 
@@ -847,7 +851,16 @@ def schema(args, vault_path: str, db_path: str):
         fm = note['frontmatter']
         if not fm.get('title') and not fm.get('topic') and not fm.get('concept'):
             violations.append(f'{rel}: missing title/topic/concept in frontmatter')
-        warnings.extend(_connections_heading_warnings(md_file, rel, note['body']))
+        # The connection rule reads the raw body (ingest's view), not
+        # read_note's stripped one.
+        try:
+            raw_text = patch_frontmatter_flow_hashtags(md_file.read_text(encoding='utf-8'))
+        except (OSError, UnicodeDecodeError):
+            raw_text = ''
+        body_offset = note_body_offset(raw_text)
+        raw_body = raw_text[body_offset:]
+        body_start = len(raw_text[:body_offset].splitlines())
+        warnings.extend(_connections_rule_warnings(rel, raw_body, body_start))
         is_concept_path = (
             len(rel.parts) > 1
             and rel.parts[0].casefold() == 'concepts'
@@ -892,8 +905,7 @@ def schema(args, vault_path: str, db_path: str):
                     f"{rel}: concept frontmatter contains document-only "
                     f"field(s): {', '.join(forbidden)}",
                 )
-            body = note['body']
-            if connections_heading_index(body.splitlines()) is not None:
+            if connections_heading_index(raw_body.splitlines()) is not None:
                 violations.append(
                     f'{rel}: concept nodes cannot have outgoing '
                     '## Connections sections',
@@ -916,36 +928,79 @@ def schema(args, vault_path: str, db_path: str):
         print('All documents valid.')
 
 
-def _connections_heading_warnings(md_file: Path, rel: Path, body: str) -> list[str]:
-    """Warn on each body line the earlier, looser heading rule (stripped text
-    starts with `## Connections`) took as a connections heading but the
-    current rule does not: a near-miss heading, an indented one, or one inside
-    a fenced code block. Edges under such a line are no longer indexed, so the
-    warning shows a vault owner which notes changed. Uses the parser's own
-    helper (ingest.connections_heading_near_misses), so the two cannot
-    disagree. Line numbers are 1-based in the file, frontmatter included."""
-    body_lines = body.splitlines()
-    misses = connections_heading_near_misses(body_lines)
-    if not misses:
-        return []
-    offset = 0
-    try:
-        raw_lines = md_file.read_text(encoding='utf-8').splitlines()
-    except (OSError, UnicodeDecodeError):
-        raw_lines = []
-    # python-frontmatter strips the body, so locate it in the raw file by
-    # content rather than by counting frontmatter lines.
-    stripped_body = [ln.strip() for ln in body_lines]
-    stripped_raw = [ln.strip() for ln in raw_lines]
-    n = len(stripped_body)
-    for k in range(len(stripped_raw) - n + 1):
-        if (stripped_raw[k] == stripped_body[0]
-                and stripped_raw[k:k + n] == stripped_body):
-            offset = k
+def _legacy_connection_lines(body: str) -> list[tuple[int, dict]]:
+    """The connection rule before CONNECTIONS_RULE_VERSION 2, kept only so
+    `schema --validate` can show which edges the change adds or drops: any
+    line whose stripped text starts with `## Connections` opened the section,
+    fences were not tracked, and the section ended at the next line whose
+    stripped text starts with `## `. Ingest applied it to python-frontmatter's
+    stripped body. Returns (index in body.splitlines(), edge) pairs."""
+    edges: list[tuple[int, dict]] = []
+    in_section = False
+    for i, line in enumerate(body.splitlines()):
+        stripped = line.strip()
+        if stripped.startswith('## Connections'):
+            in_section = True
+            continue
+        if in_section and stripped.startswith('## '):
             break
-    return [
-        f'{rel}:{offset + i + 1}: line starting with "## Connections" is not a '
-        f'connections heading ({reason}); connection lines under it are not '
-        'indexed'
-        for i, reason in misses
-    ]
+        if not in_section or not stripped.startswith('- '):
+            continue
+        m = CONNECTION_RE.match(stripped)
+        if m:
+            conn_type, target, quoted_ctx, dash_ctx = m.groups()
+            if target.startswith('['):
+                continue
+            edges.append((i, {
+                'type': conn_type,
+                'target': target,
+                'context': quoted_ctx or dash_ctx or None,
+            }))
+    return edges
+
+
+def _connections_rule_warnings(rel: Path, raw_body: str, body_start: int) -> list[str]:
+    """Warn where the current connection rule and the earlier one disagree:
+
+    - each line whose stripped text starts with `## Connections` that is not
+      a heading now (near-miss text, indented, in a fence or HTML comment),
+      with the reason, from the parser's own helper;
+    - each edge the earlier rule indexed and the current one does not
+      ("dropped"), and each edge indexed now that was not before ("added"),
+      by running both rules on the note.
+
+    `raw_body` is the text after the frontmatter's closing line; `body_start`
+    its first line's 0-based index in the file. Line numbers are 1-based in
+    the file, frontmatter included."""
+    body_lines = raw_body.splitlines()
+    out: list[tuple[int, str]] = []
+    for i, reason in connections_heading_near_misses(body_lines):
+        out.append((
+            body_start + i,
+            f'line starting with "## Connections" is not a connections '
+            f'heading ({reason})',
+        ))
+
+    # Ingest used to read python-frontmatter's stripped body; map its line
+    # indexes back onto the raw body.
+    lead = raw_body[:len(raw_body) - len(raw_body.lstrip())]
+    lead_lines = len((lead + 'x').splitlines()) - 1
+
+    def key(idx: int, edge: dict) -> tuple:
+        return (idx, edge['type'], edge['target'], edge['context'])
+
+    old = {key(lead_lines + i, e) for i, e in _legacy_connection_lines(raw_body.strip())}
+    new = {key(i, e) for i, e in parse_connection_lines(raw_body)}
+    for idx, ctype, target, _ctx in old - new:
+        out.append((
+            body_start + idx,
+            f'connection "{ctype}: {target}" was indexed by the earlier '
+            '## Connections rule and is not now (edge dropped)',
+        ))
+    for idx, ctype, target, _ctx in new - old:
+        out.append((
+            body_start + idx,
+            f'connection "{ctype}: {target}" is indexed now but was not by '
+            'the earlier ## Connections rule (edge added)',
+        ))
+    return [f'{rel}:{line + 1}: {msg}' for line, msg in sorted(out)]

@@ -201,9 +201,14 @@ class TestSchemaCommand:
             str(tmp_path / ".schist" / "schist.db"),
         )
         out = capsys.readouterr().out
-        assert "1 warning(s):" in out
+        assert "2 warning(s):" in out
         assert "WARN: notes/near.md:8:" in out
         assert reason in out
+        assert (
+            'WARN: notes/near.md:9: connection "extends: notes/other" was '
+            "indexed by the earlier ## Connections rule and is not now "
+            "(edge dropped)"
+        ) in out
         # A warning, not a violation: validation still passes.
         assert "All documents valid." in out
 
@@ -223,6 +228,122 @@ class TestSchemaCommand:
         assert "WARN: notes/fenced.md:7:" in out
         assert "inside a fenced code block" in out
         assert "All documents valid." in out
+
+    @pytest.mark.parametrize("line", [" ## Connections", "   ## Connections"])
+    def test_validate_does_not_warn_on_heading_indented_one_to_three_spaces(
+        self, tmp_path, capsys, line,
+    ):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir()
+        (notes_dir / "ok.md").write_text(
+            f"---\ntitle: Ok\nstatus: draft\n---\n\nBody\n\n{line}\n"
+            "- extends: notes/other\n",
+            encoding="utf-8",
+        )
+        commands.schema(
+            _schema_args(validate=True), str(tmp_path),
+            str(tmp_path / ".schist" / "schist.db"),
+        )
+        assert capsys.readouterr().out.strip() == "All documents valid."
+
+    @pytest.mark.parametrize("line,reason", [
+        (" ## Connections (x)", "heading text is not exactly '## Connections'"),
+        ("\u00a0## Connections", "starts with U+00A0, which is not a space or tab"),
+        ("  \t## Connections", "indented by 4 or more spaces or by a tab"),
+    ])
+    def test_validate_names_the_right_reason(self, tmp_path, capsys, line, reason):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir()
+        (notes_dir / "r.md").write_text(
+            f"---\ntitle: R\nstatus: draft\n---\n\nBody\n\n{line}\n",
+            encoding="utf-8",
+        )
+        commands.schema(
+            _schema_args(validate=True), str(tmp_path),
+            str(tmp_path / ".schist" / "schist.db"),
+        )
+        out = capsys.readouterr().out
+        assert f"WARN: notes/r.md:8: " in out
+        assert reason in out
+
+    def test_validate_warns_on_heading_in_html_div_block(self, tmp_path, capsys):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir()
+        (notes_dir / "d.md").write_text(
+            "---\ntitle: D\nstatus: draft\n---\n\n<div>\n## Connections\n"
+            "- extends: notes/other\n",
+            encoding="utf-8",
+        )
+        commands.schema(
+            _schema_args(validate=True), str(tmp_path),
+            str(tmp_path / ".schist" / "schist.db"),
+        )
+        out = capsys.readouterr().out
+        assert "WARN: notes/d.md:7: " in out
+        assert "inside an HTML block" in out
+
+    def test_validate_warns_on_heading_in_html_comment(self, tmp_path, capsys):
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir()
+        (notes_dir / "c.md").write_text(
+            "---\ntitle: C\nstatus: draft\n---\n\n<!--\n## Connections\n"
+            "- extends: notes/other\n-->\n",
+            encoding="utf-8",
+        )
+        commands.schema(
+            _schema_args(validate=True), str(tmp_path),
+            str(tmp_path / ".schist" / "schist.db"),
+        )
+        out = capsys.readouterr().out
+        assert "WARN: notes/c.md:7: " in out
+        assert "inside an HTML block" in out
+        assert "WARN: notes/c.md:8: " in out and "(edge dropped)" in out
+
+    def test_validate_warns_on_gained_edge_after_fenced_heading(
+        self, tmp_path, capsys,
+    ):
+        """A `## Usage` inside a fence used to end the section; now it does
+        not, so the edge after the fence is newly indexed."""
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir()
+        (notes_dir / "g.md").write_text(
+            "---\ntitle: G\nstatus: draft\n---\n\n## Connections\n"
+            "- extends: notes/mine\n\n```text\n## Usage\n```\n"
+            "- extends: notes/later\n",
+            encoding="utf-8",
+        )
+        commands.schema(
+            _schema_args(validate=True), str(tmp_path),
+            str(tmp_path / ".schist" / "schist.db"),
+        )
+        out = capsys.readouterr().out
+        assert "1 warning(s):" in out
+        assert (
+            'WARN: notes/g.md:12: connection "extends: notes/later" is indexed '
+            "now but was not by the earlier ## Connections rule (edge added)"
+        ) in out
+        assert "All documents valid." in out
+
+    def test_validate_reads_the_unstripped_body(self, tmp_path, capsys):
+        """python-frontmatter strips the body, which turned an indented first
+        line (a code block) into a heading. Both the near-miss warning and the
+        concept check read the raw body."""
+        concepts_dir = tmp_path / "concepts"
+        concepts_dir.mkdir()
+        (concepts_dir / "indented.md").write_text(
+            "---\ntitle: Indented\n---\n\n    ## Connections\n"
+            "    - extends: concepts/other\n",
+            encoding="utf-8",
+        )
+        commands.schema(
+            _schema_args(validate=True), str(tmp_path),
+            str(tmp_path / ".schist" / "schist.db"),
+        )
+        out = capsys.readouterr().out
+        assert "cannot have outgoing" not in out
+        assert "concepts/indented.md:5: " in out
+        assert "indented by 4 or more spaces" in out
+        assert "(edge dropped)" in out
 
     def test_validate_does_not_warn_on_exact_connections_heading(
         self, tmp_path, capsys,

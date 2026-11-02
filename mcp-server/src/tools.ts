@@ -11,7 +11,7 @@ import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote, rewriteNote, updateNote, deleteNote, writeMutex, vaultLockWaitMs } from "./git-writer.js";
 import { withVaultLock, VaultLockTimeout, VaultLockFailed } from "./vault-lock.js";
-import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, hasNonYamlOpener, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython, containsLineBoundary, isRoundTrippableTarget, connectionsSection, fencedLineFlags, isConnectionsHeading, hasConnectionsHeading } from "./markdown-parser.js";
+import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, hasNonYamlOpener, CONNECTION_RE, SLUG_WS_CHARS, splitLinesLikePython, containsLineBoundary, isRoundTrippableTarget, connectionsSection, skippedLineFlags, isConnectionsHeading, isSectionEnd, hasConnectionsHeading, noteBodyStartLine, trimConnectionWs } from "./markdown-parser.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
 import type { VaultConfig, ToolError, SearchMemoryResponse, SearchNotesResponse, QueryGraphResponse, ListConceptsResponse, GetContextResponse, SyncRetryResponse, SyncStatusResponse, PushFailureClass, ComposeBriefResponse, Note, SearchResult } from "./types.js";
@@ -2640,8 +2640,8 @@ export function* bodyConnectionEdgeLines(body: string): Generator<{ line: string
   const section = connectionsSection(lines);
   if (section === null) return;
   for (let i = section.heading + 1; i < section.end; i++) {
-    if (section.fenced[i]) continue; // fenced code — ingest skips it
-    const stripped = lines[i].trim();
+    if (section.skipped[i]) continue; // in a fence or HTML block — ingest skips it
+    const stripped = trimConnectionWs(lines[i]);
     if (!stripped.startsWith("- ")) continue;
     const m = stripped.match(CONNECTION_RE);
     if (!m) continue; // malformed line — ingest skips it
@@ -3403,12 +3403,15 @@ export function stripConnectionsTo(content: string, targets: string[]): { conten
   // fenced code never a heading, an edge, or a section end), so only lines
   // ingest indexed as edges are removed. Every exact heading outside a fence
   // opens a section here, not just the first, as before.
+  // `content` is a whole file: frontmatter lines are skipped (noteBodyStartLine)
+  // so a YAML block scalar cannot open a fence or a section.
   const inLines = splitLinesLikePython(content);
-  const inFenced = fencedLineFlags(inLines);
+  const bodyStart = noteBodyStartLine(content);
+  const inSkipped = skippedLineFlags(inLines, bodyStart);
   for (let idx = 0; idx < inLines.length; idx++) {
     const line = inLines[idx];
-    const stripped = line.trim();
-    if (inFenced[idx]) {
+    const stripped = trimConnectionWs(line);
+    if (inSkipped[idx]) {
       out.push(line);
       continue;
     }
@@ -3417,7 +3420,7 @@ export function stripConnectionsTo(content: string, targets: string[]): { conten
       out.push(line);
       continue;
     }
-    if (inSection && stripped.startsWith("## ")) {
+    if (inSection && isSectionEnd(line)) {
       inSection = false;
       out.push(line);
       continue;
@@ -3433,20 +3436,19 @@ export function stripConnectionsTo(content: string, targets: string[]): { conten
   }
   if (removed === 0) return { content: finalize(out), removed };
 
-  // Removed lines were edge lines outside any fence, so `out` has the same
-  // fences as the input.
-  const outFenced = fencedLineFlags(out);
+  // Removed lines were body edge lines outside any fence or HTML block, so
+  // `out` has the same frontmatter and blocks as the input.
+  const outSkipped = skippedLineFlags(out, bodyStart);
   const cleaned: string[] = [];
   for (let i = 0; i < out.length; i++) {
-    if (outFenced[i] || !isConnectionsHeading(out[i])) {
+    if (outSkipped[i] || !isConnectionsHeading(out[i])) {
       cleaned.push(out[i]);
       continue;
     }
 
     let j = i + 1;
     while (j < out.length && out[j].trim() === "") j++;
-    const next = j < out.length ? out[j].trim() : "";
-    if (j >= out.length || (!outFenced[j] && next.startsWith("## "))) {
+    if (j >= out.length || (!outSkipped[j] && isSectionEnd(out[j]))) {
       while (cleaned.length > 0 && cleaned[cleaned.length - 1].trim() === "") cleaned.pop();
       // Push a single "" either way: as the blank separator before the next
       // section (j < out.length), or — when Connections was the last section

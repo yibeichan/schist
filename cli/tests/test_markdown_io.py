@@ -77,6 +77,28 @@ def test_insert_connection_line_matches_shared_parity_cases(case: dict) -> None:
 
 
 @pytest.mark.parametrize(
+    "case", _connection_append_parity_cases(), ids=lambda c: c["name"]
+)
+def test_inserted_connection_is_indexed_by_ingest(case: dict) -> None:
+    """Writers agree with the reader: ingest's view of `expected` (the raw
+    body after the frontmatter, connections_section's rule) holds the edge
+    the writer inserted, so the write is never reported as done while the
+    edge goes unindexed. TS checks the same through parseNote."""
+    from schist.ingest import (
+        CONNECTION_RE,
+        note_body_offset,
+        parse_connections,
+        patch_frontmatter_flow_hashtags,
+    )
+
+    m = CONNECTION_RE.match(case["line"])
+    assert m is not None
+    raw = patch_frontmatter_flow_hashtags(case["expected"])
+    edges = parse_connections(raw[note_body_offset(raw):])
+    assert (m.group(1), m.group(2)) in {(e["type"], e["target"]) for e in edges}
+
+
+@pytest.mark.parametrize(
     "name,sep",
     [
         ("NEL", "\x85"),

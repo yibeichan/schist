@@ -981,6 +981,25 @@ def check_ingest_available(vault_path: Optional[str]) -> CheckResult:
                 "imports env_utils with no inline fallback and no sibling "
                 "env_utils.py (#369) — the post-commit hook fails on every commit"
             )
+        # The copy must parse `## Connections` sections with this CLI's rule,
+        # or the index it builds disagrees with what the CLI and MCP server
+        # write and validate. Each rule change bumps CONNECTIONS_RULE_VERSION
+        # in ingest.py; a copy without the marker predates rule 2 (any line
+        # starting with `## Connections` was a heading, fences were ignored).
+        from .ingest import CONNECTIONS_RULE_VERSION
+        rule = re.search(r"^CONNECTIONS_RULE_VERSION\s*=\s*(\d+)", script_text, re.MULTILINE)
+        if rule is None:
+            issues.append(
+                "has no CONNECTIONS_RULE_VERSION, so it reads ## Connections "
+                "sections with the old rule (any line starting with "
+                "'## Connections', fenced code included) — refresh the hook copy"
+            )
+        elif int(rule.group(1)) < CONNECTIONS_RULE_VERSION:
+            issues.append(
+                f"reads ## Connections sections with rule v{rule.group(1)} but "
+                f"this installed schist uses v{CONNECTIONS_RULE_VERSION} — "
+                "refresh the hook copy"
+            )
         if issues:
             return CheckResult(
                 "WARN", "Ingest",

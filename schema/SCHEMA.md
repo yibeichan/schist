@@ -210,22 +210,48 @@ In the `## Connections` section of a document:
 
 Multiple connections per document are allowed. One connection per line.
 
+The section is read from the note body: the text after the frontmatter's
+closing `---` line, as written (leading blank lines and indentation kept).
+Frontmatter lines never count, even a YAML block scalar holding `## Connections`
+or a fence line.
+
 The section starts at the first line that is exactly `## Connections`: up to
 three leading spaces and trailing spaces or tabs are allowed, but nothing else
 on the line, so `## Connections (draft)` or `## Connections to other work` is
 an ordinary heading. A line indented by four or more spaces or by a tab is an
-indented code block, not a heading. The section ends at the next line starting
-with `## `.
+indented code block, not a heading. The section ends at the next line that is
+up to three spaces, then `## `, then text.
 
-Fenced code blocks are ignored. A fence opens on a line that starts (after up
-to three spaces) with three or more backticks or tildes, and closes on a later
-line made of the same character repeated at least as many times, with nothing
-after it but spaces or tabs; a fence that is never closed runs to the end of
-the note. A line inside a fence is never the heading, never a connection and
-never ends the section, so a note can show an example `## Connections` section
-in a fence without creating edges. When the only `## Connections` in a note is
-in a fence, `schist link` and `add_connection` add a real section at the end of
-the note, closing a fence left open first.
+Fenced code blocks and HTML blocks are skipped, following CommonMark 0.31:
+
+- A fence opens on a line that starts (after up to three spaces) with three or
+  more backticks, with no backtick later on the line, or three or more tildes.
+  It closes on a later line made of the same character repeated at least as
+  many times, with nothing after it but spaces or tabs.
+- An HTML block opens on a line that starts (after up to three spaces) with
+  `<script`, `<pre`, `<style` or `<textarea` (closed by the line containing
+  `</script>`, `</pre>`, `</style>` or `</textarea>`), `<!--` (closed by `-->`),
+  `<?` (closed by `?>`), `<!` and a letter (closed by `>`), `<![CDATA[` (closed
+  by `]]>`), an opening or closing tag of a block-level element such as `div`,
+  `table` or `section` (closed by a blank line), or any other complete tag
+  alone on the line (closed by a blank line; this kind cannot interrupt a
+  paragraph). The closing text may be on the opening line. Tag names are
+  matched without regard to ASCII case.
+- Whichever block opens first governs until it closes, so a fence line inside
+  an HTML block opens nothing, and the reverse. A block that is never closed
+  runs to the end of the note.
+
+A line inside a fence or HTML block is never the heading, never a connection
+and never ends the section, so a note can show an example `## Connections`
+section in a fence without creating edges. Block quotes and list items are not
+interpreted: their lines are read as top-level lines. Lines are split on the
+same boundaries as Python's `str.splitlines()`, which include characters
+(such as U+2028 and U+0085) that Markdown renderers do not treat as line
+breaks.
+
+When a note's only `## Connections` is in a fence or HTML block, `schist link`
+and `add_connection` add a real section at the end of the note, first closing
+a fence or HTML block left open.
 
 ### Implicit Concept Edges
 
@@ -356,4 +382,4 @@ The `schist schema --validate` command checks:
 6. All note filenames match `YYYY-MM-DD-slug.md` pattern
 7. No concept files have `## Connections` sections (by the rule in [Connection Syntax](#connection-syntax); an example inside a fenced code block is allowed)
 8. No orphaned concepts (concepts with zero incoming edges — warning, not error)
-9. No line looks like a connections heading without being one (warning, not error): a line whose text starts with `## Connections` but is not exactly that heading, is indented by four or more spaces or a tab, or is inside a fenced code block. Connection lines under it are not indexed. Each warning names the file, the line number and the reason.
+9. Notes the connection rule change affects (warning, not error): each line whose text starts with `## Connections` but is not a heading under the rule in [Connection Syntax](#connection-syntax) (not exactly that text, indented by four or more spaces or a tab, or inside a fenced code block or HTML block), and each connection the earlier rule indexed that is no longer indexed, or the reverse. Each warning names the file, the line number and the reason.

@@ -176,6 +176,24 @@ class TestAddConcept:
         assert "cannot contain" in capsys.readouterr().err
         assert not (tmp_path / "concepts").exists()
 
+    def test_concept_body_with_indented_first_line_is_not_a_section(
+        self, tmp_path, capsys,
+    ):
+        """An indented first body line is an indented code block. add_concept
+        accepts it, and ingest (which reads the unstripped body) indexes no
+        edge from it."""
+        from schist.ingest import note_body_offset, parse_connections
+
+        body = "    ## Connections\n    - extends: concepts/other"
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.add_concept(
+                _add_concept_args(body=body),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert "cannot contain" not in capsys.readouterr().err
+        text = (tmp_path / "concepts" / "stable-concept.md").read_text()
+        assert parse_connections(text[note_body_offset(text):]) == []
+
     def test_refuses_to_overwrite_stable_slug(self, tmp_path, capsys):
         with patch("schist.commands.git_ops.commit", return_value=(True, "")):
             commands.add_concept(

@@ -12,7 +12,7 @@ import tempfile
 
 import frontmatter
 
-from .ingest import connections_section, unclosed_fence
+from .ingest import connections_section, note_body_start_line, unclosed_block_closer
 
 # Explicit whitespace set shared verbatim with ingest.py's _SLUG_WS_CHARS and
 # mcp-server's SLUG_WS_CHARS (markdown-parser.ts): the UNION of Python's and
@@ -158,7 +158,8 @@ def insert_connection_line(content: str, line: str) -> str:
     (not a substring test): a mid-line prose mention of "## Connections" is
     not a heading, so the edge gets a real section instead of landing outside
     any section. The heading must be exact and outside a fenced code block
-    (ingest.connections_section, the rule parse_connections reads with), so a
+    or HTML block, and only body lines count (ingest.connections_section
+    and note_body_start_line, the rule parse_connections reads with), so a
     `## Connections` shown in a fence never receives an edge. Output is always
     '\\n'-joined with a single trailing newline,
     healing exotic separators on write the way the TS repair paths do.
@@ -168,25 +169,30 @@ def insert_connection_line(content: str, line: str) -> str:
     slugs.
     """
     lines = content.splitlines()
-    section = connections_section(lines)
+    # Scan only the body: frontmatter lines (a YAML block scalar holding
+    # "  ```" or "  ## Connections") must not open a fence or a section.
+    start = note_body_start_line(content)
+    section = connections_section(lines, start)
     if section is None:
         # Create section at end. Blank line after the heading matches the
         # MCP server's create-path shape so both writers mint one format.
-        # When the only `## Connections` sits in an unclosed fence, the new
-        # heading lands inside that fence too, so close it first.
-        fence = unclosed_fence(lines)
-        closer = '\n' + fence if fence else ''
+        # When the body ends inside an unclosed fence or HTML block, the
+        # new heading would land inside it too, so close it first.
+        # A type 6/7 HTML block ('' closer) is ended by the blank line below.
+        closer = unclosed_block_closer(lines, start)
+        closer = '\n' + closer if closer else ''
         return (content.rstrip() + closer
                 + '\n\n## Connections\n\n' + line + '\n')
-    _heading, end, _fenced = section
+    _heading, end, _skipped = section
     if end < len(lines):
         lines.insert(end, line)
     else:
-        # The section runs to EOF. If it ends inside an unclosed fence, close
-        # the fence so the appended edge is outside it.
-        fence = unclosed_fence(lines)
-        if fence:
-            lines.append(fence)
+        # The section runs to EOF. If it ends inside an unclosed fence or
+        # HTML block, close it (a blank line for HTML types 6 and 7) so the
+        # appended edge is outside it.
+        closer = unclosed_block_closer(lines, start)
+        if closer is not None:
+            lines.append(closer)
         lines.append(line)
     return '\n'.join(lines) + '\n'
 
