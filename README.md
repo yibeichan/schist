@@ -21,7 +21,7 @@ schist gives agents a persistent, queryable knowledge base that survives session
 
 - **Agent memory is shared across projects by default**, can be scoped to a project with tags, or kept separate per project with its own database
 - **Each spoke writes only where you allow it** — the hub rejects pushes outside that spoke's write scopes
-- **Agents that only propose wait for a human** — the local viewer agent files proposals, and nothing is written until you approve one
+- **Agents that only propose wait for a human** — the local viewer agent files proposals, and nothing is written until you approve one. A rejection's reason can be saved as a standard, and the agent must check every later proposal into that directory against it
 
 Read access is not gated: every spoke and MCP client can read the whole vault. See [SECURITY.md](./SECURITY.md).
 

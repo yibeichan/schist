@@ -1160,7 +1160,8 @@ SPDX-License-Identifier: Apache-2.0
 //   step {text} · token {text} · interim · proposal {id, title} · done · error {message}
 // The agent only reads; it can file proposals (GET api/proposals, POST
 // api/proposals/<id>/approve|reject), and nothing is written until approved
-// here. Every POST carries X-Schist-Agent: 1, which a cross-site page cannot
+// here. Reject posts {reason, save_standard}; a saved standard is the one
+// write a rejection makes. Every POST carries X-Schist-Agent: 1, which a cross-site page cannot
 // send. Served any other way, the status request fails and the button stays
 // hidden. Answers render through the page's sanitized Markdown renderer;
 // [[note-id]] citations become buttons inserted as DOM nodes afterwards.
