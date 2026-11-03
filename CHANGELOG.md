@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-11-02
+## [0.3.0] - 2026-11-03
 
 ### License
 - **schist moves from the MIT License to AGPL-3.0-or-later and Apache-2.0, starting with this release.** The MCP server (`mcp-server/`), the RAG service (`rag/`), the hub's pre-receive hook and the CLI's hub and server modules (`hub_admin`, `hub_keys`, `hub_shell`, `pre_receive`, `viewer/serve`, `viewer/agent`, `viewer/proposals`) are AGPL-3.0-or-later; everything else, including the rest of the CLI and library, is Apache-2.0. Copyright is held by Yibei Chen. Every file names its license in an SPDX header or in `REUSE.toml`, the full texts are in `LICENSES/`, and CI runs `reuse lint` plus a test that every code file carries its own SPDX header with the license of its component. The PyPI package declares `Apache-2.0 AND AGPL-3.0-or-later` and ships both texts; the npm package declares `AGPL-3.0-or-later`. Code published before this change, including v0.2.0, remains available under the MIT License. Contributions now need a DCO sign-off (`git commit -s`), which a check on each pull request reports, and `CITATION.cff` describes how to cite schist.
