@@ -153,7 +153,7 @@ def _validate_scope(scope: str) -> None:
 def parse_vault_yaml(path: str | Path) -> VaultACL:
     """Parse and validate a vault.yaml file, returning a VaultACL."""
     path = Path(path)
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
     if not isinstance(data, dict):

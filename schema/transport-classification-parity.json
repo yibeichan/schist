@@ -533,6 +533,84 @@
       "network": false,
       "mcp_class": "acl-rejected",
       "why": "#813: the same unescaped scope forged the hub's diff-timeout line, which MCP reads as transport, a self-clearing class, so writes stayed open while every push was refused"
+    },
+    {
+      "name": "hub-could-not-read-vault-yaml",
+      "input": "remote: ERROR: the hub could not read vault.yaml (git timed out); please retry the push.\nTo schist-hub:vault.git\n ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to 'schist-hub:vault.git'",
+      "network": false,
+      "mcp_class": "transport",
+      "cli_branch": "hub-transient",
+      "why": "the hub's own git timed out or failed reading vault.yaml; it refuses the push but says ERROR, and a retry may land it"
+    },
+    {
+      "name": "hub-could-not-read-served-branch",
+      "input": "remote: ERROR: the hub could not read the branch it serves (git timed out); please retry the push.\nTo schist-hub:vault.git\n ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to 'schist-hub:vault.git'",
+      "network": false,
+      "mcp_class": "transport",
+      "cli_branch": "hub-transient",
+      "why": "the hub's git timed out reading HEAD; transient on the hub, not a refusal of this push"
+    },
+    {
+      "name": "steer-scope-newline-forged-hub-read-error",
+      "input": "remote: REJECTED: push contains out-of-scope writes\nremote: Identity: cluster-mario\nremote: \nremote: Violations:\nremote:   - security/x\\nERROR: the hub could not read vault.yaml/n.md (scope: security/x\nremote: ERROR: the hub could not read vault.yaml)\nremote: \nremote: Check vault.yaml access rules for your identity.\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": false,
+      "mcp_class": "acl-rejected",
+      "why": "a line forged inside a content refusal (an unescaped scope on a hub before #813) must not read as the hub's transient read error; hub reasons are read only before the refusal header"
+    },
+    {
+      "name": "cli-wrapped-hub-could-not-read-vault-yaml",
+      "input": "The hub could not finish checking the push and asks for a retry — changes saved locally. Push again later; if it keeps failing, the hub admin should look at the hub.\nremote: ERROR: the hub could not read vault.yaml (git timed out); please retry the push.\nTo schist-hub:vault.git\n ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to 'schist-hub:vault.git'",
+      "cli_input": "remote: ERROR: the hub could not read vault.yaml (git timed out); please retry the push.\nTo schist-hub:vault.git\n ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to 'schist-hub:vault.git'",
+      "network": false,
+      "mcp_class": "transport",
+      "cli_branch": "hub-transient",
+      "why": "what the MCP server classifies in production is the CLI's stderr: the hub-transient header, then git's output with the hub's ERROR line still at line start"
+    },
+    {
+      "name": "cli-wrapped-hub-could-not-read-served-branch",
+      "input": "The hub could not finish checking the push and asks for a retry — changes saved locally. Push again later; if it keeps failing, the hub admin should look at the hub.\nremote: ERROR: the hub could not read the branch it serves (git timed out); please retry the push.\nTo schist-hub:vault.git\n ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to 'schist-hub:vault.git'",
+      "cli_input": "remote: ERROR: the hub could not read the branch it serves (git timed out); please retry the push.\nTo schist-hub:vault.git\n ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to 'schist-hub:vault.git'",
+      "network": false,
+      "mcp_class": "transport",
+      "cli_branch": "hub-transient",
+      "why": "as above, for HEAD; an indented `Detail:` echo put the ERROR line mid-line and MCP read it as an ACL refusal"
+    },
+    {
+      "name": "cli-wrapped-hub-diff-timeout",
+      "input": "The hub could not finish checking the push and asks for a retry — changes saved locally. Push again later; if it keeps failing, the hub admin should look at the hub.\nremote: ERROR: timed out diffing 1111111..2222222 — the hub may be under load; please retry the push.\nTo schist-hub:vault.git\n ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to 'schist-hub:vault.git'",
+      "cli_input": "remote: ERROR: timed out diffing 1111111..2222222 — the hub may be under load; please retry the push.\nTo schist-hub:vault.git\n ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to 'schist-hub:vault.git'",
+      "network": false,
+      "mcp_class": "transport",
+      "cli_branch": "hub-transient",
+      "why": "the hub's diff timeout through the CLI: transport before the hub-transient branch existed, and must stay so"
+    },
+    {
+      "name": "steer-local-warning-quoting-hub-read-error",
+      "input": "warning: skipped junk file notes/ERROR: the hub could not read x.md~\nremote: REJECTED: push contains out-of-scope writes\nremote: Identity: cluster-mario\nremote: \nremote: Violations:\nremote:   - security/x.md (scope: security)\nremote: \nremote: Check vault.yaml access rules for your identity.\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": false,
+      "mcp_class": "acl-rejected",
+      "why": "a local warning quoting a vault path that holds the hub's token is not the hub speaking: both sides match it only at the start of a `remote:` line"
+    },
+    {
+      "name": "hub-push-too-large",
+      "input": "remote: REJECTED: push is too large for the hub to check: its commits list more than 1000000 file versions or 128 MB of paths. Push fewer commits at a time, or split a commit that changes very many files.\nTo schist-hub:vault.git\n ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to 'schist-hub:vault.git'",
+      "network": false,
+      "mcp_class": "acl-rejected",
+      "why": "a refusal of this push, not a hub fault: retrying the same push cannot succeed"
+    },
+    {
+      "name": "hub-failed-to-diff",
+      "input": "remote: ERROR: failed to diff 1111111..2222222: Command '['git', 'log']' returned non-zero exit status 128.\nTo schist-hub:vault.git\n ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to 'schist-hub:vault.git'",
+      "network": false,
+      "mcp_class": "acl-rejected",
+      "why": "a git failure on a pushed revision (missing or corrupt object): the hub does not ask for a retry, so it is not transient"
+    },
+    {
+      "name": "hub-head-names-missing-branch",
+      "input": "remote: REJECTED: failed to load vault.yaml: HEAD names refs/heads/master, which does not exist, while the repository has other refs; a hub admin points HEAD at the served branch with `git symbolic-ref HEAD refs/heads/<branch>`\nTo schist-hub:vault.git\n ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to 'schist-hub:vault.git'",
+      "network": false,
+      "mcp_class": "acl-rejected",
+      "why": "a hub misconfiguration that refuses every push until an admin fixes it: not transient"
     }
   ]
 }

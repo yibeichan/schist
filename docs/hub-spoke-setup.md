@@ -266,6 +266,100 @@ of whatever process ran `git push`. On HPC this usually means the SLURM job
 wrapper didn't inherit your `.bashrc` exports — add an explicit
 `export SCHIST_IDENTITY=hpc-cluster` to the job script.
 
+### "REJECTED: failed to load vault.yaml"
+
+The hub could not read the `vault.yaml` at its `HEAD`, so it refuses every
+push rather than accept one unchecked. The rest of the message says why:
+
+- **"not valid UTF-8".** `vault.yaml` must be UTF-8. A hook that ran under a
+  latin-1 locale read such a file, so this can appear right after upgrading
+  the hub's CLI. Pushing a fixed file does not help, since the hook reads the
+  current one first, and neither does `schist hub`, which reads it the same
+  way. On the hub, as the hub user, write the re-encoded file as a new commit
+  directly (this sets the branch without running the hook; change `latin1` to
+  the file's real encoding):
+
+  ```bash
+  cd /srv/git/vault.git                     # the hub's bare repository
+  t=$(mktemp -d)                            # private: the ACL is readable here
+  git cat-file blob HEAD:vault.yaml > "$t/old.yaml"
+  iconv -f latin1 -t utf-8 "$t/old.yaml" > "$t/vault.yaml"
+  blob=$(git hash-object -w "$t/vault.yaml")
+  GIT_INDEX_FILE="$t/index" git read-tree HEAD
+  GIT_INDEX_FILE="$t/index" git update-index --cacheinfo "100644,$blob,vault.yaml"
+  tree=$(GIT_INDEX_FILE="$t/index" git write-tree)
+  commit=$(git -c user.name="hub admin" -c user.email=admin@localhost \
+             commit-tree "$tree" -p HEAD -m "Re-encode vault.yaml as UTF-8")
+  git update-ref "$(git symbolic-ref HEAD)" "$commit" HEAD
+  rm -rf "$t"
+  ```
+
+  Before upgrading a hub, `schist doctor --hub-path <hub>` reads `vault.yaml`
+  the way the upgraded hook will: its "Hub vault.yaml" line FAILs for this
+  case and the ones below.
+- **A YAML or ACL error** (for example "while parsing a flow sequence", or a
+  message about a participant or access entry). The file at `HEAD` is UTF-8
+  but is not valid YAML or not a valid `vault.yaml`. As above, pushing a fixed
+  file does not help, even as a `*` writer, because the hook parses the
+  current file before it looks at the push. Use the same recipe on the hub,
+  with the `iconv` line replaced by an edit of the copy: `cp "$t/old.yaml"
+  "$t/vault.yaml"`, then fix `$t/vault.yaml` in an editor and check it with
+  `python3 -c 'import sys, yaml; from schist.acl import parse_vault_data;
+  parse_vault_data(yaml.safe_load(open(sys.argv[1], encoding="utf-8")))'
+  "$t/vault.yaml"` (run with the hub's schist environment) before
+  `git hash-object`. Change the commit message to say what was fixed.
+- **"git exited 128 reading it".** git ran but could not read the file: a
+  missing or broken object. Check the repository with
+  `git --git-dir <hub> fsck` and restore the object from a spoke's clone.
+- **"HEAD names refs/heads/<branch>, which does not exist".** The branch the
+  hub serves was deleted or renamed, or `HEAD` names a different branch from
+  the one spokes push. Point `HEAD` at the branch spokes push (the
+  branch a spoke's `git rev-parse --abbrev-ref @{upstream}` names after
+  `origin/`, usually `main`):
+  `git --git-dir <hub> symbolic-ref HEAD refs/heads/<branch>`.
+- **"the hub has objects but no refs".** The repository holds commits but no
+  branch, so its refs were lost (a crash after `git pack-refs`, a restore that
+  copied `objects/` without `refs/` and `packed-refs`). `schist hub init`
+  always creates the branch with a first commit, so the hook does not read
+  this as a new hub, which would accept any first push and any `vault.yaml`
+  it carries. Restore the served branch to the commit spokes last pulled. The
+  branch is the one `HEAD` names (`git --git-dir <hub> symbolic-ref HEAD`
+  prints `refs/heads/<branch>`). On a spoke, `git rev-parse origin/<branch>`
+  gives the commit. On the hub, check that the commit is there
+  (`git --git-dir <hub> cat-file -t <sha>` prints `commit`;
+  `git --git-dir <hub> fsck --lost-found` lists the unreferenced commits) and
+  run `git --git-dir <hub> update-ref refs/heads/<branch> <sha>`.
+  One case is not lost refs: a hub made by hand with `git init --bare` (not
+  `schist hub init`) whose first push failed after the pre-receive hook passed
+  it (a ref lock, a full disk). A push the hook refuses leaves nothing, but
+  one that fails later leaves its objects. Only on such a hub, one that never
+  had a branch, remove them. First check that
+  `git --git-dir <hub> fsck --lost-found` lists no commit any spoke has, and
+  copy `objects/` aside. Then, with no push in progress, run
+  `git --git-dir <hub> repack -a -d` and
+  `git --git-dir <hub> prune --expire=now` (`prune` alone leaves packed
+  objects). The next push is then read as the hub's first. On a hub that had
+  a branch these two commands delete its whole history: a bare repository
+  keeps no reflog to recover it from.
+
+### "ERROR: the hub could not read vault.yaml" or "...the branch it serves"
+
+The hub's own git timed out (or could not be started) reading `vault.yaml`
+or `HEAD`, so it refused the push without checking it. This is the hub's
+fault, not the push's: on a loaded hub a later push may succeed, and the CLI
+and the MCP server treat it as transient. If it keeps happening, look at the
+hub's load and at `git --git-dir <hub> fsck`.
+
+### "REJECTED: push is too large for the hub to check"
+
+A listing the hub reads for the push has more than 1,000,000 file versions
+(each changed file counted for each commit against each parent, plus the
+change from the branch's old tip) or more than 128 MB of paths. Push fewer
+commits at a time, for example a range of the history at a time with
+`git push origin <commit>:refs/heads/main`, or split a commit that changes
+very many files. A single path longer than 4096 bytes is refused with
+"push contains a path longer than 4096 bytes"; no checkout could hold it.
+
 ### "REJECTED: rate limit exceeded"
 
 Two different limits produce this line, and only one of them clears by
@@ -371,6 +465,31 @@ ACL is bypassed. Options: (a) self-host a small hub (a Pi works), (b) run the
 hook in CI on every push (clunky — it's post-push by then), or (c) skip ACLs
 and rely on branch protection + review. Schist is designed around (a).
 
+## Limiting what one push can cost the hub
+
+The pre-receive hook streams what it reads and refuses a push that lists more
+than 1,000,000 file versions or 128 MB of paths. Both caps count the whole
+push, every ref it updates together, since a push can name the same commits
+under many refs for a few bytes each; a push of several new branches at the
+same commits counts their history once per branch. A participant without `*`
+write may update only the served branch, so the hook refuses a push of theirs
+that updates more than one ref before reading any commits. A refusal prints,
+and writes to `hooks/rejected-pushes.log`, at most 100 refused paths and the
+number of the rest. But git itself does work before the hook runs (receiving
+and unpacking the push, listing its changes), and a participant can push
+trees that are small to send and large to list. On a hub that also runs
+anything else, bound that work at the host:
+
+- `git --git-dir <hub> config receive.maxInputSize 200m` refuses a push whose
+  pack is larger than that.
+- A memory limit for the hub user makes a runaway git or hook fail, so the
+  push does not land, instead of exhausting the host: an `as` (address space)
+  limit in `/etc/security/limits.conf` (applied when sshd runs with
+  `UsePAM yes`), or on cgroup v2 `MemoryMax=` on the user's slice
+  (`systemctl set-property user-<uid>.slice MemoryMax=4G`). `as` counts
+  virtual memory, and git maps pack files in windows of up to 1 GB, so set it
+  to a few GB and check that a normal push still lands.
+
 ## Pinning identities to SSH keys
 
 By default the pre-receive hook resolves the pushing identity from
@@ -390,8 +509,11 @@ restrict,command="schist-shell laptop /srv/git/vault.git" ssh-ed25519 AAAA... la
 For every connection made with that key, sshd runs the pinned command
 regardless of what the client asked for. The wrapper sets
 `SCHIST_IDENTITY=laptop` itself (overwriting anything the client sent), marks
-the push as pinned (`SCHIST_IDENTITY_PINNED=1`), strips linker-injection env
-(`LD_*`/`DYLD_*`/`BASH_ENV`), and confines the key to `git-receive-pack` /
+the push as pinned (`SCHIST_IDENTITY_PINNED=1`), passes git only `PATH`,
+`HOME`, `USER`, `LOGNAME`, `SHELL`, `PYTHONPATH`, `VIRTUAL_ENV`, the
+`SSH_CONNECTION`/`SSH_CLIENT`/`SSH_ORIGINAL_COMMAND` variables sshd sets and
+`GIT_PROTOCOL`, dropping everything else (so set anything else git needs in
+the hub user's git config, not `~/.ssh/environment`), and confines the key to `git-receive-pack` /
 `git-upload-pack` on **that one repository** via `git shell` — a key pinned
 for vault-A cannot touch another vault the same account hosts (pass
 `--any-repo` to `key add` if you really run one key across several vaults).
@@ -418,9 +540,13 @@ Rollout:
 3. Remove `AcceptEnv SCHIST_IDENTITY` from the hub's `sshd_config` — pinned
    keys don't need it, and an `AcceptEnv` that matches `SCHIST_*` would let a
    client fake the pinned marker on any un-pinned key. While you're there,
-   don't forward `PATH`, `LD_*`, `PYTHON*`, `BASH_ENV`, or `GIT_*` either
-   (`GIT_PROTOCOL` alone is fine) — those can redirect what the forced
-   command executes.
+   don't forward `PATH`, `HOME`, `VIRTUAL_ENV`, `PYTHON*`, `LD_*`,
+   `BASH_ENV` or `GIT_*` either (`GIT_PROTOCOL` alone is fine). The wrapper
+   passes the first four on, and they redirect what the forced command and
+   the hook execute or read. `schist-shell` drops `LD_*`, `BASH_ENV` and the
+   other `GIT_*` itself, but sshd starts the forced command through the hub
+   user's login shell, which sees them first, and a client-forwarded one
+   reaches anything sshd runs that is not `schist-shell`.
 4. Check the result: `schist doctor --hub-path <hub>` FAILs on un-pinned
    keys while enforcement is off (each one can push as any identity), and
    WARNs on unkeyed participants, stale pins, risky `AcceptEnv` entries, and

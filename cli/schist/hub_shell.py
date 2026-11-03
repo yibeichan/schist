@@ -45,21 +45,31 @@ ALLOWED_VERBS = {"git-receive-pack", "git-upload-pack"}
 # to the hyphenated verb before the whitelist check.
 _TWO_WORD_VERBS = {"receive-pack", "upload-pack"}
 
-# Env scrubbed before exec (#516). GIT_* is a WHITELIST, not a blacklist:
-# git honors a long and version-growing family of GIT_* variables that
-# redirect what/where it reads and writes — GIT_TRACE=<path> appends
-# attacker-chosen lines to any file AS THE HUB USER (authorized_keys, escalation
-# grade), GIT_DIR / GIT_ALTERNATE_OBJECT_DIRECTORIES / GIT_OBJECT_DIRECTORY /
-# GIT_NAMESPACE break repo confinement, GIT_INDEX_FILE / GIT_QUARANTINE_PATH
-# interfere with receive-pack quarantine. Enumerating the dangerous ones is a
-# losing game, so drop EVERY GIT_* except the one the transport legitimately
-# needs (GIT_PROTOCOL, protocol v2). Plus the linker (LD_/DYLD_) and shell
-# startup (BASH_ENV/ENV) injectors. PATH/PYTHONPATH are left intact
-# (legitimate hub-side venv use via ~/.ssh/environment) and policed by
-# `schist doctor`'s AcceptEnv check instead.
-_SCRUB_ENV_PREFIXES = ("LD_", "DYLD_")
-_SCRUB_ENV_EXACT = {"BASH_ENV", "ENV"}
-_GIT_ENV_KEEP = {"GIT_PROTOCOL"}
+# Env scrubbed before exec (#516): a KEEP-list. sshd builds this process's
+# environment from its own variables, the hub user's ~/.ssh/environment and
+# pam_env, and whatever the client sent that `AcceptEnv` lets through, and
+# the forced command cannot tell those apart. Each family that was
+# enumerated as dangerous kept growing: GIT_TRACE=<path> appends
+# attacker-chosen lines to any file AS THE HUB USER (authorized_keys,
+# escalation grade), GIT_DIR / GIT_ALTERNATE_OBJECT_DIRECTORIES break repo
+# confinement, LD_/DYLD_ and BASH_ENV/ENV inject code, LANG/LC_* make a check
+# that decodes by the locale read a different name than the one stored (a
+# vault.yaml scope read under latin-9 matched a lookalike directory), and
+# PYTHONIOENCODING, PYTHONUTF8, XDG_CONFIG_HOME and TMPDIR change how git and
+# the hook decode, which config they read or where they write. So everything
+# is dropped except what git, the hook and its venv need. git and the hook
+# then run under the C locale, which Python 3.7+ reads as UTF-8 (PEP 538/540).
+# PATH, HOME, PYTHONPATH and VIRTUAL_ENV are legitimate hub-side settings
+# (a venv via ~/.ssh/environment); a client could only reach them through a
+# non-default AcceptEnv, which `schist doctor`'s AcceptEnv check flags.
+# SCHIST_IDENTITY and SCHIST_IDENTITY_PINNED are dropped like the rest and
+# set again by build_exec from the key's forced command.
+_ENV_KEEP = {
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL",
+    "PYTHONPATH", "VIRTUAL_ENV",
+    "SSH_CONNECTION", "SSH_CLIENT", "SSH_ORIGINAL_COMMAND",
+    "GIT_PROTOCOL",                     # protocol v2
+}
 
 
 class HubShellError(Exception):
@@ -67,13 +77,8 @@ class HubShellError(Exception):
 
 
 def scrub_environ(environ) -> list[str]:
-    """Drop injection-vector env vars in place; return the removed names."""
-    doomed = [
-        k for k in environ
-        if k in _SCRUB_ENV_EXACT
-        or k.startswith(_SCRUB_ENV_PREFIXES)
-        or (k.startswith("GIT_") and k not in _GIT_ENV_KEEP)
-    ]
+    """Drop every env var not in _ENV_KEEP, in place; return the removed names."""
+    doomed = [k for k in environ if k not in _ENV_KEEP]
     for k in doomed:
         del environ[k]
     return doomed

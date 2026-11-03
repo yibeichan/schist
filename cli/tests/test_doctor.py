@@ -2713,6 +2713,159 @@ class TestHubAclDrift:
         assert r.status == "SKIP"
 
 
+class TestCheckHubVaultYaml:
+    """The doctor check reads vault.yaml with the hook's own function, so
+    the states that make the hook refuse everything FAIL here first."""
+
+    @pytest.fixture
+    def hub(self, tmp_path):
+        import shutil
+        if shutil.which("git") is None:
+            pytest.skip("git not available")
+        from types import SimpleNamespace
+        from schist.sync import init_hub
+        hub = tmp_path / "hub.git"
+        init_hub(SimpleNamespace(name="v", participant=["alpha"]), str(hub))
+        return hub
+
+    def _commit_vault_yaml(self, hub, data: bytes):
+        import subprocess
+        git = ["git", "--git-dir", str(hub)]
+        blob = subprocess.run(git + ["hash-object", "-w", "--stdin"], input=data,
+                              capture_output=True, check=True).stdout.strip().decode()
+        index = hub / "doctor-test.index"
+        env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+        subprocess.run(git + ["read-tree", "HEAD"], env=env, check=True)
+        subprocess.run(git + ["update-index", "--cacheinfo", f"100644,{blob},vault.yaml"],
+                       env=env, check=True)
+        tree = subprocess.run(git + ["write-tree"], env=env, capture_output=True,
+                              check=True).stdout.strip().decode()
+        commit = subprocess.run(git + ["-c", "user.name=t", "-c", "user.email=t@example.com",
+                                       "commit-tree", tree, "-p", "HEAD", "-m", "v"],
+                                capture_output=True, check=True).stdout.strip().decode()
+        subprocess.run(git + ["update-ref", "refs/heads/main", commit], check=True)
+        index.unlink()
+
+    def test_a_readable_vault_yaml_passes(self, hub):
+        from schist.doctor import check_hub_vault_yaml
+        assert check_hub_vault_yaml(str(hub)).status == "PASS"
+
+    def test_a_vault_yaml_that_is_not_utf8_fails(self, hub):
+        from schist.doctor import check_hub_vault_yaml
+        self._commit_vault_yaml(hub, b"name: v\n# caf\xe9\n")
+        r = check_hub_vault_yaml(str(hub))
+        assert r.status == "FAIL" and "not valid UTF-8" in r.message
+
+    @pytest.mark.parametrize("data", [
+        b"name: v\nparticipants: [\n",                            # not YAML
+        b"- just\n- a list\n",                                     # YAML, not an ACL
+        b"name: v\nvault_version: 1\nparticipants:\n  - {name: a, type: nope}\n",
+    ], ids=["yaml", "list", "bad-participant"])
+    def test_a_vault_yaml_the_hook_cannot_parse_fails(self, hub, data, monkeypatch, capsys):
+        """The hook goes on from the read to yaml.safe_load and
+        parse_vault_data, and any error there refuses every push."""
+        from schist.doctor import check_hub_vault_yaml
+        from schist.pre_receive import main
+        self._commit_vault_yaml(hub, data)
+        r = check_hub_vault_yaml(str(hub))
+        assert r.status == "FAIL" and "does not parse" in r.message, r.message
+        monkeypatch.delenv("GIT_DIR", raising=False)
+        monkeypatch.chdir(hub)
+        assert main(stdin=["a b refs/heads/main"], identity="alpha",
+                    log_path=hub / "r.log", db_path=hub / "rl.sqlite") == 1
+        assert capsys.readouterr().err.startswith("REJECTED: failed to load vault.yaml")
+
+    def test_head_naming_a_missing_branch_fails(self, hub):
+        import subprocess
+        from schist.doctor import check_hub_vault_yaml
+        subprocess.run(["git", "--git-dir", str(hub), "symbolic-ref", "HEAD",
+                        "refs/heads/master"], check=True)
+        r = check_hub_vault_yaml(str(hub))
+        assert r.status == "FAIL" and "HEAD names refs/heads/master" in r.message
+
+    def test_a_hub_with_objects_but_no_refs_fails(self, hub):
+        import subprocess
+        from schist.doctor import check_hub_vault_yaml
+        subprocess.run(["git", "--git-dir", str(hub), "update-ref", "-d", "refs/heads/main"],
+                       check=True)
+        r = check_hub_vault_yaml(str(hub))
+        assert r.status == "FAIL" and "the hub has objects but no refs" in r.message
+
+    def test_an_empty_hub_warns_instead_of_failing(self, tmp_path):
+        import subprocess
+        from schist.doctor import check_hub_vault_yaml
+        empty = tmp_path / "empty.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(empty)], check=True)
+        r = check_hub_vault_yaml(str(empty))
+        assert r.status == "WARN" and "accepts every push" in r.message
+
+    def test_no_vault_yaml_warns_that_every_push_is_accepted(self, hub):
+        import subprocess
+        from schist.doctor import check_hub_vault_yaml
+        git = ["git", "--git-dir", str(hub)]
+        empty = subprocess.run(git + ["mktree"], input=b"", capture_output=True,
+                               check=True).stdout.strip().decode()
+        commit = subprocess.run(git + ["-c", "user.name=t", "-c", "user.email=t@example.com",
+                                       "commit-tree", empty, "-p", "HEAD", "-m", "e"],
+                                capture_output=True, check=True).stdout.strip().decode()
+        subprocess.run(git + ["update-ref", "refs/heads/main", commit], check=True)
+        r = check_hub_vault_yaml(str(hub))
+        assert r.status == "WARN" and "accepts every push" in r.message
+
+    def test_a_detached_head_warns(self, hub):
+        import subprocess
+        from schist.doctor import check_hub_vault_yaml
+        git = ["git", "--git-dir", str(hub)]
+        sha = subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True,
+                             check=True).stdout.strip().decode()
+        subprocess.run(git + ["update-ref", "--no-deref", "HEAD", sha], check=True)
+        r = check_hub_vault_yaml(str(hub))
+        assert r.status == "WARN" and "HEAD is detached" in r.message
+
+    def _detach(self, hub, branch="main", others=()):
+        import subprocess
+        git = ["git", "--git-dir", str(hub)]
+        sha = subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True,
+                             check=True).stdout.strip().decode()
+        if branch != "main":
+            subprocess.run(git + ["branch", "-m", "main", branch], check=True)
+        for name, at in others:
+            target = sha if at == "head" else subprocess.run(
+                git + ["commit-tree", f"{sha}^{{tree}}", "-p", sha, "-m", "o"],
+                capture_output=True, check=True,
+                env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+                     "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e"}
+            ).stdout.strip().decode()
+            subprocess.run(git + ["update-ref", f"refs/heads/{name}", target], check=True)
+        subprocess.run(git + ["update-ref", "--no-deref", "HEAD", sha], check=True)
+
+    def test_the_detached_head_fix_names_the_branch_the_hub_serves(self, hub):
+        """Applying a fix that names refs/heads/main on a hub serving trunk
+        made HEAD name a missing branch, and every push was refused."""
+        import subprocess
+        from schist.doctor import check_hub_vault_yaml
+        self._detach(hub, "trunk", others=[("old", "other")])
+        r = check_hub_vault_yaml(str(hub))
+        assert r.status == "WARN" and "symbolic-ref HEAD refs/heads/trunk`" in r.message
+        assert "refs/heads/main" not in r.message
+        fix = r.message.split("`")[1]
+        subprocess.run(fix, shell=True, check=True)
+        assert check_hub_vault_yaml(str(hub)).status == "PASS"
+
+    def test_the_detached_head_fix_lists_branches_when_it_cannot_tell(self, hub):
+        from schist.doctor import check_hub_vault_yaml
+        self._detach(hub, "trunk", others=[(f"b{i}", "head") for i in range(6)])
+        r = check_hub_vault_yaml(str(hub))
+        assert r.status == "WARN" and "refs/heads/<branch>" in r.message
+        assert "refs/heads/b0" in r.message and "and 2 more" in r.message
+        assert "refs/heads/main" not in r.message
+
+    def test_run_doctor_runs_it_for_a_hub(self, hub):
+        from schist.doctor import run_doctor
+        labels = {r.label: r.status for r in run_doctor(None, None, hub_path=str(hub))}
+        assert labels.get("Hub vault.yaml") == "PASS"
+
+
 class TestDoctorHubWiring:
     def test_run_doctor_includes_hub_check_when_path_given(self, tmp_path, capsys):
         import shutil
@@ -3251,6 +3404,9 @@ class TestAcceptEnvGlobs:
         # A GIT_ glob is flagged conservatively: only the exact GIT_PROTOCOL
         # is carved out, so a broad git-family glob gets a WARN.
         "GIT_PROTO*",
+        # Kept by schist-shell's keep-list, so forwarding them reaches git
+        # and the hook.
+        "HOME", "VIRTUAL_ENV", "HO*", "VIRTUAL*",
     ])
     def test_dangerous_globs_flagged(self, tok):
         from schist.doctor import _acceptenv_offender

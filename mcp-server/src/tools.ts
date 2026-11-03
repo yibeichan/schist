@@ -1085,7 +1085,10 @@ function isTransportFailure(text: string): boolean {
 // any sentinel), but #531 proposes treating transport as self-clearing, so a
 // steerable substring here would open a gate rather than close one — worse.
 // Stated as a forward constraint, not as current behavior.
-const HUB_TRANSIENT_RE = /^remote:\s*error: timed out diffing\b/m;
+// The hub also says ERROR (not REJECTED) when it could not read its own
+// vault.yaml or the branch it serves (a git timeout or failure there): the
+// push may land on a retry, and the fix is on the hub, not in the push.
+const HUB_TRANSIENT_RE = /^remote:\s*error: (?:timed out diffing|the hub could not read)\b/m;
 
 // The hub REFUSING our content. pre_receive.py prefixes every such line
 // "REJECTED:" — out-of-scope writes, unknown identity, cannot determine

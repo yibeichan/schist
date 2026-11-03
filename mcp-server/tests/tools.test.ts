@@ -1926,6 +1926,18 @@ describe("push failure classification (#501)", () => {
       "please retry the push.\n" +
       " ! [remote rejected] other -> other (pre-receive hook declined)\n",
     ))).toBe("transport");
+    // The hub also asks for a retry when git failed or timed out reading its
+    // own vault.yaml or the branch it serves.
+    expect(classifyPushFailure(failed(
+      "remote: ERROR: the hub could not read vault.yaml (git timed out); please " +
+      "retry the push.\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+    ))).toBe("transport");
+    expect(classifyPushFailure(failed(
+      "remote: ERROR: the hub could not read the branch it serves (git was killed by signal 9); " +
+      "please retry the push.\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+    ))).toBe("transport");
     // But only the TIMEOUT path. "failed to diff" comes from a
     // CalledProcessError on `git log <old>..<new>` (pre_receive.py:464) — a
     // missing or unreachable rev, or a corrupt object. No retry clears that,
