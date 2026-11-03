@@ -13,23 +13,25 @@ import { connectionBody, insertConnectionLine, parseConnections, parseNote, scan
 import { bodyConnectionEdgeLines, stripConnectionsTo } from "../src/tools.js";
 
 const M = 1_000_000;
-const CASES: Record<string, string> = {
-  "chained processing instructions": "## Connections\n" + "<? ?>".repeat(M / 5) + "\n- extends: a\n",
-  "chained CDATA": "## Connections\n" + "<![CDATA[]]>".repeat(Math.floor(M / 12)) + "\n",
-  "edge line with a long space run": "## Connections\n- extends: a" + " ".repeat(M) + "x\n",
-  "edge line with a colon chain": "## Connections\n- a:" + "b:".repeat(M / 2) + "\n",
-  "edge line with an unclosed quote": '## Connections\n- a: b "' + "x".repeat(M) + "\n",
-  "edge line with many quote pairs": "## Connections\n- a: b" + ' "'.repeat(M / 2) + "\n",
-  "bracket line with escapes": "[" + "\\x".repeat(M / 2) + "\n## Connections\n- extends: a\n",
-  "rule-like line ending in a letter": "## Connections\n" + "-".repeat(M) + "x\n",
-  "fence opener with a long info word": "```" + "a".repeat(M) + "!\n## Connections\n- extends: a\n",
-  "long run of backticks": "`".repeat(M) + "x!\n## Connections\n",
-  "long indentation before a fence": " ".repeat(M) + "```x\n## Connections\n",
-  "many edges": "## Connections\n" + "- extends: a\n".repeat(Math.floor(M / 13)),
-  "unclosed fence over many lines": "```\n" + "x\n".repeat(M / 2),
+const n = (x: number) => Math.floor(x);
+// Each case builds a whole note at size m, so a step can be timed at two sizes.
+const CASES: Record<string, (m: number) => string> = {
+  "chained processing instructions": (m) => "## Connections\n" + "<? ?>".repeat(n(m / 5)) + "\n- extends: a\n",
+  "chained CDATA": (m) => "## Connections\n" + "<![CDATA[]]>".repeat(n(m / 12)) + "\n",
+  "edge line with a long space run": (m) => "## Connections\n- extends: a" + " ".repeat(m) + "x\n",
+  "edge line with a colon chain": (m) => "## Connections\n- a:" + "b:".repeat(n(m / 2)) + "\n",
+  "edge line with an unclosed quote": (m) => '## Connections\n- a: b "' + "x".repeat(m) + "\n",
+  "edge line with many quote pairs": (m) => "## Connections\n- a: b" + ' "'.repeat(n(m / 2)) + "\n",
+  "bracket line with escapes": (m) => "[" + "\\x".repeat(n(m / 2)) + "\n## Connections\n- extends: a\n",
+  "rule-like line ending in a letter": (m) => "## Connections\n" + "-".repeat(m) + "x\n",
+  "fence opener with a long info word": (m) => "```" + "a".repeat(m) + "!\n## Connections\n- extends: a\n",
+  "long run of backticks": (m) => "`".repeat(m) + "x!\n## Connections\n",
+  "long indentation before a fence": (m) => " ".repeat(m) + "```x\n## Connections\n",
+  "many edges": (m) => "## Connections\n" + "- extends: a\n".repeat(n(m / 13)),
+  "unclosed fence over many lines": (m) => "```\n" + "x\n".repeat(n(m / 2)),
 };
 // The frontmatter hashtag patch (parseNote) on one long flow-collection line.
-const HASHTAGS = "---\ntags: [" + "#,".repeat(M / 2) + "]\n---\nx\n";
+const HASHTAGS = (m: number) => "---\ntags: [" + "#,".repeat(n(m / 2)) + "]\n---\nx\n";
 
 function time(fn: () => unknown): number {
   const t0 = performance.now();
@@ -41,24 +43,51 @@ function time(fn: () => unknown): number {
   return performance.now() - t0;
 }
 
+/**
+ * Fastest of three runs of each step, at a quarter of the size and at full
+ * size. A note four times larger takes about four times as long for linear
+ * work and sixteen times for quadratic work, so 8x separates them with room
+ * for a loaded runner; a step too fast to time reliably is left to the
+ * backstop. A fixed one-second ceiling alone failed on runner speed.
+ */
+type Steps = Record<string, () => unknown>;
+function expectLinear(stepsAt: (m: number) => Steps): void {
+  const bestOf3 = (steps: Steps) =>
+    Object.fromEntries(Object.entries(steps).map(([k, fn]) => [k, Math.min(time(fn), time(fn), time(fn))]));
+  const quarter = bestOf3(stepsAt(n(M / 4)));
+  const full = bestOf3(stepsAt(M));
+  const slow = Object.fromEntries(Object.entries(full).filter(([, ms]) => ms >= 5000));
+  expect(slow).toEqual({});
+  const superlinear = Object.fromEntries(
+    Object.entries(full)
+      .filter(([k, ms]) => ms >= 50 && quarter[k] > 0)
+      .map(([k, ms]) => [k, Math.round((ms / quarter[k]) * 10) / 10])
+      .filter(([, g]) => (g as number) >= 8),
+  );
+  expect(superlinear).toEqual({});
+}
+
 test("the frontmatter hashtag patch is linear on a 1 MB flow list", () => {
-  expect(time(() => parseNote(HASHTAGS))).toBeLessThan(1000);
-});
+  expectLinear((m) => {
+    const text = HASHTAGS(m);
+    return { parseNote: () => parseNote(text) };
+  });
+}, 30_000);
 
 describe("the connection rule is linear on 1 MB adversarial notes", () => {
-  for (const [name, body] of Object.entries(CASES)) {
+  for (const [name, build] of Object.entries(CASES)) {
     test(name, () => {
-      const text = "---\ntitle: t\n---\n" + body;
-      const steps: Record<string, number> = {
-        parse: time(() => parseConnections(connectionBody(text))),
-        scan: time(() => scanNoteConnections(text)),
-        insert: time(() => insertConnectionLine(text, "- extends: new")),
-        strip: time(() => stripConnectionsTo(text, ["a"])),
-        validator: time(() => [...bodyConnectionEdgeLines(connectionBody(text))]),
-        parseNote: time(() => parseNote(text)),
-      };
-      const slow = Object.fromEntries(Object.entries(steps).filter(([, ms]) => ms >= 1000));
-      expect(slow).toEqual({});
-    });
+      expectLinear((m) => {
+        const text = "---\ntitle: t\n---\n" + build(m);
+        return {
+          parse: () => parseConnections(connectionBody(text)),
+          scan: () => scanNoteConnections(text),
+          insert: () => insertConnectionLine(text, "- extends: new"),
+          strip: () => stripConnectionsTo(text, ["a"]),
+          validator: () => [...bodyConnectionEdgeLines(connectionBody(text))],
+          parseNote: () => parseNote(text),
+        };
+      });
+    }, 30_000);
   }
 });
