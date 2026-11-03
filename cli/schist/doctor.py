@@ -3002,7 +3002,8 @@ def _mcp_server_dist_dir(entry: dict) -> Optional[Path]:
     def dist_of(path: Path) -> Optional[Path]:
         try:
             real = path.expanduser().resolve(strict=True)
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):
+            # ValueError: a path with a NUL byte, from a hand-edited config.
             return None
         if not real.is_file():
             return None

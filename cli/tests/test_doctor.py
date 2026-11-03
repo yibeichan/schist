@@ -5593,6 +5593,24 @@ class TestCheckMcpConnectionsRule:
         assert r.status == "WARN", r.message
         assert "rule v1" in r.message
 
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            {"command": "node", "args": ["/opt/x\u0000y/dist/index.js"]},
+            {"command": "/opt/a\u0000b/bin/schist-mcp", "args": []},
+        ],
+        ids=["nul-in-args", "nul-in-command"],
+    )
+    def test_warn_when_a_configured_path_holds_a_nul_byte(self, tmp_path, monkeypatch, entry):
+        """resolve() raises ValueError on a NUL byte; doctor reports the
+        server as unreadable instead of stopping with a traceback."""
+        from schist.doctor import check_mcp_connections_rule
+
+        self._config(tmp_path, monkeypatch, entry)
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "cannot find the configured MCP server" in r.message
+
     def test_warn_when_the_configured_server_cannot_be_read(self, tmp_path, monkeypatch):
         from schist.doctor import check_mcp_connections_rule
 
