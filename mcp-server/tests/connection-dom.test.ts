@@ -232,5 +232,11 @@ test("this test runs the marked and DOMPurify versions the page loads", () => {
     // The script tag and the Content-Security-Policy each name the file.
     expect(loaded.length).toBeGreaterThanOrEqual(2);
     expect(new Set(loaded)).toEqual(new Set([pkg.devDependencies[name]]));
+    // And the copy jest loads is that version, not a stale node_modules.
+    const installed = JSON.parse(
+      readFileSync(path.join(root, "mcp-server", "node_modules", name, "package.json"), "utf-8"),
+    ) as { version: string };
+    expect(installed.version).toBe(pkg.devDependencies[name]);
   }
+  expect(purify.version).toBe(pkg.devDependencies.dompurify);
 });
