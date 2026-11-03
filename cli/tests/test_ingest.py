@@ -2615,29 +2615,33 @@ def test_note_body_offset_agrees_with_python_frontmatter(case: dict) -> None:
 # the chained-HTML lines before). markdown-parser.ts runs the same set in
 # mcp-server/tests/connection-linear.test.ts.
 _M = 1_000_000
+# Each case builds its note body at size m, so a step can be timed at m and 2m.
 _LINEAR_CASES = {
-    'chained processing instructions': '## Connections\n' + '<? ?>' * (_M // 5) + '\n- extends: a\n',
-    'chained CDATA': '## Connections\n' + '<![CDATA[]]>' * (_M // 12) + '\n',
-    'edge line with a long space run': '## Connections\n- extends: a' + ' ' * _M + 'x\n',
-    'edge line with a colon chain': '## Connections\n- a:' + 'b:' * (_M // 2) + '\n',
-    'edge line with an unclosed quote': '## Connections\n- a: b "' + 'x' * _M + '\n',
-    'edge line with many quote pairs': '## Connections\n- a: b' + ' "' * (_M // 2) + '\n',
-    'bracket line with escapes': '[' + '\\x' * (_M // 2) + '\n## Connections\n- extends: a\n',
-    'rule-like line ending in a letter': '## Connections\n' + '-' * _M + 'x\n',
-    'fence opener with a long info word': '```' + 'a' * _M + '!\n## Connections\n- extends: a\n',
-    'long run of backticks': '`' * _M + 'x!\n## Connections\n',
-    'long indentation before a fence': ' ' * _M + '```x\n## Connections\n',
-    'many edges': '## Connections\n' + '- extends: a\n' * (_M // 13),
-    'unclosed fence over many lines': '```\n' + 'x\n' * (_M // 2),
+    'chained processing instructions': lambda m: '---\ntitle: t\n---\n' + '## Connections\n' + '<? ?>' * (m // 5) + '\n- extends: a\n',
+    'chained CDATA': lambda m: '---\ntitle: t\n---\n' + '## Connections\n' + '<![CDATA[]]>' * (m // 12) + '\n',
+    'edge line with a long space run': lambda m: '---\ntitle: t\n---\n' + '## Connections\n- extends: a' + ' ' * m + 'x\n',
+    'edge line with a colon chain': lambda m: '---\ntitle: t\n---\n' + '## Connections\n- a:' + 'b:' * (m // 2) + '\n',
+    'edge line with an unclosed quote': lambda m: '---\ntitle: t\n---\n' + '## Connections\n- a: b "' + 'x' * m + '\n',
+    'edge line with many quote pairs': lambda m: '---\ntitle: t\n---\n' + '## Connections\n- a: b' + ' "' * (m // 2) + '\n',
+    'bracket line with escapes': lambda m: '---\ntitle: t\n---\n' + '[' + '\\x' * (m // 2) + '\n## Connections\n- extends: a\n',
+    'rule-like line ending in a letter': lambda m: '---\ntitle: t\n---\n' + '## Connections\n' + '-' * m + 'x\n',
+    'fence opener with a long info word': lambda m: '---\ntitle: t\n---\n' + '```' + 'a' * m + '!\n## Connections\n- extends: a\n',
+    'long run of backticks': lambda m: '---\ntitle: t\n---\n' + '`' * m + 'x!\n## Connections\n',
+    'long indentation before a fence': lambda m: '---\ntitle: t\n---\n' + ' ' * m + '```x\n## Connections\n',
+    'many edges': lambda m: '---\ntitle: t\n---\n' + '## Connections\n' + '- extends: a\n' * (m // 13),
+    'unclosed fence over many lines': lambda m: '---\ntitle: t\n---\n' + '```\n' + 'x\n' * (m // 2),
     # R4-5: the frontmatter hashtag patch on one long flow-collection line.
-    'frontmatter flow list of hashtags': '\x00HASHTAGS',
+    'frontmatter flow list of hashtags': lambda m: '---\ntags: [' + '#,' * (m // 2) + ']\n---\nx\n',
 }
 
 
 @pytest.mark.parametrize('name', sorted(_LINEAR_CASES))
 def test_connection_rule_is_linear_on_1mb_adversarial_notes(name: str) -> None:
     """Every reader and writer path, and `schema --validate`'s warnings, on a
-    1 MB note: each well under a second (linear is tens of milliseconds)."""
+    1 MB note: each finishes within a few seconds, and doubling the note from
+    0.5 MB to 1 MB at most roughly doubles its time. The slowest step takes
+    about 0.4 s at 1 MB on a laptop and about three times that on a CI runner,
+    so a fixed one-second ceiling failed on runner speed alone."""
     import time
 
     from schist.commands import _connections_rule_warnings
@@ -2649,32 +2653,39 @@ def test_connection_rule_is_linear_on_1mb_adversarial_notes(name: str) -> None:
     )
     from schist.markdown_io import ConnectionWriteError, insert_connection_line
 
-    body = _LINEAR_CASES[name]
-    if body == '\x00HASHTAGS':
-        text = '---\ntags: [' + '#,' * (_M // 2) + ']\n---\nx\n'
-    else:
-        text = '---\ntitle: t\n---\n' + body
-    steps = {}
-    t = time.perf_counter()
-    patch_frontmatter_flow_hashtags(text)
-    steps['hashtag patch'] = time.perf_counter() - t
-    t = time.perf_counter()
-    parse_connections(connection_body(text))
-    steps['parse'] = time.perf_counter() - t
-    t = time.perf_counter()
-    lines, scan = scan_note_connections(text)
-    steps['scan'] = time.perf_counter() - t
-    t = time.perf_counter()
-    try:
-        insert_connection_line(text, '- extends: new')
-    except ConnectionWriteError:
-        pass
-    steps['insert'] = time.perf_counter() - t
-    t = time.perf_counter()
-    _connections_rule_warnings(Path('n.md'), text, lines, scan)
-    steps['validate warnings'] = time.perf_counter() - t
-    slow = {k: round(v, 3) for k, v in steps.items() if v >= 1.0}
+    def time_steps(text: str) -> dict[str, float]:
+        steps = {}
+        t = time.perf_counter()
+        patch_frontmatter_flow_hashtags(text)
+        steps['hashtag patch'] = time.perf_counter() - t
+        t = time.perf_counter()
+        parse_connections(connection_body(text))
+        steps['parse'] = time.perf_counter() - t
+        t = time.perf_counter()
+        lines, scan = scan_note_connections(text)
+        steps['scan'] = time.perf_counter() - t
+        t = time.perf_counter()
+        try:
+            insert_connection_line(text, '- extends: new')
+        except ConnectionWriteError:
+            pass
+        steps['insert'] = time.perf_counter() - t
+        t = time.perf_counter()
+        _connections_rule_warnings(Path('n.md'), text, lines, scan)
+        steps['validate warnings'] = time.perf_counter() - t
+        return steps
+
+    build = _LINEAR_CASES[name]
+    half = time_steps(build(_M // 2))
+    full = time_steps(build(_M))
+    # A backstop for any runner, then the growth: doubling the note roughly
+    # doubles linear work and quadruples quadratic work. Steps too fast to
+    # time reliably are left to the backstop.
+    slow = {k: round(v, 3) for k, v in full.items() if v >= 5.0}
     assert not slow, slow
+    growth = {k: round(full[k] / half[k], 1) for k in full if full[k] >= 0.05 and half[k] > 0}
+    superlinear = {k: g for k, g in growth.items() if g >= 3.0}
+    assert not superlinear, superlinear
 
 
 @pytest.mark.parametrize(
