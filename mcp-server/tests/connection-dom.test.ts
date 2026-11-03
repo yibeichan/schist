@@ -6,7 +6,7 @@
  * The connection rule against the viewer's rendered page, not only marked's
  * tokens. The Markdown rendering code of cli/schist/viewer/index.html (the
  * block between its "Markdown rendering" markers: marked 12.0.2 with raw HTML
- * shown as text, then DOMPurify 3.2.6 with the viewer's settings) runs here
+ * shown as text, then DOMPurify 3.4.17 with the viewer's settings) runs here
  * on jsdom, and the result is put into a container with innerHTML, as the
  * viewer does. Every edge the rule reads must be a list item of a top-level
  * list whose nearest preceding heading, in document order, is an h2 whose
@@ -221,4 +221,16 @@ test("random bodies: each edge read is shown under Connections in the rendered p
   }
   expect(failures.slice(0, 5)).toEqual([]);
   expect(withEdges).toBeGreaterThan(1500);
+});
+
+test("this test runs the marked and DOMPurify versions the page loads", () => {
+  const pkg = JSON.parse(readFileSync(path.join(root, "mcp-server", "package.json"), "utf-8")) as {
+    devDependencies: Record<string, string>;
+  };
+  for (const name of ["marked", "dompurify"]) {
+    const loaded = [...page.matchAll(new RegExp(`cdn\\.jsdelivr\\.net/npm/${name}@([^/"\\s]+)/`, "g"))].map((m) => m[1]);
+    // The script tag and the Content-Security-Policy each name the file.
+    expect(loaded.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(loaded)).toEqual(new Set([pkg.devDependencies[name]]));
+  }
 });
