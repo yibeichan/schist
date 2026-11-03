@@ -44,23 +44,32 @@ function time(fn: () => unknown): number {
 }
 
 /**
- * Fastest of three runs of each step, at a quarter of the size and at full
- * size. A note four times larger takes about four times as long for linear
- * work and sixteen times for quadratic work, so 8x separates them with room
- * for a loaded runner; a step too fast to time reliably is left to the
- * backstop. A fixed one-second ceiling alone failed on runner speed.
+ * Fastest of five runs of each step, after one warm-up run, at a quarter of
+ * the size and at full size. A note four times larger takes about four times
+ * as long for linear work and sixteen times for quadratic work, so 8x
+ * separates them with room for a loaded runner. A step is judged on growth
+ * only when its quarter-size time is at least 20 ms: shorter timings are
+ * mostly noise (a 10 ms step read as 8x on a CI runner), and the garbage
+ * collector cannot be paused here as it is in test_ingest.py. Every step is
+ * held to the 5 s backstop. A fixed one-second ceiling alone failed on
+ * runner speed.
  */
 type Steps = Record<string, () => unknown>;
 function expectLinear(stepsAt: (m: number) => Steps): void {
-  const bestOf3 = (steps: Steps) =>
-    Object.fromEntries(Object.entries(steps).map(([k, fn]) => [k, Math.min(time(fn), time(fn), time(fn))]));
-  const quarter = bestOf3(stepsAt(n(M / 4)));
-  const full = bestOf3(stepsAt(M));
+  const bestOf5 = (steps: Steps) =>
+    Object.fromEntries(
+      Object.entries(steps).map(([k, fn]) => {
+        time(fn);
+        return [k, Math.min(time(fn), time(fn), time(fn), time(fn), time(fn))];
+      }),
+    );
+  const quarter = bestOf5(stepsAt(n(M / 4)));
+  const full = bestOf5(stepsAt(M));
   const slow = Object.fromEntries(Object.entries(full).filter(([, ms]) => ms >= 5000));
   expect(slow).toEqual({});
   const superlinear = Object.fromEntries(
     Object.entries(full)
-      .filter(([k, ms]) => ms >= 50 && quarter[k] > 0)
+      .filter(([k]) => quarter[k] >= 20)
       .map(([k, ms]) => [k, Math.round((ms / quarter[k]) * 10) / 10])
       .filter(([, g]) => (g as number) >= 8),
   );
