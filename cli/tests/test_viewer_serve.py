@@ -953,6 +953,27 @@ class TestViewerFingerprint:
         srv.viewer_stamp.unlink()
         assert srv.status()['viewer_current'] is False
 
+    def test_a_rebuild_replaces_each_stamp_in_one_step(self, server):
+        """status() reads the stamps while a rebuild writes them. Each must be
+        replaced by a new file, so a reader holding the old one still sees
+        its whole text, never a truncated or empty file."""
+        srv, _ = server
+        held = []
+        for path in (srv.stamp, srv.viewer_stamp):
+            path.write_text('old\n')
+            held.append(open(path, encoding='utf-8'))
+        try:
+            with srv.build_lock:
+                assert srv.rebuild()[0]
+            for f in held:
+                assert f.read() == 'old\n'
+        finally:
+            for f in held:
+                f.close()
+        st = srv.status()
+        assert st['built_head'] == st['vault_head'] and st['viewer_current'] is True
+        assert not [p.name for p in srv.stamp.parent.iterdir() if p.name.endswith('.tmp')]
+
     def test_timer_rebuilds_a_site_from_other_viewer_code(self, server):
         srv, base = server
         h = {'X-Schist-Rebuild': '1'}
