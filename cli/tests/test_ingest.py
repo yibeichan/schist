@@ -2638,10 +2638,11 @@ _LINEAR_CASES = {
 @pytest.mark.parametrize('name', sorted(_LINEAR_CASES))
 def test_connection_rule_is_linear_on_1mb_adversarial_notes(name: str) -> None:
     """Every reader and writer path, and `schema --validate`'s warnings, on a
-    1 MB note: each finishes within a few seconds, and doubling the note from
-    0.5 MB to 1 MB at most roughly doubles its time. The slowest step takes
+    1 MB note: each finishes within a few seconds, and growing the note from
+    0.25 MB to 1 MB grows its time about fourfold, as linear work does. The slowest step takes
     about 0.4 s at 1 MB on a laptop and about three times that on a CI runner,
     so a fixed one-second ceiling failed on runner speed alone."""
+    import gc
     import time
 
     from schist.commands import _connections_rule_warnings
@@ -2675,16 +2676,28 @@ def test_connection_rule_is_linear_on_1mb_adversarial_notes(name: str) -> None:
         steps['validate warnings'] = time.perf_counter() - t
         return steps
 
+    def best_of_3(text: str) -> dict[str, float]:
+        runs = [time_steps(text) for _ in range(3)]
+        return {k: min(r[k] for r in runs) for k in runs[0]}
+
     build = _LINEAR_CASES[name]
-    half = time_steps(build(_M // 2))
-    full = time_steps(build(_M))
-    # A backstop for any runner, then the growth: doubling the note roughly
-    # doubles linear work and quadruples quadratic work. Steps too fast to
-    # time reliably are left to the backstop.
+    # Garbage collection pauses and a shared runner's noise land on single
+    # runs; with the collector off, the fastest of three runs is stable.
+    gc.collect()
+    gc.disable()
+    try:
+        quarter = best_of_3(build(_M // 4))
+        full = best_of_3(build(_M))
+    finally:
+        gc.enable()
+    # A backstop for any runner, then the growth: a note four times larger
+    # takes about four times as long for linear work and sixteen times for
+    # quadratic work, so 8x separates them with room for a loaded runner.
+    # Steps too fast to time reliably are left to the backstop.
     slow = {k: round(v, 3) for k, v in full.items() if v >= 5.0}
     assert not slow, slow
-    growth = {k: round(full[k] / half[k], 1) for k in full if full[k] >= 0.05 and half[k] > 0}
-    superlinear = {k: g for k, g in growth.items() if g >= 3.0}
+    growth = {k: round(full[k] / quarter[k], 1) for k in full if full[k] >= 0.05 and quarter[k] > 0}
+    superlinear = {k: g for k, g in growth.items() if g >= 8.0}
     assert not superlinear, superlinear
 
 
