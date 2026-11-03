@@ -128,7 +128,8 @@ def test_append_connection_refuses_non_markdown_separators(
     note.write_text(text, encoding="utf-8", newline="")
     with pytest.raises(ConnectionWriteError, match=f"U\\+{ord(sep):04X}"):
         append_connection(str(note), "extends", "notes/b.md")
-    assert note.read_text(encoding="utf-8", newline="") == text, f"{name}: file changed"
+    with open(note, encoding="utf-8", newline="") as f:
+        assert f.read() == text, f"{name}: file changed"
 
 
 def test_append_connection_golden_path_and_context(tmp_path) -> None:
