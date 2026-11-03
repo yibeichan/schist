@@ -5,7 +5,7 @@
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { parseNote } from "../src/markdown-parser.js";
+import { buildNote, hasNonYamlOpener, parseNote } from "../src/markdown-parser.js";
 
 // gray-matter reads the text after the opening `---` as a language name and
 // ships a `javascript` engine that evaluates the block. Note content comes
@@ -46,5 +46,48 @@ describe("frontmatter languages", () => {
 
   test("a note without frontmatter is unaffected", () => {
     expect(parseNote("just text\n").body).toBe("just text\n");
+  });
+
+  // buildNote writes a note from metadata and a body. The body comes from
+  // the note being rewritten (update_note, the concept cascade) or from the
+  // caller (create_note), so it is note content, never parsed as one.
+  test.each(["---js", "---javascript", "--- js", "---JS", "\uFEFF---js", "---coffee"])(
+    "a body opening with %j is written as text, not evaluated",
+    (opener) => {
+      const body = payload(opener);
+      const out = buildNote({ title: "t" }, body);
+      expect(existsSync(marker)).toBe(false);
+      expect(out).toBe(`---\ntitle: t\n---\n${body}`);
+    },
+  );
+
+  test("a body opening with a YAML block is not merged into the frontmatter", () => {
+    const body = "---\nstatus: final\nsource_agent: someone-else\n---\nbody\n";
+    const out = buildNote({ title: "t", status: "draft" }, body);
+    expect(out).toBe(`---\ntitle: t\nstatus: draft\n---\n${body}`);
+  });
+
+  test("an ordinary note is written as before", () => {
+    expect(buildNote({ title: "t", tags: ["a"] }, "Body text\n")).toBe(
+      "---\ntitle: t\ntags:\n  - a\n---\nBody text\n",
+    );
+  });
+
+  test.each([
+    "---yaml\ntitle: x\n---\nbody\n",
+    "---\nsource_agent: someone-else\n---\nbody\n",
+    "---js\n(1, {})\n---\nbody\n",
+    "\uFEFF---\ntitle: x\n---\nbody\n",
+    "\uFEFF\uFEFF---js\n(1, {})\n---\nbody\n",
+  ])("with no metadata, a body opening with %j stays body text", (body) => {
+    const out = buildNote({}, body);
+    expect(hasNonYamlOpener(out)).toBe(false);
+    const parsed = parseNote(out);
+    expect(parsed.metadata).toEqual({});
+    expect(parsed.body).toBe(body);
+  });
+
+  test("with no metadata, an ordinary body is written unchanged", () => {
+    expect(buildNote({}, "just text\n")).toBe("just text\n");
   });
 });

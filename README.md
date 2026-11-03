@@ -6,7 +6,7 @@ Your AI agents write code, run ops, do research. But between sessions, they forg
 
 **schist** is that structure. A markdown-native knowledge graph where agents are the primary writers. Content lives in git (versioned, branched, merged). SQLite gives you instant search and graph queries. A static web viewer lets humans see what agents know.
 
-No vendor lock-in. No cloud dependency. No server to run. Just files.
+No vendor lock-in. No cloud dependency. No server needed on a single machine. Just files.
 
 ## Why schist
 
@@ -14,10 +14,16 @@ If you're using AI agents for real work, you've hit these problems:
 
 - **Agents repeat research** they did last session because context windows don't persist
 - **Decisions get lost** — that architecture choice from Tuesday? Gone.
-- **No cross-project memory** — your coding agent doesn't know what your ops agent learned
+- **Lessons are either trapped or everywhere** — what your ops agent learned never reaches your coding agent, or every agent sees everything with no say in what crosses over
 - **Tool output isn't knowledge** — logs, search results, and transcripts aren't structured
 
-schist gives agents a persistent, queryable knowledge base that survives session restarts.
+schist gives agents a persistent, queryable knowledge base that survives session restarts, and lets you decide what moves between projects and machines:
+
+- **Agent memory is shared across projects by default**, can be scoped to a project with tags, or kept separate per project with its own database
+- **Each spoke writes only where you allow it** — the hub rejects pushes outside that spoke's write scopes
+- **Agents that only propose wait for a human** — the local viewer agent files proposals, and nothing is written until you approve one
+
+Read access is not gated: every spoke and MCP client can read the whole vault. See [SECURITY.md](./SECURITY.md).
 
 ## 30-Second Demo
 
@@ -25,7 +31,9 @@ schist gives agents a persistent, queryable knowledge base that survives session
 # Install
 pip install schist
 npm install -g @schist/mcp-server
-
+# These install the latest published release. For changes on main, install from
+# git: pip install "git+https://github.com/yibeichan/schist.git#subdirectory=cli"
+# (and build the MCP server from source; see docs/getting-started.md)
 
 # Create a vault
 schist init ~/vaults/my-project --name my-project --identity local
@@ -170,7 +178,7 @@ Add to your system prompt or session init:
 On session start, run: schist context --vault /path/to/vault
 ```
 
-This gives the agent a snapshot of graph stats, recent notes, and hot concepts.
+This gives the agent a snapshot of graph stats, recent notes, and hot concepts. Agents connected over MCP can call `get_context` for the same snapshot.
 
 ## MCP Tools
 
@@ -183,18 +191,24 @@ This gives the agent a snapshot of graph stats, recent notes, and hot concepts.
 | `update_note` | Update a note's body and/or frontmatter (auto-commits) |
 | `delete_note` | Delete a note via git rm; refuses on inbound edges unless `cascade` |
 | `add_connection` | Add a typed edge from a document to another document or concept |
+| `add_concept_alias` | Mark a concept as a duplicate of a canonical concept |
 | `list_concepts` | List all concept nodes |
 | `query_graph` | Run read-only SQL against the graph database |
 | `compose_brief` | Compose a context-rich markdown brief for external filing |
 | `get_context` | Dump graph context for agent session init |
 | `search_memory` | Search cross-project agent memory |
 | `add_memory` | Add a memory entry (decision, lesson, blocker, etc.) |
+| `get_agent_state` | Get a keyed agent state value |
+| `set_agent_state` | Set a keyed agent state value (key prefix must match the owner) |
+| `delete_agent_state` | Delete a keyed agent state value |
+| `sync_status` | Report spoke/hub sync state: ahead/behind counts, clean tree, last sync error |
+| `sync_retry` | Retry spoke-to-hub sync (push only, or pull with rebase then push) |
 
 ## CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `schist init` | Create a new vault |
+| `schist init` | Create a new vault (standalone, hub, or spoke) |
 | `schist doctor` | Verify setup health |
 | `schist add` | Create a new note |
 | `schist add-concept` | Create a stable concept node |
@@ -205,6 +219,12 @@ This gives the agent a snapshot of graph stats, recent notes, and hot concepts.
 | `schist serve` | Serve the viewer on 127.0.0.1 with a rebuild button, a local read-only agent (Ollama) and its proposal queue |
 | `schist context` | Dump session context |
 | `schist schema` | Print or validate schema |
+| `schist sync pull` / `sync push` | Pull updates from the hub / push local changes to it (spoke) |
+| `schist hooks reinstall` | Refresh the pre-commit and post-commit hooks from the canonical templates |
+| `schist hub participant add\|rename\|remove` | Manage hub participants |
+| `schist hub grant` / `hub revoke` | Grant or revoke a participant's write on a directory |
+| `schist hub key add\|list\|remove` | Pin SSH keys to participant identities |
+| `schist hub security` | Toggle `security.require_pinned_identity` on the hub |
 
 ## Architecture
 
@@ -249,7 +269,7 @@ constraints and the full trust model are documented in [SECURITY.md](./SECURITY.
 
 ## Cross-Project Agent Memory
 
-schist includes a shared memory subsystem scoped by agent identity. Any project using the schist MCP server can capture lessons, decisions, and blockers — and recall them from any other project on the same machine. Details: [`docs/cross-project-memory.md`](./docs/cross-project-memory.md).
+schist includes a shared memory subsystem scoped by agent identity. Any project using the schist MCP server can capture lessons, decisions, and blockers — and recall them from any other project on the same machine. Sharing is the default; scope entries with `project:<name>` tags, or set `SCHIST_MEMORY_DB` to give one project its own database. Memory does not sync between machines. Details: [`docs/cross-project-memory.md`](./docs/cross-project-memory.md).
 
 ## Getting Started
 

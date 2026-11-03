@@ -1329,6 +1329,99 @@ def _load_hub_acl(hub: Path):
     return parse_vault_data(yaml.safe_load(_hub_file_text(hub, "vault.yaml")))
 
 
+def _detached_head_fix(hub: Path, hub_path: str) -> str:
+    """The command that points a detached HEAD back at a branch. The branch
+    whose tip is HEAD's commit is named when there is exactly one, or the
+    only branch when there is one; otherwise the admin picks one of the
+    existing branches, of which a few are listed. Guessing `main` on a hub
+    serving another branch made a WARN into a FAIL."""
+    git = ["git", "--git-dir", str(hub)]
+    try:
+        r = subprocess.run(git + ["for-each-ref", "--format=%(objectname) %(refname)",
+                                  "refs/heads/"], capture_output=True, timeout=10, check=True)
+        head = subprocess.run(git + ["rev-parse", "-q", "--verify", "HEAD"],
+                              capture_output=True, timeout=10).stdout.strip()
+    except (subprocess.SubprocessError, OSError):
+        r = None
+    branches: list[tuple[bytes, str]] = []
+    if r is not None:
+        for line in r.stdout.splitlines():
+            sha, _, ref = line.partition(b" ")
+            branches.append((sha, ref.decode("utf-8", "backslashreplace")))
+    at_head = [ref for sha, ref in branches if head and sha == head]
+    if len(at_head) == 1 or len(branches) == 1:
+        ref = at_head[0] if len(at_head) == 1 else branches[0][1]
+        return f"`git --git-dir {shlex.quote(hub_path)} symbolic-ref HEAD {shlex.quote(ref)}`"
+    if not branches:
+        return (f"create the served branch at HEAD's commit and point HEAD at it: "
+                f"`git --git-dir {shlex.quote(hub_path)} update-ref refs/heads/<branch> HEAD`, "
+                f"then `git --git-dir {shlex.quote(hub_path)} symbolic-ref HEAD refs/heads/<branch>`")
+    listed = ", ".join(ref for _, ref in branches[:5])
+    more = f" and {len(branches) - 5} more" if len(branches) > 5 else ""
+    return (f"point HEAD at the branch spokes push, one of {listed}{more}: "
+            f"`git --git-dir {shlex.quote(hub_path)} symbolic-ref HEAD refs/heads/<branch>`")
+
+
+def check_hub_vault_yaml(hub_path: Optional[str]) -> CheckResult:
+    """Read the hub's vault.yaml exactly as its pre-receive hook does.
+
+    The hook refuses every push while it cannot read vault.yaml (not UTF-8,
+    not valid YAML or not a valid ACL, HEAD naming a branch that does not
+    exist beside other branches, a broken object) and accepts every push
+    unchecked when there is none. Both states
+    used to read as SKIP here, so a hub that would refuse everything after
+    an upgrade looked fine before it."""
+    label = "Hub vault.yaml"
+    if not hub_path:
+        return CheckResult("SKIP", label, "no --hub-path supplied")
+    hub = Path(hub_path)
+    if not (hub / "objects").is_dir():
+        return CheckResult("SKIP", label, f"not a git repository: {hub_path}")
+    from schist.pre_receive import extract_vault_yaml_from_git
+    try:
+        text = extract_vault_yaml_from_git(git_dir=str(hub))
+    except UnicodeDecodeError as e:
+        return CheckResult(
+            "FAIL", label,
+            f"vault.yaml at HEAD is not valid UTF-8 ({e.reason} at byte {e.start}), so the hook "
+            "refuses every push. Fix: re-encode it as UTF-8 (docs/hub-spoke-setup.md, "
+            "Troubleshooting, \"REJECTED: failed to load vault.yaml\").")
+    except RuntimeError as e:
+        return CheckResult("FAIL", label, f"the hook refuses every push: {e}")
+    except (subprocess.SubprocessError, OSError) as e:
+        return CheckResult(
+            "FAIL", label,
+            f"the hook cannot read vault.yaml ({type(e).__name__}: a missing or broken object, "
+            f"or git timing out), so it refuses every push. Fix: run "
+            f"`git --git-dir {hub_path} fsck`.")
+    if text is None:
+        return CheckResult(
+            "WARN", label,
+            "no vault.yaml at HEAD: the hook accepts every push without an ACL check. "
+            "Fix: commit a vault.yaml to the served branch (Step 1 of "
+            "docs/hub-spoke-setup.md describes what it holds).")
+    # Parsed exactly as the hook's load_acl() does; any error there refuses
+    # every push, the push that would fix the file included.
+    from schist.acl import parse_vault_data
+    try:
+        parse_vault_data(yaml.safe_load(text))
+    except Exception as e:  # noqa: BLE001 — the hook refuses on any exception
+        return CheckResult(
+            "FAIL", label,
+            f"vault.yaml at HEAD does not parse, so the hook refuses every push: "
+            f"{type(e).__name__}: {e}. Fix: rewrite it on the hub (docs/hub-spoke-setup.md, "
+            "Troubleshooting, \"REJECTED: failed to load vault.yaml\").")
+    head = subprocess.run(["git", "--git-dir", str(hub), "symbolic-ref", "-q", "HEAD"],
+                          capture_output=True, timeout=10)
+    if head.returncode != 0:
+        return CheckResult(
+            "WARN", label,
+            "HEAD is detached, so the hook cannot tell which branch it serves and refuses "
+            "every ref update from an identity without '*' write. Fix: "
+            f"{_detached_head_fix(hub, hub_path)}.")
+    return CheckResult("PASS", label, "vault.yaml at HEAD reads and parses as the hook reads it")
+
+
 def check_hub_key_pinning(hub_path: Optional[str],
                           authorized_keys: Optional[str] = None) -> CheckResult:
     """Verify every hub SSH key is pinned to an identity via schist-shell.
@@ -1475,7 +1568,7 @@ _ACCEPTENV_RE = re.compile(r"^\s*AcceptEnv\s+(.+)$", re.IGNORECASE | re.MULTILIN
 # just as surely as `GIT_*` does — prefix checks alone gave globs a free pass.
 _ACCEPTENV_DANGEROUS = (
     "SCHIST_IDENTITY", "SCHIST_IDENTITY_PINNED",
-    "PATH", "BASH_ENV", "ENV",
+    "PATH", "BASH_ENV", "ENV", "HOME", "VIRTUAL_ENV",
     "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
     "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
     "GIT_EXEC_PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
@@ -1488,7 +1581,9 @@ def _acceptenv_offender(token: str) -> bool:
 
     SCHIST_* fakes the identity or the pinned marker; PATH / LD_* / DYLD_* /
     PYTHON* / BASH_ENV / ENV let a client redirect what the forced command
-    (or the pre-receive hook's python3) executes; GIT_* covers config/exec
+    (or the pre-receive hook's python3) executes; HOME and VIRTUAL_ENV pass
+    schist-shell's keep-list and redirect which git config and which venv
+    the hook uses; GIT_* covers config/exec
     redirection — except GIT_PROTOCOL, which git's own transport uses and is
     harmless. Glob tokens are matched against _ACCEPTENV_DANGEROUS.
     """
@@ -1499,7 +1594,7 @@ def _acceptenv_offender(token: str) -> bool:
         # name landing in one is flagged without enumerating members.
         if name.startswith("SCHIST"):
             return True
-        if name in {"PATH", "BASH_ENV", "ENV"}:
+        if name in {"PATH", "BASH_ENV", "ENV", "HOME", "VIRTUAL_ENV"}:
             return True
         if name.startswith(("LD_", "DYLD_", "PYTHON")):
             return True
@@ -3712,6 +3807,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_skill_tool_references(vault_path),
     ]
     if hub_path:
+        checks.append(check_hub_vault_yaml(hub_path))
         checks.append(check_hub_acl_drift(hub_path))
         checks.append(check_hub_pre_receive_hook(hub_path))
         checks.append(check_hub_key_pinning(hub_path, authorized_keys))

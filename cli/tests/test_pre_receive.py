@@ -394,7 +394,7 @@ class TestMain:
             ["security/bad.md"],
         ]
 
-        def mock_changed_files(oldrev, newrev):
+        def mock_changed_files(oldrev, newrev, **kwargs):
             idx = call_count[0]
             call_count[0] += 1
             return files_per_call[idx]
@@ -404,7 +404,12 @@ class TestMain:
             "ccc ddd refs/heads/feature",
         ]
         with patch("schist.pre_receive.get_changed_files", side_effect=mock_changed_files):
-            rc = main(stdin=stdin, acl=acl, identity="cluster-mario", log_path=log_path)
+            rc = main(stdin=stdin, acl=acl, identity="admin", log_path=log_path)
+        assert rc == 0
+        assert call_count[0] == 2
+        call_count[0] = 0
+        with patch("schist.pre_receive.get_changed_files", side_effect=mock_changed_files):
+            rc = main(stdin=stdin, acl=acl, identity="researcher", log_path=log_path)
         assert rc == 1
 
     def test_deleted_branch_needs_a_wildcard_writer(self, acl):
@@ -667,36 +672,43 @@ class TestGetChangedFiles:
     def test_existing_branch_uses_commit_history_not_net_diff(self):
         from schist.pre_receive import get_changed_files
 
-        log = type("Result", (), {"stdout": b"a.md\0b.md\0a.md\0", "returncode": 0})()
-        net = type("Result", (), {"stdout": b"c.md\0a.md\0", "returncode": 0})()
-        with patch("subprocess.run", side_effect=[log, net]) as mock_run:
+        from schist.pre_receive import _SCAN_GIT as _PIN
+        outputs = iter([[b"a.md", b"b.md", b"a.md", b""], [b"c.md", b"a.md", b""]])
+        cmds = []
+
+        def fake(cmd, timeout):
+            cmds.append(cmd)
+            return iter(next(outputs))
+
+        with patch("schist.pre_receive._git_nul_tokens", side_effect=fake):
             result = get_changed_files("aaa", "bbb")
         # Per-commit listing first, then the net diff, de-duplicated (#703).
         assert result == ["a.md", "b.md", "c.md"]
-        cmds = [c[0][0] for c in mock_run.call_args_list]
         assert cmds == [
-            ["git", "log", "--name-only", "--no-renames", "-c", "--format=", "-z", "aaa..bbb"],
-            ["git", "diff", "--name-only", "--no-renames", "-z", "aaa", "bbb"],
+            [*_PIN, "log", "--root",
+             "--name-only", "--no-renames", "-c", "--format=", "-z", "aaa..bbb"],
+            [*_PIN, "diff", "--name-only", "--no-renames", "-z", "aaa", "bbb"],
         ]
 
     def test_new_branch_uses_commit_history_not_tip_diff(self):
         from schist.pre_receive import ZERO_SHA, get_changed_files
 
-        mock_result = type("Result", (), {"stdout": b"new-file.md\0", "returncode": 0})()
-        with patch("subprocess.run", return_value=mock_result) as mock_run:
+        from schist.pre_receive import _SCAN_GIT as _PIN
+        with patch("schist.pre_receive._git_nul_tokens",
+                   return_value=iter([b"new-file.md", b""])) as mock_tokens:
             result = get_changed_files(ZERO_SHA, "abc123")
         assert result == ["new-file.md"]
-        cmd = mock_run.call_args[0][0]
+        cmd = mock_tokens.call_args[0][0]
         assert cmd == [
-            "git", "log", "--name-only", "--no-renames", "-c", "--format=", "-z",
+            *_PIN, "log", "--root",
+            "--name-only", "--no-renames", "-c", "--format=", "-z",
             "abc123", "--not", "--all",
         ]
 
     def test_empty_diff_returns_empty(self):
         from schist.pre_receive import get_changed_files
 
-        mock_result = type("Result", (), {"stdout": b"", "returncode": 0})()
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("schist.pre_receive._git_nul_tokens", side_effect=lambda c, t: iter([])):
             result = get_changed_files("aaa", "bbb")
         assert result == []
 
@@ -1354,6 +1366,37 @@ def _bare_repo_with(tmp_path, commits):
     return repo, shas
 
 
+_GIT_WITHOUT_Z = r"""#!/bin/sh
+# git before 2.42 has no `cat-file -Z`; parse-options rejects it.
+case " $* " in
+  *" cat-file "*" -Z "*|*" cat-file "*" -Z") echo "error: unknown switch \`Z'" >&2; exit 129;;
+esac
+exec "$REAL_GIT" "$@"
+"""
+
+
+@pytest.fixture(params=["git", "git-before-2.42"])
+def git_version(request, tmp_path_factory, monkeypatch):
+    """Run the test with the installed git, and again with a stand-in that
+    rejects options git 2.30 to 2.41 do not have."""
+    if request.param == "git-before-2.42":
+        import shutil
+        bindir = tmp_path_factory.mktemp("old-git-bin")
+        stand_in = bindir / "git"
+        stand_in.write_text(_GIT_WITHOUT_Z, encoding="utf-8")
+        stand_in.chmod(0o755)
+        monkeypatch.setenv("REAL_GIT", shutil.which("git"))
+        monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+        assert subprocess.run(["git", "cat-file", "--batch-check", "-Z"], input=b"",
+                              capture_output=True).returncode == 129
+    return request.param
+
+
+def _peak_rss_mb(ru_maxrss: int, platform: str = sys.platform) -> float:
+    """getrusage's ru_maxrss in MB: bytes on macOS, KiB on Linux."""
+    return ru_maxrss / (1 << 20) if platform == "darwin" else ru_maxrss / 1024
+
+
 @pytest.fixture(autouse=True)
 def _skip_blob_reads(request, monkeypatch):
     """Most tests here feed main() made-up revisions with a patched file list;
@@ -1431,6 +1474,589 @@ class TestFrontmatterOpeners:
             assert "research/mario/x.md" in capsys.readouterr().err
 
 
+    def test_each_pushed_version_is_read_once(self, tmp_path, monkeypatch):
+        """Reading every changed path at every pushed commit cost commits x
+        paths reads (900 here); each pushed note version is read once."""
+        from schist.pre_receive import find_bad_frontmatter, get_changed_files
+        commits = [SEED] + [{f"research/mario/n{i}.md": b"---\ntitle: n\n---\n" + bytes([65 + i])}
+                            for i in range(30)]
+        repo, shas = _bare_repo_with(tmp_path, commits)
+        monkeypatch.chdir(repo)
+        import schist.pre_receive as pr
+        real_heads, reads = pr._blob_heads, []
+
+        def spy(ids, timeout):
+            reads.append(len(ids))
+            return real_heads(ids, timeout)
+
+        monkeypatch.setattr(pr, "_blob_heads", spy)
+        assert find_bad_frontmatter(shas[0], shas[-1], get_changed_files(shas[0], shas[-1])) == []
+        assert reads == [30]
+
+    def test_a_push_that_fixes_an_old_note_is_accepted(self, tmp_path, monkeypatch):
+        """Only versions the push writes are read: the note's old version,
+        which an earlier hook let in, does not refuse the push fixing it."""
+        from schist.pre_receive import find_bad_frontmatter, get_changed_files
+        repo, (base, _c1, c2) = _bare_repo_with(tmp_path, [
+            {"research/mario/x.md": b"---js\n{}\n---\n"},
+            {"research/mario/other.md": b"o\n"},
+            {"research/mario/x.md": b"---\ntitle: x\n---\n"}])
+        monkeypatch.chdir(repo)
+        assert find_bad_frontmatter(base, c2, get_changed_files(base, c2)) == []
+
+    def test_a_note_written_only_by_a_merge_is_found(self, tmp_path, monkeypatch):
+        from schist.pre_receive import find_bad_frontmatter, get_changed_files
+        work = tmp_path / "w"
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+        subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
+        (work / "seed.md").write_bytes(b"---\ntitle: s\n---\n")
+        subprocess.run(git + ["add", "."], cwd=work, check=True)
+        subprocess.run(git + ["commit", "-qm", "seed"], cwd=work, check=True)
+        base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=work, capture_output=True,
+                              text=True, encoding="utf-8", check=True).stdout.strip()
+        subprocess.run(git + ["checkout", "-qb", "side"], cwd=work, check=True)
+        (work / "a.md").write_bytes(b"---\ntitle: a\n---\n")
+        subprocess.run(git + ["add", "."], cwd=work, check=True)
+        subprocess.run(git + ["commit", "-qm", "side"], cwd=work, check=True)
+        subprocess.run(git + ["checkout", "-q", "main"], cwd=work, check=True)
+        (work / "b.md").write_bytes(b"b\n")
+        subprocess.run(git + ["add", "."], cwd=work, check=True)
+        subprocess.run(git + ["commit", "-qm", "main"], cwd=work, check=True)
+        subprocess.run(git + ["merge", "-q", "--no-commit", "side"], cwd=work, check=True)
+        (work / "a.md").write_bytes(b"---js\n{}\n---\n")     # written by the merge alone
+        subprocess.run(git + ["add", "."], cwd=work, check=True)
+        subprocess.run(git + ["commit", "-qm", "merge"], cwd=work, check=True)
+        new = subprocess.run(["git", "rev-parse", "HEAD"], cwd=work, capture_output=True,
+                             text=True, encoding="utf-8", check=True).stdout.strip()
+        monkeypatch.chdir(work)
+        assert find_bad_frontmatter(base, new, get_changed_files(base, new)) == ["a.md"]
+
+    @pytest.mark.parametrize("form", ["existing", "new"])
+    def test_a_note_a_merge_writes_and_a_later_commit_fixes_is_found(self, tmp_path,
+                                                                     monkeypatch, form):
+        """The bad version is in neither the tip nor any single-parent
+        commit's diff, only in the merge's diff against its parents, so the
+        scan's `-m` is what finds it."""
+        from schist.pre_receive import ZERO_SHA, find_bad_frontmatter
+        work, hub = tmp_path / "w", tmp_path / "hub.git"
+        git = ["git", "-C", str(work), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+
+        def commit(path, data, message):
+            (work / path).write_bytes(data)
+            subprocess.run(git + ["add", path], check=True)
+            subprocess.run(git + ["commit", "-qm", message], check=True)
+
+        subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
+        commit("seed.md", b"---\ntitle: s\n---\n", "seed")
+        base = subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True, text=True,
+                              check=True).stdout.strip()
+        subprocess.run(git + ["checkout", "-qb", "side"], check=True)
+        commit("a.md", b"---\ntitle: a\n---\n", "side")
+        subprocess.run(git + ["checkout", "-q", "main"], check=True)
+        commit("b.md", b"b\n", "main")
+        subprocess.run(git + ["merge", "-q", "--no-commit", "side"], check=True)
+        commit("a.md", b"---js\n{}\n---\n", "the merge writes a bad a.md")
+        commit("a.md", b"---\ntitle: a\n---\n", "fix a.md")
+        new = subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True, text=True,
+                             check=True).stdout.strip()
+        # As in quarantine: the pushed commits are present but unreferenced.
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(hub)], check=True)
+        subprocess.run(git + ["push", "-q", str(hub), f"{new}:refs/tmp/x",
+                              f"{base}:refs/heads/main"], check=True)
+        subprocess.run(["git", "update-ref", "-d", "refs/tmp/x"], cwd=hub, check=True)
+        monkeypatch.chdir(hub)
+        old = base if form == "existing" else ZERO_SHA
+        assert find_bad_frontmatter(old, new, []) == ["a.md"]
+
+    def test_an_unreadable_pushed_note_refuses_instead_of_skipping(self, tmp_path, monkeypatch):
+        from schist.pre_receive import find_bad_frontmatter, get_changed_files
+        repo, (old, new) = _bare_repo_with(tmp_path, [SEED, {
+            "research/mario/x.md": b"---js\n{}\n---\n"}])
+        _loosen(repo)
+        _drop_object(repo, "HEAD:research/mario/x.md")
+        monkeypatch.chdir(repo)
+        with pytest.raises(subprocess.CalledProcessError):
+            find_bad_frontmatter(old, new, get_changed_files(old, new))
+
+    def test_a_force_push_back_onto_an_old_bad_note_is_found(self, tmp_path, monkeypatch):
+        """A commit whose parent is an old hub commit still holding a bad
+        note: the note is in no pushed commit's own diff, but lands on the
+        branch, so the net diff from the old tip is read too."""
+        from schist.pre_receive import find_bad_frontmatter, get_changed_files
+        repo, (old_bad, tip) = _bare_repo_with(tmp_path, [
+            {"research/mario/x.md": b"---js\n{}\n---\n"},
+            {"research/mario/x.md": b"---\ntitle: x\n---\n"}])
+        rewound = subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "commit-tree",
+             f"{old_bad}^{{tree}}", "-p", old_bad, "-m", "rewind"],
+            cwd=repo, capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
+        monkeypatch.chdir(repo)
+        assert find_bad_frontmatter(tip, rewound, get_changed_files(tip, rewound)) == [
+            "research/mario/x.md"]
+
+    def test_a_root_commit_is_read_whatever_the_hub_git_config(self, tmp_path, monkeypatch):
+        """`log.showRoot=false` in the hub user's git config hid a root
+        commit's files from `git log`."""
+        from schist.pre_receive import ZERO_SHA, find_bad_frontmatter, get_changed_files
+        repo, _ = _bare_repo_with(tmp_path, [SEED])
+        stream = (b"commit refs/heads/orphan\ncommitter t <t@example.com> 1700000100 +0000\n"
+                  b"data 2\nc\nM 100644 inline r.md\ndata 9\n---js\n{}\n\n\n")
+        subprocess.run(["git", "fast-import", "--quiet"], cwd=repo, input=stream, check=True)
+        root = subprocess.run(["git", "rev-parse", "orphan"], cwd=repo, capture_output=True,
+                              text=True, encoding="utf-8", check=True).stdout.strip()
+        subprocess.run(["git", "update-ref", "-d", "refs/heads/orphan"], cwd=repo, check=True)
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / ".gitconfig").write_text("[log]\n\tshowRoot = false\n", encoding="utf-8")
+        monkeypatch.setenv("HOME", str(home))
+        # conftest points GIT_CONFIG_GLOBAL at an empty file; this test needs
+        # the hub user's config read.
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(home / ".gitconfig"))
+        monkeypatch.chdir(repo)
+        assert get_changed_files(ZERO_SHA, root) == ["r.md"]
+        assert find_bad_frontmatter(ZERO_SHA, root, ["r.md"]) == ["r.md"]
+
+    def test_a_push_listing_too_many_versions_is_refused(self, tmp_path, monkeypatch, capsys):
+        import schist.pre_receive as pr
+        commits = [SEED] + [{f"research/mario/n{i}.md": b"n%d\n" % i} for i in range(10)]
+        repo, shas = _bare_repo_with(tmp_path, commits)
+        monkeypatch.chdir(repo)
+        monkeypatch.setattr(pr, "SCAN_ENTRY_LIMIT", 5)
+        with pytest.raises(pr.ScanLimitExceeded):
+            pr.find_bad_frontmatter(shas[0], shas[-1], [])
+        from schist.acl import parse_vault_data
+        acl = parse_vault_data({
+            "name": "v", "vault_version": 1, "scope_convention": "subdirectory",
+            "participants": [{"name": "admin", "type": "agent"}],
+            "access": {"admin": {"read": ["*"], "write": ["*"]}}})
+        rc = pr.main(stdin=[f"{shas[0]} {shas[-1]} refs/heads/main"], acl=acl, identity="admin",
+                     log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
+        assert rc == 1
+        assert "REJECTED: push is too large for the hub to check" in capsys.readouterr().err
+
+    def test_one_blob_at_many_paths_is_listed_in_linear_time(self, tmp_path, monkeypatch):
+        """Each blob's paths were kept in a list with a membership test, so
+        one blob at every path of a large tree cost paths squared: the two-tree
+        attack took the whole 60 s timeout. Linear, this takes well under a
+        second."""
+        import time
+        from schist.pre_receive import _pushed_markdown_blobs
+        repo, (old,) = _bare_repo_with(tmp_path, [SEED])
+        git = ["git", "-C", str(repo)]
+        blob = subprocess.run(git + ["hash-object", "-w", "--stdin"], input=b"n\n",
+                              capture_output=True, check=True).stdout.strip().decode()
+        tree = subprocess.run(git + ["mktree"], capture_output=True, check=True, input="".join(
+            f"100644 blob {blob}\tn{i}.md\n" for i in range(40_000)).encode()).stdout.strip().decode()
+        new = subprocess.run(git + ["-c", "user.name=t", "-c", "user.email=t@example.com",
+                                    "commit-tree", tree, "-p", old, "-m", "wide"],
+                             capture_output=True, check=True).stdout.strip().decode()
+        monkeypatch.chdir(repo)
+        start = time.monotonic()
+        blobs = _pushed_markdown_blobs(old, new)
+        assert len(blobs[blob]) == 40_000
+        assert time.monotonic() - start < 8
+
+    def test_every_listing_pins_the_git_config_it_depends_on(self, tmp_path, monkeypatch):
+        """Each of --root and the -c pins is enough alone for a root commit,
+        so the behavioural test above cannot see one of them go missing:
+        assert both on every listing command."""
+        import schist.pre_receive as pr
+        repo, (old, new) = _bare_repo_with(tmp_path, [SEED, {"research/mario/x.md": b"x\n"}])
+        monkeypatch.chdir(repo)
+        real_popen, cmds = subprocess.Popen, []
+
+        def spy(cmd, *a, **k):
+            cmds.append(list(cmd))
+            return real_popen(cmd, *a, **k)
+
+        monkeypatch.setattr(subprocess, "Popen", spy)
+        pr.get_changed_files(old, new)
+        pr.get_changed_files(pr.ZERO_SHA, new)
+        pr._pushed_markdown_blobs(old, new)
+        pr._pushed_markdown_blobs(pr.ZERO_SHA, new)
+        listings = [c for c in cmds if any(v in c for v in ("log", "diff", "diff-tree"))]
+        assert len(listings) == 6
+        for cmd in listings:
+            assert cmd[:len(pr._SCAN_GIT)] == pr._SCAN_GIT, cmd
+            for pin in ("log.showRoot=true", "log.diffMerges=separate", "log.showSignature=false",
+                        "diff.ignoreSubmodules=none"):
+                assert pin in cmd, (pin, cmd)
+            if "log" in cmd:
+                assert "--root" in cmd, cmd
+
+    @pytest.mark.parametrize("where", ["global", "hub", "gitmodules"])
+    def test_gitlinks_are_listed_whatever_the_hub_git_config(self, tmp_path, monkeypatch, where):
+        """`diff.ignoreSubmodules=all` in the hub user's config dropped gitlinks
+        from the scope listing, so a scoped writer could add one at any path.
+        A hub's `submodule.<name>.ignore` and a `.gitmodules` asking the same
+        are covered too."""
+        from schist.pre_receive import ZERO_SHA, get_changed_files
+        repo, (old,) = _bare_repo_with(tmp_path, [{
+            "research/mario/x.md": b"x\n",
+            ".gitmodules": (b'[submodule "sub"]\n\tpath = other/sub\n\turl = x\n'
+                            b'\tignore = all\n')}])
+        git = ["git", "-C", str(repo)]
+        base = subprocess.run(git + ["ls-tree", "-z", old], capture_output=True,
+                              check=True).stdout
+        fake = "1" * 40
+        oth = subprocess.run(git + ["mktree"], input=f"160000 commit {fake}\tsub\n".encode(),
+                             capture_output=True, check=True).stdout.strip().decode()
+        res = subprocess.run(git + ["mktree"], capture_output=True, check=True, input=(
+            f"040000 tree " + subprocess.run(
+                git + ["mktree"], input=f"160000 commit {fake}\tx.md\n".encode(),
+                capture_output=True, check=True).stdout.strip().decode() + "\tmario\n").encode()
+        ).stdout.strip().decode()
+        entries = [e for e in base.split(b"\0") if e and not e.endswith(b"\tresearch")]
+        tree = subprocess.run(git + ["mktree", "-z"], capture_output=True, check=True, input=(
+            b"\0".join(entries) + b"\0" + f"040000 tree {oth}\tother\0".encode()
+            + f"040000 tree {res}\tresearch\0".encode())).stdout.strip().decode()
+        new = subprocess.run(git + ["-c", "user.name=t", "-c", "user.email=t@example.com",
+                                    "commit-tree", tree, "-p", old, "-m", "gitlinks"],
+                             capture_output=True, check=True).stdout.strip().decode()
+        cfg = tmp_path / "gitconfig"
+        cfg.write_text("[diff]\n\tignoreSubmodules = all\n" if where == "global" else "",
+                       encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(cfg))
+        monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+        if where == "hub":
+            subprocess.run(git + ["config", "submodule.sub.path", "other/sub"], check=True)
+            subprocess.run(git + ["config", "submodule.sub.ignore", "all"], check=True)
+        monkeypatch.chdir(repo)
+        expected = ["other/sub", "research/mario/x.md"]
+        assert sorted(get_changed_files(old, new)) == expected
+        subprocess.run(["git", "update-ref", "-d", "refs/heads/main"], check=True)
+        assert sorted(get_changed_files(ZERO_SHA, new)) == [".gitmodules"] + expected
+
+    def test_a_listing_cut_short_refuses_instead_of_crashing(self):
+        from schist.pre_receive import _raw_entries
+        with pytest.raises(subprocess.CalledProcessError):
+            list(_raw_entries([b"\n:100644 100644 " + b"a" * 40 + b" " + b"b" * 40 + b" M"]))
+        with pytest.raises(subprocess.CalledProcessError):
+            list(_raw_entries([b":100644 100644", b"x.md"]))
+
+    def test_a_timeout_kills_the_whole_process_group(self):
+        """A wrapper whose child keeps stdout open held the read until the
+        child exited, well past the timeout."""
+        import time
+        from schist.pre_receive import _git_nul_tokens
+        start = time.monotonic()
+        with pytest.raises(subprocess.TimeoutExpired):
+            list(_git_nul_tokens(["sh", "-c", "sleep 30 & sleep 30"], 0.5))
+        assert time.monotonic() - start < 10
+
+    @pytest.mark.parametrize("data", [
+        b"---js\n{}\n", b"---\ntitle: x\n", b"\xef\xbb\xbf---js\n", b"----\n", b"plain\n", b"",
+        b"---" + b" " * 10_000 + b"js\nbody\n",       # first line longer than the head
+        b"---" + b" " * 10_000 + b"\nbody js\n",      # long blank first line, text after it
+        b"---" + b" " * 10_000,                        # no newline at all
+        b"--- js" + b"\n" + b"x" * 200_000,
+    ], ids=range(10))
+    def test_the_streamed_opener_answers_like_the_whole_blob(self, data):
+        import io
+        from schist.pre_receive import _bad_opener, _read_opener
+        assert _bad_opener(_read_opener(io.BytesIO(data), len(data))) == _bad_opener(data)
+
+    def test_a_large_note_is_not_held_in_memory(self, tmp_path):
+        """A 1 GB note compresses to a few MB, and reading it whole held
+        gigabytes on the hub. Measured in a fresh interpreter, whose peak RSS
+        reflects only the scan, with the blob written to disk in chunks."""
+        repo, (old,) = _bare_repo_with(tmp_path, [SEED])
+        note = tmp_path / "big.md"
+        with open(note, "wb") as f:
+            f.write(b"---\ntitle: big\n---\n")
+            for _ in range(300):
+                f.write(b"x" * (1 << 20))
+        git = ["git", "-C", str(repo)]
+        blob = subprocess.run(git + ["hash-object", "-w", str(note)], capture_output=True,
+                              check=True).stdout.strip().decode()
+        note.unlink()
+        tree = subprocess.run(git + ["mktree"], input=f"100644 blob {blob}\tbig.md\n".encode(),
+                              capture_output=True, check=True).stdout.strip().decode()
+        new = subprocess.run(git + ["-c", "user.name=t", "-c", "user.email=t@example.com",
+                                    "commit-tree", tree, "-p", old, "-m", "big"],
+                             capture_output=True, check=True).stdout.strip().decode()
+        code = ("import resource, sys\n"
+                "from schist.pre_receive import find_bad_frontmatter, get_changed_files\n"
+                "old, new = sys.argv[1:3]\n"
+                "assert find_bad_frontmatter(old, new, get_changed_files(old, new)) == []\n"
+                "print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)\n")
+        env = {k: v for k, v in os.environ.items() if k != "GIT_DIR"}
+        r = subprocess.run([sys.executable, "-c", code, old, new], cwd=repo, env=env,
+                           capture_output=True, text=True, encoding="utf-8", check=True)
+        peak_mb = _peak_rss_mb(int(r.stdout.strip()))
+        assert peak_mb < 150, peak_mb
+
+    def test_peak_rss_is_read_in_each_platforms_unit(self):
+        """ru_maxrss is KiB on Linux and bytes on macOS; dividing by 1024
+        everywhere read a Mac's 40 MB as 40,000 MB."""
+        assert _peak_rss_mb(40 << 20, "darwin") == 40
+        assert _peak_rss_mb(40 << 10, "linux") == 40
+
+    def test_get_changed_files_keeps_a_path_that_begins_with_a_line_break(self, tmp_path,
+                                                                          monkeypatch):
+        """Nothing is stripped from a listed path: `\nresearch.md` is not
+        `research.md`, and stripping a leading line break would let a root
+        path such as `\nresearch/alpha/x.md` be checked as one inside a
+        granted scope."""
+        from schist.pre_receive import get_changed_files
+        repo, (old,) = _bare_repo_with(tmp_path, [SEED])
+        git = ["git", "-C", str(repo)]
+        blob = subprocess.run(git + ["hash-object", "-w", "--stdin"], input=b"x\n",
+                              capture_output=True, check=True).stdout.strip().decode()
+        base = subprocess.run(git + ["ls-tree", "-z", old], capture_output=True,
+                              check=True).stdout
+        tree = subprocess.run(git + ["mktree", "-z"], capture_output=True, check=True,
+                              input=base + f"100644 blob {blob}\t\nresearch.md\0".encode()
+                              ).stdout.strip().decode()
+        new = subprocess.run(git + ["-c", "user.name=t", "-c", "user.email=t@example.com",
+                                    "commit-tree", tree, "-p", old, "-m", "nl"],
+                             capture_output=True, check=True).stdout.strip().decode()
+        monkeypatch.chdir(repo)
+        assert get_changed_files(old, new) == ["\nresearch.md"]
+
+    @pytest.mark.parametrize("listing", ["scope", "scan"])
+    def test_path_bytes_are_capped(self, tmp_path, monkeypatch, listing):
+        """Nested directories make each path long while the pushed trees stay
+        small; the entry cap alone let about 2 MB pushed hold gigabytes."""
+        import schist.pre_receive as pr
+        repo, (old, new) = _bare_repo_with(tmp_path, [SEED, {
+            f"research/mario/n{i}.md": b"n\n" for i in range(20)}])
+        monkeypatch.chdir(repo)
+        monkeypatch.setattr(pr, "SCAN_BYTE_LIMIT", 200)
+        with pytest.raises(pr.ScanLimitExceeded, match="MB of paths"):
+            if listing == "scope":
+                pr.get_changed_files(old, new)
+            else:
+                pr._pushed_markdown_blobs(old, new)
+
+    def test_a_path_longer_than_path_max_is_refused(self, tmp_path, monkeypatch, git_version):
+        """The scope listing, which runs first, decides; the frontmatter scan
+        only counts, so it does not refuse a long path the push deletes."""
+        import schist.pre_receive as pr
+        repo, (old, new) = _bare_repo_with(tmp_path, [SEED, {
+            "research/mario/a-rather-long-note-name.md": b"n\n"}])
+        monkeypatch.chdir(repo)
+        monkeypatch.setattr(pr, "MAX_PATH_BYTES", 30)
+        with pytest.raises(pr.ScanLimitExceeded, match="path longer than 30 bytes"):
+            pr.get_changed_files(old, new)
+        assert list(pr._pushed_markdown_blobs(old, new).values()) == [
+            ["research/mario/a-rather-long-note-name.md"]]
+
+    def test_a_long_path_holding_a_line_break_is_checked_against_the_tip(self, tmp_path,
+                                                                        monkeypatch, git_version):
+        """A name holding a line break cannot go to a line-based cat-file."""
+        import schist.pre_receive as pr
+        repo, (old,) = _bare_repo_with(tmp_path, [SEED])
+        git = ["git", "-C", str(repo)]
+        blob = subprocess.run(git + ["hash-object", "-w", "--stdin"], input=b"x\n",
+                              capture_output=True, check=True).stdout.strip().decode()
+        base = subprocess.run(git + ["ls-tree", "-z", old], capture_output=True,
+                              check=True).stdout
+        name = "a-long\nname-that-is-over-thirty-bytes.md"
+        tree = subprocess.run(git + ["mktree", "-z"], capture_output=True, check=True,
+                              input=base + f"100644 blob {blob}\t{name}\0".encode()
+                              ).stdout.strip().decode()
+        new = subprocess.run(git + ["-c", "user.name=t", "-c", "user.email=t@example.com",
+                                    "commit-tree", tree, "-p", old, "-m", "nl"],
+                             capture_output=True, check=True).stdout.strip().decode()
+        monkeypatch.chdir(repo)
+        monkeypatch.setattr(pr, "MAX_PATH_BYTES", 30)
+        with pytest.raises(pr.ScanLimitExceeded, match="path longer than 30 bytes"):
+            pr.get_changed_files(old, new)
+        assert name in pr.get_changed_files(new, old)      # the push that deletes it
+
+    @pytest.mark.parametrize("present", [[], ["plain"], ["newline"], ["plain", "newline"]])
+    def test_long_names_with_and_without_line_breaks_are_looked_up(self, tmp_path, monkeypatch,
+                                                                   git_version, present):
+        """Each lookup path answers for its own names, together in one push."""
+        import schist.pre_receive as pr
+        names = {"plain": "a-rather-long-name-over-thirty bytes.md",
+                 "newline": "another\nrather-long-name-over-thirty.md"}
+        repo, (old,) = _bare_repo_with(tmp_path, [SEED])
+        git = ["git", "-C", str(repo)]
+        blob = subprocess.run(git + ["hash-object", "-w", "--stdin"], input=b"x\n",
+                              capture_output=True, check=True).stdout.strip().decode()
+        base = subprocess.run(git + ["ls-tree", "-z", old], capture_output=True,
+                              check=True).stdout
+        tree = subprocess.run(git + ["mktree", "-z"], capture_output=True, check=True,
+                              input=base + b"".join(f"100644 blob {blob}\t{names[k]}\0".encode()
+                                                    for k in present)).stdout.strip().decode()
+        new = subprocess.run(git + ["-c", "user.name=t", "-c", "user.email=t@example.com",
+                                    "commit-tree", tree, "-p", old, "-m", "t"],
+                             capture_output=True, check=True).stdout.strip().decode()
+        monkeypatch.chdir(repo)
+        monkeypatch.setattr(pr, "MAX_PATH_BYTES", 30)
+        asked = [n.encode() for n in names.values()]
+        if present:
+            with pytest.raises(pr.ScanLimitExceeded, match="path longer than 30 bytes"):
+                pr._refuse_long_paths(new, asked)
+        else:
+            pr._refuse_long_paths(new, asked)
+
+    @pytest.mark.parametrize("entry", [
+        "100644 blob {blob}\ta-rather-long-name-over-thirty-bytes.md\r",
+        "100644 blob {blob}\t\ra-rather-long-name-over-thirty-bytes.md",
+        "100644 blob {blob}\ta-rather-long\r\nname-over-thirty-bytes.md\r",
+        "160000 commit {commit}\ta-rather-long-gitlink-over-thirty-bytes",
+    ])
+    def test_a_long_name_in_the_tip_is_found_whatever_bytes_it_holds(
+            self, tmp_path, monkeypatch, git_version, entry):
+        """Looked up by listing the tip, not by name: a line-based cat-file
+        drops a trailing carriage return, so a name ending in one was looked
+        up as a different name, read as missing and let through; a gitlink
+        names a commit the hub need not have, so cat-file read it as missing
+        too."""
+        import schist.pre_receive as pr
+        repo, (old,) = _bare_repo_with(tmp_path, [SEED])
+        git = ["git", "-C", str(repo)]
+        blob = subprocess.run(git + ["hash-object", "-w", "--stdin"], input=b"x\n",
+                              capture_output=True, check=True).stdout.strip().decode()
+        base = subprocess.run(git + ["ls-tree", "-z", old], capture_output=True,
+                              check=True).stdout
+        line = entry.format(blob=blob, commit="1" * 40)
+        tree = subprocess.run(git + ["mktree", "-z", "--missing"], capture_output=True,
+                              check=True, input=base + line.encode() + b"\0"
+                              ).stdout.strip().decode()
+        new = subprocess.run(git + ["-c", "user.name=t", "-c", "user.email=t@example.com",
+                                    "commit-tree", tree, "-p", old, "-m", "t"],
+                             capture_output=True, check=True).stdout.strip().decode()
+        monkeypatch.chdir(repo)
+        monkeypatch.setattr(pr, "MAX_PATH_BYTES", 30)
+        name = line.split("\t", 1)[1]
+        with pytest.raises(pr.ScanLimitExceeded, match="path longer than 30 bytes"):
+            pr._refuse_long_paths(new, [name.encode()])
+        with pytest.raises(pr.ScanLimitExceeded, match="path longer than 30 bytes"):
+            pr.get_changed_files(old, new)
+        assert name in pr.get_changed_files(new, old)      # the push that deletes it
+
+    def test_the_tip_listing_counts_against_the_push_wide_totals(self, tmp_path, monkeypatch):
+        """Each ref line listing the tip against a fresh total let a push of
+        many ref lines list one large tip once per line."""
+        import schist.pre_receive as pr
+        name = "research/mario/a-rather-long-note-name.md"
+        repo, (old, new) = _bare_repo_with(tmp_path, [SEED, {
+            f"research/mario/n{i}.md": b"n\n" for i in range(20)}])
+        monkeypatch.chdir(repo)
+        monkeypatch.setattr(pr, "MAX_PATH_BYTES", 30)
+        tip_entries = len(subprocess.run(["git", "ls-tree", "-r", "-z", "--name-only", new],
+                                         capture_output=True, check=True).stdout.split(b"\0")) - 1
+        totals = [0, 0]
+        pr._refuse_long_paths(new, [name.encode()], totals)
+        assert totals[0] == tip_entries
+        monkeypatch.setattr(pr, "SCAN_ENTRY_LIMIT", tip_entries + 5)
+        with pytest.raises(pr.ScanLimitExceeded, match="file versions"):
+            pr._refuse_long_paths(new, [name.encode()], totals)
+
+    def test_many_long_names_cost_one_git_process(self, tmp_path, monkeypatch):
+        """One process per name holding a line break let a push of small
+        trees spawn tens of thousands of git processes on the hub."""
+        import schist.pre_receive as pr
+        repo, (old,) = _bare_repo_with(tmp_path, [SEED])
+        monkeypatch.chdir(repo)
+        monkeypatch.setattr(pr, "MAX_PATH_BYTES", 30)
+        spawned = []
+        real_popen = subprocess.Popen
+
+        def counting_popen(*args, **kwargs):
+            spawned.append(args[0] if args else kwargs.get("args"))
+            return real_popen(*args, **kwargs)
+
+        monkeypatch.setattr(pr.subprocess, "Popen", counting_popen)
+        names = [f"missing\nname-number-{i:03d}-over-thirty-bytes.md".encode() for i in range(50)]
+        pr._refuse_long_paths(old, names)
+        assert len(spawned) == 1
+
+    def test_a_push_may_delete_a_long_path(self, tmp_path, monkeypatch, git_version):
+        """A path over the limit that landed before the hook refused them must
+        still be removable; only a long path left in the pushed tip refuses."""
+        import schist.pre_receive as pr
+        name = "research/mario/a-rather-long-note-name.md"
+        repo, (base, with_long, without) = _bare_repo_with(tmp_path, [SEED, {name: b"n\n"},
+                                                                     {name: None}])
+        monkeypatch.chdir(repo)
+        monkeypatch.setattr(pr, "MAX_PATH_BYTES", 30)
+        assert name in pr.get_changed_files(with_long, without)
+        # Added and deleted inside one push: still listed for the scope check
+        # of the commit that held it, but not refused, since the tip has none.
+        assert name in pr.get_changed_files(base, without)
+        with pytest.raises(pr.ScanLimitExceeded, match="path longer than 30 bytes"):
+            pr.get_changed_files(base, with_long)
+
+    def test_main_prints_the_cap_that_was_hit(self, tmp_path, monkeypatch, capsys, git_version):
+        import schist.pre_receive as pr
+        from schist.acl import parse_vault_data
+        repo, (old, new) = _bare_repo_with(tmp_path, [SEED, {
+            "research/mario/a-rather-long-note-name.md": b"n\n"}])
+        monkeypatch.chdir(repo)
+        monkeypatch.setattr(pr, "MAX_PATH_BYTES", 30)
+        acl = parse_vault_data({
+            "name": "v", "vault_version": 1, "scope_convention": "subdirectory",
+            "participants": [{"name": "admin", "type": "agent"}],
+            "access": {"admin": {"read": ["*"], "write": ["*"]}}})
+        rc = pr.main(stdin=[f"{old} {new} refs/heads/main"], acl=acl, identity="admin",
+                     log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
+        assert rc == 1
+        assert ("REJECTED: push contains a path longer than 30 bytes; shorten it."
+                in capsys.readouterr().err)
+
+    def test_undecodable_bytes_are_found_like_the_character_loop(self):
+        from schist.pre_receive import _has_undecodable_bytes
+        for value in ["", "plain.md", "caf\u00e9.md", "a\udc80b", "x\udcff", "\udc7f", "\udd00",
+                      "\ud800", "n\u2028.md"]:
+            assert _has_undecodable_bytes(value) == any(0xDC80 <= ord(c) <= 0xDCFF for c in value)
+
+    def test_get_changed_files_is_capped(self, tmp_path, monkeypatch):
+        import schist.pre_receive as pr
+        commits = [SEED] + [{f"research/mario/n{i}.md": b"n\n"} for i in range(10)]
+        repo, shas = _bare_repo_with(tmp_path, commits)
+        monkeypatch.chdir(repo)
+        monkeypatch.setattr(pr, "SCAN_ENTRY_LIMIT", 5)
+        with pytest.raises(pr.ScanLimitExceeded):
+            pr.get_changed_files(shas[0], shas[-1])
+
+    def test_a_long_token_is_read_in_linear_time(self):
+        """One path is one token, and git puts no limit on a tree entry's
+        name. Joining the open token to each 64 KB chunk took about 10 s for
+        48 MB on the hub (and 4x per doubling); read linearly it is well
+        under a second."""
+        import time
+        from schist.pre_receive import _git_nul_tokens
+        size = 48 << 20
+        cmd = [sys.executable, "-c",
+               f"import sys; sys.stdout.buffer.write(b'a' * {size} + b'\\0b')"]
+        start = time.monotonic()
+        tokens = list(_git_nul_tokens(cmd, 60))
+        assert time.monotonic() - start < 3
+        assert [len(t) for t in tokens] == [size, 1]
+
+    def test_tokens_split_across_chunks_are_kept_whole(self):
+        from schist.pre_receive import _git_nul_tokens
+        expected = [b"a" * 70_000, b"", b"b", b"c" * 200_000, b"d" * 65_535, b"tail"]
+        lengths = [len(t) for t in expected]
+        cmd = [sys.executable, "-c",
+               "import sys\n"
+               f"parts = [c * n for c, n in zip([b'a', b'', b'b', b'c', b'd'], {lengths[:5]})]\n"
+               "sys.stdout.buffer.write(b'\\0'.join(parts + [b'tail']))"]
+        assert list(_git_nul_tokens(cmd, 30)) == expected
+
+    def test_an_open_token_past_the_byte_cap_is_refused_before_its_end(self, monkeypatch):
+        import schist.pre_receive as pr
+        monkeypatch.setattr(pr, "SCAN_BYTE_LIMIT", 100_000)
+        # The token never ends: refused as too large, not as a timeout.
+        cmd = [sys.executable, "-c",
+               "import sys\nwhile True: sys.stdout.buffer.write(b'a' * 65536)"]
+        with pytest.raises(pr.ScanLimitExceeded, match="MB of paths"):
+            list(pr._git_nul_tokens(cmd, 20))
+
+    def test_a_stalled_git_listing_times_out(self):
+        from schist.pre_receive import _git_nul_tokens
+        import time
+        start = time.monotonic()
+        with pytest.raises(subprocess.TimeoutExpired):
+            list(_git_nul_tokens(["sh", "-c", "sleep 30"], 0.5))
+        assert time.monotonic() - start < 10
+
+
 class TestRefPolicy:
     @pytest.fixture(autouse=True)
     def _isolate(self, tmp_path, monkeypatch):
@@ -1468,6 +2094,105 @@ class TestRefPolicy:
         assert self._run(acl, "cluster-mario", "aaa bbb refs/heads/trunk", tmp_path) == 0
         assert self._run(acl, "cluster-mario", "aaa bbb refs/heads/main", tmp_path) == 1
 
+    def test_a_hub_head_that_is_not_a_branch_refuses_scoped_writers(self, acl, tmp_path,
+                                                                     monkeypatch, capsys):
+        """Guessing refs/heads/main let a scoped writer create `main` on a
+        hub serving another branch."""
+        from schist.pre_receive import served_branch
+        monkeypatch.delenv("GIT_DIR")
+        repo, (sha,) = _bare_repo_with(tmp_path, [SEED])
+        subprocess.run(["git", "update-ref", "--no-deref", "HEAD", sha], cwd=repo, check=True)
+        monkeypatch.chdir(repo)
+        assert served_branch() is None
+        assert self._run(acl, "cluster-mario", "aaa bbb refs/heads/main", tmp_path) == 1
+        assert "cannot read the branch it serves" in capsys.readouterr().err
+        assert self._run(acl, "admin", "aaa bbb refs/heads/main", tmp_path) == 0
+
+    def test_a_failed_head_read_raises(self, acl, tmp_path, monkeypatch):
+        from schist.pre_receive import served_branch
+        monkeypatch.delenv("GIT_DIR")
+        repo, _ = _bare_repo_with(tmp_path, [SEED])
+        monkeypatch.chdir(repo)
+        real_run = subprocess.run
+
+        def slow_head(args, *a, **k):
+            if list(args[:2]) == ["git", "symbolic-ref"]:
+                raise subprocess.TimeoutExpired(args, 10)
+            return real_run(args, *a, **k)
+
+        monkeypatch.setattr(subprocess, "run", slow_head)
+        with pytest.raises(subprocess.TimeoutExpired):
+            served_branch()
+
+    def test_a_hub_that_cannot_read_its_branch_asks_for_a_retry(self, acl, tmp_path, monkeypatch,
+                                                               capsys):
+        """A timeout is the hub's fault and may clear: an ERROR line, which
+        spokes read as transient, not a REJECTED refusal of the push."""
+        def slow():
+            raise subprocess.TimeoutExpired(["git", "symbolic-ref"], 10)
+        monkeypatch.setattr("schist.pre_receive.served_branch", slow)
+        assert self._run(acl, "cluster-mario", "aaa bbb refs/heads/main", tmp_path) == 1
+        err = capsys.readouterr().err
+        assert err.startswith("ERROR: the hub could not read the branch it serves (git timed out)")
+        assert "REJECTED" not in err
+
+    # Git allows these in a ref name; Python's no-argument split() and strip()
+    # treat them as whitespace (NO-BREAK SPACE, NEXT LINE, LINE SEPARATOR,
+    # IDEOGRAPHIC SPACE).
+    @pytest.mark.parametrize("sep", [0x00A0, 0x0085, 0x2028, 0x3000], ids=hex)
+    @pytest.mark.parametrize("tail", ["x", ""], ids=["inside", "trailing"])
+    def test_unicode_whitespace_does_not_shorten_a_ref_name(self, acl, tmp_path, capsys,
+                                                            sep, tail):
+        ref = "refs/heads/main" + chr(sep) + tail
+        assert self._run(acl, "cluster-mario", f"aaa bbb {ref}", tmp_path) == 1
+        assert "may only push refs/heads/main" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("locale_encoding, pushed, shown", [
+        # A trailing NO-BREAK SPACE on the last line survives reading stdin.
+        ("utf-8", b"aaa bbb refs/heads/main\xc2\xa0\n", "refs/heads/main\xa0:"),
+        # A name that is not UTF-8 reads the same under any locale sshd forwards.
+        ("latin-1", b"aaa bbb refs/heads/main\xff\n", "refs/heads/main\\xff:"),
+    ], ids=["trailing-nbsp", "not-utf8"])
+    def test_ref_names_read_from_stdin_are_kept_whole(self, acl, tmp_path, monkeypatch, capsys,
+                                                      locale_encoding, pushed, shown):
+        import io
+        import sys
+        monkeypatch.setattr(sys, "stdin",
+                            io.TextIOWrapper(io.BytesIO(pushed), encoding=locale_encoding))
+        with patch("schist.pre_receive.get_changed_files", return_value=["research/mario/n.md"]):
+            rc = main(acl=acl, identity="cluster-mario",
+                      log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
+        assert rc == 1
+        assert shown in capsys.readouterr().err
+
+    @pytest.mark.parametrize("identity", ["cluster-mario", "admin"])
+    def test_a_line_the_hook_cannot_read_is_refused(self, acl, tmp_path, capsys, identity):
+        assert self._run(acl, identity, "aaa bbb", tmp_path) == 1
+        assert "not a ref update the hook can read" in capsys.readouterr().err
+
+    def test_empty_lines_are_skipped(self, acl, tmp_path):
+        with patch("schist.pre_receive.get_changed_files", return_value=["research/mario/n.md"]):
+            assert main(stdin=["", "aaa bbb refs/heads/main", ""], acl=acl,
+                        identity="cluster-mario", log_path=tmp_path / "rejected.log",
+                        db_path=tmp_path / "rl.sqlite") == 0
+
+    def test_a_non_ascii_served_branch_is_read_as_utf8_under_any_locale(self, tmp_path,
+                                                                        monkeypatch):
+        """served_branch() decodes HEAD the way main() decodes pushed ref
+        names. Read by an ASCII or latin-1 locale, a non-ASCII branch name
+        would match a differently named ref pushed alongside it."""
+        monkeypatch.delenv("GIT_DIR")
+        repo, _ = _bare_repo_with(tmp_path, [SEED])
+        head = "refs/heads/ma" + chr(0xEF) + "n"
+        subprocess.run(["git", "symbolic-ref", "HEAD", head], cwd=repo, check=True)
+        env = {"PATH": os.environ["PATH"], "LC_ALL": "C", "PYTHONCOERCECLOCALE": "0",
+               "PYTHONUTF8": "0", "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "from schist.pre_receive import served_branch; print(ascii(served_branch()))"],
+            cwd=repo, env=env, capture_output=True, text=True)
+        assert out.stdout.strip() == ascii(head), out.stderr
+
 
 # ── Rejection message follow-ups to #781 ─────────────────────────────────────
 
@@ -1477,13 +2202,12 @@ class TestRejectionMessages:
         monkeypatch.setenv("GIT_DIR", str(tmp_path))   # not a repo: HEAD falls back to main
 
     def test_acl_violations_are_reported_alongside_a_ref_refusal(self, acl, tmp_path, capsys):
-        """#790: a push that broke the ref rule on one ref returned before the
-        ACL violations found on its other refs were printed or logged, so the
-        pusher fixed one problem only to be refused again for the other."""
-        files = {"bbb": ["research/mario/n.md"], "ddd": ["security/out.md"]}
+        """#790: a push that broke the ref rule returned before the ACL
+        violations found on the ref were printed or logged, so the pusher
+        fixed one problem only to be refused again for the other."""
         with patch("schist.pre_receive.get_changed_files",
-                   side_effect=lambda old, new: files[new]):
-            rc = main(stdin=["aaa bbb refs/heads/feature", "ccc ddd refs/heads/main"],
+                   side_effect=lambda old, new, **k: ["security/out.md"]):
+            rc = main(stdin=["aaa bbb refs/heads/feature"],
                       acl=acl, identity="cluster-mario",
                       log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
         assert rc == 1
@@ -1517,18 +2241,29 @@ class TestRejectionMessages:
         err = capsys.readouterr().err
         assert "refs/heads/feature" in err and "security/out.md" in err
 
-    def test_a_ref_refusal_is_still_reported_when_a_later_diff_times_out(self, acl, tmp_path, capsys):
-        def diff(old, new):
-            if new == "ddd":
-                raise subprocess.TimeoutExpired("git log", 30)
-            return []
-        with patch("schist.pre_receive.get_changed_files", side_effect=diff):
-            rc = main(stdin=["aaa bbb refs/heads/feature", "ccc ddd refs/heads/main"],
+    @pytest.mark.parametrize("failure", [subprocess.TimeoutExpired("git log", 30),
+                                         subprocess.CalledProcessError(128, ["git", "log"])],
+                             ids=["timeout", "git-error"])
+    def test_a_ref_refusal_is_not_followed_by_a_retry_hint(self, acl, tmp_path, capsys, failure):
+        """The push is refused for the ref whatever a retry finds; an ERROR
+        line after it made both spoke-side classifiers read it as transient,
+        so clients retried a push that can never land."""
+        from schist.sync import classify_push_failure
+        with patch("schist.pre_receive.get_changed_files", side_effect=failure):
+            rc = main(stdin=["aaa bbb refs/heads/feature"],
                       acl=acl, identity="cluster-mario",
                       log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
         assert rc == 1
         err = capsys.readouterr().err
-        assert "REJECTED: push updates refs" in err and "timed out" in err
+        assert err.startswith("REJECTED: push updates refs") and "refs/heads/feature" in err
+        assert "ERROR" not in err and "retry" not in err
+        relayed = "".join(f"remote: {line}\n" for line in err.splitlines())
+        assert classify_push_failure(relayed) != "hub-transient"
+        # Without a ref refusal the same failure still asks for a retry.
+        with patch("schist.pre_receive.get_changed_files", side_effect=failure):
+            assert main(stdin=["aaa bbb refs/heads/main"], acl=acl, identity="cluster-mario",
+                        log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite") == 1
+        assert capsys.readouterr().err.startswith("ERROR: ")
 
     def test_main_passes_the_served_branch_to_the_hint(self, acl, tmp_path, monkeypatch, capsys):
         monkeypatch.setattr("schist.pre_receive.served_branch", lambda: "refs/heads/trunk")
@@ -1555,6 +2290,124 @@ class TestRejectionMessages:
             Violation("x", "security/x.md", "security", "refs/heads/main"),
         ])
         assert mixed.splitlines()[0] == "REJECTED: push contains out-of-scope writes"
+
+
+WILDCARD_ONLY = {
+    "name": "v", "vault_version": 1, "scope_convention": "subdirectory",
+    "participants": [{"name": "admin", "type": "agent"}, {"name": "alpha", "type": "agent"}],
+    "access": {"admin": {"read": ["*"], "write": ["*"]},
+               "alpha": {"read": ["*"], "write": ["research/alpha"]}}}
+
+
+class TestPushWideLimits:
+    """The scan caps bound the whole push: each extra ref line naming the
+    same commits listed their history again under a fresh count, and a
+    refused ref was scanned too, so K ref lines cost K times the cap."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self, monkeypatch):
+        monkeypatch.delenv("GIT_DIR", raising=False)
+        monkeypatch.setattr("schist.pre_receive.served_branch", lambda: "refs/heads/main")
+
+    def _repo(self, tmp_path, monkeypatch):
+        repo, (old, new) = _bare_repo_with(tmp_path, [SEED, {
+            f"research/alpha/n{i}.md": b"n\n" for i in range(4)}])
+        monkeypatch.chdir(repo)
+        return old, new
+
+    @pytest.mark.reads_blobs
+    @pytest.mark.parametrize("listing", ["scope", "scan"])
+    def test_the_caps_count_every_ref_line_of_a_push(self, tmp_path, monkeypatch, capsys,
+                                                     listing):
+        """Each ref lists 8 entries (4 per commit, 4 in the net diff), under
+        a cap of 20; four ref lines list 32."""
+        import schist.pre_receive as pr
+        old, new = self._repo(tmp_path, monkeypatch)
+        monkeypatch.setattr(pr, "SCAN_ENTRY_LIMIT", 20)
+        # Only the listing under test counts, so each total is pinned alone.
+        other = "get_changed_files" if listing == "scan" else "find_bad_frontmatter"
+        monkeypatch.setattr(pr, other, lambda *a, **k: [])
+        acl = parse_vault_data(WILDCARD_ONLY)
+        one = pr.main(stdin=[f"{old} {new} refs/heads/main"], acl=acl, identity="admin",
+                      log_path=tmp_path / "r.log", db_path=tmp_path / "rl.sqlite")
+        assert one == 0
+        capsys.readouterr()
+        rc = pr.main(stdin=[f"{old} {new} refs/heads/x{i}" for i in range(4)], acl=acl,
+                     identity="admin", log_path=tmp_path / "r.log",
+                     db_path=tmp_path / "rl.sqlite")
+        assert rc == 1
+        assert "REJECTED: push is too large for the hub to check" in capsys.readouterr().err
+
+    def test_a_shared_total_carries_across_calls(self, tmp_path, monkeypatch):
+        import schist.pre_receive as pr
+        old, new = self._repo(tmp_path, monkeypatch)
+        monkeypatch.setattr(pr, "SCAN_ENTRY_LIMIT", 12)
+        for listing in (pr.get_changed_files, pr._pushed_markdown_blobs):
+            listing(old, new)
+            listing(old, new)                   # a fresh count each call by default
+            totals = [0, 0]
+            listing(old, new, totals)
+            assert totals[0] == 8
+            with pytest.raises(pr.ScanLimitExceeded):
+                listing(old, new, totals)
+
+    def test_a_scoped_writers_multi_ref_push_is_refused_before_any_scan(self, tmp_path,
+                                                                          capsys):
+        """Git sends each ref once and such an identity may update only the
+        served branch, so the push holds a refused ref whatever it carries;
+        every refusal is named, the served branch's own included."""
+        acl = parse_vault_data(WILDCARD_ONLY)
+        log = tmp_path / "r.log"
+
+        def no_scan(*a, **k):
+            raise AssertionError("scanned")
+        with patch("schist.pre_receive.get_changed_files", side_effect=no_scan), \
+                patch("schist.pre_receive.find_bad_frontmatter", side_effect=no_scan):
+            rc = main(stdin=["aaa bbb refs/heads/main"] +
+                      [f"aaa bbb refs/heads/x{i}" for i in range(3)],
+                      acl=acl, identity="alpha", log_path=log, db_path=tmp_path / "rl.sqlite")
+            assert rc == 1
+            err = capsys.readouterr().err
+            assert [f"refs/heads/x{i}" in err for i in range(3)] == [True] * 3
+            assert "refs/heads/main:" not in err
+            rc = main(stdin=["aaa bbb refs/heads/x0", f"aaa {'0' * 40} refs/heads/main"],
+                      acl=acl, identity="alpha", log_path=log, db_path=tmp_path / "rl.sqlite")
+            assert rc == 1
+            assert "refs/heads/main: only a '*' writer may delete a ref" in capsys.readouterr().err
+            # Not something git sends, but two lines that each pass alone
+            # are refused too.
+            rc = main(stdin=["aaa bbb refs/heads/main", "ccc ddd refs/heads/main"],
+                      acl=acl, identity="alpha", log_path=log, db_path=tmp_path / "rl.sqlite")
+            assert rc == 1
+            assert "may update only the served branch" in capsys.readouterr().err
+        assert log.read_text(encoding="utf-8").count("REF_REJECTED identity=alpha") == 6
+
+    def test_a_refusal_prints_and_logs_a_bounded_number_of_paths(self, tmp_path, capsys):
+        import schist.pre_receive as pr
+        limit = pr.MAX_REPORTED_VIOLATIONS
+        refused = [f"security/n{i}.md" for i in range(limit + 50)]
+        log = tmp_path / "r.log"
+        with patch("schist.pre_receive.get_changed_files", return_value=refused):
+            rc = main(stdin=["aaa bbb refs/heads/main"], acl=parse_vault_data(WILDCARD_ONLY),
+                      identity="alpha", log_path=log, db_path=tmp_path / "rl.sqlite")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert f"security/n{limit - 1}.md" in err and f"security/n{limit}.md" not in err
+        assert "  ... and 50 more" in err
+        (entry,) = log.read_text(encoding="utf-8").splitlines()
+        assert f"count={limit + 50} " in entry and "... and 50 more]" in entry
+        assert f"security/n{limit - 1}.md" in entry and f"security/n{limit}.md" not in entry
+
+    def test_the_log_bound_holds_across_refs(self, tmp_path):
+        import schist.pre_receive as pr
+        limit = pr.MAX_REPORTED_VIOLATIONS
+        log = tmp_path / "r.log"
+        pr.log_rejection([Violation("x", f"a/{i}.md", "a", f"refs/heads/r{i % 3}")
+                          for i in range(3 * limit)], log_path=log)
+        lines = log.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 3
+        assert all(f"count={limit} " in line for line in lines)
+        assert sum(line.count(".md") for line in lines) == limit
 
 
 class TestLineSeparatorsAndRefLog:
@@ -1603,8 +2456,8 @@ class TestLineSeparatorsAndRefLog:
                       log_path=log)
         lines = log.read_text(encoding="utf-8").splitlines()
         assert len(lines) == 2
-        assert "ref=refs/heads/main files=[security/a.md]" in lines[0]
-        assert "ref=refs/heads/feature files=[security/b.md]" in lines[1]
+        assert "ref=refs/heads/main count=1 files=[security/a.md]" in lines[0]
+        assert "ref=refs/heads/feature count=1 files=[security/b.md]" in lines[1]
 
     @pytest.mark.parametrize("sep", ["\u2028", "\u2029", "\n"])
     def test_a_refused_directory_name_cannot_forge_a_line(self, acl, tmp_path, capsys, sep):
@@ -1627,12 +2480,10 @@ class TestLineSeparatorsAndRefLog:
     def test_ref_refusals_are_logged_when_a_later_diff_times_out(self, acl, tmp_path):
         log = tmp_path / "rejected.log"
 
-        def diff(old, new):
-            if new == "ddd":
-                raise subprocess.TimeoutExpired("git log", 30)
-            return []
+        def diff(old, new, **k):
+            raise subprocess.TimeoutExpired("git log", 30)
         with patch("schist.pre_receive.get_changed_files", side_effect=diff):
-            rc = main(stdin=["aaa bbb refs/heads/feature", "ccc ddd refs/heads/main"],
+            rc = main(stdin=["aaa bbb refs/heads/feature"],
                       acl=acl, identity="cluster-mario",
                       log_path=log, db_path=tmp_path / "rl.sqlite")
         assert rc == 1
@@ -1643,12 +2494,10 @@ class TestLineSeparatorsAndRefLog:
         # corrupt rev) must log the ref refusals already found, like a timeout.
         log = tmp_path / "rejected.log"
 
-        def diff(old, new):
-            if new == "ddd":
-                raise subprocess.CalledProcessError(128, ["git", "log"])
-            return []
+        def diff(old, new, **k):
+            raise subprocess.CalledProcessError(128, ["git", "log"])
         with patch("schist.pre_receive.get_changed_files", side_effect=diff):
-            rc = main(stdin=["aaa bbb refs/heads/feature", "ccc ddd refs/heads/main"],
+            rc = main(stdin=["aaa bbb refs/heads/feature"],
                       acl=acl, identity="cluster-mario",
                       log_path=log, db_path=tmp_path / "rl.sqlite")
         assert rc == 1
@@ -1684,3 +2533,435 @@ class TestLineSeparatorsAndRefLog:
         from schist.git_ops import _display_path
         assert _display_path("a\u2028b\u2029c.md") == "a\\u2028b\\u2029c.md"
         assert _display_path("naïve.md") == "naïve.md"
+
+
+# ── The hook reads the same names under any locale ──────────────────────────
+
+def _installed_locales() -> set[str]:
+    try:
+        out = subprocess.run(["locale", "-a"], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {line.strip() for line in out.splitlines()}
+
+
+# sshd forwards the client's LANG/LC_*, so the hook can run under any locale
+# the hub has installed. An ASCII locale (C, with coercion to UTF-8 off) needs
+# nothing installed; latin-9 is where a name decoded by the locale reads as
+# a different, valid string, which is the bypass itself.
+_LATIN9 = next((name for name in ("en_US.iso885915", "en_GB.iso885915")
+                if name in _installed_locales()), None)
+HOOK_LOCALES = [
+    pytest.param("C", id="ascii"),
+    pytest.param(_LATIN9 or "en_US.iso885915", id="latin9",
+                 marks=pytest.mark.skipif(_LATIN9 is None, reason="no latin-9 locale installed")),
+]
+
+
+def _run_in_locale(locale_name: str, cwd: Path, code: str, *args: str) -> subprocess.CompletedProcess:
+    """Run `code` (ASCII source) in a fresh interpreter under `locale_name`."""
+    env = {"PATH": os.environ["PATH"], "LC_ALL": locale_name, "LANG": locale_name,
+           "PYTHONCOERCECLOCALE": "0", "PYTHONUTF8": "0",
+           "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+    return subprocess.run([sys.executable, "-c", code, *args], cwd=cwd, env=env,
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=60)
+
+
+@pytest.mark.parametrize("locale_name", HOOK_LOCALES)
+def test_a_non_ascii_served_branch_resolves_under_any_locale(tmp_path, monkeypatch,
+                                                             locale_name):
+    """HEAD's target goes back to `git rev-parse` as the bytes git printed.
+    Passed as a str, it was encoded by the locale: under latin-9 the branch
+    `refs/heads/ma\u00efn` went back as a name that does not exist and every
+    push was refused, and under an ASCII locale it could not be encoded."""
+    monkeypatch.delenv("GIT_DIR", raising=False)
+    vault = ("name: v\nvault_version: 1\nscope_convention: subdirectory\n"
+             "participants:\n  - {name: alpha, type: agent}\n"
+             "access:\n  alpha: {read: ['*'], write: ['research/alpha']}\n").encode()
+    repo, (tip,) = _bare_repo_with(tmp_path, [{"vault.yaml": vault}])
+    branch = "refs/heads/ma\u00efn".encode("utf-8")
+    subprocess.run([b"git", b"update-ref", branch, tip.encode()], cwd=repo, check=True)
+    subprocess.run([b"git", b"symbolic-ref", b"HEAD", branch], cwd=repo, check=True)
+    subprocess.run(["git", "update-ref", "-d", "refs/heads/main"], cwd=repo, check=True)
+    code = ("import sys\n"
+            "from schist.pre_receive import extract_vault_yaml_from_git\n"
+            "from schist.doctor import check_hub_vault_yaml\n"
+            "print(ascii(extract_vault_yaml_from_git()))\n"
+            "r = check_hub_vault_yaml(sys.argv[1])\n"
+            "print(r.status, ascii(r.message))\n")
+    r = _run_in_locale(locale_name, repo, code, str(repo))
+    assert r.returncode == 0, r.stderr
+    content, doctor = r.stdout.splitlines()
+    assert content == ascii(vault.decode()), r.stdout
+    assert doctor.startswith("PASS"), doctor
+
+
+def test_hook_modules_name_an_encoding_for_every_text_read_and_write():
+    """The rule behind the locale tests below, for code they do not reach:
+    every text-mode subprocess call and file open in the modules the hook
+    imports names a fixed encoding, the hook reads its standard streams as
+    bytes, and nothing decodes by the locale. Each module must have at least
+    one call the scan checked, so a rename that hides a module's calls from
+    it fails here instead of passing with nothing checked."""
+    import ast
+    root = Path(__file__).resolve().parents[1] / "schist"
+    checked, bad = {}, []
+    # Calls that pick the locale's encoding, or open text streams this scan
+    # cannot check: none belongs in the hook's modules.
+    locale_calls = {"getpreferredencoding", "getfilesystemencoding", "fsdecode", "fsencode",
+                    "TextIOWrapper", "fdopen", "NamedTemporaryFile", "TemporaryFile",
+                    "SpooledTemporaryFile", "popen"}
+
+    def fixed_encoding(kw):
+        enc = kw.get("encoding")
+        return isinstance(enc, ast.Constant) and isinstance(enc.value, str)
+
+    for name in ("pre_receive.py", "acl.py", "rate_limit.py"):
+        checked[name] = 0
+        tree = ast.parse((root / name).read_text(encoding="utf-8"))
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        for node in ast.walk(tree):
+            # sys.stdin / sys.stdout decode and encode by the locale; the hook
+            # may use them only as sys.stdin.buffer (the original defect).
+            if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                    and node.value.id == "sys" and node.attr in ("stdin", "stdout")):
+                up = parents.get(node)
+                if not (isinstance(up, ast.Attribute) and up.attr == "buffer"):
+                    bad.append(f"{name}:{node.lineno} sys.{node.attr} without .buffer")
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            if func in locale_calls:
+                bad.append(f"{name}:{node.lineno} {func}() decodes by the locale or opens an unchecked text stream")
+                continue
+            if any(k.arg is None for k in node.keywords) and func in (
+                    "run", "check_output", "check_call", "call", "Popen", "open"):
+                bad.append(f"{name}:{node.lineno} {func}(**kwargs) cannot be checked")
+                continue
+            kw = {k.arg: k.value for k in node.keywords}
+            if func == "decode" and node.args and not (
+                    isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+                bad.append(f"{name}:{node.lineno} decode() with a computed encoding")
+            if func in ("run", "check_output", "check_call", "call", "Popen"):
+                flags = [kw[k] for k in ("text", "universal_newlines") if k in kw]
+                if any(not isinstance(f, ast.Constant) for f in flags):
+                    bad.append(f"{name}:{node.lineno} {func}() with a non-constant text flag")
+                    continue
+                # encoding= or errors= alone also switches to text mode.
+                if any(f.value for f in flags) or "encoding" in kw or "errors" in kw:
+                    checked[name] += 1
+                    if not fixed_encoding(kw):
+                        bad.append(f"{name}:{node.lineno} {func}() in text mode without a fixed encoding")
+            elif func in ("open", "read_text", "write_text"):
+                # builtin open(path, mode); Path(...).open(mode)
+                pos = 1 if isinstance(node.func, ast.Name) else 0
+                mode = node.args[pos] if len(node.args) > pos else kw.get("mode")
+                if func == "open" and isinstance(mode, ast.Constant) and "b" in str(mode.value):
+                    continue
+                checked[name] += 1
+                if not fixed_encoding(kw):
+                    bad.append(f"{name}:{node.lineno} {func}() without a fixed encoding")
+    assert all(checked.values()), checked   # the scan reached each module's calls
+    assert bad == []
+
+
+# ── A vault.yaml the hook cannot read refuses the push ─────────────────────
+
+_ALPHA_VAULT = ("name: v\nvault_version: 1\nscope_convention: subdirectory\n"
+                "participants:\n  - {name: alpha, type: agent}\n"
+                "access:\n  alpha: {read: ['*'], write: ['research/alpha']}\n").encode("utf-8")
+
+
+def _loosen(repo):
+    """Unpack the repo's packs into loose objects, so one can be removed."""
+    for pack in (repo / "objects" / "pack").glob("*.pack"):
+        data = pack.read_bytes()
+        for f in pack.parent.glob(pack.stem + ".*"):
+            f.unlink()
+        subprocess.run(["git", "unpack-objects", "-q"], cwd=repo, input=data, check=True)
+
+
+def _drop_object(repo, rev):
+    sha = subprocess.run(["git", "rev-parse", rev], cwd=repo, capture_output=True,
+                         text=True, encoding="utf-8", check=True).stdout.strip()
+    (repo / "objects" / sha[:2] / sha[2:]).unlink()
+
+
+ZERO_SHA_T = "0" * 40
+
+
+class TestVaultYamlAbsence:
+    """Only a HEAD without vault.yaml lets a push through unchecked; a
+    vault.yaml the hook cannot read refuses it."""
+
+    @pytest.fixture(autouse=True)
+    def _no_git_dir(self, monkeypatch):
+        monkeypatch.delenv("GIT_DIR", raising=False)
+        monkeypatch.delenv("GIT_WORK_TREE", raising=False)
+
+    def test_an_unborn_head_has_no_vault_yaml(self, tmp_path, monkeypatch):
+        from schist.pre_receive import extract_vault_yaml_from_git
+        repo = tmp_path / "hub.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(repo)], check=True)
+        monkeypatch.chdir(repo)
+        assert extract_vault_yaml_from_git() is None
+
+    @pytest.mark.parametrize("store", ["pack", "loose", "alternates"])
+    def test_a_hub_with_objects_but_no_refs_raises(self, tmp_path, monkeypatch, store):
+        """Refs lost on a hub that holds commits (a crash after pack-refs, a
+        restore of objects without refs) is not a fresh hub: `schist hub
+        init` always seeds a commit holding vault.yaml, and reading the state
+        as "no vault.yaml" let the first pusher create main with any ACL."""
+        from schist.pre_receive import extract_vault_yaml_from_git
+        repo, _ = _bare_repo_with(tmp_path, [{"vault.yaml": _ALPHA_VAULT}])
+        if store == "loose":
+            _loosen(repo)
+        if store == "alternates":
+            other = tmp_path / "empty.git"
+            subprocess.run(["git", "init", "-q", "--bare", str(other)], check=True)
+            (other / "objects" / "info" / "alternates").write_text(
+                str(repo / "objects") + "\n", encoding="utf-8")
+            repo = other
+        else:
+            subprocess.run(["git", "update-ref", "-d", "refs/heads/main"], cwd=repo, check=True)
+        assert subprocess.run(["git", "for-each-ref"], cwd=repo, capture_output=True,
+                              check=True).stdout == b""
+        monkeypatch.chdir(repo)
+        with pytest.raises(RuntimeError, match="the hub has objects but no refs"):
+            extract_vault_yaml_from_git()
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(RuntimeError, match="git fsck --lost-found"):
+            extract_vault_yaml_from_git(git_dir=str(repo))
+
+    def test_main_refuses_a_push_to_a_hub_that_lost_its_refs(self, tmp_path, monkeypatch, capsys):
+        from schist.pre_receive import main
+        repo, (old, new) = _bare_repo_with(tmp_path, [{"vault.yaml": _ALPHA_VAULT},
+                                                      {"outside.md": b"o\n"}])
+        subprocess.run(["git", "update-ref", "-d", "refs/heads/main"], cwd=repo, check=True)
+        monkeypatch.chdir(repo)
+        rc = main(stdin=[f"{ZERO_SHA_T} {new} refs/heads/main"], identity="alpha",
+                  log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
+        assert rc == 1
+        assert capsys.readouterr().err.startswith(
+            "REJECTED: failed to load vault.yaml: the hub has objects but no refs")
+
+    def test_the_first_push_to_an_empty_hub_is_accepted(self, tmp_path, monkeypatch):
+        """The pushed objects sit in the quarantine directory under objects/
+        while pre-receive runs; they are not the hub's own."""
+        hub = tmp_path / "hub.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(hub)], check=True)
+        hook = hub / "hooks" / "pre-receive"
+        hook.write_text(
+            "#!/bin/sh\n"
+            f"exec '{sys.executable}' -c 'import os, sys\n"
+            "assert os.environ[\"GIT_QUARANTINE_PATH\"]\n"
+            "assert any(os.scandir(os.environ[\"GIT_QUARANTINE_PATH\"]))\n"
+            "from schist.pre_receive import extract_vault_yaml_from_git as e\n"
+            "sys.exit(0 if e() is None else 3)'\n", encoding="utf-8")
+        hook.chmod(0o755)
+        work = tmp_path / "work"
+        git = ["git", "-C", str(work), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+        subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
+        (work / "vault.yaml").write_bytes(_ALPHA_VAULT)
+        subprocess.run(git + ["add", "vault.yaml"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "v"], check=True)
+        env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+        r = subprocess.run(git + ["push", "-q", str(hub), "main"], env=env,
+                           capture_output=True, text=True, encoding="utf-8")
+        assert r.returncode == 0, r.stderr
+        # And once the hub holds that commit, losing the ref refuses.
+        subprocess.run(["git", "update-ref", "-d", "refs/heads/main"], cwd=hub, check=True)
+        r = subprocess.run(git + ["push", "-q", str(hub), "main"], env=env,
+                           capture_output=True, text=True, encoding="utf-8")
+        assert r.returncode != 0 and "objects but no refs" in r.stderr
+
+    def test_a_head_tree_without_vault_yaml_has_none(self, tmp_path, monkeypatch):
+        from schist.pre_receive import extract_vault_yaml_from_git
+        repo, _ = _bare_repo_with(tmp_path, [{"README.md": b"r\n"}])
+        monkeypatch.chdir(repo)
+        assert extract_vault_yaml_from_git() is None
+
+    def test_vault_yaml_is_read_from_head(self, tmp_path, monkeypatch):
+        from schist.pre_receive import extract_vault_yaml_from_git
+        repo, _ = _bare_repo_with(tmp_path, [{"vault.yaml": _ALPHA_VAULT}])
+        monkeypatch.chdir(repo)
+        assert extract_vault_yaml_from_git() == _ALPHA_VAULT.decode("utf-8")
+
+    @pytest.mark.parametrize("missing", ["HEAD:vault.yaml", "HEAD"], ids=["blob", "commit"])
+    def test_a_missing_object_raises_instead_of_reading_as_absent(self, tmp_path, monkeypatch,
+                                                                   missing):
+        from schist.pre_receive import extract_vault_yaml_from_git
+        repo, _ = _bare_repo_with(tmp_path, [{"vault.yaml": _ALPHA_VAULT}])
+        _loosen(repo)
+        _drop_object(repo, missing)
+        monkeypatch.chdir(repo)
+        with pytest.raises(subprocess.CalledProcessError):
+            extract_vault_yaml_from_git()
+
+    def test_a_git_timeout_raises(self, tmp_path, monkeypatch):
+        from schist.pre_receive import extract_vault_yaml_from_git
+        repo, _ = _bare_repo_with(tmp_path, [{"vault.yaml": _ALPHA_VAULT}])
+        monkeypatch.chdir(repo)
+        real_run = subprocess.run
+
+        def slow_cat_file(args, *a, **k):
+            if list(args[:2]) == ["git", "cat-file"]:
+                raise subprocess.TimeoutExpired(args, 10)
+            return real_run(args, *a, **k)
+
+        monkeypatch.setattr(subprocess, "run", slow_cat_file)
+        with pytest.raises(subprocess.TimeoutExpired):
+            extract_vault_yaml_from_git()
+
+    def test_main_refuses_a_push_when_vault_yaml_cannot_be_read(self, tmp_path, monkeypatch,
+                                                                capsys):
+        """The push a scoped writer could land while the blob was unreadable:
+        a file outside its scope."""
+        from schist.pre_receive import main
+        repo, (old, new) = _bare_repo_with(tmp_path, [{"vault.yaml": _ALPHA_VAULT},
+                                                      {"outside.md": b"o\n"}])
+        _loosen(repo)
+        _drop_object(repo, "HEAD:vault.yaml")
+        monkeypatch.chdir(repo)
+        rc = main(stdin=[f"{old} {new} refs/heads/main"], identity="alpha",
+                  log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
+        assert rc == 1
+        err = capsys.readouterr().err
+        # git ran and failed (a missing object): no retry fixes it, so it is a
+        # refusal, not the transient ERROR a timeout gets.
+        assert err.startswith("REJECTED: failed to load vault.yaml: git exited 128 reading it")
+
+    def test_a_vault_yaml_timeout_asks_for_a_retry(self, tmp_path, monkeypatch, capsys):
+        from schist.pre_receive import main
+        def slow(git_dir=None):
+            raise subprocess.TimeoutExpired(["git", "cat-file"], 10)
+        monkeypatch.setattr("schist.pre_receive.extract_vault_yaml_from_git", slow)
+        monkeypatch.chdir(tmp_path)
+        rc = main(stdin=["a b refs/heads/main"], identity="alpha",
+                  log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
+        assert rc == 1
+        assert capsys.readouterr().err.startswith(
+            "ERROR: the hub could not read vault.yaml (git timed out); please retry the push.")
+
+    def test_a_git_killed_by_a_signal_asks_for_a_retry(self, tmp_path, monkeypatch, capsys):
+        """A git the OOM killer ended (under the memory limit the docs
+        recommend) said nothing about the repository: "git exited -9; run
+        git fsck" sent the admin after a broken object that did not exist,
+        and spokes stopped retrying."""
+        from schist.pre_receive import _git_failure, main
+        killed = subprocess.CalledProcessError(-9, ["git", "cat-file"])
+        assert _git_failure(killed) == "git was killed by signal 9"
+        assert _git_failure(subprocess.CalledProcessError(128, ["git"])) == "git exited 128"
+
+        def oom(git_dir=None):
+            raise killed
+        monkeypatch.setattr("schist.pre_receive.extract_vault_yaml_from_git", oom)
+        monkeypatch.chdir(tmp_path)
+        rc = main(stdin=["a b refs/heads/main"], identity="alpha",
+                  log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
+        assert rc == 1
+        assert capsys.readouterr().err == (
+            "ERROR: the hub could not read vault.yaml (git was killed by signal 9); "
+            "please retry the push.\n")
+
+    def test_head_naming_a_missing_branch_beside_other_refs_raises(self, tmp_path,
+                                                                   monkeypatch):
+        """Not an empty hub: the served branch was renamed or HEAD names
+        another branch, and the vault.yaml on `main` still governs."""
+        from schist.pre_receive import extract_vault_yaml_from_git
+        repo, _ = _bare_repo_with(tmp_path, [{"vault.yaml": _ALPHA_VAULT}])
+        subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/trunk"], cwd=repo, check=True)
+        monkeypatch.chdir(repo)
+        with pytest.raises(RuntimeError, match="HEAD names refs/heads/trunk, which does not exist"):
+            extract_vault_yaml_from_git()
+
+    def test_main_refuses_a_push_while_head_names_a_missing_branch(self, tmp_path, monkeypatch,
+                                                                  capsys):
+        from schist.pre_receive import main
+        repo, (old, new) = _bare_repo_with(tmp_path, [{"vault.yaml": _ALPHA_VAULT},
+                                                      {"outside.md": b"o\n"}])
+        subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/trunk"], cwd=repo, check=True)
+        monkeypatch.chdir(repo)
+        rc = main(stdin=[f"{old} {new} refs/heads/main"], identity="alpha",
+                  log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert err.startswith("REJECTED: failed to load vault.yaml: HEAD names refs/heads/trunk")
+        assert "git symbolic-ref HEAD refs/heads/<branch>" in err
+
+    def test_a_vault_yaml_that_is_not_utf8_is_refused_with_its_cause(self, tmp_path, monkeypatch,
+                                                                      capsys):
+        from schist.pre_receive import main
+        latin1 = _ALPHA_VAULT + "# café\n".encode("latin-1")
+        repo, (old, new) = _bare_repo_with(tmp_path, [{"vault.yaml": latin1},
+                                                      {"research/alpha/n.md": b"n\n"}])
+        monkeypatch.chdir(repo)
+        rc = main(stdin=[f"{old} {new} refs/heads/main"], identity="alpha",
+                  log_path=tmp_path / "rejected.log", db_path=tmp_path / "rl.sqlite")
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert ("not valid UTF-8, so every push is refused until a hub admin rewrites it "
+                "as UTF-8 (docs/hub-spoke-setup.md") in err
+
+
+SCOPE = "research/ma" + chr(0xEF) + "n"                      # research/maïn
+MOJIBAKE = "research/ma" + chr(0xC3) + chr(0xAF) + "n"       # its UTF-8 bytes read as latin-9
+
+_MAIN_IN_HUB = """
+import sys
+from pathlib import Path
+from schist.pre_receive import main
+old, new, tmp = sys.argv[1:4]
+sys.exit(main(stdin=[old + " " + new + " refs/heads/main"], identity="alpha",
+              log_path=Path(tmp) / "rejected.log", db_path=Path(tmp) / "rl.sqlite"))
+"""
+
+
+@pytest.mark.parametrize("locale_name", HOOK_LOCALES)
+@pytest.mark.parametrize("pushed, accepted", [(SCOPE, True), (MOJIBAKE, False)],
+                         ids=["granted-scope", "lookalike-scope"])
+def test_vault_yaml_scopes_read_the_same_under_any_locale(tmp_path, monkeypatch, locale_name,
+                                                          pushed, accepted):
+    """vault.yaml grants `research/maïn`. Read by a latin-9 locale it named
+    `research/maÃ¯n` instead, so a push there landed and one to the granted
+    directory was refused."""
+    monkeypatch.delenv("GIT_DIR", raising=False)
+    vault = ("name: v\nvault_version: 1\nscope_convention: subdirectory\n"
+             "participants:\n  - {name: alpha, type: agent}\n"
+             f"access:\n  alpha: {{read: ['*'], write: ['{SCOPE}']}}\n").encode("utf-8")
+    repo, (old, new) = _bare_repo_with(tmp_path, [
+        {"vault.yaml": vault}, {pushed + "/n.md": b"---\ntitle: n\n---\n"}])
+    r = _run_in_locale(locale_name, repo, _MAIN_IN_HUB, old, new, str(tmp_path))
+    assert (r.returncode == 0) is accepted, r.stderr
+    assert "Traceback" not in r.stderr
+
+
+_FIND_BAD = """
+import sys
+from schist.pre_receive import find_bad_frontmatter, get_changed_files
+old, new = sys.argv[1:3]
+print(ascii(find_bad_frontmatter(old, new, get_changed_files(old, new))))
+"""
+
+
+@pytest.mark.parametrize("locale_name", HOOK_LOCALES)
+def test_a_note_whose_path_holds_a_line_break_is_read_under_any_locale(tmp_path, monkeypatch,
+                                                                       locale_name):
+    """A path holding a line break is read with `git cat-file blob <rev>:<path>`.
+    A str argument is encoded with the locale, so under latin-9 a non-ASCII
+    path named no blob and a `---js` note went unread."""
+    monkeypatch.delenv("GIT_DIR", raising=False)
+    repo = tmp_path / "hub.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(repo)], check=True)
+    quoted = b'"research/mario/x\\n\\303\\255.md"'     # research/mario/x<LF>í.md
+    stream = (b"commit refs/heads/main\ncommitter t <t@example.com> 1700000000 +0000\n"
+              b"data 2\nc\nM 100644 inline research/mario/seed.md\ndata 2\nx\n\n"
+              b"commit refs/heads/main\ncommitter t <t@example.com> 1700000001 +0000\n"
+              b"data 2\nc\nM 100644 inline " + quoted + b"\ndata 13\n---js\n{}\n---\n\n")
+    subprocess.run(["git", "fast-import", "--quiet"], cwd=repo, input=stream, check=True)
+    old, new = subprocess.run(["git", "rev-list", "--reverse", "main"], cwd=repo,
+                              capture_output=True, text=True, check=True).stdout.split()
+    r = _run_in_locale(locale_name, repo, _FIND_BAD, old, new)
+    assert r.stdout.strip() == ascii(["research/mario/x\n" + chr(0xED) + ".md"]), r.stderr

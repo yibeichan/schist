@@ -451,5 +451,16 @@ export function buildNote(
       if (end === lines.length) content = content.trimEnd() + "\n";
     }
   }
-  return matter.stringify(content, metadata);
+  // Hand gray-matter a file object, not a string: given a string,
+  // matter.stringify first parses it as a note with the default engines, so a
+  // body that opens with `---js` would be evaluated and a body that opens with
+  // a YAML block would be merged into the frontmatter.
+  const out = matter.stringify({ content }, metadata, YAML_ONLY);
+  // With no metadata gray-matter writes no frontmatter block, and a body that
+  // opens with `---` would become the note's first line: read back as its
+  // frontmatter, or refused by the hub. An empty block keeps it body text.
+  if (Object.keys(metadata).length === 0 && /^\uFEFF*---/.test(content)) {
+    return `---\n---\n${out}`;
+  }
+  return out;
 }
