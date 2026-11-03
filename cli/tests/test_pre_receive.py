@@ -1397,6 +1397,28 @@ def _peak_rss_mb(ru_maxrss: int, platform: str = sys.platform) -> float:
     return ru_maxrss / (1 << 20) if platform == "darwin" else ru_maxrss / 1024
 
 
+# Printed by a child to report its own peak RSS. On Linux, ru_maxrss in a
+# child started by exec carries over its parent's peak, so a child spawned
+# from a large pytest process reads that process's memory, not its own;
+# VmHWM in /proc/self/status belongs to the child's address space alone.
+_PRINT_OWN_PEAK_RSS = (
+    "import resource\n"
+    "try:\n"
+    "    hwm = [l for l in open('/proc/self/status') if l.startswith('VmHWM:')]\n"
+    "except OSError:\n"
+    "    hwm = []\n"
+    "print('VmHWM', hwm[0].split()[1]) if hwm else "
+    "print('ru_maxrss', resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)\n"
+)
+
+
+def _own_peak_rss_mb(stdout: str, platform: str = sys.platform) -> float:
+    """MB from _PRINT_OWN_PEAK_RSS's output: VmHWM is in kB on Linux;
+    otherwise ru_maxrss in its platform's unit."""
+    kind, value = stdout.split()[-2:]
+    return int(value) / 1024 if kind == "VmHWM" else _peak_rss_mb(int(value), platform)
+
+
 @pytest.fixture(autouse=True)
 def _skip_blob_reads(request, monkeypatch):
     """Most tests here feed main() made-up revisions with a patched file list;
@@ -1775,15 +1797,21 @@ class TestFrontmatterOpeners:
         new = subprocess.run(git + ["-c", "user.name=t", "-c", "user.email=t@example.com",
                                     "commit-tree", tree, "-p", old, "-m", "big"],
                              capture_output=True, check=True).stdout.strip().decode()
-        code = ("import resource, sys\n"
+        code = ("import sys\n"
                 "from schist.pre_receive import find_bad_frontmatter, get_changed_files\n"
                 "old, new = sys.argv[1:3]\n"
                 "assert find_bad_frontmatter(old, new, get_changed_files(old, new)) == []\n"
-                "print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)\n")
+                f"{_PRINT_OWN_PEAK_RSS}")
         env = {k: v for k, v in os.environ.items() if k != "GIT_DIR"}
+        # Spawn while this process holds more than the limit: a child whose
+        # reading included its parent's peak would fail here every time,
+        # whatever ran earlier in the suite.
+        ballast = bytearray(200 << 20)
+        ballast[::4096] = b"x" * len(ballast[::4096])
         r = subprocess.run([sys.executable, "-c", code, old, new], cwd=repo, env=env,
                            capture_output=True, text=True, encoding="utf-8", check=True)
-        peak_mb = _peak_rss_mb(int(r.stdout.strip()))
+        del ballast
+        peak_mb = _own_peak_rss_mb(r.stdout)
         assert peak_mb < 150, peak_mb
 
     def test_peak_rss_is_read_in_each_platforms_unit(self):
@@ -1791,6 +1819,9 @@ class TestFrontmatterOpeners:
         everywhere read a Mac's 40 MB as 40,000 MB."""
         assert _peak_rss_mb(40 << 20, "darwin") == 40
         assert _peak_rss_mb(40 << 10, "linux") == 40
+        assert _own_peak_rss_mb("VmHWM 40960\n") == 40
+        assert _own_peak_rss_mb(f"ru_maxrss {40 << 20}\n", "darwin") == 40
+        assert _own_peak_rss_mb(f"ru_maxrss {40 << 10}\n", "linux") == 40
 
     def test_get_changed_files_keeps_a_path_that_begins_with_a_line_break(self, tmp_path,
                                                                           monkeypatch):
