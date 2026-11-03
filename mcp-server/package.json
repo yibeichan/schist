@@ -1,6 +1,6 @@
 {
   "name": "@schist/mcp-server",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "MCP server for schist: agent-first knowledge graph with git + SQLite",
   "author": "Yibei Chen",
   "license": "AGPL-3.0-or-later",

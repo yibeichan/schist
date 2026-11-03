@@ -7,10 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-03
+
 ### Security
 - **The viewer loads DOMPurify 3.4.17, up from 3.2.6.** DOMPurify sanitizes every note body and Ask the vault answer before the page inserts it, and releases since 3.2.6 fix sanitizer bypasses. The page's script tag, its Subresource Integrity hash and its Content-Security-Policy name the new file, and the MCP server's test dependency, which a test uses to run the page's renderer, moves with it; a test now fails when the versions of marked or DOMPurify that the page loads differ from the ones the tests run. Rebuild a site with `schist build`, or use the viewer's Rebuild button, to load the new version.
 
 ### Fixed
+- **The MCP server no longer writes a note body that `schist-ingest` would read as frontmatter.** That was a body opening with blank lines and `---`, a JSON `{` block or a TOML `+++` block, written with no frontmatter keys. `update_note` and the delete cascade also refuse to rewrite a note whose frontmatter the server and ingest would split differently (a BOM, blank lines or `-----` before it, `---yaml`, a JSON or TOML block), saying how to fix its opening.
 - **`schist serve` no longer reports a freshly built site as stale.** After a rebuild the server rewrote its build stamps in place, so a status request at that moment could read an empty commit id, mark the site out of date, and make a timer's `POST api/rebuild?if_changed=1` build it again. Each stamp is now replaced in one step.
 
 ## [0.3.1] - 2026-11-03
@@ -226,7 +229,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `query_graph` tool rejects non-SELECT SQL
 - Git writes serialized via async-mutex (10s timeout) to prevent concurrent commit conflicts
 
-[Unreleased]: https://github.com/yibeichan/schist/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/yibeichan/schist/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/yibeichan/schist/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/yibeichan/schist/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/yibeichan/schist/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/yibeichan/schist/compare/v0.1.0...v0.2.0
