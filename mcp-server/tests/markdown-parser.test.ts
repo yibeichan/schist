@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseNote, buildNote, buildConnectionLine, parseConnections, isRoundTrippableTarget, SLUG_WS_CHARS } from "../src/markdown-parser.js";
-import { ConnectionWriteError } from "../src/markdown-parser.js";
+import { ConnectionWriteError, verifyNoteConnections } from "../src/markdown-parser.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -311,5 +311,33 @@ describe("parseConnections bracket-reference skip (#415)", () => {
     expect(parseConnections(body)).toEqual([
       { type: "related", target: "note-a", context: undefined },
     ]);
+  });
+});
+
+describe("a refusal names at most twenty connections, each cut to 200 characters", () => {
+  // cli/tests/test_markdown_io.py checks the same strings for ingest's writers.
+  const refusal = (text: string): string => {
+    try {
+      verifyNoteConnections(text, [], "delete_note");
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConnectionWriteError);
+      return (e as Error).message;
+    }
+    throw new Error("expected a refusal");
+  };
+
+  test("thousands of connections are summarised", () => {
+    const lines = Array.from({ length: 5000 }, (_, i) => `- extends: n${i}\n`).join("");
+    const msg = refusal("---\ntitle: t\n---\n## Connections\n" + lines);
+    expect(msg).toContain("extends: n19, … and 4980 more], not [none]");
+    expect(msg).not.toContain("n20,");
+    expect(msg.length).toBeLessThan(1000);
+  });
+
+  test("a huge target is cut by code points", () => {
+    const target = "x".repeat(5000) + "\u{1F600}";
+    const msg = refusal(`---\ntitle: t\n---\n## Connections\n- extends: ${target}\n`);
+    expect(msg).toContain("[extends: " + "x".repeat(191) + "…], not [none]");
+    expect(msg.length).toBeLessThan(1000);
   });
 });

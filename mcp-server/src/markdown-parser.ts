@@ -867,8 +867,21 @@ export function sameEdges(a: Connection[], b: Connection[]): boolean {
   return true;
 }
 
+// A refusal names at most this many connections, each cut to this many
+// characters, so a note with a huge Connections section cannot make the
+// error itself huge. markdown_io.py's _describe_edges uses the same limits.
+const DESCRIBE_EDGES_MAX = 20;
+const DESCRIBE_EDGE_CHARS = 200;
+
 function describeEdges(edges: Connection[]): string {
-  return edges.length === 0 ? "none" : edges.map((c) => `${c.type}: ${c.target}`).join(", ");
+  if (edges.length === 0) return "none";
+  const shown = edges.slice(0, DESCRIBE_EDGES_MAX).map((c) => {
+    // Code points, as Python counts, so the two cut a long target alike.
+    const s = Array.from(`${c.type}: ${c.target}`);
+    return s.length > DESCRIBE_EDGE_CHARS ? s.slice(0, DESCRIBE_EDGE_CHARS).join("") + "…" : s.join("");
+  });
+  const more = edges.length - shown.length;
+  return shown.join(", ") + (more > 0 ? `, … and ${more} more` : "");
 }
 
 /** Throw ConnectionWriteError unless the note file `text` reads exactly

@@ -558,3 +558,26 @@ def test_write_note_exclusive_refuses_existing_file_and_symlink(tmp_path) -> Non
     with pytest.raises(FileExistsError):
         write_note(str(dangling), {"title": "C"}, "escaped", exclusive=True)
     assert not outside.exists()
+
+
+def test_a_refusal_names_at_most_twenty_connections_each_cut_to_200_characters():
+    """A note with thousands of connections, or one with a huge target, must
+    not make the refusal itself huge: a cascading delete returned a 936 KB
+    error. markdown-parser.test.ts checks the same strings for the server."""
+    from schist.markdown_io import ConnectionWriteError, verify_note_connections
+
+    many = '---\ntitle: t\n---\n## Connections\n' + ''.join(f'- extends: n{i}\n' for i in range(5000))
+    with pytest.raises(ConnectionWriteError) as e:
+        verify_note_connections(many, [], 'delete_note')
+    msg = str(e.value)
+    assert 'extends: n19, … and 4980 more], not [none]' in msg
+    assert 'n20,' not in msg
+    assert len(msg) < 1000
+
+    long_target = 'x' * 5000 + '\U0001F600'
+    huge = f'---\ntitle: t\n---\n## Connections\n- extends: {long_target}\n'
+    with pytest.raises(ConnectionWriteError) as e:
+        verify_note_connections(huge, [], 'delete_note')
+    msg = str(e.value)
+    assert '[extends: ' + 'x' * 191 + '…], not [none]' in msg
+    assert len(msg) < 1000

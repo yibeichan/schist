@@ -165,8 +165,22 @@ def _edge_key(edge: dict) -> tuple:
     return (edge['type'], edge['target'], edge['context'] or '')
 
 
+# A refusal names at most this many connections, each cut to this many
+# characters, so a note with a huge Connections section cannot make the
+# error itself huge. markdown-parser.ts describeEdges uses the same limits.
+_DESCRIBE_EDGES_MAX = 20
+_DESCRIBE_EDGE_CHARS = 200
+
+
 def _describe_edges(edges: list[dict]) -> str:
-    return ', '.join(f"{e['type']}: {e['target']}" for e in edges) or 'none'
+    if not edges:
+        return 'none'
+    shown = []
+    for e in edges[:_DESCRIBE_EDGES_MAX]:
+        s = f"{e['type']}: {e['target']}"
+        shown.append(s[:_DESCRIBE_EDGE_CHARS] + '…' if len(s) > _DESCRIBE_EDGE_CHARS else s)
+    more = len(edges) - len(shown)
+    return ', '.join(shown) + (f', … and {more} more' if more > 0 else '')
 
 
 def verify_note_connections(text: str, expected: list[dict], action: str) -> None:
