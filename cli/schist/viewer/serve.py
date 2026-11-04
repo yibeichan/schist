@@ -195,7 +195,7 @@ class ViewerServer(http.server.ThreadingHTTPServer):
         page = self.out / 'index.html'
         return {
             'built_at': page.stat().st_mtime if page.exists() else None,
-            'built_head': self.stamp.read_text().strip() if self.stamp.exists() else None,
+            'built_head': self._read(self.stamp),
             'vault_head': self.vault_head(),
             'viewer_current': self._read(self.viewer_stamp) == self.fingerprint,
             'building': self.build_lock.locked(),
@@ -247,11 +247,23 @@ class ViewerServer(http.server.ThreadingHTTPServer):
             for name in sorted((p.name for p in self.staging.iterdir()), key=lambda n: n == 'index.html'):
                 os.replace(self.staging / name, self.out / name)
             self.staging.rmdir()
-            self.stamp.write_text(head + '\n')
-            self.viewer_stamp.write_text(self.fingerprint + '\n')
+            _write_atomic(self.stamp, head + '\n')
+            _write_atomic(self.viewer_stamp, self.fingerprint + '\n')
         except OSError as e:
             return False, f'could not install the built site in {self.out}: {e}'
         return True, r.stdout[-2000:]
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Replace path's contents in one step: a reader sees the old text or the
+    new, never the empty file an in-place write leaves while it runs."""
+    tmp = path.with_name(f'.{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
+    try:
+        tmp.write_text(text, encoding='utf-8')
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):

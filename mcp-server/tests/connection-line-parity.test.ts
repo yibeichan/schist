@@ -20,7 +20,19 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CONNECTION_RE, parseConnections } from "../src/markdown-parser.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import {
+  CONNECTION_RE,
+  connectionBody,
+  normalizeNewlines,
+  parseConnections,
+  parseNote,
+  scanConnections,
+  splitConnectionLines,
+} from "../src/markdown-parser.js";
+import { bodyConnectionEdgeLines, readNoteText, stripConnectionsTo } from "../src/tools.js";
+import { NoteDecodeError } from "../src/markdown-parser.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,8 +43,10 @@ type LineCase = {
   expected: { type: string; target: string; context: string | null } | null;
 };
 type BodyEdge = { type: string; target: string; context: string | null };
-type BodyCase = { name: string; body: string; edges: BodyEdge[] };
-type ParityFixture = { lines: LineCase[]; bodies: BodyCase[] };
+type BodyCase = { name: string; body: string; edges: BodyEdge[]; problem: number | null };
+type FileCase = { name: string; text: string; body: string; edges: BodyEdge[] };
+type ByteCase = { name: string; hex: string; decodes: boolean; edges: BodyEdge[] };
+type ParityFixture = { lines: LineCase[]; bodies: BodyCase[]; files: FileCase[]; byte_files: ByteCase[] };
 
 function loadFixture(): ParityFixture {
   const fixturePath = path.resolve(__dirname, "..", "..", "schema", "connection-line-parity.json");
@@ -76,6 +90,28 @@ describe("connection-body splitter parity (#359)", () => {
         context: e.context ?? null,
       }));
       expect(got).toEqual(c.edges);
+      const scan = scanConnections(splitConnectionLines(normalizeNewlines(c.body)));
+      expect(scan.problem === null ? null : scan.problem.index).toBe(c.problem);
+    });
+  }
+
+  // The write-time validator and the delete cascade read the section with
+  // the same rule (exact heading, fenced code skipped) as parseConnections and
+  // ingest, so each body case must give them the same edges.
+  for (const c of fixture.bodies) {
+    test(`validator sees the same edges: ${c.name}`, () => {
+      const got = [...bodyConnectionEdgeLines(c.body)].map(({ line }) => {
+        const m = line.match(CONNECTION_RE)!;
+        return { type: m[1], target: m[2], context: m[3] || m[4] || null };
+      });
+      expect(got).toEqual(c.edges);
+    });
+  }
+
+  for (const c of fixture.bodies.filter((b) => b.edges.length === 0)) {
+    test(`delete cascade strips nothing: ${c.name}`, () => {
+      const targets = [...splitLinesForTargets(c.body)];
+      expect(stripConnectionsTo(c.body, targets).removed).toBe(0);
     });
   }
 
@@ -85,5 +121,152 @@ describe("connection-body splitter parity (#359)", () => {
     const t0 = performance.now();
     expect(splitLinesLikePython(big)).toEqual([big]); // no boundaries → one line
     expect(performance.now() - t0).toBeLessThan(2000); // linear is a few ms
+  });
+});
+
+/** Every target any line of `body` would carry if it were an edge. Bracket
+ * references are left out: the cascade matches by target and never sees one,
+ * since a note id never starts with "[". */
+function* splitLinesForTargets(body: string): Generator<string> {
+  for (const raw of body.split(/\r\n|[\n\r\v\f\u001c-\u001e\u0085\u2028\u2029]/)) {
+    const m = raw.trim().match(CONNECTION_RE);
+    if (m && !m[2].startsWith("[")) yield m[2];
+  }
+}
+
+describe("delete cascade leaves fenced lines alone", () => {
+  test("strips the real edge and keeps the same line inside a fence", () => {
+    const body = [
+      "## Connections",
+      "- extends: note-a",
+      "```",
+      "- extends: note-a",
+      "## Notes",
+      "```",
+      "- related: note-b",
+      "",
+    ].join("\n");
+    const { content, removed } = stripConnectionsTo(body, ["note-a"]);
+    expect(removed).toBe(1);
+    expect(content).toBe(
+      ["## Connections", "```", "- extends: note-a", "## Notes", "```", "- related: note-b", ""].join("\n"),
+    );
+  });
+});
+
+describe("connection whole-file parity", () => {
+  // The same cases run through a real ingest in cli/tests/test_ingest.py:
+  // both sides read the raw body after the frontmatter's closing line.
+  test("fixture is present and non-trivial", () => {
+    expect(fixture.files.length).toBeGreaterThanOrEqual(6);
+  });
+
+  // The vocabulary validator sees exactly the edges ingest will index.
+  for (const c of fixture.files) {
+    test(`validator sees ingest's edges: ${c.name}`, () => {
+      const got = [...bodyConnectionEdgeLines(connectionBody(c.text))].map(({ line }) => {
+        const m = line.match(CONNECTION_RE)!;
+        return { type: m[1], target: m[2], context: m[3] || m[4] || null };
+      });
+      expect(got).toEqual(c.edges);
+    });
+  }
+
+  // File I/O parity: the note's bytes on disk, read the way the server reads
+  // notes (readNoteText), give the body ingest stores in docs.body (the
+  // text the viewer renders) and the edges ingest indexes.
+  // cli/tests/test_ingest.py runs the same files through a real ingest.
+  for (const c of fixture.files) {
+    test(`read from disk: ${c.name}`, async () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "schist-file-parity-"));
+      try {
+        const file = path.join(dir, "note.md");
+        writeFileSync(file, Buffer.from(c.text, "utf-8"));
+        const text = await readNoteText(file);
+        expect(connectionBody(text)).toBe(c.body);
+        expect(parseConnections(connectionBody(text)).map((e) => e.target)).toEqual(c.edges.map((e) => e.target));
+        // The writers' and get_note's reading of the same file (parseNote
+        // applies the frontmatter hashtag patch, as ingest does).
+        try {
+          expect(parseNote(text).connections.map((e) => e.target)).toEqual(c.edges.map((e) => e.target));
+        } catch (e) {
+          if (e instanceof Error && e.name === "YAMLException") return; // gray-matter cannot read it
+          throw e;
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  // Note bytes: readNoteText decodes strictly, as ingest's read_text does,
+  // and refuses a note ingest skips. cli/tests/test_ingest.py runs the same
+  // bytes through a real ingest.
+  for (const c of fixture.byte_files) {
+    test(`bytes from disk: ${c.name}`, async () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "schist-byte-parity-"));
+      try {
+        const file = path.join(dir, "note.md");
+        writeFileSync(file, Buffer.from(c.hex, "hex"));
+        if (!c.decodes) {
+          await expect(readNoteText(file)).rejects.toBeInstanceOf(NoteDecodeError);
+          return;
+        }
+        const got = parseNote(await readNoteText(file)).connections.map((e) => e.target);
+        expect(got).toEqual(c.edges.map((e) => e.target));
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  for (const c of fixture.files) {
+    test(c.name, () => {
+      let parsed: ReturnType<typeof parseNote>;
+      try {
+        parsed = parseNote(c.text);
+      } catch {
+        // gray-matter cannot read this note's YAML (e.g. never closed); the
+        // connection slice must still match ingest.
+        expect(parseConnections(connectionBody(c.text)).map((e) => e.target)).toEqual(c.edges.map((e) => e.target));
+        return;
+      }
+      const got = parsed.connections.map((e) => ({
+        type: e.type,
+        target: e.target,
+        context: e.context ?? null,
+      }));
+      expect(got).toEqual(c.edges);
+    });
+  }
+});
+
+describe("delete cascade on whole files", () => {
+  test("a fence line in a frontmatter block scalar does not hide the edge", () => {
+    const text = "---\ntitle: t\nsummary: |\n  ```\n---\n## Connections\n- extends: a\n- extends: b\n";
+    const { content, removed } = stripConnectionsTo(text, ["a"]);
+    expect(removed).toBe(1);
+    expect(content).toBe("---\ntitle: t\nsummary: |\n  ```\n---\n## Connections\n- extends: b\n");
+  });
+
+  test("a heading in a frontmatter block scalar is not a section", () => {
+    const text = "---\ntitle: t\nsummary: |\n  ## Connections\n  - extends: a\n---\nBody\n";
+    expect(stripConnectionsTo(text, ["a"]).removed).toBe(0);
+  });
+
+  test("U+FEFF before ## does not end the section, as for the reader", () => {
+    const text = "---\ntitle: t\n---\n## Connections\n- extends: a\n\ufeff## P\n- extends: b\n";
+    expect(parseNote(text).connections.map((e) => e.target)).toEqual(["a", "b"]);
+    const { content, removed } = stripConnectionsTo(text, ["b"]);
+    expect(removed).toBe(1);
+    expect(content).toBe("---\ntitle: t\n---\n## Connections\n- extends: a\n\ufeff## P\n");
+  });
+
+  test("a note the rule indexes nothing from is left alone", () => {
+    const text = "---\ntitle: t\n---\n\n## Connections\n- extends: a\n<div>\n- extends: a\n\n- extends: b\n";
+    expect(parseNote(text).connections).toEqual([]);
+    const { content, removed } = stripConnectionsTo(text, ["a"]);
+    expect(removed).toBe(0);
+    expect(content).toBe(text);
   });
 });

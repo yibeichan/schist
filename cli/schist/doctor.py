@@ -981,6 +981,28 @@ def check_ingest_available(vault_path: Optional[str]) -> CheckResult:
                 "imports env_utils with no inline fallback and no sibling "
                 "env_utils.py (#369) — the post-commit hook fails on every commit"
             )
+        # The copy must parse `## Connections` sections with this CLI's rule,
+        # or the index it builds disagrees with what the CLI and MCP server
+        # write and validate. Each rule change bumps CONNECTIONS_RULE_VERSION
+        # in ingest.py; a copy without the marker predates rule 2 (any line
+        # starting with `## Connections` was a heading, fences were ignored).
+        # A copy with a different version, older or newer, reads another rule.
+        from .ingest import CONNECTIONS_RULE_VERSION
+        rule = re.search(r"^CONNECTIONS_RULE_VERSION\s*=\s*(\d+)", script_text, re.MULTILINE)
+        if rule is None:
+            issues.append(
+                "has no CONNECTIONS_RULE_VERSION, so it reads ## Connections "
+                "sections with the old rule (any line starting with "
+                "'## Connections', fenced code included) — refresh the hook copy"
+            )
+        elif int(rule.group(1)) != CONNECTIONS_RULE_VERSION:
+            # Either direction is skew: an older copy indexes edges this CLI
+            # does not read, a newer one (from a later schist) the reverse.
+            issues.append(
+                f"reads ## Connections sections with rule v{rule.group(1)} but "
+                f"this installed schist uses v{CONNECTIONS_RULE_VERSION} — "
+                "refresh the hook copy, or upgrade schist if the copy is newer"
+            )
         if issues:
             return CheckResult(
                 "WARN", "Ingest",
@@ -1329,6 +1351,99 @@ def _load_hub_acl(hub: Path):
     return parse_vault_data(yaml.safe_load(_hub_file_text(hub, "vault.yaml")))
 
 
+def _detached_head_fix(hub: Path, hub_path: str) -> str:
+    """The command that points a detached HEAD back at a branch. The branch
+    whose tip is HEAD's commit is named when there is exactly one, or the
+    only branch when there is one; otherwise the admin picks one of the
+    existing branches, of which a few are listed. Guessing `main` on a hub
+    serving another branch made a WARN into a FAIL."""
+    git = ["git", "--git-dir", str(hub)]
+    try:
+        r = subprocess.run(git + ["for-each-ref", "--format=%(objectname) %(refname)",
+                                  "refs/heads/"], capture_output=True, timeout=10, check=True)
+        head = subprocess.run(git + ["rev-parse", "-q", "--verify", "HEAD"],
+                              capture_output=True, timeout=10).stdout.strip()
+    except (subprocess.SubprocessError, OSError):
+        r = None
+    branches: list[tuple[bytes, str]] = []
+    if r is not None:
+        for line in r.stdout.splitlines():
+            sha, _, ref = line.partition(b" ")
+            branches.append((sha, ref.decode("utf-8", "backslashreplace")))
+    at_head = [ref for sha, ref in branches if head and sha == head]
+    if len(at_head) == 1 or len(branches) == 1:
+        ref = at_head[0] if len(at_head) == 1 else branches[0][1]
+        return f"`git --git-dir {shlex.quote(hub_path)} symbolic-ref HEAD {shlex.quote(ref)}`"
+    if not branches:
+        return (f"create the served branch at HEAD's commit and point HEAD at it: "
+                f"`git --git-dir {shlex.quote(hub_path)} update-ref refs/heads/<branch> HEAD`, "
+                f"then `git --git-dir {shlex.quote(hub_path)} symbolic-ref HEAD refs/heads/<branch>`")
+    listed = ", ".join(ref for _, ref in branches[:5])
+    more = f" and {len(branches) - 5} more" if len(branches) > 5 else ""
+    return (f"point HEAD at the branch spokes push, one of {listed}{more}: "
+            f"`git --git-dir {shlex.quote(hub_path)} symbolic-ref HEAD refs/heads/<branch>`")
+
+
+def check_hub_vault_yaml(hub_path: Optional[str]) -> CheckResult:
+    """Read the hub's vault.yaml exactly as its pre-receive hook does.
+
+    The hook refuses every push while it cannot read vault.yaml (not UTF-8,
+    not valid YAML or not a valid ACL, HEAD naming a branch that does not
+    exist beside other branches, a broken object) and accepts every push
+    unchecked when there is none. Both states
+    used to read as SKIP here, so a hub that would refuse everything after
+    an upgrade looked fine before it."""
+    label = "Hub vault.yaml"
+    if not hub_path:
+        return CheckResult("SKIP", label, "no --hub-path supplied")
+    hub = Path(hub_path)
+    if not (hub / "objects").is_dir():
+        return CheckResult("SKIP", label, f"not a git repository: {hub_path}")
+    from schist.pre_receive import extract_vault_yaml_from_git
+    try:
+        text = extract_vault_yaml_from_git(git_dir=str(hub))
+    except UnicodeDecodeError as e:
+        return CheckResult(
+            "FAIL", label,
+            f"vault.yaml at HEAD is not valid UTF-8 ({e.reason} at byte {e.start}), so the hook "
+            "refuses every push. Fix: re-encode it as UTF-8 (docs/hub-spoke-setup.md, "
+            "Troubleshooting, \"REJECTED: failed to load vault.yaml\").")
+    except RuntimeError as e:
+        return CheckResult("FAIL", label, f"the hook refuses every push: {e}")
+    except (subprocess.SubprocessError, OSError) as e:
+        return CheckResult(
+            "FAIL", label,
+            f"the hook cannot read vault.yaml ({type(e).__name__}: a missing or broken object, "
+            f"or git timing out), so it refuses every push. Fix: run "
+            f"`git --git-dir {hub_path} fsck`.")
+    if text is None:
+        return CheckResult(
+            "WARN", label,
+            "no vault.yaml at HEAD: the hook accepts every push without an ACL check. "
+            "Fix: commit a vault.yaml to the served branch (Step 1 of "
+            "docs/hub-spoke-setup.md describes what it holds).")
+    # Parsed exactly as the hook's load_acl() does; any error there refuses
+    # every push, the push that would fix the file included.
+    from schist.acl import parse_vault_data
+    try:
+        parse_vault_data(yaml.safe_load(text))
+    except Exception as e:  # noqa: BLE001 — the hook refuses on any exception
+        return CheckResult(
+            "FAIL", label,
+            f"vault.yaml at HEAD does not parse, so the hook refuses every push: "
+            f"{type(e).__name__}: {e}. Fix: rewrite it on the hub (docs/hub-spoke-setup.md, "
+            "Troubleshooting, \"REJECTED: failed to load vault.yaml\").")
+    head = subprocess.run(["git", "--git-dir", str(hub), "symbolic-ref", "-q", "HEAD"],
+                          capture_output=True, timeout=10)
+    if head.returncode != 0:
+        return CheckResult(
+            "WARN", label,
+            "HEAD is detached, so the hook cannot tell which branch it serves and refuses "
+            "every ref update from an identity without '*' write. Fix: "
+            f"{_detached_head_fix(hub, hub_path)}.")
+    return CheckResult("PASS", label, "vault.yaml at HEAD reads and parses as the hook reads it")
+
+
 def check_hub_key_pinning(hub_path: Optional[str],
                           authorized_keys: Optional[str] = None) -> CheckResult:
     """Verify every hub SSH key is pinned to an identity via schist-shell.
@@ -1475,7 +1590,7 @@ _ACCEPTENV_RE = re.compile(r"^\s*AcceptEnv\s+(.+)$", re.IGNORECASE | re.MULTILIN
 # just as surely as `GIT_*` does — prefix checks alone gave globs a free pass.
 _ACCEPTENV_DANGEROUS = (
     "SCHIST_IDENTITY", "SCHIST_IDENTITY_PINNED",
-    "PATH", "BASH_ENV", "ENV",
+    "PATH", "BASH_ENV", "ENV", "HOME", "VIRTUAL_ENV",
     "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
     "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
     "GIT_EXEC_PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
@@ -1488,7 +1603,9 @@ def _acceptenv_offender(token: str) -> bool:
 
     SCHIST_* fakes the identity or the pinned marker; PATH / LD_* / DYLD_* /
     PYTHON* / BASH_ENV / ENV let a client redirect what the forced command
-    (or the pre-receive hook's python3) executes; GIT_* covers config/exec
+    (or the pre-receive hook's python3) executes; HOME and VIRTUAL_ENV pass
+    schist-shell's keep-list and redirect which git config and which venv
+    the hook uses; GIT_* covers config/exec
     redirection — except GIT_PROTOCOL, which git's own transport uses and is
     harmless. Glob tokens are matched against _ACCEPTENV_DANGEROUS.
     """
@@ -1499,7 +1616,7 @@ def _acceptenv_offender(token: str) -> bool:
         # name landing in one is flagged without enumerating members.
         if name.startswith("SCHIST"):
             return True
-        if name in {"PATH", "BASH_ENV", "ENV"}:
+        if name in {"PATH", "BASH_ENV", "ENV", "HOME", "VIRTUAL_ENV"}:
             return True
         if name.startswith(("LD_", "DYLD_", "PYTHON")):
             return True
@@ -2812,6 +2929,25 @@ def _mcp_dist_dir_from_config(vault_path: Optional[str]) -> Optional[Path]:
     Mirrors `check_mcp_config`'s lookup order so doctor reports against the
     actual deployed dist (not just the source checkout's local build).
     """
+    for entry in _mcp_config_entries(vault_path):
+        args = entry.get("args")
+        if not isinstance(args, list) or not args:
+            continue
+        args0 = Path(str(args[0]))
+        if args0.is_file():
+            return args0.parent
+    return None
+
+
+def _mcp_config_entry(vault_path: Optional[str]) -> Optional[dict]:
+    """The configured schist MCP server entry ({"command", "args", ...}) of
+    the first config file that has one, or None."""
+    return next(_mcp_config_entries(vault_path), None)
+
+
+def _mcp_config_entries(vault_path: Optional[str]):
+    """Each config file's schist MCP server entry, in `check_mcp_config`'s
+    order."""
     candidates = [
         Path.home() / ".claude.json",
         Path.home() / ".claude" / "settings.json",
@@ -2854,12 +2990,54 @@ def _mcp_dist_dir_from_config(vault_path: Optional[str]) -> Optional[Path]:
                     break
         if not entry:
             continue
-        args = entry.get("args")
-        if not isinstance(args, list) or not args:
-            continue
-        args0 = Path(str(args[0]))
-        if args0.is_file():
-            return args0.parent
+        yield entry
+
+
+def _mcp_server_dist_dir(entry: dict) -> Optional[Path]:
+    """The dist/ directory of the server `entry` starts, or None when it
+    cannot be found. Follows symlinks: `node <link>` where the link points
+    into dist/, and a bare command (a bin link on PATH, found with
+    shutil.which and resolved). `npx` and a command whose target has no
+    dist/ fall back to the npm global install (`npm root -g`)."""
+    def dist_of(path: Path) -> Optional[Path]:
+        try:
+            real = path.expanduser().resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            # ValueError: a path with a NUL byte, from a hand-edited config.
+            return None
+        if not real.is_file():
+            return None
+        for d in (real.parent, real.parent.parent, real.parent.parent.parent):
+            if (d / "markdown-parser.js").is_file():
+                return d
+            if (d / "dist" / "markdown-parser.js").is_file():
+                return d / "dist"
+        return real.parent
+
+    command = str(entry.get("command") or "")
+    args = entry.get("args") if isinstance(entry.get("args"), list) else []
+    base = Path(command).name
+    if base in ("node", "node.exe", "nodejs") or not command:
+        for a in args:
+            a = str(a)
+            if a.startswith("-"):
+                continue
+            found = dist_of(Path(a))
+            if found is not None:
+                return found
+            break
+        return None
+    if base not in ("npx", "npx.cmd"):
+        on_path = shutil.which(command) if os.sep not in command else command
+        if on_path:
+            found = dist_of(Path(on_path))
+            if found is not None:
+                return found
+    from .mcp_locate import _npm_global_entry
+
+    npm = _npm_global_entry()
+    if npm is not None and npm.is_file():
+        return npm.resolve().parent
     return None
 
 
@@ -3143,6 +3321,62 @@ def check_mcp_cli_spawn(vault_path: Optional[str]) -> CheckResult:
         f"{len(ok)} MCP client entr{'y' if len(ok) == 1 else 'ies'} can spawn both CLIs "
         f"from a GUI-launched process ({', '.join(ok)})",
     )
+
+
+_MCP_RULE_VERSION_RE = re.compile(r"CONNECTIONS_RULE_VERSION\s*=\s*(\d+)")
+
+
+def check_mcp_connections_rule(vault_path: Optional[str]) -> CheckResult:
+    """The MCP server and this CLI must read `## Connections` sections with
+    the same rule: the server's writers check their output with it and
+    update_note validates the edges it finds, so a server on another rule
+    lets through edges ingest reads differently. Compares the built server's
+    CONNECTIONS_RULE_VERSION (dist/markdown-parser.js) with ingest.py's."""
+    from .ingest import CONNECTIONS_RULE_VERSION
+
+    name = "MCP connection rule"
+    fix = (
+        "Upgrade the MCP server and the CLI together (`npm install -g @schist/mcp-server`, "
+        "or `cd <schist>/mcp-server && npm run build` in a checkout), then restart the MCP client."
+    )
+    entry = _mcp_config_entry(vault_path)
+    if entry is None:
+        return CheckResult("SKIP", name, "skipped (no MCP config)")
+    # A configured server whose rule cannot be read is reported, not
+    # skipped: an old server is exactly the skew this check is for.
+    dist_dir = _mcp_server_dist_dir(entry)
+    if dist_dir is None:
+        return CheckResult(
+            "WARN", name,
+            "cannot find the configured MCP server's files "
+            f"(command {entry.get('command')!r}), so its ## Connections rule is unknown",
+            fix=fix,
+        )
+    try:
+        text = (dist_dir / "markdown-parser.js").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return CheckResult(
+            "WARN", name,
+            f"cannot read {dist_dir / 'markdown-parser.js'}, so the configured MCP server's "
+            "## Connections rule is unknown",
+            fix=fix,
+        )
+    m = _MCP_RULE_VERSION_RE.search(text)
+    if m is None:
+        return CheckResult(
+            "WARN", name,
+            "the MCP server predates the shared ## Connections rule "
+            f"(this CLI uses rule v{CONNECTIONS_RULE_VERSION})",
+            fix=fix,
+        )
+    if int(m.group(1)) != CONNECTIONS_RULE_VERSION:
+        return CheckResult(
+            "WARN", name,
+            f"the MCP server reads ## Connections sections with rule v{m.group(1)}, "
+            f"this CLI with v{CONNECTIONS_RULE_VERSION}",
+            fix=fix,
+        )
+    return CheckResult("PASS", name, f"in sync (rule v{CONNECTIONS_RULE_VERSION})")
 
 
 def check_mcp_schema_alignment(vault_path: Optional[str]) -> CheckResult:
@@ -3705,6 +3939,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_mcp_config(vault_path),
         check_mcp_cli_spawn(vault_path),
         check_mcp_schema_alignment(vault_path),
+        check_mcp_connections_rule(vault_path),
         check_mcp_vocab_alignment(vault_path),
         check_memory_db_path(vault_path),
         check_vault_access(vault_path),
@@ -3712,6 +3947,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_skill_tool_references(vault_path),
     ]
     if hub_path:
+        checks.append(check_hub_vault_yaml(hub_path))
         checks.append(check_hub_acl_drift(hub_path))
         checks.append(check_hub_pre_receive_hook(hub_path))
         checks.append(check_hub_key_pinning(hub_path, authorized_keys))

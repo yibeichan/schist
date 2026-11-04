@@ -157,6 +157,22 @@ def build_search_index(db: sqlite3.Connection) -> dict:
         " ORDER BY date DESC"
     ).fetchall()
 
+    # Every edge the index holds, by source, for the detail panel: it lists
+    # these as they are, so an indexed edge is always shown, whether or not
+    # its target is a node and however the body renders.
+    edges_by_source: dict[str, list[dict]] = {}
+    for source, target, etype, context in db.execute(
+        "SELECT source, target, type, context FROM edges ORDER BY id"
+    ):
+        edges_by_source.setdefault(source, []).append(
+            {
+                "type": etype,
+                "target": target,
+                "peer": normalize_endpoint(target),
+                "context": context or "",
+            }
+        )
+
     documents = []
     store = {}
     for id_, title, date, status, tags_json, body in docs:
@@ -177,9 +193,12 @@ def build_search_index(db: sqlite3.Connection) -> dict:
             "date": date or "",
             "status": status or "draft",
             "tags": tags,
-            # Full body stored here for the detail panel; the truncated
-            # body_excerpt above is only used by the lunr index.
-            "body": (body or "").strip(),
+            # Full body for the detail panel, exactly as ingest stored it:
+            # docs.body is the text the note's connections were read from
+            # (ingest.connection_body), so it is rendered unchanged. The
+            # truncated body_excerpt above is only used by the lunr index.
+            "body": body or "",
+            "edges": edges_by_source.get(id_, []),
         }
 
     return {"documents": documents, "store": store}

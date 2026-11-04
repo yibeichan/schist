@@ -103,30 +103,39 @@ class TestBuildExec:
 
     def test_scrub_environ_strips_injection_vectors(self):
         from schist.hub_shell import scrub_environ
-        # GIT_* is a whitelist (#524 review finding 1): every GIT_ var except
-        # GIT_PROTOCOL is scrubbed, incl. the ones the blacklist missed
-        # (GIT_TRACE = arbitrary file-append as hub user; GIT_DIR /
-        # GIT_ALTERNATE_OBJECT_DIRECTORIES = confinement break).
-        env = {"LD_PRELOAD": "/evil.so", "DYLD_INSERT_LIBRARIES": "/e.dylib",
-               "BASH_ENV": "/evil.sh", "ENV": "/evil.sh",
-               "GIT_EXEC_PATH": "/evil-git", "GIT_CONFIG_GLOBAL": "/evil.cfg",
-               "GIT_SSH_COMMAND": "evil", "GIT_ASKPASS": "/evil-askpass",
-               "GIT_TRACE": "/home/git/.ssh/authorized_keys",
-               "GIT_DIR": "/other.git",
-               "GIT_ALTERNATE_OBJECT_DIRECTORIES": "/steal",
-               "GIT_NAMESPACE": "x", "GIT_INDEX_FILE": "/y",
-               "PATH": "/usr/bin", "GIT_PROTOCOL": "version=2",
-               "SCHIST_IDENTITY": "pi"}
+        # A keep-list: every variable outside it is dropped, including the
+        # families a deny-list kept missing (GIT_TRACE = arbitrary file-append
+        # as hub user; GIT_DIR / GIT_ALTERNATE_OBJECT_DIRECTORIES =
+        # confinement break; the client's locale; Python's own encoding
+        # switches; XDG config redirection).
+        dropped = {"LD_PRELOAD": "/evil.so", "DYLD_INSERT_LIBRARIES": "/e.dylib",
+                   "BASH_ENV": "/evil.sh", "ENV": "/evil.sh",
+                   "GIT_EXEC_PATH": "/evil-git", "GIT_CONFIG_GLOBAL": "/evil.cfg",
+                   "GIT_SSH_COMMAND": "evil", "GIT_ASKPASS": "/evil-askpass",
+                   "GIT_TRACE": "/home/git/.ssh/authorized_keys",
+                   "GIT_DIR": "/other.git",
+                   "GIT_ALTERNATE_OBJECT_DIRECTORIES": "/steal",
+                   "GIT_NAMESPACE": "x", "GIT_INDEX_FILE": "/y",
+                   "SCHIST_IDENTITY": "pi", "SCHIST_IDENTITY_PINNED": "1",
+                   # The client's locale, forwarded by `AcceptEnv LANG LC_*`.
+                   "LANG": "en_US.iso885915", "LC_ALL": "en_US.iso885915",
+                   "LC_CTYPE": "en_US.iso885915", "LANGUAGE": "fr",
+                   "PYTHONIOENCODING": "latin-1", "PYTHONUTF8": "0",
+                   "PYTHONCOERCECLOCALE": "0", "XDG_CONFIG_HOME": "/evil",
+                   "TMPDIR": "/evil", "TZ": "UTC", "TERM": "xterm"}
+        kept = {"PATH": "/usr/bin", "HOME": "/home/git", "USER": "git", "LOGNAME": "git",
+                "SHELL": "/bin/sh", "PYTHONPATH": "/opt/schist", "VIRTUAL_ENV": "/opt/venv",
+                "SSH_CONNECTION": "1 2 3 4", "SSH_CLIENT": "1 2 3",
+                "SSH_ORIGINAL_COMMAND": "git-receive-pack 'v.git'",
+                "GIT_PROTOCOL": "version=2"}
+        env = {**dropped, **kept}
         removed = scrub_environ(env)
-        assert sorted(removed) == ["BASH_ENV", "DYLD_INSERT_LIBRARIES", "ENV",
-                                   "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                                   "GIT_ASKPASS", "GIT_CONFIG_GLOBAL", "GIT_DIR",
-                                   "GIT_EXEC_PATH", "GIT_INDEX_FILE",
-                                   "GIT_NAMESPACE", "GIT_SSH_COMMAND",
-                                   "GIT_TRACE", "LD_PRELOAD"]
-        # GIT_PROTOCOL (protocol v2) and PATH (doctor-policed, legit hub-side
-        # uses) deliberately survive — see the #516 comment in hub_shell.py.
-        assert set(env) == {"PATH", "GIT_PROTOCOL", "SCHIST_IDENTITY"}
+        assert sorted(removed) == sorted(dropped)
+        assert env == kept
+
+    def test_build_exec_sets_the_identity_the_scrub_dropped(self):
+        argv, env = build_exec("pi", "git-receive-pack 'vault.git'")
+        assert env == {"SCHIST_IDENTITY": "pi", "SCHIST_IDENTITY_PINNED": "1"}
 
 
 class TestMain:
@@ -191,3 +200,24 @@ class TestMain:
         assert recorded["argv"] == ["git", "shell", "-c", "git-receive-pack 'v.git'"]
         assert recorded["identity"] == "pi"  # client assertion overwritten
         assert recorded["pinned"] == "1"
+
+    def test_main_drops_what_the_client_sent_before_exec(self, monkeypatch):
+        """scrub_environ is tested alone above; this pins its call in main(),
+        which nothing else would notice going missing."""
+        sent = {"LANG": "en_US.ISO-8859-15", "LC_ALL": "en_US.ISO-8859-15",
+                "GIT_TRACE": "/tmp/trace", "PYTHONIOENCODING": "latin-1"}
+        for name, value in sent.items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "git-receive-pack 'v.git'")
+        recorded = {}
+
+        def fake_execvp(file, argv):
+            import os
+            recorded.update(os.environ)
+            raise SystemExit(0)
+
+        monkeypatch.setattr("os.execvp", fake_execvp)
+        with pytest.raises(SystemExit):
+            main(["pi"])
+        assert recorded["SCHIST_IDENTITY"] == "pi"
+        assert [name for name in sent if name in recorded] == []

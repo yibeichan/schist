@@ -1,4 +1,5 @@
 {
+  "description": "Pins the connection rule in cli/schist/ingest.py (CONNECTION_RE, scan_connections, connection_body) and mcp-server/src/markdown-parser.ts (the same names in camelCase). `lines`: CONNECTION_RE on one line. `bodies`: the edges a body yields and the 0-based line of the first problem (null when there is none; a problem means no edges). `files`: whole note files, written to disk as UTF-8 bytes and read back the way each side reads notes (Python read_text, TS readNoteText); `body` is connection_body of the text, which ingest stores in docs.body for the viewer, and `edges` what ingest indexes. mcp-server/tests/connection-marked.test.ts also checks every body and file here against marked 12.0.2. `byte_files`: note files given as bytes (hex): whether they decode as UTF-8 (ingest skips a note that does not; the MCP server refuses it) and the edges ingest indexes.",
   "lines": [
     {
       "name": "plain edge",
@@ -231,7 +232,8 @@
           "target": "note-a",
           "context": null
         }
-      ]
+      ],
+      "problem": null
     },
     {
       "name": "CR boundary",
@@ -242,7 +244,8 @@
           "target": "note-a",
           "context": null
         }
-      ]
+      ],
+      "problem": null
     },
     {
       "name": "CRLF pair is a single boundary",
@@ -253,140 +256,110 @@
           "target": "note-a",
           "context": null
         }
-      ]
+      ],
+      "problem": null
     },
     {
-      "name": "VT U+000B boundary",
+      "name": "VT U+000B is not a line ending: no heading, no edge",
       "body": "## Connections\u000b- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": [],
+      "problem": 0
     },
     {
-      "name": "FF U+000C boundary",
+      "name": "FF U+000C is not a line ending: no heading, no edge",
       "body": "## Connections\f- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": [],
+      "problem": 0
     },
     {
-      "name": "FS U+001C boundary",
+      "name": "FS U+001C is not a line ending: no heading, no edge",
       "body": "## Connections\u001c- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": [],
+      "problem": 0
     },
     {
-      "name": "GS U+001D boundary",
+      "name": "GS U+001D is not a line ending: no heading, no edge",
       "body": "## Connections\u001d- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": [],
+      "problem": 0
     },
     {
-      "name": "RS U+001E boundary",
+      "name": "RS U+001E is not a line ending: no heading, no edge",
       "body": "## Connections\u001e- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": [],
+      "problem": 0
     },
     {
-      "name": "NEL U+0085 boundary",
+      "name": "NEL U+0085 is not a line ending: no heading, no edge",
       "body": "## Connections\u0085- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": [],
+      "problem": 0
     },
     {
-      "name": "LS U+2028 boundary",
+      "name": "LS U+2028 is not a line ending: no heading, no edge",
       "body": "## Connections\u2028- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": [],
+      "problem": 0
     },
     {
-      "name": "PS U+2029 boundary",
+      "name": "PS U+2029 is not a line ending: no heading, no edge",
       "body": "## Connections\u2029- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": [],
+      "problem": 0
     },
     {
       "name": "plain space is NOT a splitlines boundary",
       "body": "## Connections - extends: note-a",
-      "edges": []
+      "edges": [],
+      "problem": null
     },
     {
       "name": "tab is NOT a splitlines boundary",
       "body": "## Connections\t- extends: note-a",
-      "edges": []
+      "edges": [],
+      "problem": null
     },
     {
       "name": "US U+001F is NOT a splitlines boundary",
       "body": "## Connections\u001f- extends: note-a",
-      "edges": []
+      "edges": [],
+      "problem": 0
     },
     {
       "name": "NBSP U+00A0 is NOT a splitlines boundary",
       "body": "## Connections\u00a0- extends: note-a",
-      "edges": []
+      "edges": [],
+      "problem": null
     },
     {
       "name": "en quad U+2000 is NOT a splitlines boundary",
       "body": "## Connections\u2000- extends: note-a",
-      "edges": []
+      "edges": [],
+      "problem": null
     },
     {
       "name": "ideographic space U+3000 is NOT a splitlines boundary",
       "body": "## Connections\u3000- extends: note-a",
-      "edges": []
+      "edges": [],
+      "problem": null
     },
     {
       "name": "ZWNBSP U+FEFF is NOT a splitlines boundary",
       "body": "## Connections\ufeff- extends: note-a",
-      "edges": []
+      "edges": [],
+      "problem": null
     },
     {
       "name": "MMSP U+205F is NOT a splitlines boundary",
       "body": "## Connections\u205f- extends: note-a",
-      "edges": []
+      "edges": [],
+      "problem": null
     },
     {
       "name": "NNBSP U+202F is NOT a splitlines boundary",
       "body": "## Connections\u202f- extends: note-a",
-      "edges": []
+      "edges": [],
+      "problem": null
     },
     {
       "name": "bogus-type edge smuggled after a valid one via CR on the same physical line",
@@ -402,50 +375,38 @@
           "target": "note-b",
           "context": null
         }
-      ]
+      ],
+      "problem": null
     },
     {
-      "name": "section ends at the next ## heading (NEL-separated)",
+      "name": "NEL-joined section and heading stay one line: no edge",
       "body": "## Connections\u0085- extends: note-a\u0085## Other\u0085- supports: note-b",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": [],
+      "problem": 0
     },
     {
-      "name": "quoted context survives an NEL boundary",
+      "name": "NEL-joined edge with quoted context stays one line: no edge",
       "body": "## Connections\u0085- extends: note-a \"why\"",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": "why"
-        }
-      ]
+      "edges": [],
+      "problem": 0
     },
     {
-      "name": "intro paragraph before an LS-separated section",
+      "name": "LS-joined intro and section stay one line: no edge",
       "body": "Intro.\u2028\u2028## Connections\u2028- extends: note-a",
-      "edges": [
-        {
-          "type": "extends",
-          "target": "note-a",
-          "context": null
-        }
-      ]
+      "edges": [],
+      "problem": 0
     },
     {
       "name": "single-token bracket reference is skipped by both parsers (#415)",
       "body": "## Connections\n- extends: [moltbook]",
-      "edges": []
+      "edges": [],
+      "problem": null
     },
     {
       "name": "wiki-link bracket reference is skipped (#415)",
       "body": "## Connections\n- extends: [[some-note]]",
-      "edges": []
+      "edges": [],
+      "problem": null
     },
     {
       "name": "bracket reference among real edges: only the real edges survive (#415)",
@@ -461,7 +422,8 @@
           "target": "note-b",
           "context": null
         }
-      ]
+      ],
+      "problem": null
     },
     {
       "name": "multi-word bracket reference never matches the regex at all (#415)",
@@ -470,6 +432,1726 @@
         {
           "type": "extends",
           "target": "note-a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "heading inside a backtick fence is not a heading",
+      "body": "Example:\n```\n## Connections\n- extends: note-a\n```\n",
+      "edges": [],
+      "problem": null
+    },
+    {
+      "name": "heading text with a suffix is not a heading",
+      "body": "## Connections (x)\n- extends: note-a",
+      "edges": [],
+      "problem": null
+    },
+    {
+      "name": "heading text with extra words is not a heading",
+      "body": "## Connections to Our Vault\n- extends: note-a",
+      "edges": [],
+      "problem": null
+    },
+    {
+      "name": "heading indented 4 spaces is an indented code block",
+      "body": "    ## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": null
+    },
+    {
+      "name": "heading indented by a tab is an indented code block",
+      "body": "\t## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": null
+    },
+    {
+      "name": "heading indented 2 spaces is not read: the heading starts at column 0",
+      "body": "  ## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": null
+    },
+    {
+      "name": "heading with trailing spaces and tab is a heading",
+      "body": "## Connections \t\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "real section after a closed fence yields its edges",
+      "body": "```\n## Connections\n- extends: fake\n```\n\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "edge-looking line inside a fence within a real section is skipped",
+      "body": "## Connections\n- extends: note-a\n```\n- extends: fake\n## Notes\n```\n- related: note-b",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "related",
+          "target": "note-b",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "unclosed fence before a heading leaves no section",
+      "body": "```python\nx = 1\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "tilde fence hides a heading",
+      "body": "~~~\n## Connections\n- extends: note-a\n~~~",
+      "edges": [],
+      "problem": null
+    },
+    {
+      "name": "tilde fence is not closed by backticks",
+      "body": "~~~\n```\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "a closing fence longer than its opener is a problem: no edges",
+      "body": "```\ncode\n`````\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "shorter closing fence does not close the fence",
+      "body": "````\n```\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "closing fence with trailing text does not close the fence",
+      "body": "```\n``` not a close\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "a fence-like line indented 4 spaces before the heading is a problem: no edges",
+      "body": "    ```\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "CRLF exact heading is a heading",
+      "body": "## Connections\r\n- extends: note-a\r\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "CRLF fenced heading is not a heading",
+      "body": "```\r\n## Connections\r\n- extends: note-a\r\n```\r\n",
+      "edges": [],
+      "problem": null
+    },
+    {
+      "name": "a backtick run with a backtick in its info string is a problem: no edges",
+      "body": "``` a`b\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "fence after a non-fence backtick line hides the heading",
+      "body": "``` a`b\n```\n## Connections\n- extends: fake\n```",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "tilde opener may have a backtick in its info string",
+      "body": "~~~ a`b\n## Connections\n- extends: fake\n~~~",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "HTML type 1 pre block hides lines until its close tag (a line starting with \"<\" is a problem: no edges)",
+      "body": "<pre>\n## Connections\n- extends: fake\n</pre>\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "HTML type 1 is case-insensitive and may end on its start line (a line starting with \"<\" is a problem: no edges)",
+      "body": "<SCRIPT type=\"x\">var a;</Script>\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "HTML type 1 unclosed runs to the end (a line starting with \"<\" is a problem: no edges)",
+      "body": "<textarea>\n## Connections\n- extends: fake",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "HTML type 2 multi-line comment hides a section (a line starting with \"<\" is a problem: no edges)",
+      "body": "<!--\n## Connections\n- extends: fake\n-->",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "HTML type 2 one-line comment then a real section (a line starting with \"<\" is a problem: no edges)",
+      "body": "<!-- note -->\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "HTML comment inside a section: the section ends at a heading marked shows (a line starting with \"<\" is a problem: no edges)",
+      "body": "## Connections\n- extends: note-a\n<!--\n- extends: fake\n## Notes\n-->\n- related: note-b",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "HTML type 3 processing instruction (a line starting with \"<\" is a problem: no edges)",
+      "body": "<?xml version=\"1.0\"\n## Connections\n- extends: fake\n?>\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "HTML type 4 declaration (a line starting with \"<\" is a problem: no edges)",
+      "body": "<!DOCTYPE html\n## Connections\n- extends: fake\n>\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "HTML type 5 CDATA (a line starting with \"<\" is a problem: no edges)",
+      "body": "<![CDATA[\n## Connections\n- extends: fake\n]]>\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "HTML type 6 div ends at a blank line, then a real section (a line starting with \"<\" is a problem: no edges)",
+      "body": "<div>\n## Connections\n- extends: fake\n\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "HTML type 6 closing tag with attributes and uppercase (a line starting with \"<\" is a problem: no edges)",
+      "body": "</DIV class=\"x\">\n## Connections\n- extends: fake",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "HTML type 6 can interrupt a paragraph (a line starting with \"<\" is a problem: no edges)",
+      "body": "Some text\n<table>\n## Connections\n- extends: fake",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "HTML type 7 open tag alone on a line (a line starting with \"<\" is a problem: no edges)",
+      "body": "<span>\n## Connections\n- extends: fake",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "HTML type 7 tag with attributes (a line starting with \"<\" is a problem: no edges)",
+      "body": "<x-card data-a=\"1\" hidden>\n## Connections\n- extends: fake\n\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "HTML type 7 tag after paragraph text: skipped, since marked may start a block (a line starting with \"<\" is a problem: no edges)",
+      "body": "Some text\n<span>\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "HTML type 7 needs the tag alone on the line (a line starting with \"<\" is a problem: no edges)",
+      "body": "<span> text\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "div then fence: the HTML block governs until its blank line (a line starting with \"<\" is a problem: no edges)",
+      "body": "<div>\n```\n</div>\n\n```\n## Connections\n- extends: fake\n```",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "fence then div: the fence governs until it closes (a line starting with \"<\" is a problem: no edges)",
+      "body": "```\n<div>\n```\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "HTML block inside a section: the section ends at a heading marked shows (a line starting with \"<\" is a problem: no edges)",
+      "body": "## Connections\n- extends: note-a\n<div>\n- extends: fake\n## Notes\n\n- related: note-b",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "long s is not an ASCII letter for HTML tag names (a line starting with \"<\" is a problem: no edges)",
+      "body": "<\u017fcript>\n## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "U+001F in the section is a problem: no edges",
+      "body": "## Connections\n- extends: note-a\n\u001f## P\n- extends: note-b",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "U+FEFF before ## does not end the section",
+      "body": "## Connections\n- extends: note-a\n\ufeff## P\n- extends: note-b",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "note-b",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "a line indented 4 spaces in the section is a problem: no edges",
+      "body": "## Connections\n- extends: note-a\n    ## P\n- extends: note-b",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "an empty ## heading ends the section",
+      "body": "## Connections\n- extends: note-a\n## \n- extends: note-b",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "U+001F or U+FEFF before - is not an edge line",
+      "body": "## Connections\n\u001f- extends: note-a\n\ufeff- extends: note-b",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "heading indented 1 space is not read: the heading starts at column 0",
+      "body": " ## Connections\n- extends: note-a",
+      "edges": [],
+      "problem": null
+    },
+    {
+      "name": "NBSP before the heading is not a heading",
+      "body": "\u00a0## Connections\n- extends: fake",
+      "edges": [],
+      "problem": null
+    },
+    {
+      "name": "indented first body line is an indented code block",
+      "body": "    ## Connections\n    - extends: fake",
+      "edges": [],
+      "problem": null
+    },
+    {
+      "name": "edge indented 4 spaces is code",
+      "body": "## Connections\n    - extends: fake",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "edge indented by a tab is code",
+      "body": "## Connections\n\t- extends: fake",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "NBSP before - is not an edge line",
+      "body": "## Connections\n\u00a0- extends: fake",
+      "edges": [],
+      "problem": null
+    },
+    {
+      "name": "edge nested under the previous item is not top-level",
+      "body": "## Connections\n- extends: note-a\n  - extends: fake",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "edge after a dash-tab item stays in that item",
+      "body": "## Connections\n-\textends: fake\n - extends: fake",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "an edge line indented 1 space is not read; one at column 0 is",
+      "body": "## Connections\n - extends: note-a\n- extends: note-b",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-b",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "heading inside a list item is not a heading",
+      "body": "- item\n  ## Connections\n- extends: fake",
+      "edges": [],
+      "problem": null
+    },
+    {
+      "name": "heading indented in a list item after a blank line is not a heading",
+      "body": "- item\n\n  ## Connections\n- extends: fake",
+      "edges": [],
+      "problem": null
+    },
+    {
+      "name": "heading after a list at column 0 is a heading",
+      "body": "- item\n  more\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "fence opened in a list item is not closed by a shallower fence line",
+      "body": "1) item\n\t```\n  ```\n## Connections\n- extends: fake",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "\"- \" alone is paragraph text, so the next fence opens",
+      "body": "- \n  ```\n    ```\n## Connections\n- extends: fake",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "marked ends an HTML declaration at > and reads on (a line starting with \"<\" is a problem: no edges)",
+      "body": "<!DOCTYPE x\n> ```\n## Connections\n- extends: fake",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "HTML comment after a list item: hidden for CommonMark (a line starting with \"<\" is a problem: no edges)",
+      "body": "- x\n<!--\n## Connections\n- extends: fake\n-->",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "a - line after paragraph text can make marked end the paragraph (a line starting with \"<\" is a problem: no edges)",
+      "body": "foo\n</span>\n- \n## Connections\n- extends: fake",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "uppercase HTML tag does not interrupt a paragraph in marked (a line starting with \"<\" is a problem: no edges)",
+      "body": "text\n<DIV>\n<pre>\n## Connections\n- extends: fake",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "empty quote line then a type 7 tag (a line starting with \"<\" is a problem: no edges)",
+      "body": "> \n<x-y a=\"1\">\n## Connections\n- extends: fake",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "thematic break then a type 7 tag (a line starting with \"<\" is a problem: no edges)",
+      "body": "***\n</span>\n## Connections\n- extends: fake",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "U+2028 makes marked read an ATX line as paragraph text (a line starting with \"<\" is a problem: no edges)",
+      "body": "x\n## Other \u2028y\n<span>\n```\n## Connections\n- extends: fake",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "U+2028 inside an edge's dash context is a problem: no edges",
+      "body": "## Connections\n- extends: note-a \u2014 why\u2028more",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "U+2028 in a tilde fence's info string",
+      "body": "~~~\u2028x\n## Connections\n- extends: fake\n~~~",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "ordinary note: heading, blank line, edges",
+      "body": "Intro.\n\n## Connections\n\n- extends: note-a\n- supports: note-b \"why\"\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "supports",
+          "target": "note-b",
+          "context": "why"
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R3-2: bullet then 5 spaces (indented code in the item) is a problem",
+      "body": "## Connections\n-     extends: b\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R3-2: bullet, space, tab is a problem",
+      "body": "## Connections\n- \t extends: b\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R3-2: bullet, space, two tabs is a problem",
+      "body": "## Connections\n- \t\textends: b\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R3-2: indented bullet then 5 spaces is a problem",
+      "body": "## Connections\n -     extends: b\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R3-4: <meta x opens an HTML block in marked",
+      "body": "<meta x\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "R3-4: <meta x after paragraph text",
+      "body": "text\n<meta x\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R3-4: tag name with underscore",
+      "body": "<a_b>\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "R3-4: <pre then NBSP",
+      "body": "<pre\u00a0x\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "R3-4: <pre then U+2028",
+      "body": "<pre\u2028x\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "R3-4: <pre then VT",
+      "body": "<pre\u000b\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "R3-4: <pre then U+FEFF",
+      "body": "<pre\ufeff>\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "R3-4: closing tag with U+2028 before >",
+      "body": "</b\u2028>\n## Connections\n - extends: evil\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "R3-5: definition title in double quotes spans the section",
+      "body": "[x]: /url \"\n## Connections\n- extends: evil\n\"\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "R3-5: definition title in single quotes spans the section",
+      "body": "[x]: /url '\n## Connections\n- extends: evil\n'\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "R3-5: definition title in parentheses spans the section",
+      "body": "[x]: /url (\n## Connections\n- extends: evil\n)\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "R3-5: an item holding a definition is not an edge",
+      "body": "## Connections\n- [x]: tgt\n",
+      "edges": [],
+      "problem": null
+    },
+    {
+      "name": "R3-6: bullet then 4 spaces, then a processing instruction and a fence",
+      "body": "## Connections\n-    extends: k\n<? ?>```\n- extends: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R3-6: bullet then 4 spaces, then a declaration and a fence",
+      "body": "## Connections\n-    extends: k\n<!X >```\n- extends: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R3-6: bullet then 4 spaces, then CDATA and a fence",
+      "body": "## Connections\n-    extends: k\n<![CDATA[ ]]>```\n- extends: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R3-7: setext heading over a thematic break and an indented edge",
+      "body": "## Connections\nTitle\n***\n - extends: evil\n===\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "R3-7: setext h2 over ___ and an indented edge",
+      "body": "## Connections\nTitle\n___\n  - extends: evil\n---\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "R3-7: setext over *** and a 3-space edge",
+      "body": "## Connections\nsee\n***\n   - extends: evil\n=\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "R3-7: setext after a processing instruction",
+      "body": "## Connections\n<? ?>\u3000\n - extends: s1\n  ===",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R3-8: marked closes ``` at ```~~~",
+      "body": "```\n```~~~\n```\n## Connections\n- extends: evil\n```\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "R3-8: marked closes ~~~ at ~~~`",
+      "body": "~~~\n~~~`\n~~~\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "R3-8: a fence in the section closed by ```~",
+      "body": "## Connections\n- extends: ok\n\n```\n```~\n```\n- extends: evil\n",
+      "edges": [],
+      "problem": 3
+    },
+    {
+      "name": "R3-9: text after --> then a processing instruction and a fence",
+      "body": "<!-- x -->- a\n<? ?>```\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "R3-9: the same inside the section",
+      "body": "## Connections\n<!-- x -->- extends: z\n<? ?>```\n- extends: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R3-11: ordered bullet and 5 spaces with nothing after",
+      "body": "## Connections\n1.     \n<? ?>```\n- extends: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R3-11: bullet and 5 spaces with nothing after",
+      "body": "## Connections\n-     \n<? ?>```\n- extends: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R3-11: lazy line with trailing spaces",
+      "body": "## Connections\n- extends: a\nxy    \n<? ?>```\n- extends: evil\n",
+      "edges": [],
+      "problem": 3
+    },
+    {
+      "name": "R3-11: reverse arrangement",
+      "body": "## Connections\n1.     \n<? ?>\n   - badtype: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R3-12: <?> is an unclosed processing instruction in marked",
+      "body": "<?>\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "R3-13: <div then a blank line",
+      "body": "<div\n\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "R3-13: <p then a blank line",
+      "body": "<p\n\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "R3-13: </table then a blank line in the section",
+      "body": "## Connections\n- extends: ok\n\n</table\n\n- extends: evil\n",
+      "edges": [],
+      "problem": 3
+    },
+    {
+      "name": "R3-18: indented thematic break after paragraph text",
+      "body": "## Connections\npara\n - - -\n<? ?>```\n- extends: evil\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "R3-18: indented * * * after paragraph text",
+      "body": "## Connections\npara\n * * *\n<? ?>```\n- extends: evil\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "R3-18: setext over an indented item",
+      "body": "## Connections\npara\n  - x\n===\n<? ?>```\n- extends: evil\n",
+      "edges": [],
+      "problem": 3
+    },
+    {
+      "name": "R3-19: ##<tab> ends the section",
+      "body": "## Connections\n- extends: a\n##\tOther\n- extends: b\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R3-19: ## then NBSP ends the section",
+      "body": "## Connections\n- extends: a\n##\u00a0Other\n- extends: b\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R3-19: a setext h2 is a problem",
+      "body": "## Connections\n- extends: a\n\nOther\n---\n- extends: b\n",
+      "edges": [],
+      "problem": 4
+    },
+    {
+      "name": "R3-19: an empty ## ends the section",
+      "body": "## Connections\n- extends: a\n## \n- extends: b\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R3-19: an edge item turned into a heading by ===",
+      "body": "## Connections\n- extends: a\n===",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "R3-19: an edge item turned into a table",
+      "body": "## Connections\n- extends: a\n:-:",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "rule: a strict fence before the heading is skipped",
+      "body": "```py\n## Connections\n- extends: fake\n```\n## Connections\n- extends: note-a\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "rule: a strict fence in the section is skipped",
+      "body": "## Connections\n- extends: note-a\n```\n- extends: fake\n```\n- extends: note-b\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "note-b",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "rule: an indented strict fence in a list item before the heading",
+      "body": "- step\n  ```bash\n  ls\n  ```\n## Connections\n- extends: note-a\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "rule: a fence with a fence-like line inside is a problem",
+      "body": "```\n  ```x\n```\n## Connections\n- extends: note-a\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "rule: an unclosed fence is a problem",
+      "body": "## Connections\n- extends: note-a\n```\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "rule: a fence with an info string with spaces is a problem",
+      "body": "``` python title\nx\n```\n## Connections\n- extends: note-a\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "rule: a fence whose content is less indented than the opener is a problem",
+      "body": "  ```\n x\n  ```\n## Connections\n- extends: note-a\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "rule: [text](url) at line start is fine",
+      "body": "[x](y) text\n## Connections\n- extends: note-a\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "rule: [label]: url at line start is a problem",
+      "body": "[x]: y\n## Connections\n- extends: note-a\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "rule: [ without a ] on the line is a problem",
+      "body": "[open\n## Connections\n- extends: note-a\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "rule: escaped ] before ]: is a problem",
+      "body": "[x\\]]: y\n## Connections\n- extends: note-a\n",
+      "edges": [],
+      "problem": 0
+    },
+    {
+      "name": "rule: a block quote before the heading is fine",
+      "body": "> quote\n> more\n## Connections\n- extends: note-a\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "rule: a block quote in the section is a problem",
+      "body": "## Connections\n- extends: note-a\n> quote\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "rule: a thematic break before the heading is fine",
+      "body": "text\n\n---\n\n## Connections\n- extends: note-a\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "rule: a thematic break in the section is a problem",
+      "body": "## Connections\n- extends: note-a\n\n---\n",
+      "edges": [],
+      "problem": 3
+    },
+    {
+      "name": "rule: a nested item is not an edge",
+      "body": "## Connections\n- extends: note-a\n  - extends: nested\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "rule: an h3 ends the section",
+      "body": "## Connections\n- extends: note-a\n### Papers\n- cites: p\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "rule: #tag is not a heading",
+      "body": "## Connections\n- extends: note-a\n#tag\n- extends: note-b\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "note-b",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "rule: a type starting with a bracket is not an edge",
+      "body": "## Connections\n- [x]: note-a\n- extends: note-b\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-b",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "rule: a type starting with < is not an edge",
+      "body": "## Connections\n- <x: note-a\n",
+      "edges": [],
+      "problem": null
+    },
+    {
+      "name": "rule: bullet and 3 spaces is an edge",
+      "body": "## Connections\n-   extends: note-a\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "rule: CRLF and CR line endings",
+      "body": "## Connections\r\n- extends: note-a\r- extends: note-b\r\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "note-b",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "rule: a second ## Connections ends the first section",
+      "body": "## Connections\n- extends: note-a\n## Connections\n- extends: note-b\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "rule: a heading with trailing #s is not read",
+      "body": "## Connections ##\n- extends: note-a\n",
+      "edges": [],
+      "problem": null
+    },
+    {
+      "name": "marked trims the last item: a rule line with U+FEFF after it underlines the item",
+      "body": "## Connections\n- extends: p\n=\ufeff\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "marked trims the last item: - then U+FEFF and a tab",
+      "body": "## Connections\n- extends: p\n-\ufeff\t\n1.\n- extends: z\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "marked trims the last item: - then U+3000",
+      "body": "## Connections\n- extends: p\n-\u3000\n- extends: z\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "marked trims the last item: a table row with U+3000 after it",
+      "body": "## Connections\n- extends: p\n|-\u3000\n- extends: z\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (1)",
+      "body": "## Connections\n- extends: a\n- extends: b\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "b",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (2)",
+      "body": "## Connections\n- extends: a\n- <style>\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (3)",
+      "body": "## Connections\n- extends: a \u2014 <textarea>\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": "<textarea>"
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (4)",
+      "body": "Intro <details>\n\n## Connections\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (5)",
+      "body": "## Connections\n- extends: a\n\nx <h2>Other</h2>\n\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (6)",
+      "body": "## Connections\n- extends: a \"<template>\"\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": "<template>"
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (7)",
+      "body": "x <select>\n\n## Connections\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (8)",
+      "body": "## Connections\n- extends: a\n- x <xmp>\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (9)",
+      "body": "## Connections\n- extends: a\n- x <noscript>\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (10)",
+      "body": "Intro <plaintext>\n\n## Connections\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (11)",
+      "body": "## Connections\n- extends: a\n  more <style>\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (12)",
+      "body": "## Connections\n- extends: a\n- x <title>\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (13)",
+      "body": "## Connections\n- extends: a\n- x <iframe>\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (14)",
+      "body": "## Connections\n- extends: <svg><style>\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "<svg><style>",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: raw HTML inside a line (15)",
+      "body": "Intro <textarea>\n\n## Connections\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-4: a list item holding a heading or quote (1)",
+      "body": "## Connections\n- extends: a\n- ## Other\n- extends: evil\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "R4-4: a list item holding a heading or quote (2)",
+      "body": "## Connections\n- extends: a\n\n* # Rejected links\n\n- extends: evil\n",
+      "edges": [],
+      "problem": 3
+    },
+    {
+      "name": "R4-4: a list item holding a heading or quote (3)",
+      "body": "## Connections\n- extends: a\n- > ## Other\n- extends: evil\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "R4-2: block HTML in a quote or list item (1)",
+      "body": "> <!--\n\n## Connections\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: block HTML in a quote or list item (2)",
+      "body": "- <!--\n\n## Connections\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: block HTML in a quote or list item (3)",
+      "body": "## Connections\n- extends: a\n- <!--\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: block HTML in a quote or list item (4)",
+      "body": "1. > <![CDATA[\n\n## Connections\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: block HTML in a quote or list item (5)",
+      "body": "> <?\n\n## Connections\n- extends: evil\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "evil",
+          "context": null
+        }
+      ],
+      "problem": null
+    },
+    {
+      "name": "R4-2: an indented backtick pair after a paragraph (1)",
+      "body": "para\n    ```\n    <textarea>\n    ```\n\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R4-2: an indented backtick pair after a paragraph (2)",
+      "body": "para\n    ```\n    <!-- -->\n    ```\n\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R4-2: an indented backtick pair after a paragraph (3)",
+      "body": "- a\n    ```\n    <textarea>\n    ```\n\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R4-2: an indented tilde pair after a paragraph (1)",
+      "body": "para\n    ~~~\n    <textarea>\n    ~~~\n\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R4-2: an indented tilde pair after a paragraph (2)",
+      "body": "> q\n    ~~~\n    <textarea>\n    ~~~\n\n## Connections\n- extends: evil\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "R4-4: a heading in a nested item",
+      "body": "## Connections\n- extends: a\n- - # x\n- extends: b\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "R4-4: a heading after a nested marker and spaces",
+      "body": "## Connections\n- extends: p\n-   - ## Other ]\n- extends: z\n",
+      "edges": [],
+      "problem": 2
+    },
+    {
+      "name": "R4-2: a fence pair indented 4 spaces is not skipped",
+      "body": "text\n    ```\n    x\n    ```\n## Connections\n- extends: a\n",
+      "edges": [],
+      "problem": 1
+    },
+    {
+      "name": "a fence pair indented 3 spaces is skipped",
+      "body": "   ```\n   ## Connections\n   ```\n## Connections\n- extends: a\n",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        }
+      ],
+      "problem": null
+    }
+  ],
+  "files": [
+    {
+      "name": "indented first body line after frontmatter is code, not a heading",
+      "text": "---\ntitle: x\n---\n\n    ## Connections\n    - extends: fake\n",
+      "body": "    ## Connections\n    - extends: fake",
+      "edges": []
+    },
+    {
+      "name": "indented fence as the first body line is not a fence",
+      "text": "---\ntitle: x\n---\n    ```\n## Connections\n- extends: note-a\n",
+      "body": "    ```\n## Connections\n- extends: note-a",
+      "edges": []
+    },
+    {
+      "name": "fence line in a frontmatter block scalar does not open a fence",
+      "text": "---\ntitle: t\nsummary: |\n  ```\n---\n## Connections\n- extends: note-a\n",
+      "body": "## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "heading in a frontmatter block scalar is not a heading",
+      "text": "---\ntitle: t\nsummary: |\n  ## Connections\n  - extends: fake\n---\nBody\n",
+      "body": "Body",
+      "edges": []
+    },
+    {
+      "name": "frontmatter fence then body fence: the body governs",
+      "text": "---\ntitle: t\nsummary: |\n  ```\n---\n```\n## Connections\n- extends: fake\n```\nprose\n",
+      "body": "```\n## Connections\n- extends: fake\n```\nprose",
+      "edges": []
+    },
+    {
+      "name": "CRLF file",
+      "text": "---\r\ntitle: t\r\n---\r\n\r\n## Connections\r\n- extends: note-a\r\n",
+      "body": "## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "no frontmatter",
+      "text": "## Connections\n- extends: note-a\n",
+      "body": "## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "---foo is not a closing line: the section after the real one counts",
+      "text": "---\ntitle: t\n---foo: |\n  ## Connections\n  - extends: fake\n---\n## Connections\n- extends: note-a\n",
+      "body": "## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "leading blank line before frontmatter: its lines are not body",
+      "text": "\n---\n## Connections\n- extends: fake\n---\nBody\n",
+      "body": "Body",
+      "edges": []
+    },
+    {
+      "name": "closing line of five dashes",
+      "text": "---\ntitle: t\n-----\n## Connections\n- extends: note-a\n",
+      "body": "## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "BOM: no frontmatter, so its lines are body lines",
+      "text": "\ufeff---\ntitle: t\n---\n## Connections\n- extends: note-a\n",
+      "body": "\ufeff---\ntitle: t\n---\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "unclosed frontmatter: the whole text is the body",
+      "text": "---\ntitle: t\n## Connections\n- extends: note-a\n",
+      "body": "---\ntitle: t\n## Connections\n- extends: note-a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "note-a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "R3-1: NEL before a fence on the first body line",
+      "text": "---\ntitle: t\n---\n\u0085```\n## Connections\n- extends: evil\n",
+      "body": "\u0085```\n## Connections\n- extends: evil",
+      "edges": []
+    },
+    {
+      "name": "R3-1: U+001C before a comment on the first body line",
+      "text": "---\ntitle: t\n---\n\u001c<!--\n## Connections\n- extends: evil\n",
+      "body": "\u001c<!--\n## Connections\n- extends: evil",
+      "edges": []
+    },
+    {
+      "name": "R3-1: 4 spaces before a fence on the first body line",
+      "text": "---\ntitle: t\n---\n    ```\n## Connections\n- extends: evil\n",
+      "body": "    ```\n## Connections\n- extends: evil",
+      "edges": []
+    },
+    {
+      "name": "R3-1: U+3000 before backticks on the first body line (text, rendered as read)",
+      "text": "---\ntitle: t\n---\n\u3000```\n## Connections\n- extends: shown\n",
+      "body": "\u3000```\n## Connections\n- extends: shown",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "shown",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "R3-3: lone CR frontmatter holding a section",
+      "text": "---\rtitle: t\rsummary: |\r  ## Connections\r  - extends: evil\r---\rbody\r",
+      "body": "body",
+      "edges": []
+    },
+    {
+      "name": "R3-3: lone CR frontmatter holding a fence opener",
+      "text": "---\rtitle: t\rsummary: |\r  ```\r---\r## Connections\r- extends: a\r",
+      "body": "## Connections\n- extends: a",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "R3-3: one stray CR before the closing line",
+      "text": "---\ntitle: t\nsummary: |\n  ## Connections\n  - extends: evil\r---\nbody\n",
+      "body": "body",
+      "edges": []
+    },
+    {
+      "name": "R3-21: TOML frontmatter is skipped whether or not python-frontmatter reads it",
+      "text": "+++\n## Connections\n- extends: hidden\n+++\n## Connections\n- extends: shown\n",
+      "body": "## Connections\n- extends: shown",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "shown",
+          "context": null
+        }
+      ]
+    },
+    {
+      "name": "R4-1: the hashtag patch changes only the frontmatter (1)",
+      "text": "---\ntitle: t\n----\n\n## Connections\n- badtype: notes/x.md \"[#a]\"\n",
+      "body": "## Connections\n- badtype: notes/x.md \"[#a]\"",
+      "edges": [
+        {
+          "type": "badtype",
+          "target": "notes/x.md",
+          "context": "[#a]"
+        }
+      ]
+    },
+    {
+      "name": "R4-1: the hashtag patch changes only the frontmatter (2)",
+      "text": "---\ntitle: t\n----\nintro\n---\ufeff\n\n## Connections\n- extends: a \"[#b]\"\n",
+      "body": "intro\n---\ufeff\n\n## Connections\n- extends: a \"[#b]\"",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
+          "context": "[#b]"
+        }
+      ]
+    },
+    {
+      "name": "R4-1: the hashtag patch changes only the frontmatter (3)",
+      "text": "---\ntitle: t\n----\n\n## Connections\n- extends: a{#b}\n- extends: c \u2014 see [#d]\n",
+      "body": "## Connections\n- extends: a{#b}\n- extends: c \u2014 see [#d]",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a{#b}",
+          "context": null
+        },
+        {
+          "type": "extends",
+          "target": "c",
+          "context": "see [#d]"
+        }
+      ]
+    },
+    {
+      "name": "R4-1: the hashtag patch changes only the frontmatter (4)",
+      "text": "---\ntitle: t\n----\n[#a\\] x\n\n## Connections\n- extends: a\n",
+      "body": "[#a\\] x\n\n## Connections\n- extends: a",
+      "edges": []
+    },
+    {
+      "name": "R4-1: the hashtag patch changes only the frontmatter (5)",
+      "text": "\ufeff---\ntitle: t\n## Connections\n- badtype: x \"[#a]\"\n## Other\n---\n",
+      "body": "\ufeff---\ntitle: t\n## Connections\n- badtype: x \"[#a]\"\n## Other\n---",
+      "edges": [
+        {
+          "type": "badtype",
+          "target": "x",
+          "context": "[#a]"
+        }
+      ]
+    },
+    {
+      "name": "R4-1: the hashtag patch changes only the frontmatter (6)",
+      "text": "---\ntitle: Legacy\nstatus: draft\n----\nintro\n---\ufeff\n\n## Connections\n- badtype: notes/x.md \"[#b]\"\n",
+      "body": "intro\n---\ufeff\n\n## Connections\n- badtype: notes/x.md \"[#b]\"",
+      "edges": [
+        {
+          "type": "badtype",
+          "target": "notes/x.md",
+          "context": "[#b]"
+        }
+      ]
+    },
+    {
+      "name": "R4-1: the hashtag patch changes only the frontmatter (7)",
+      "text": "---\ntags: [#a, #b]\n---\n## Connections\n- extends: x \"[#c]\"\n",
+      "body": "## Connections\n- extends: x \"[#c]\"",
+      "edges": [
+        {
+          "type": "extends",
+          "target": "x",
+          "context": "[#c]"
+        }
+      ]
+    }
+  ],
+  "byte_files": [
+    {
+      "name": "R4-3: an invalid UTF-8 byte: ingest skips the note",
+      "hex": "2d2d2d0a7469746c653a204c65676163790a2d2d2d0aff0a0a232320436f6e6e656374696f6e730a2d20626164747970653a206e6f7465732f782e6d640a",
+      "decodes": false,
+      "edges": []
+    },
+    {
+      "name": "R4-3: a lone continuation byte in a connection line",
+      "hex": "232320436f6e6e656374696f6e730a2d20657874656e64733a206180620a",
+      "decodes": false,
+      "edges": []
+    },
+    {
+      "name": "a UTF-8 byte-order mark is kept, so the note has no frontmatter",
+      "hex": "efbbbf2d2d2d0a7469746c653a20740a2d2d2d0a232320436f6e6e656374696f6e730a2d20657874656e64733a20610a",
+      "decodes": true,
+      "edges": [
+        {
+          "type": "extends",
+          "target": "a",
           "context": null
         }
       ]

@@ -1414,6 +1414,8 @@ class TestCheckIngestAvailableStaleHandCopy:
 
     def test_pass_when_354_window_copy_has_env_utils_sibling(self, tmp_path):
         """The #354-window copy WITH the env_utils.py sibling works — no WARN."""
+        from schist.ingest import CONNECTIONS_RULE_VERSION
+
         window_copy = (
             "#!/usr/bin/env python3\n"
             "try:\n"
@@ -1421,6 +1423,8 @@ class TestCheckIngestAvailableStaleHandCopy:
             "except ImportError:\n"
             "    from env_utils import env_flag\n"
             "from index_contract import INDEX_SCHEMA_VERSION\n"
+            # Keeps this case about env_utils, not the connection rule.
+            f"CONNECTIONS_RULE_VERSION = {CONNECTIONS_RULE_VERSION}\n"
         )
         vault = self._vault_with_copy(
             tmp_path, with_sibling=True, script_text=window_copy
@@ -1432,6 +1436,57 @@ class TestCheckIngestAvailableStaleHandCopy:
         with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
             r = check_ingest_available(str(vault))
         assert r.status == "PASS", r.message
+
+    def test_warn_when_copy_has_no_connections_rule_version(self, tmp_path):
+        """A copy from before the exact, fence-aware ## Connections rule has
+        no CONNECTIONS_RULE_VERSION and indexes edges the CLI and MCP server
+        no longer write or see."""
+        vault = self._vault_with_copy(tmp_path, with_sibling=True)
+        script = tmp_path / ".schist" / "ingest.py"
+        text = script.read_text()
+        assert "\nCONNECTIONS_RULE_VERSION = " in text  # fixture guard
+        script.write_text(text.replace("\nCONNECTIONS_RULE_VERSION = ", "\nOTHER_VERSION = "))
+        with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
+            r = check_ingest_available(str(vault))
+        assert r.status == "WARN"
+        assert "has no CONNECTIONS_RULE_VERSION" in r.message
+        assert "refresh the hook copy" in r.message
+
+    def test_warn_when_copy_has_older_connections_rule_version(self, tmp_path):
+        import re as _re
+
+        vault = self._vault_with_copy(tmp_path, with_sibling=True)
+        script = tmp_path / ".schist" / "ingest.py"
+        text, n = _re.subn(
+            r"^CONNECTIONS_RULE_VERSION = \d+", "CONNECTIONS_RULE_VERSION = 1",
+            script.read_text(), flags=_re.MULTILINE,
+        )
+        assert n == 1
+        script.write_text(text)
+        with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
+            r = check_ingest_available(str(vault))
+        assert r.status == "WARN"
+        assert "rule v1" in r.message
+
+    def test_warn_when_copy_has_newer_connections_rule_version(self, tmp_path):
+        """A copy from a later schist reads a rule this CLI does not."""
+        import re as _re
+
+        from schist.ingest import CONNECTIONS_RULE_VERSION
+
+        newer = CONNECTIONS_RULE_VERSION + 1
+        vault = self._vault_with_copy(tmp_path, with_sibling=True)
+        script = tmp_path / ".schist" / "ingest.py"
+        text, n = _re.subn(
+            r"^CONNECTIONS_RULE_VERSION = \d+", f"CONNECTIONS_RULE_VERSION = {newer}",
+            script.read_text(), flags=_re.MULTILINE,
+        )
+        assert n == 1
+        script.write_text(text)
+        with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
+            r = check_ingest_available(str(vault))
+        assert r.status == "WARN"
+        assert f"rule v{newer}" in r.message
 
     def test_pass_when_current_copy_lacks_env_utils_sibling(self, tmp_path):
         """The CURRENT ingest.py defines the env_flag fallback inline, so a
@@ -2713,6 +2768,159 @@ class TestHubAclDrift:
         assert r.status == "SKIP"
 
 
+class TestCheckHubVaultYaml:
+    """The doctor check reads vault.yaml with the hook's own function, so
+    the states that make the hook refuse everything FAIL here first."""
+
+    @pytest.fixture
+    def hub(self, tmp_path):
+        import shutil
+        if shutil.which("git") is None:
+            pytest.skip("git not available")
+        from types import SimpleNamespace
+        from schist.sync import init_hub
+        hub = tmp_path / "hub.git"
+        init_hub(SimpleNamespace(name="v", participant=["alpha"]), str(hub))
+        return hub
+
+    def _commit_vault_yaml(self, hub, data: bytes):
+        import subprocess
+        git = ["git", "--git-dir", str(hub)]
+        blob = subprocess.run(git + ["hash-object", "-w", "--stdin"], input=data,
+                              capture_output=True, check=True).stdout.strip().decode()
+        index = hub / "doctor-test.index"
+        env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+        subprocess.run(git + ["read-tree", "HEAD"], env=env, check=True)
+        subprocess.run(git + ["update-index", "--cacheinfo", f"100644,{blob},vault.yaml"],
+                       env=env, check=True)
+        tree = subprocess.run(git + ["write-tree"], env=env, capture_output=True,
+                              check=True).stdout.strip().decode()
+        commit = subprocess.run(git + ["-c", "user.name=t", "-c", "user.email=t@example.com",
+                                       "commit-tree", tree, "-p", "HEAD", "-m", "v"],
+                                capture_output=True, check=True).stdout.strip().decode()
+        subprocess.run(git + ["update-ref", "refs/heads/main", commit], check=True)
+        index.unlink()
+
+    def test_a_readable_vault_yaml_passes(self, hub):
+        from schist.doctor import check_hub_vault_yaml
+        assert check_hub_vault_yaml(str(hub)).status == "PASS"
+
+    def test_a_vault_yaml_that_is_not_utf8_fails(self, hub):
+        from schist.doctor import check_hub_vault_yaml
+        self._commit_vault_yaml(hub, b"name: v\n# caf\xe9\n")
+        r = check_hub_vault_yaml(str(hub))
+        assert r.status == "FAIL" and "not valid UTF-8" in r.message
+
+    @pytest.mark.parametrize("data", [
+        b"name: v\nparticipants: [\n",                            # not YAML
+        b"- just\n- a list\n",                                     # YAML, not an ACL
+        b"name: v\nvault_version: 1\nparticipants:\n  - {name: a, type: nope}\n",
+    ], ids=["yaml", "list", "bad-participant"])
+    def test_a_vault_yaml_the_hook_cannot_parse_fails(self, hub, data, monkeypatch, capsys):
+        """The hook goes on from the read to yaml.safe_load and
+        parse_vault_data, and any error there refuses every push."""
+        from schist.doctor import check_hub_vault_yaml
+        from schist.pre_receive import main
+        self._commit_vault_yaml(hub, data)
+        r = check_hub_vault_yaml(str(hub))
+        assert r.status == "FAIL" and "does not parse" in r.message, r.message
+        monkeypatch.delenv("GIT_DIR", raising=False)
+        monkeypatch.chdir(hub)
+        assert main(stdin=["a b refs/heads/main"], identity="alpha",
+                    log_path=hub / "r.log", db_path=hub / "rl.sqlite") == 1
+        assert capsys.readouterr().err.startswith("REJECTED: failed to load vault.yaml")
+
+    def test_head_naming_a_missing_branch_fails(self, hub):
+        import subprocess
+        from schist.doctor import check_hub_vault_yaml
+        subprocess.run(["git", "--git-dir", str(hub), "symbolic-ref", "HEAD",
+                        "refs/heads/master"], check=True)
+        r = check_hub_vault_yaml(str(hub))
+        assert r.status == "FAIL" and "HEAD names refs/heads/master" in r.message
+
+    def test_a_hub_with_objects_but_no_refs_fails(self, hub):
+        import subprocess
+        from schist.doctor import check_hub_vault_yaml
+        subprocess.run(["git", "--git-dir", str(hub), "update-ref", "-d", "refs/heads/main"],
+                       check=True)
+        r = check_hub_vault_yaml(str(hub))
+        assert r.status == "FAIL" and "the hub has objects but no refs" in r.message
+
+    def test_an_empty_hub_warns_instead_of_failing(self, tmp_path):
+        import subprocess
+        from schist.doctor import check_hub_vault_yaml
+        empty = tmp_path / "empty.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(empty)], check=True)
+        r = check_hub_vault_yaml(str(empty))
+        assert r.status == "WARN" and "accepts every push" in r.message
+
+    def test_no_vault_yaml_warns_that_every_push_is_accepted(self, hub):
+        import subprocess
+        from schist.doctor import check_hub_vault_yaml
+        git = ["git", "--git-dir", str(hub)]
+        empty = subprocess.run(git + ["mktree"], input=b"", capture_output=True,
+                               check=True).stdout.strip().decode()
+        commit = subprocess.run(git + ["-c", "user.name=t", "-c", "user.email=t@example.com",
+                                       "commit-tree", empty, "-p", "HEAD", "-m", "e"],
+                                capture_output=True, check=True).stdout.strip().decode()
+        subprocess.run(git + ["update-ref", "refs/heads/main", commit], check=True)
+        r = check_hub_vault_yaml(str(hub))
+        assert r.status == "WARN" and "accepts every push" in r.message
+
+    def test_a_detached_head_warns(self, hub):
+        import subprocess
+        from schist.doctor import check_hub_vault_yaml
+        git = ["git", "--git-dir", str(hub)]
+        sha = subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True,
+                             check=True).stdout.strip().decode()
+        subprocess.run(git + ["update-ref", "--no-deref", "HEAD", sha], check=True)
+        r = check_hub_vault_yaml(str(hub))
+        assert r.status == "WARN" and "HEAD is detached" in r.message
+
+    def _detach(self, hub, branch="main", others=()):
+        import subprocess
+        git = ["git", "--git-dir", str(hub)]
+        sha = subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True,
+                             check=True).stdout.strip().decode()
+        if branch != "main":
+            subprocess.run(git + ["branch", "-m", "main", branch], check=True)
+        for name, at in others:
+            target = sha if at == "head" else subprocess.run(
+                git + ["commit-tree", f"{sha}^{{tree}}", "-p", sha, "-m", "o"],
+                capture_output=True, check=True,
+                env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+                     "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e"}
+            ).stdout.strip().decode()
+            subprocess.run(git + ["update-ref", f"refs/heads/{name}", target], check=True)
+        subprocess.run(git + ["update-ref", "--no-deref", "HEAD", sha], check=True)
+
+    def test_the_detached_head_fix_names_the_branch_the_hub_serves(self, hub):
+        """Applying a fix that names refs/heads/main on a hub serving trunk
+        made HEAD name a missing branch, and every push was refused."""
+        import subprocess
+        from schist.doctor import check_hub_vault_yaml
+        self._detach(hub, "trunk", others=[("old", "other")])
+        r = check_hub_vault_yaml(str(hub))
+        assert r.status == "WARN" and "symbolic-ref HEAD refs/heads/trunk`" in r.message
+        assert "refs/heads/main" not in r.message
+        fix = r.message.split("`")[1]
+        subprocess.run(fix, shell=True, check=True)
+        assert check_hub_vault_yaml(str(hub)).status == "PASS"
+
+    def test_the_detached_head_fix_lists_branches_when_it_cannot_tell(self, hub):
+        from schist.doctor import check_hub_vault_yaml
+        self._detach(hub, "trunk", others=[(f"b{i}", "head") for i in range(6)])
+        r = check_hub_vault_yaml(str(hub))
+        assert r.status == "WARN" and "refs/heads/<branch>" in r.message
+        assert "refs/heads/b0" in r.message and "and 2 more" in r.message
+        assert "refs/heads/main" not in r.message
+
+    def test_run_doctor_runs_it_for_a_hub(self, hub):
+        from schist.doctor import run_doctor
+        labels = {r.label: r.status for r in run_doctor(None, None, hub_path=str(hub))}
+        assert labels.get("Hub vault.yaml") == "PASS"
+
+
 class TestDoctorHubWiring:
     def test_run_doctor_includes_hub_check_when_path_given(self, tmp_path, capsys):
         import shutil
@@ -3251,6 +3459,9 @@ class TestAcceptEnvGlobs:
         # A GIT_ glob is flagged conservatively: only the exact GIT_PROTOCOL
         # is carved out, so a broad git-family glob gets a WARN.
         "GIT_PROTO*",
+        # Kept by schist-shell's keep-list, so forwarding them reaches git
+        # and the hook.
+        "HOME", "VIRTUAL_ENV", "HO*", "VIRTUAL*",
     ])
     def test_dangerous_globs_flagged(self, tok):
         from schist.doctor import _acceptenv_offender
@@ -5291,3 +5502,136 @@ class TestCheckVaultAccess:
         results = run_doctor(str(vault), None)
         assert any(r.label == "Vault access" and r.status == "FAIL"
                    for r in results)
+
+
+class TestCheckMcpConnectionsRule:
+    """The built MCP server carries CONNECTIONS_RULE_VERSION; doctor warns
+    when it differs from ingest.py's, or is missing (an older server)."""
+
+    def _setup(self, tmp_path: Path, monkeypatch, js: str | None) -> None:
+        dist_dir = tmp_path / "mcp" / "dist"
+        dist_dir.mkdir(parents=True)
+        (dist_dir / "index.js").write_text("// stub\n")
+        if js is not None:
+            (dist_dir / "markdown-parser.js").write_text(js)
+        (tmp_path / ".claude.json").write_text(json.dumps({
+            "mcpServers": {"schist": {"command": "node", "args": [str(dist_dir / "index.js")]}}
+        }))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    def test_pass_when_versions_match(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+        from schist.ingest import CONNECTIONS_RULE_VERSION
+
+        self._setup(tmp_path, monkeypatch, f"export const CONNECTIONS_RULE_VERSION = {CONNECTIONS_RULE_VERSION};\n")
+        r = check_mcp_connections_rule(None)
+        assert r.status == "PASS", r.message
+
+    def test_warn_when_versions_differ(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+        from schist.ingest import CONNECTIONS_RULE_VERSION
+
+        self._setup(tmp_path, monkeypatch, f"export const CONNECTIONS_RULE_VERSION = {CONNECTIONS_RULE_VERSION + 1};\n")
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN"
+        assert f"rule v{CONNECTIONS_RULE_VERSION + 1}" in r.message
+
+    def test_warn_when_server_has_no_version(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+
+        self._setup(tmp_path, monkeypatch, "export function parseConnections() {}\n")
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN"
+        assert "predates the shared" in r.message
+
+    def _dist(self, tmp_path: Path, version: int) -> Path:
+        dist = tmp_path / "pkg" / "dist"
+        dist.mkdir(parents=True)
+        (dist / "index.js").write_text("// stub\n")
+        (dist / "markdown-parser.js").write_text(f"export const CONNECTIONS_RULE_VERSION = {version};\n")
+        return dist
+
+    def _config(self, tmp_path: Path, monkeypatch, entry: dict) -> None:
+        (tmp_path / ".claude.json").write_text(json.dumps({"mcpServers": {"schist": entry}}))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("schist.mcp_locate._npm_global_entry", lambda: None)
+
+    def test_follows_a_symlinked_entry(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+
+        dist = self._dist(tmp_path, 1)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "schist-mcp.js").symlink_to(dist / "index.js")
+        self._config(tmp_path, monkeypatch, {"command": "node", "args": [str(bin_dir / "schist-mcp.js")]})
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "rule v1" in r.message
+
+    def test_finds_a_bare_command_on_path(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+
+        dist = self._dist(tmp_path, 1)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        link = bin_dir / "schist-mcp"
+        link.symlink_to(dist / "index.js")
+        (dist / "index.js").chmod(0o755)
+        monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+        self._config(tmp_path, monkeypatch, {"command": "schist-mcp", "args": []})
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "rule v1" in r.message
+
+    def test_npx_uses_the_npm_global_install(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+
+        dist = self._dist(tmp_path, 1)
+        self._config(tmp_path, monkeypatch, {"command": "npx", "args": ["-y", "@schist/mcp-server"]})
+        monkeypatch.setattr("schist.mcp_locate._npm_global_entry", lambda: dist / "index.js")
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "rule v1" in r.message
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            {"command": "node", "args": ["/opt/x\u0000y/dist/index.js"]},
+            {"command": "/opt/a\u0000b/bin/schist-mcp", "args": []},
+        ],
+        ids=["nul-in-args", "nul-in-command"],
+    )
+    def test_warn_when_a_configured_path_holds_a_nul_byte(self, tmp_path, monkeypatch, entry):
+        """resolve() raises ValueError on a NUL byte; doctor reports the
+        server as unreadable instead of stopping with a traceback."""
+        from schist.doctor import check_mcp_connections_rule
+
+        self._config(tmp_path, monkeypatch, entry)
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "cannot find the configured MCP server" in r.message
+
+    def test_warn_when_the_configured_server_cannot_be_read(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+
+        self._config(tmp_path, monkeypatch, {"command": "node", "args": [str(tmp_path / "gone" / "index.js")]})
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "rule is unknown" in r.message
+
+        dist = self._dist(tmp_path, 2)
+        (dist / "markdown-parser.js").unlink()
+        self._config(tmp_path, monkeypatch, {"command": "node", "args": [str(dist / "index.js")]})
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "cannot read" in r.message
+
+    def test_real_source_carries_the_cli_version(self):
+        """The TypeScript source declares the same version as ingest.py, in
+        the form the check reads from the build."""
+        from schist.doctor import _MCP_RULE_VERSION_RE
+        from schist.ingest import CONNECTIONS_RULE_VERSION
+
+        src = (Path(__file__).resolve().parents[2] / "mcp-server" / "src" / "markdown-parser.ts").read_text()
+        m = _MCP_RULE_VERSION_RE.search(src)
+        assert m is not None and int(m.group(1)) == CONNECTIONS_RULE_VERSION

@@ -642,7 +642,15 @@ export function getNote(vaultRoot: string, id: string): Note | null {
     if (!row) return null;
 
     const body = (row.body as string) ?? "";
-    const connections = parseConnectionsSync(body);
+    // docs.body is the text ingest read the edges from (connection_body), so
+    // reading it again gives the indexed edges; show only connections the
+    // edges table holds as well, so a stale or older index never shows an
+    // edge it does not have.
+    const indexed = new Set(
+      (db.prepare("SELECT target, type FROM edges WHERE source = ?").all(id) as { target: string; type: string }[])
+        .map((e) => `${e.type}\u0000${e.target}`),
+    );
+    const connections = parseConnectionsSync(body).filter((c) => indexed.has(`${c.type}\u0000${c.target}`));
 
     const conf = row.confidence;
     const note: Note = {
@@ -766,6 +774,32 @@ function conceptNoteAliasInfo(
  * readonly open reads whatever index exists, stale included. The id-shape
  * check runs before any I/O so non-concept reads never touch the DB at all.
  */
+/**
+ * The (type, target) pairs the index holds for edges from `source`, keyed
+ * `${type}\u0000${target}`, or null when the index cannot be read (missing,
+ * locked, older schema). update_note grandfathers out-of-vocabulary
+ * connection lines only when ingest indexed them, which this answers from
+ * the index itself rather than from a re-read of the file.
+ */
+export function tryIndexedEdgeKeys(vaultRoot: string, source: string): Set<string> | null {
+  try {
+    const db = new Database(path.join(vaultRoot, ".schist", "schist.db"), {
+      readonly: true,
+      fileMustExist: true,
+    });
+    try {
+      db.pragma("busy_timeout = 5000");
+      const rows = db.prepare("SELECT type, target FROM edges WHERE source = ?").all(source) as
+        { type: string; target: string }[];
+      return new Set(rows.map((r) => `${r.type}\u0000${r.target}`));
+    } finally {
+      db.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
 export function tryConceptNoteAliasInfo(
   vaultRoot: string,
   id: string

@@ -4,6 +4,7 @@
 
 """schist CLI commands."""
 
+import bisect
 import json
 import os
 import re
@@ -12,7 +13,19 @@ from datetime import date, datetime
 from pathlib import Path
 
 from . import git_ops, markdown_io, sqlite_query
-from .ingest import SchemaConfigError, _normalize_concept_slug, _normalize_tag
+from .ingest import (
+    SchemaConfigError,
+    _normalize_concept_slug,
+    _normalize_tag,
+    CONNECTION_RE,
+    connections_heading_near_misses,
+    has_connections_heading,
+    normalize_newlines,
+    note_body_offset,
+    note_body_start_line,
+    patch_frontmatter_flow_hashtags,
+    scan_note_connections,
+)
 
 
 def _reject_escaping_relpath(value: str, what: str):
@@ -395,6 +408,9 @@ def add(args, vault_path: str, db_path: str):
             try:
                 markdown_io.write_note(filepath, fm, body, exclusive=True)
                 break
+            except markdown_io.ConnectionWriteError as e:
+                print(f'Error: {e}', file=sys.stderr)
+                sys.exit(1)
             except FileExistsError:
                 if attempt == max_collision_retries:
                     print(
@@ -471,7 +487,10 @@ def add_concept(args, vault_path: str, db_path: str):
         body = sys.stdin.read()
     if body is None:
         body = ''
-    if any(line.strip().startswith('## Connections') for line in body.splitlines()):
+    # Same heading rule as ingest.parse_connections: a `## Connections`
+    # shown inside a fenced code block, or a near-miss heading, yields no
+    # edges, so it is allowed in a concept body.
+    if has_connections_heading(body):
         print(
             'Error: concept nodes cannot contain an outgoing '
             '## Connections section',
@@ -501,6 +520,9 @@ def add_concept(args, vault_path: str, db_path: str):
     with git_ops.vault_write_lock(vault_path):
         try:
             markdown_io.write_note(filepath, fm, body, exclusive=True)
+        except markdown_io.ConnectionWriteError as e:
+            print(f'Error: {e}', file=sys.stderr)
+            sys.exit(1)
         except FileExistsError:
             print(f'Error: concept already exists: {rel_path}', file=sys.stderr)
             sys.exit(1)
@@ -606,8 +628,12 @@ def link(args, vault_path: str, db_path: str):
     # across the RMW AND the commit so each commit stages exactly its own
     # append (mirrors MCP holding its write mutex across the git commit).
     with _vault_write_lock(vault_path):
-        markdown_io.append_connection(source_path, args.link_type, args.target, args.context,
-                                       vault_root=vault_path)
+        try:
+            markdown_io.append_connection(source_path, args.link_type, args.target, args.context,
+                                           vault_root=vault_path)
+        except markdown_io.ConnectionWriteError as e:
+            print(f'Error: {e}', file=sys.stderr)
+            sys.exit(1)
 
         ok, output = git_ops.commit(vault_path, f'link: {args.source} -{args.link_type}-> {args.target}', [args.source])
     if not ok:
@@ -780,6 +806,7 @@ def schema(args, vault_path: str, db_path: str):
     # (root README/SCHEMA docs, shared skills, CI docs) are not vault notes and
     # must not make the content validator permanently red.
     violations = []
+    warnings: list[str] = []
     vault = Path(vault_path)
     content_roots = {
         Path(directory).parts[0].casefold()
@@ -837,6 +864,14 @@ def schema(args, vault_path: str, db_path: str):
         fm = note['frontmatter']
         if not fm.get('title') and not fm.get('topic') and not fm.get('concept'):
             violations.append(f'{rel}: missing title/topic/concept in frontmatter')
+        # The connection rule reads ingest's view of the file, not
+        # read_note's stripped body.
+        try:
+            raw_text = patch_frontmatter_flow_hashtags(md_file.read_text(encoding='utf-8'))
+        except (OSError, UnicodeDecodeError):
+            raw_text = ''
+        file_lines, scan = scan_note_connections(raw_text)
+        warnings.extend(_connections_rule_warnings(rel, raw_text, file_lines, scan))
         is_concept_path = (
             len(rel.parts) > 1
             and rel.parts[0].casefold() == 'concepts'
@@ -881,11 +916,7 @@ def schema(args, vault_path: str, db_path: str):
                     f"{rel}: concept frontmatter contains document-only "
                     f"field(s): {', '.join(forbidden)}",
                 )
-            body = note['body']
-            if any(
-                line.strip().startswith('## Connections')
-                for line in body.splitlines()
-            ):
+            if scan.heading is not None:
                 violations.append(
                     f'{rel}: concept nodes cannot have outgoing '
                     '## Connections sections',
@@ -895,6 +926,10 @@ def schema(args, vault_path: str, db_path: str):
                 f'{rel}: concept nodes must live under concepts/',
             )
 
+    if warnings:
+        print(f'{len(warnings)} warning(s):')
+        for w in warnings:
+            print(f'  WARN: {w}')
     if violations:
         print(f'{len(violations)} violation(s):')
         for v in violations:
@@ -902,3 +937,105 @@ def schema(args, vault_path: str, db_path: str):
         sys.exit(1)
     else:
         print('All documents valid.')
+
+
+def _legacy_connection_lines(body: str) -> list[tuple[int, dict]]:
+    """The connection rule before CONNECTIONS_RULE_VERSION 2, kept only so
+    `schema --validate` can show which edges the change adds or drops: lines
+    split with str.splitlines() (VT, FF, NEL, U+2028 and others included),
+    any line whose stripped text starts with `## Connections` opened the
+    section, fences and HTML blocks were not tracked, and the section ended
+    at the next line whose stripped text starts with `## `. Ingest applied it
+    to python-frontmatter's stripped body. Returns (character offset of the
+    line in `body`, edge) pairs."""
+    edges: list[tuple[int, dict]] = []
+    in_section = False
+    offset = 0
+    for raw_line in body.splitlines(keepends=True):
+        line_offset = offset
+        offset += len(raw_line)
+        stripped = raw_line.strip()
+        if stripped.startswith('## Connections'):
+            in_section = True
+            continue
+        if in_section and stripped.startswith('## '):
+            break
+        if not in_section or not stripped.startswith('- '):
+            continue
+        m = CONNECTION_RE.match(stripped)
+        if m:
+            conn_type, target, quoted_ctx, dash_ctx = m.groups()
+            if target.startswith('['):
+                continue
+            edges.append((line_offset, {
+                'type': conn_type,
+                'target': target,
+                'context': quoted_ctx or dash_ctx or None,
+            }))
+    return edges
+
+
+def _connections_rule_warnings(rel: Path, raw_text: str, lines: list[str], scan) -> list[str]:
+    """Warn where the connection rule indexes less than a reader might expect:
+
+    - when the note has a `## Connections` heading but holds Markdown the
+      rule does not follow, so no connection is indexed from it: the line and
+      the reason (the same text the MCP server's get_note returns);
+    - each line whose stripped text starts with `## Connections` that is not
+      the heading (near-miss text, indented), with the reason;
+    - each edge the earlier rule indexed and the current one does not
+      ("dropped"), and each edge indexed now that was not before ("added"),
+      by running both rules on the note.
+
+    `lines` and `scan` are scan_note_connections(raw_text). Line numbers are
+    1-based in the file, frontmatter included. Linear in the note's size."""
+    text = normalize_newlines(raw_text)
+    body_start = note_body_start_line(text)
+    out: list[tuple[int, str]] = []
+    if scan.problem is not None and scan.heading is not None:
+        out.append((
+            scan.problem[0],
+            f'no connections are indexed from this note: {scan.problem[1]}',
+        ))
+    heading = None if scan.heading is None else scan.heading - body_start
+    for i, reason in connections_heading_near_misses(lines[body_start:], heading):
+        out.append((
+            body_start + i,
+            f'line starting with "## Connections" is not a connections '
+            f'heading ({reason})',
+        ))
+
+    # The earlier rule read python-frontmatter's stripped body and split it
+    # on every splitlines() boundary; place each of its edges on the file
+    # line that holds it, through a table of line start offsets.
+    offset = note_body_offset(text)
+    raw_body = text[offset:]
+    lead = len(raw_body) - len(raw_body.lstrip())
+    starts = [0]
+    for ln in lines:
+        starts.append(starts[-1] + len(ln) + 1)
+
+    def file_line(body_offset: int) -> int:
+        return bisect.bisect_right(starts, offset + lead + body_offset) - 1
+
+    def key(idx: int, edge: dict) -> tuple:
+        return (idx, edge['type'], edge['target'], edge['context'])
+
+    old = {
+        key(file_line(off), e)
+        for off, e in _legacy_connection_lines(raw_body.strip())
+    }
+    new = {key(i, e) for i, e in scan.edges}
+    for idx, ctype, target, _ctx in old - new:
+        out.append((
+            idx,
+            f'connection "{ctype}: {target}" was indexed by the earlier '
+            '## Connections rule and is not now (edge dropped)',
+        ))
+    for idx, ctype, target, _ctx in new - old:
+        out.append((
+            idx,
+            f'connection "{ctype}: {target}" is indexed now but was not by '
+            'the earlier ## Connections rule (edge added)',
+        ))
+    return [f'{rel}:{line + 1}: {msg}' for line, msg in sorted(out)]

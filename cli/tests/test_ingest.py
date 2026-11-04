@@ -373,7 +373,12 @@ def test_parse_connections_matches_shared_body_parity_cases(case: dict) -> None:
     type smuggled across such a separator bypass the #317 vocabulary check
     while ingest still indexed the edge (#359). These whole-body cases pin the
     splitters together across languages."""
-    from schist.ingest import parse_connections
+    from schist.ingest import (
+        normalize_newlines,
+        parse_connections,
+        scan_connections,
+        split_connection_lines,
+    )
 
     edges = parse_connections(case["body"])
     got = [
@@ -381,6 +386,8 @@ def test_parse_connections_matches_shared_body_parity_cases(case: dict) -> None:
         for e in edges
     ]
     assert got == case["edges"]
+    scan = scan_connections(split_connection_lines(normalize_newlines(case["body"])))
+    assert (None if scan.problem is None else scan.problem[0]) == case["problem"]
 
 
 def test_ingest_deduplicates_implicit_concept_edges(tmp_path: Path) -> None:
@@ -2502,3 +2509,220 @@ def test_ingest_entrypoint_reports_a_broken_install_cleanly(
     assert "no content directories configured" in err
     assert "reinstall the CLI" in err
     assert "Traceback" not in err
+
+
+def _connection_file_parity_cases() -> list[dict]:
+    return _connection_parity_fixture()["files"]
+
+
+def test_connection_file_parity_fixture_is_nontrivial() -> None:
+    assert len(_connection_file_parity_cases()) >= 6
+
+
+@pytest.mark.parametrize(
+    "case", _connection_file_parity_cases(), ids=lambda c: c["name"]
+)
+def test_ingest_reads_connections_from_the_unstripped_body(
+    tmp_path: Path, case: dict,
+) -> None:
+    """Ingest reads connections from connection_body (the text after the
+    frontmatter's closing line, with CRLF and CR as LF), not
+    python-frontmatter's stripped post.content, and stores that same text in
+    docs.body for the viewer; frontmatter lines never open a fence or a
+    section. The file is written as bytes and read the way ingest reads
+    notes. The same cases run through readNoteText in
+    connection-line-parity.test.ts."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    (vault / "notes").mkdir(parents=True)
+    (vault / "notes" / "2026-06-08-case.md").write_bytes(case["text"].encode("utf-8"))
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute(
+            "SELECT type, target FROM edges WHERE type != 'references' ORDER BY rowid",
+        ).fetchall()
+        (body,) = conn.execute("SELECT body FROM docs").fetchone()
+    finally:
+        conn.close()
+    assert rows == [(e["type"], e["target"]) for e in case["edges"]]
+    # docs.body, which the viewer renders, is the text the edges came from.
+    assert body == case["body"]
+
+
+def _frontmatter_boundary_fixture() -> dict:
+    fixture = _repo_root() / "schema" / "frontmatter-boundary-parity.json"
+    return json.loads(fixture.read_text(encoding="utf-8"))
+
+
+def test_frontmatter_boundary_python_whitespace_is_str_isspace() -> None:
+    from schist.ingest import PY_WHITESPACE
+
+    expected = "".join(c for c in map(chr, range(0x110000)) if c.isspace())
+    assert PY_WHITESPACE == expected
+    assert _frontmatter_boundary_fixture()["python_whitespace"] == expected
+
+
+@pytest.mark.parametrize(
+    "case", _frontmatter_boundary_fixture()["cases"], ids=lambda c: c["name"]
+)
+def test_note_body_offset_matches_shared_boundary_cases(case: dict) -> None:
+    from schist.ingest import connection_body, note_body_offset
+
+    text = case["text"]
+    assert text[note_body_offset(text):] == case["body"]
+    assert connection_body(text) == case["connection_body"]
+
+
+@pytest.mark.parametrize(
+    "case", _frontmatter_boundary_fixture()["cases"], ids=lambda c: c["name"]
+)
+def test_note_body_offset_agrees_with_python_frontmatter(case: dict) -> None:
+    """note_body_offset writes out python-frontmatter's split; its body,
+    stripped and with CRLF and CR turned into LF, is exactly post.content of
+    the text as a text-mode read returns it (ingest reads files that way).
+    TOML is skipped when the toml package (python-frontmatter's TOML handler)
+    is absent: the rule then still treats `+++` lines as frontmatter, which
+    only hides lines from connection parsing."""
+    import frontmatter
+    from frontmatter.util import u
+
+    from schist.ingest import normalize_newlines, note_body_offset
+
+    text = case["text"]
+    stripped = u(normalize_newlines(text)).strip()
+    handler = frontmatter.detect_format(stripped, frontmatter.handlers)
+    if handler is None and text.lstrip().startswith("+++"):
+        pytest.skip("python-frontmatter has no TOML handler here")
+    if handler is None:
+        lib_body = stripped
+    else:
+        try:
+            _fm, content = handler.split(stripped)
+            lib_body = content.strip()
+        except ValueError:
+            lib_body = stripped
+    assert normalize_newlines(text[note_body_offset(text):]).strip() == lib_body
+
+
+# Adversarial note bodies of about 1 MB, most of them one line: the
+# connection rule must read each in linear time (R3-17 measured minutes on
+# the chained-HTML lines before). markdown-parser.ts runs the same set in
+# mcp-server/tests/connection-linear.test.ts.
+_M = 1_000_000
+# Each case builds its note body at size m, so a step can be timed at m and 2m.
+_LINEAR_CASES = {
+    'chained processing instructions': lambda m: '---\ntitle: t\n---\n' + '## Connections\n' + '<? ?>' * (m // 5) + '\n- extends: a\n',
+    'chained CDATA': lambda m: '---\ntitle: t\n---\n' + '## Connections\n' + '<![CDATA[]]>' * (m // 12) + '\n',
+    'edge line with a long space run': lambda m: '---\ntitle: t\n---\n' + '## Connections\n- extends: a' + ' ' * m + 'x\n',
+    'edge line with a colon chain': lambda m: '---\ntitle: t\n---\n' + '## Connections\n- a:' + 'b:' * (m // 2) + '\n',
+    'edge line with an unclosed quote': lambda m: '---\ntitle: t\n---\n' + '## Connections\n- a: b "' + 'x' * m + '\n',
+    'edge line with many quote pairs': lambda m: '---\ntitle: t\n---\n' + '## Connections\n- a: b' + ' "' * (m // 2) + '\n',
+    'bracket line with escapes': lambda m: '---\ntitle: t\n---\n' + '[' + '\\x' * (m // 2) + '\n## Connections\n- extends: a\n',
+    'rule-like line ending in a letter': lambda m: '---\ntitle: t\n---\n' + '## Connections\n' + '-' * m + 'x\n',
+    'fence opener with a long info word': lambda m: '---\ntitle: t\n---\n' + '```' + 'a' * m + '!\n## Connections\n- extends: a\n',
+    'long run of backticks': lambda m: '---\ntitle: t\n---\n' + '`' * m + 'x!\n## Connections\n',
+    'long indentation before a fence': lambda m: '---\ntitle: t\n---\n' + ' ' * m + '```x\n## Connections\n',
+    'many edges': lambda m: '---\ntitle: t\n---\n' + '## Connections\n' + '- extends: a\n' * (m // 13),
+    'unclosed fence over many lines': lambda m: '---\ntitle: t\n---\n' + '```\n' + 'x\n' * (m // 2),
+    # R4-5: the frontmatter hashtag patch on one long flow-collection line.
+    'frontmatter flow list of hashtags': lambda m: '---\ntags: [' + '#,' * (m // 2) + ']\n---\nx\n',
+}
+
+
+@pytest.mark.parametrize('name', sorted(_LINEAR_CASES))
+def test_connection_rule_is_linear_on_1mb_adversarial_notes(name: str) -> None:
+    """Every reader and writer path, and `schema --validate`'s warnings, on a
+    1 MB note: each finishes within a few seconds, and growing the note from
+    0.25 MB to 1 MB grows its time about fourfold, as linear work does. The slowest step takes
+    about 0.4 s at 1 MB on a laptop and about three times that on a CI runner,
+    so a fixed one-second ceiling failed on runner speed alone."""
+    import gc
+    import time
+
+    from schist.commands import _connections_rule_warnings
+    from schist.ingest import (
+        connection_body,
+        parse_connections,
+        patch_frontmatter_flow_hashtags,
+        scan_note_connections,
+    )
+    from schist.markdown_io import ConnectionWriteError, insert_connection_line
+
+    def time_steps(text: str) -> dict[str, float]:
+        steps = {}
+        t = time.perf_counter()
+        patch_frontmatter_flow_hashtags(text)
+        steps['hashtag patch'] = time.perf_counter() - t
+        t = time.perf_counter()
+        parse_connections(connection_body(text))
+        steps['parse'] = time.perf_counter() - t
+        t = time.perf_counter()
+        lines, scan = scan_note_connections(text)
+        steps['scan'] = time.perf_counter() - t
+        t = time.perf_counter()
+        try:
+            insert_connection_line(text, '- extends: new')
+        except ConnectionWriteError:
+            pass
+        steps['insert'] = time.perf_counter() - t
+        t = time.perf_counter()
+        _connections_rule_warnings(Path('n.md'), text, lines, scan)
+        steps['validate warnings'] = time.perf_counter() - t
+        return steps
+
+    def best_of_3(text: str) -> dict[str, float]:
+        runs = [time_steps(text) for _ in range(3)]
+        return {k: min(r[k] for r in runs) for k in runs[0]}
+
+    build = _LINEAR_CASES[name]
+    # Garbage collection pauses and a shared runner's noise land on single
+    # runs; with the collector off, the fastest of three runs is stable.
+    gc.collect()
+    gc.disable()
+    try:
+        quarter = best_of_3(build(_M // 4))
+        full = best_of_3(build(_M))
+    finally:
+        gc.enable()
+    # A backstop for any runner, then the growth: a note four times larger
+    # takes about four times as long for linear work and sixteen times for
+    # quadratic work, so 8x separates them with room for a loaded runner.
+    # Steps too fast to time reliably are left to the backstop.
+    slow = {k: round(v, 3) for k, v in full.items() if v >= 5.0}
+    assert not slow, slow
+    growth = {k: round(full[k] / quarter[k], 1) for k in full if full[k] >= 0.05 and quarter[k] > 0}
+    superlinear = {k: g for k, g in growth.items() if g >= 8.0}
+    assert not superlinear, superlinear
+
+
+@pytest.mark.parametrize(
+    "case", _connection_parity_fixture()["byte_files"], ids=lambda c: c["name"]
+)
+def test_ingest_reads_note_bytes_as_shared_cases(tmp_path: Path, case: dict) -> None:
+    """A note's bytes, through ingest's own read (read_text, UTF-8): an
+    undecodable note is skipped (no docs row, no edges). The MCP server's
+    readNoteText refuses the same bytes (connection-line-parity.test.ts)."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    (vault / "notes").mkdir(parents=True)
+    (vault / "notes" / "2026-11-02-bytes.md").write_bytes(bytes.fromhex(case["hex"]))
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    ingest(str(vault), str(db))
+    conn = sqlite3.connect(db)
+    try:
+        docs = conn.execute("SELECT count(*) FROM docs").fetchone()[0]
+        rows = conn.execute(
+            "SELECT type, target FROM edges WHERE type != 'references' ORDER BY rowid",
+        ).fetchall()
+    finally:
+        conn.close()
+    assert docs == (1 if case["decodes"] else 0)
+    assert rows == [(e["type"], e["target"]) for e in case["edges"]]

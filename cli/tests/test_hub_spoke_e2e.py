@@ -239,6 +239,36 @@ def test_non_executable_pre_receive_is_a_total_acl_bypass(tmp_path):
     assert "not executable" in res.message
 
 
+def test_a_ref_named_like_the_served_branch_is_refused(tmp_path):
+    """Git allows NO-BREAK SPACE in a ref name. The installed hook must not
+    read `refs/heads/main<U+00A0>x` as the served branch: a participant
+    without `*` write access may push only that branch."""
+    from schist.sync import init_hub
+
+    hub = tmp_path / "hub.git"
+    init_hub(SimpleNamespace(name="e2e-refname", participant=["alpha"]), str(hub))
+    work = tmp_path / "work"
+    _run(["git", "clone", str(hub), str(work)])
+    _run(["git", "config", "user.email", "t@t"], cwd=work)
+    _run(["git", "config", "user.name", "t"], cwd=work)
+    (work / "research").mkdir()
+    (work / "research" / "note.md").write_text("in scope\n")
+    _run(["git", "add", "."], cwd=work)
+    _run(["git", "commit", "-m", "note"], cwd=work)
+
+    env = os.environ.copy()
+    env["SCHIST_IDENTITY"] = "alpha"
+    ref = "refs/heads/main" + chr(0xA0) + "x"
+    r = _run(["git", "push", "origin", f"HEAD:{ref}"], cwd=work, env=env, check=False)
+    assert r.returncode != 0
+    assert "may only push refs/heads/main" in r.stderr
+    refs = _run(["git", "--git-dir", str(hub), "for-each-ref", "--format=%(refname)"]).stdout
+    assert ref not in refs.split("\n")
+
+    # Control: the same commit on the served branch lands.
+    _run(["git", "push", "origin", "HEAD:refs/heads/main"], cwd=work, env=env)
+
+
 def test_global_scope_spoke_checks_out_content_dirs(tmp_path, monkeypatch, capsys):
     """#786: `--scope global` names every content directory, not a directory
     called global/. Init used to pass the word straight to

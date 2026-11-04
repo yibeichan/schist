@@ -293,6 +293,45 @@ class TestBuildSearchIndex:
         assert store["tags"] == ["transformer", "attention"]
         assert store["body"].startswith("Self-attention body text")
 
+    def test_store_lists_every_indexed_edge_of_the_note(self, vault_db):
+        """The detail panel lists a note's outgoing connections from the
+        index, including those whose target is not a node, so an indexed
+        edge is never hidden by how the body renders or by a missing node."""
+        vault_db.execute(
+            "INSERT INTO edges (source, target, type, context) VALUES (?, ?, ?, ?)",
+            ("notes/2026-01-01-attention.md", "notes/not-a-node.md", "extends", "why"),
+        )
+        vault_db.commit()
+        graph = build.build_graph(vault_db)
+        index = build.build_search_index(vault_db)
+        edges = index["store"]["notes/2026-01-01-attention.md"]["edges"]
+        rows = vault_db.execute(
+            "SELECT type, target FROM edges WHERE source = ? ORDER BY id",
+            ("notes/2026-01-01-attention.md",),
+        ).fetchall()
+        assert [(e["type"], e["target"]) for e in edges] == rows
+        assert {"type": "extends", "target": "notes/not-a-node.md",
+                "peer": "notes/not-a-node.md", "context": "why"} in edges
+        # The graph drops the unresolvable edge; the store keeps it.
+        assert not any(link["target"] == "notes/not-a-node.md" for link in graph["links"])
+
+    def test_store_body_is_the_indexed_text_unchanged(self, vault_db):
+        """docs.body is the text ingest read the connections from; the panel
+        renders it as stored, not stripped (an indented first line stays an
+        indented code block)."""
+        vault_db.execute(
+            "INSERT INTO docs (id, title, body) VALUES (?, ?, ?)",
+            ("notes/2026-03-02-indented.md", "Indented", "    ## Connections\n    - extends: x"),
+        )
+        vault_db.commit()
+        index = build.build_search_index(vault_db)
+        assert index["store"]["notes/2026-03-02-indented.md"]["body"] == "    ## Connections\n    - extends: x"
+
+    def test_panel_lists_outgoing_connections_from_the_store(self):
+        page = build.INDEX_HTML.read_text(encoding="utf-8")
+        assert "...(meta.edges || []).map(e =>" in page
+        assert "const outgoing = links.filter" not in page
+
     def test_body_excerpt_truncated_and_flattened(self, vault_db):
         """The documents section's body is truncated to 500 chars and has
         newlines flattened to spaces (so lunr indexes cleanly)."""

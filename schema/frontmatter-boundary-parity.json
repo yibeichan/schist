@@ -1,0 +1,144 @@
+{
+  "description": "Pins where a note's body starts, after the frontmatter's closing line: python-frontmatter's rule (what ingest uses), written out in cli/schist/ingest.py note_body_offset and mcp-server/src/markdown-parser.ts frontmatterLength. CRLF and CR count as LF, as in a text-mode file read (ingest's read_text; the MCP server's readNoteText). `connection_body` is the body the connection rule reads and ingest stores in docs.body (CRLF and CR turned into LF, leading and trailing blank lines dropped); writers and the delete cascade skip the frontmatter lines before it. `python_whitespace` is str.isspace() (Python's strip() and re \\s), which both implementations carry as a constant. Consumed by cli/tests/test_ingest.py and mcp-server/tests/frontmatter-boundary-parity.test.ts.",
+  "python_whitespace": "\t\n\u000b\f\r\u001c\u001d\u001e\u001f \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000",
+  "cases": [
+    {
+      "name": "YAML frontmatter",
+      "text": "---\ntitle: t\n---\nBody\n",
+      "body": "Body\n",
+      "connection_body": "Body"
+    },
+    {
+      "name": "closing line of five dashes",
+      "text": "---\ntitle: t\n-----\nBody\n",
+      "body": "Body\n",
+      "connection_body": "Body"
+    },
+    {
+      "name": "---foo is not a closing line",
+      "text": "---\ntitle: t\n---foo\nmore: x\n---\nBody\n",
+      "body": "Body\n",
+      "connection_body": "Body"
+    },
+    {
+      "name": "opening line with a language word is not frontmatter",
+      "text": "---yaml\ntitle: t\n---\nBody\n",
+      "body": "---yaml\ntitle: t\n---\nBody\n",
+      "connection_body": "---yaml\ntitle: t\n---\nBody"
+    },
+    {
+      "name": "leading blank lines before the opening line",
+      "text": "\n \n---\ntitle: t\n---\nBody\n",
+      "body": "Body\n",
+      "connection_body": "Body"
+    },
+    {
+      "name": "BOM before the opening line means no frontmatter",
+      "text": "\ufeff---\ntitle: t\n---\nBody\n",
+      "body": "\ufeff---\ntitle: t\n---\nBody\n",
+      "connection_body": "\ufeff---\ntitle: t\n---\nBody"
+    },
+    {
+      "name": "CRLF line endings",
+      "text": "---\r\ntitle: t\r\n---\r\nBody\r\n",
+      "body": "Body\r\n",
+      "connection_body": "Body"
+    },
+    {
+      "name": "lone CR line endings are line endings, as in a text-mode file read",
+      "text": "---\rtitle: t\r---\rBody\r",
+      "body": "Body\r",
+      "connection_body": "Body"
+    },
+    {
+      "name": "no closing line: the whole text is the body",
+      "text": "---\ntitle: t\nBody\n",
+      "body": "---\ntitle: t\nBody\n",
+      "connection_body": "---\ntitle: t\nBody"
+    },
+    {
+      "name": "indented --- inside a block scalar does not close",
+      "text": "---\ntitle: t\nsummary: |\n  ---\n  more\n---\nBody\n",
+      "body": "Body\n",
+      "connection_body": "Body"
+    },
+    {
+      "name": "unindented --- inside a block scalar closes",
+      "text": "---\ntitle: t\nsummary: |\n---\n  more\n---\nBody\n",
+      "body": "  more\n---\nBody\n",
+      "connection_body": "  more\n---\nBody"
+    },
+    {
+      "name": "closing line with trailing spaces and tab",
+      "text": "---\ntitle: t\n--- \t\nBody\n",
+      "body": "Body\n",
+      "connection_body": "Body"
+    },
+    {
+      "name": "closing line followed by blank lines",
+      "text": "---\ntitle: t\n---\n\n\nBody\n",
+      "body": "\n\nBody\n",
+      "connection_body": "Body"
+    },
+    {
+      "name": "opening line followed by blank lines",
+      "text": "---\n\n\ntitle: t\n---\nBody\n",
+      "body": "Body\n",
+      "connection_body": "Body"
+    },
+    {
+      "name": "empty frontmatter",
+      "text": "---\n---\nBody\n",
+      "body": "Body\n",
+      "connection_body": "Body"
+    },
+    {
+      "name": "closing line at the end of the text",
+      "text": "---\ntitle: t\n---",
+      "body": "",
+      "connection_body": ""
+    },
+    {
+      "name": "only an opening line",
+      "text": "---",
+      "body": "---",
+      "connection_body": "---"
+    },
+    {
+      "name": "JSON frontmatter",
+      "text": "{\n\"title\": \"t\"\n}\nBody\n",
+      "body": "Body\n",
+      "connection_body": "Body"
+    },
+    {
+      "name": "TOML frontmatter",
+      "text": "+++\ntitle = \"t\"\n+++\nBody\n",
+      "body": "Body\n",
+      "connection_body": "Body"
+    },
+    {
+      "name": "no frontmatter",
+      "text": "Body\n## Connections\n",
+      "body": "Body\n## Connections\n",
+      "connection_body": "Body\n## Connections"
+    },
+    {
+      "name": "NEL after the dashes counts as whitespace",
+      "text": "---\u0085\ntitle: t\n---\nBody\n",
+      "body": "Body\n",
+      "connection_body": "Body"
+    },
+    {
+      "name": "U+FEFF after the dashes is not whitespace",
+      "text": "---\ufeff\ntitle: t\n---\nBody\n",
+      "body": "---\ufeff\ntitle: t\n---\nBody\n",
+      "connection_body": "---\ufeff\ntitle: t\n---\nBody"
+    },
+    {
+      "name": "indented opening line is stripped first",
+      "text": "  ---\ntitle: t\n---\nBody\n",
+      "body": "Body\n",
+      "connection_body": "Body"
+    }
+  ]
+}

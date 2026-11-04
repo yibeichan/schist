@@ -169,7 +169,7 @@ export function makeWriteTools(config: VaultConfig) {
   return [
     {
       name: "get_note",
-      description: "Get a note by ID with full content and connections",
+      description: "Get a note by ID with full content and connections. connections_warning says when the note's ## Connections section is not read (no connections are indexed from it). A note that is not valid UTF-8 is refused, as ingest skips it.",
       inputSchema: {
         type: "object" as const,
         properties: { id: { type: "string" } },
@@ -275,7 +275,7 @@ export function makeWriteTools(config: VaultConfig) {
     },
     {
       name: "add_connection",
-      description: "Add a typed connection from a document note to another note or concept. Concepts cannot be connection sources.",
+      description: "Add a typed connection from a document note to another note or concept. Concepts cannot be connection sources. Refused, writing nothing, when the note's ## Connections section is not read.",
       inputSchema: {
         type: "object" as const,
         properties: {

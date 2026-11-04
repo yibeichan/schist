@@ -89,12 +89,12 @@ export const OUTPUT_SCHEMAS: Record<string, OutputSchema> = {
     id: string, title: string, date: string,
     status: { type: ["string", "null"] }, tags: strings, concepts: strings,
     body: string, connections: { type: "array", items: connection },
-    confidence: string, file_ref: string,
+    connections_warning: string, confidence: string, file_ref: string,
     alias_of: string, aliases: strings,
   }, ["id", "title", "date", "status", "tags", "concepts", "body", "connections"]),
   create_note: object({
     id: string, path: string, commitSha: string,
-    commitWarning: string, syncWarning: string,
+    commitWarning: string, syncWarning: string, connectionsWarning: string,
   }, ["id", "path", "commitSha"]),
   create_concept: object({
     id: string, path: string, commitSha: string,
@@ -102,7 +102,7 @@ export const OUTPUT_SCHEMAS: Record<string, OutputSchema> = {
   }, ["id", "path", "commitSha"]),
   update_note: object({
     id: string, updated: boolean, commitSha: string,
-    commitWarning: string, syncWarning: string,
+    commitWarning: string, syncWarning: string, connectionsWarning: string,
   }, ["id", "updated", "commitSha"]),
   delete_note: object({
     id: string, deleted: boolean, commitSha: string, repaired: strings,

@@ -2859,14 +2859,57 @@ CLI_BRANCH_FOR_MCP_CLASS = {
 }
 
 
+@pytest.mark.parametrize("case", [c for c in _transport_parity_cases()
+                                  if c.get("cli_branch") == "hub-transient" and "cli_input" in c],
+                         ids=lambda c: c["name"])
+def test_sync_push_prints_what_the_mcp_server_classifies(case, tmp_path, capsys) -> None:
+    """The MCP server classifies sync_push's stderr, so the corpus `input` for
+    a CLI-wrapped case must be what sync_push really prints. An indented
+    `Detail:` echo put the hub's ERROR line mid-line, where MCP read it as an
+    ACL refusal."""
+    from schist.sync import sync_push
+    vault = _make_spoke(tmp_path)
+    with patch("schist.sync.git_ops.push", return_value=(False, case["cli_input"])), \
+         patch("schist.sync.git_ops.has_unpushed_commits", return_value=True), \
+         patch("schist.sync.git_ops.has_uncommitted_changes", return_value=False):
+        with pytest.raises(SystemExit):
+            sync_push(MagicMock(), vault, "db.sqlite")
+    assert case["input"] in capsys.readouterr().err
+
+
+# The CLI branches that differ from CLI_BRANCH_FOR_MCP_CLASS for an asserted
+# MCP class: the hub's own ERROR lines are transport to MCP, and the CLI says
+# so in its own words.
+CLI_BRANCH_OVERRIDES = {("transport", "hub-transient")}
+
+
+def test_cli_wrapped_cases_are_what_the_cli_prints() -> None:
+    """A case whose `input` is the CLI's stderr must be exactly what sync_push
+    prints for its `cli_input`, or the corpus tests a message nobody sends."""
+    from schist.sync import HUB_TRANSIENT_HEADER
+    wrapped = [c for c in _transport_parity_cases() if c.get("cli_branch") == "hub-transient"
+               and "cli_input" in c]
+    assert len(wrapped) >= 3
+    for case in wrapped:
+        assert case["input"] == f"{HUB_TRANSIENT_HEADER}\n{case['cli_input']}", case["name"]
+
+
 def _expected_cli_branch(case: dict) -> str:
     """The branch this case pins, from `mcp_class` or an explicit override.
 
-    `cli_branch` is only for a case that opts out of the MCP assertion
+    `cli_branch` is required for a case that opts out of the MCP assertion
     (`mcp_class: null`); without it such a case would be asserted on neither
-    side, which is the vacuous-pass shape #600 was about.
+    side, which is the vacuous-pass shape #600 was about. A case may also
+    give it beside `mcp_class` where the CLI takes a branch of its own for
+    that class (the hub's ERROR lines are `transport` to MCP and
+    `hub-transient` to the CLI).
     """
     if case.get("mcp_class") is None:
+        return case["cli_branch"]
+    if "cli_branch" in case:
+        assert (case["mcp_class"], case["cli_branch"]) in CLI_BRANCH_OVERRIDES, (
+            f"{case['name']}: cli_branch {case['cli_branch']!r} beside mcp_class "
+            f"{case['mcp_class']!r} is not an allowed pair")
         return case["cli_branch"]
     branch = CLI_BRANCH_FOR_MCP_CLASS.get(case["mcp_class"])
     assert branch is not None, (
@@ -2875,6 +2918,13 @@ def _expected_cli_branch(case: dict) -> str:
         "cli_branch in the shared corpus case."
     )
     return branch
+
+
+def test_a_cli_branch_beside_mcp_class_must_be_an_allowed_pair() -> None:
+    with pytest.raises(AssertionError, match="not an allowed pair"):
+        _expected_cli_branch({"name": "x", "mcp_class": "acl-rejected", "cli_branch": "other"})
+    assert _expected_cli_branch({"name": "x", "mcp_class": "transport",
+                                 "cli_branch": "hub-transient"}) == "hub-transient"
 
 
 @pytest.mark.parametrize("mcp_class", [

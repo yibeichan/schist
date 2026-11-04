@@ -50,7 +50,6 @@ except ImportError:  # pragma: no cover — running as a bare script (a legacy
 
 SKIP_DIRS = {'.git', '.schist'}
 ROOT_SUPPORT_DOCS = {'readme.md', 'schema.md', 'tags.md', 'conventions.md'}
-HASHTAG_AT_START_RE = re.compile(r'^#[^\s,\]\}]+')
 # CONNECTION_RE is defined below _SLUG_WS_CHARS — it is built from the same
 # explicit whitespace class (#338).
 
@@ -96,14 +95,481 @@ _SLUG_WS_RUN = re.compile(f'[{re.escape(_SLUG_WS_CHARS)}]+')
 # two languages' CONNECTION_REs parsed divergent codepoints differently —
 # e.g. a NEL (U+0085) separator produced an edge under Python's \s but not
 # under JS's (#338). `\s` becomes the explicit class, `\S` its negation;
-# semantics are otherwise identical. schema/connection-line-parity.json pins
+# The context group is [^\n\r]*, not `.*`, because JS's `.` stops at
+# U+2028/U+2029, which can sit inside a line. Otherwise the semantics are
+# identical. schema/connection-line-parity.json pins
 # this regex against mcp-server/src/markdown-parser.ts's CONNECTION_RE.
 _WS_CLASS = f'[{re.escape(_SLUG_WS_CHARS)}]'
 _NON_WS_CLASS = f'[^{re.escape(_SLUG_WS_CHARS)}]'
 CONNECTION_RE = re.compile(
     f'^-{_WS_CLASS}+({_NON_WS_CLASS}+):{_WS_CLASS}+({_NON_WS_CLASS}+)'
-    f'(?:{_WS_CLASS}+"([^"]*)")?(?:{_WS_CLASS}+—{_WS_CLASS}+(.*))?$'
+    f'(?:{_WS_CLASS}+"([^"]*)")?(?:{_WS_CLASS}+—{_WS_CLASS}+([^\\n\\r]*))?$'
 )
+
+# The connections rule, shared by every reader and writer of a note's
+# `## Connections` section (parse_connections here; markdown_io's insert and
+# append; the concept checks and `schist schema --validate` in commands.py).
+# It lives in ingest.py, not markdown_io, because the bare-script hook copy of
+# this file cannot import markdown_io. mcp-server/src/markdown-parser.ts
+# mirrors it (scanConnections and friends); schema/connection-line-parity.json
+# pins the two, and mcp-server/tests/connection-marked.test.ts checks every
+# edge either reader finds against marked 12.0.2, the renderer the viewer
+# uses.
+#
+# The rule is conservative by construction. It indexes an edge only where
+# the viewer shows it as a top-level list item under the `## Connections`
+# heading, and when a note holds Markdown whose rendering the rule does not
+# follow, it indexes nothing from that note and reports why
+# (ConnectionScan.problem; `schist schema --validate` and the MCP server's
+# get_note show it, and the writers refuse to edit the section).
+#
+# The rule reads the note body as connection_body returns it: CRLF and CR
+# become LF, the text after the frontmatter's closing line (note_body_offset),
+# without leading and trailing blank lines. Ingest stores exactly that text
+# in docs.body, and the viewer renders it unchanged. Lines are split on LF.
+# - The heading is the first line that is exactly `## Connections` at column
+#   0, optionally followed by spaces or tabs, outside a fence.
+# - The section ends at the next line of 0-3 spaces, 1-6 `#`, then whitespace
+#   (_SLUG_WS_CHARS) or the end of the line: any ATX heading, of any level,
+#   empty or not. Otherwise it runs to the end of the body.
+# - A fence opens on a line of 0-3 spaces, then 3+ backticks or 3+ tildes, then
+#   an optional info word of ASCII letters, digits and `_+.#-`, then optional
+#   spaces. It closes on the first later line that is the same spaces and the
+#   same run, then optional spaces; every line between must be blank or start
+#   with the same spaces, and none may start, after spaces and tabs, with
+#   ``` or ~~~. Lines from opener to closer are never a heading, an edge or a
+#   section end. An opener indented 4+ spaces is not skipped (after a
+#   paragraph marked reads it as paragraph text), so it is a problem.
+# - Problems, from the body start to the end of the section: a line holding
+#   U+000B, U+000C, U+001C-U+001F, U+0085, U+2028 or U+2029; a line that
+#   starts, after spaces and tabs, with ``` or ~~~ and is not part of a
+#   fence as above; a line that starts, after spaces and tabs, with `<`; a
+#   line that starts, after spaces and tabs, with `[` unless its first
+#   unescaped `]` comes before any other `[` and is not followed by `:` (so
+#   it cannot open a link reference definition, whose label and title can
+#   run over later lines).
+# - Problems inside the section, outside fences: a line that starts, after
+#   spaces and tabs, with `>`; a non-blank line indented by a tab or 4+
+#   spaces; a non-blank line made only of `-`, `=`, `*`, `_`, `+`, `|`, `:`,
+#   spaces and tabs, ignoring _SLUG_WS_CHARS at either end (setext
+#   underlines, thematic breaks, table delimiter rows); a list marker
+#   followed by a tab or 4+ spaces; a list marker whose content starts with
+#   `#` or `>` (a heading or block quote inside the item).
+# - An edge line, in the section and outside fences: `-` at column 0, 1-3
+#   spaces, then text that, trimmed with the explicit _SLUG_WS_CHARS set,
+#   matches CONNECTION_RE with a type that starts with an ASCII letter or
+#   digit and a target that does not start with `[`.
+#
+# Every step is one pass over the lines, so reading a note is linear in its
+# size.
+#
+# CONNECTIONS_RULE_VERSION is bumped whenever this rule changes; `schist
+# doctor` compares it against a hand-provisioned .schist/ingest.py hook copy.
+CONNECTIONS_RULE_VERSION = 2
+CONNECTIONS_HEADING_TEXT = '## Connections'
+_CONNECTIONS_HEADING_RE = re.compile(r'## Connections[ \t]*')
+_SECTION_END_RE = re.compile(f' {{0,3}}#{{1,6}}(?:{_WS_CLASS}|$)')
+_FENCE_OPEN_RE = re.compile(r'( {0,3})(`{3,}|~{3,})[A-Za-z0-9_+.#-]* *')
+_FENCE_LIKE_RE = re.compile(r'[ \t]*(?:```|~~~)')
+_LIST_MARKER_WS_RE = re.compile(r'[ \t]*(?:[-+*]|[0-9]{1,9}[.)])([ \t]+)')
+_EDGE_PREFIX_RE = re.compile(r'- {1,3}[^ \t]')
+# Characters a renderer reads as a line break or that Python's
+# str.splitlines() splits on, but a Markdown line does not end at.
+_NON_MARKDOWN_SEPARATORS = '\x0b\x0c\x1c\x1d\x1e\x1f\x85\u2028\u2029'
+_NON_MARKDOWN_SEPARATOR_RE = re.compile(f'[{_NON_MARKDOWN_SEPARATORS}]')
+_RULE_LINE_CHARS = frozenset('-=*_+|: \t')
+_ASCII_ALNUM = frozenset(
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+)
+
+
+class ConnectionScan:
+    """What the connection rule finds in a list of lines.
+
+    heading: index of the `## Connections` heading, or None. When a problem
+        comes before it, the first later line of that shape.
+    end: index of the line that ends the section, or len(lines).
+    edges: (line index, {'type', 'target', 'context'}) for each edge line,
+        always empty when `problem` is set.
+    problem: (line index, reason) for the first line that stops the note's
+        edges from being indexed, or None.
+    """
+
+    __slots__ = ('heading', 'end', 'edges', 'problem')
+
+    def __init__(self, heading, end, edges, problem):
+        self.heading = heading
+        self.end = end
+        self.edges = edges
+        self.problem = problem
+
+
+def is_connections_heading(line: str) -> bool:
+    """True when `line` (already split, no terminator) has the shape of the
+    connections heading. It says nothing about fences; scan_connections
+    checks them."""
+    return _CONNECTIONS_HEADING_RE.fullmatch(line) is not None
+
+
+def is_section_end(line: str) -> bool:
+    """True when `line` has the shape of an ATX heading, which ends a
+    connections section."""
+    return _SECTION_END_RE.match(line) is not None
+
+
+def trim_connection_ws(text: str) -> str:
+    """Trim the explicit whitespace union shared with markdown-parser.ts."""
+    return text.strip(_SLUG_WS_CHARS)
+
+
+def normalize_newlines(text: str) -> str:
+    """Turn CRLF and CR into LF, as Python's text-mode file reads do. Every
+    connection reader and writer starts here, and the MCP server reads note
+    files the same way (markdown-parser.ts normalizeNewlines)."""
+    return text.replace('\r\n', '\n').replace('\r', '\n')
+
+
+def _fence_end(lines: list[str], i: int) -> int | None:
+    """If lines[i] opens a fence the rule accepts, the index of its closing
+    line, else None."""
+    m = _FENCE_OPEN_RE.fullmatch(lines[i])
+    if m is None:
+        return None
+    prefix, run = m.group(1), m.group(2)
+    for j in range(i + 1, len(lines)):
+        ln = lines[j]
+        if ln.strip(' \t') == '':
+            continue
+        if not ln.startswith(prefix):
+            return None
+        if _FENCE_LIKE_RE.match(ln):
+            rest = ln[len(prefix):]
+            if rest.startswith(run) and rest[len(run):].strip(' ') == '':
+                return j
+            return None
+    return None
+
+
+def _may_open_definition(s: str) -> bool:
+    """For a line starting with `[`: False only when its first unescaped
+    `]` comes before any other `[` and is not followed by `:`, so the line
+    cannot start a link reference definition (whose label may run onto later
+    lines). `[text](url)` and `[text] more` are safe; `[label]: /url`,
+    `[a [b]`, `[a\\]` and `[open` are not."""
+    i = 1
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c == '\\':
+            i += 2
+            continue
+        if c == '[':
+            return True
+        if c == ']':
+            return s[i + 1:i + 2] == ':'
+        i += 1
+    return True
+
+
+def _line_problem(line: str, in_section: bool) -> str | None:
+    """Why `line` stops a note's edges from being indexed, or None. Fences
+    are handled by scan_connections before this is called."""
+    if _NON_MARKDOWN_SEPARATOR_RE.search(line):
+        ch = _NON_MARKDOWN_SEPARATOR_RE.search(line).group(0)
+        return (
+            f'the line holds U+{ord(ch):04X}, which some readers take as a '
+            'line break and Markdown does not'
+        )
+    s = line.lstrip(' \t')
+    if s.startswith('```') or s.startswith('~~~'):
+        return (
+            'a fence the connection rule does not follow (it must open with at '
+            'most 3 spaces of indentation and close with the same run at the '
+            'same indentation, with an info word of letters, digits and _+.#- '
+            'only)'
+        )
+    if s.startswith('<'):
+        return 'the line starts with "<" (HTML)'
+    if s.startswith('[') and _may_open_definition(s):
+        return 'the line starts like a link reference definition ("[label]:")'
+    if not in_section or s == '':
+        return None
+    if s.startswith('>'):
+        return 'a block quote in the Connections section'
+    lead = line[:len(line) - len(s)]
+    if '\t' in lead or len(lead) >= 4:
+        return 'a line indented by a tab or 4+ spaces in the Connections section'
+    # Whitespace at either end does not count: marked trims the end of a
+    # list's last item with JS trimEnd(), so `=` + U+FEFF underlines it.
+    rule = trim_connection_ws(s)
+    if rule and all(c in _RULE_LINE_CHARS for c in rule):
+        return (
+            'a line of only "-", "=", "*", "_", "+", "|" or ":" in the '
+            'Connections section (a heading underline, rule or table)'
+        )
+    m = _LIST_MARKER_WS_RE.match(line)
+    if m is not None:
+        ws = m.group(1)
+        if '\t' in ws or len(ws) >= 4:
+            return (
+                'a list marker followed by a tab or 4+ spaces in the '
+                'Connections section'
+            )
+        # Past nested markers too (`- - ## x` is a heading in an item).
+        pos = m.end()
+        nested = _LIST_MARKER_WS_RE.match(line, pos)
+        while nested is not None:
+            pos = nested.end()
+            nested = _LIST_MARKER_WS_RE.match(line, pos)
+        if line[pos:].startswith(('#', '>')):
+            return (
+                'a list item that holds a heading or a block quote in the '
+                'Connections section'
+            )
+    return None
+
+
+def connection_line_edge(line: str) -> dict | None:
+    """The edge `line` carries under the connection rule, or None: `-` at
+    column 0, 1-3 spaces, then CONNECTION_RE on the trimmed line, a type that
+    starts with an ASCII letter or digit, and a target that is not a bracket
+    reference (`[moltbook]`, `[[wiki-note]]`, #415). Whether the line is in a
+    section is scan_connections's business."""
+    if not _EDGE_PREFIX_RE.match(line):
+        return None
+    m = CONNECTION_RE.match(trim_connection_ws(line))
+    if m is None:
+        return None
+    conn_type, target, quoted_ctx, dash_ctx = m.groups()
+    if conn_type[0] not in _ASCII_ALNUM or target.startswith('['):
+        return None
+    return {
+        'type': conn_type,
+        'target': target,
+        'context': quoted_ctx or dash_ctx or None,
+    }
+
+
+def scan_connections(lines: list[str], start: int = 0) -> ConnectionScan:
+    """Apply the connection rule to `lines` (LF-split, see
+    normalize_newlines), ignoring lines before `start` (a writer passes the
+    frontmatter's line count, note_body_start_line). One pass."""
+    n = len(lines)
+    heading = None
+    end = n
+    edges: list[tuple[int, dict]] = []
+    problem = None
+    i = start
+    while i < n:
+        line = lines[i]
+        in_section = heading is not None
+        if in_section and is_section_end(line):
+            end = i
+            break
+        close = _fence_end(lines, i)
+        if close is not None:
+            for j in range(i, close + 1):
+                if _NON_MARKDOWN_SEPARATOR_RE.search(lines[j]):
+                    problem = (j, _line_problem(lines[j], False))
+                    break
+            if problem is not None:
+                break
+            i = close + 1
+            continue
+        if not in_section and is_connections_heading(line):
+            heading = i
+            i += 1
+            continue
+        reason = _line_problem(line, in_section)
+        if reason is not None:
+            problem = (i, reason)
+            break
+        if in_section:
+            edge = connection_line_edge(line)
+            if edge is not None:
+                edges.append((i, edge))
+        i += 1
+    if problem is not None:
+        edges = []
+        if heading is None:
+            # Report whether a heading follows, so the problem can be shown.
+            for k in range(problem[0] + 1, n):
+                if is_connections_heading(lines[k]):
+                    heading = k
+                    break
+        end = n
+        if heading is not None:
+            for k in range(max(heading, problem[0]) + 1, n):
+                if is_section_end(lines[k]):
+                    end = k
+                    break
+    return ConnectionScan(heading, end, edges, problem)
+
+
+def has_connections_heading(body: str) -> bool:
+    """True when `body` has a connections heading line (found even after a
+    problem, so a concept body with one is refused either way).
+    markdown-parser.ts hasConnectionsHeading is its twin."""
+    return scan_connections(split_connection_lines(normalize_newlines(body))).heading is not None
+
+
+def _fenced_lines(lines: list[str]) -> set[int]:
+    """Indexes of the lines inside fences the rule skips (opener to closer),
+    found the way scan_connections finds them. One pass."""
+    out: set[int] = set()
+    i = 0
+    while i < len(lines):
+        close = _fence_end(lines, i)
+        if close is None:
+            i += 1
+            continue
+        out.update(range(i, close + 1))
+        i = close + 1
+    return out
+
+
+def connections_heading_near_misses(
+    lines: list[str], heading: int | None = None,
+) -> list[tuple[int, str]]:
+    """Lines whose stripped text starts with `## Connections` (the earlier,
+    looser heading rule) that the current rule does not take as the heading,
+    each with the reason. `heading` is the heading scan_connections found on
+    the same lines (or None). `schist schema --validate` warns on these."""
+    out: list[tuple[int, str]] = []
+    fenced: set[int] | None = None
+    for i, ln in enumerate(lines):
+        if not ln.strip().startswith(CONNECTIONS_HEADING_TEXT):
+            continue
+        if is_connections_heading(ln):
+            if fenced is None:
+                fenced = _fenced_lines(lines)
+            if heading is None or i < heading or i in fenced:
+                out.append((i, 'inside a fenced code block, so it is not a heading'))
+            elif i > heading:
+                out.append((
+                    i, 'a later ## Connections heading; only the first section is read',
+                ))
+            continue
+        indent = ln[:len(ln) - len(ln.lstrip())]
+        if indent.strip(' \t'):
+            odd = next(c for c in indent if c not in ' \t')
+            out.append((
+                i,
+                f'starts with U+{ord(odd):04X}, which is not a space or tab, '
+                'so the line is not a heading',
+            ))
+        elif indent:
+            out.append((i, 'indented (the heading must start at column 0)'))
+        else:
+            out.append((
+                i, f"heading text is not exactly '{CONNECTIONS_HEADING_TEXT}'",
+            ))
+    return out
+
+
+# str.isspace() (and Python's re `\s`): the whitespace python-frontmatter's
+# text.strip() and FM_BOUNDARY `\s*` use. markdown-parser.ts carries the same
+# string; schema/frontmatter-boundary-parity.json pins both.
+PY_WHITESPACE = (
+    '\t\n\x0b\x0c\r\x1c\x1d\x1e\x1f \x85\xa0 '
+    '        '
+    '       　'
+)
+
+_CM_LINE_END_RE = re.compile(r'\r\n|\r|\n')
+
+
+def split_connection_lines(text: str) -> list[str]:
+    """Split on CommonMark line endings only (\\n, \\r\\n, \\r), the way a
+    Markdown renderer does. VT, FF, U+001C-U+001E, NEL, LS and PS stay inside
+    a line. A final line ending adds no empty line (like str.splitlines()).
+    Every connection reader and writer splits with this; markdown-parser.ts
+    splitConnectionLines is its twin."""
+    if not text:
+        return []
+    parts = _CM_LINE_END_RE.split(text)
+    if parts[-1] == '':
+        parts.pop()
+    return parts
+
+
+def _delimiter_match(s: str, p: int, kind: str) -> int | None:
+    """If a frontmatter boundary of `kind` starts at line start `p` of `s`,
+    return where python-frontmatter's FM_BOUNDARY match ends, else None.
+    YAML is `^-{3,}\\s*$` and TOML `^\\+{3,}\\s*$` (re.MULTILINE, so `$` is
+    only before "\\n" or at the end); JSON is `^(?:{|})$`."""
+    n = len(s)
+    if kind == 'json':
+        if p < n and s[p] in '{}' and (p + 1 == n or s[p + 1] == '\n'):
+            return p + 1
+        return None
+    ch = '-' if kind == 'yaml' else '+'
+    q = p
+    while q < n and s[q] == ch:
+        q += 1
+    if q - p < 3:
+        return None
+    e = q
+    while e < n and s[e] in PY_WHITESPACE:
+        e += 1
+    if e == n:
+        return n  # greedy `\\s*` reaches the end
+    last_nl = s.rfind('\n', q, e)
+    return None if last_nl == -1 else last_nl
+
+
+def note_body_offset(text: str) -> int:
+    """Index in `text` where the note body starts: just after the frontmatter's
+    closing line. This is python-frontmatter's rule (what ingest parses
+    metadata with), written out so markdown-parser.ts frontmatterLength can
+    match it exactly: turn CRLF and CR into LF (as a text-mode file read
+    does; ingest and the MCP server read note files that way, see
+    normalize_newlines), strip str.isspace() whitespace,
+    detect YAML (`---`), then JSON (`{`), then TOML (`+++`) on the first line,
+    and close at the next boundary line. 0 when there is no frontmatter (a
+    BOM before `---` means none) or it is never closed (python-frontmatter
+    then treats the whole text as the body). Unlike post.content, the body is
+    not stripped, so a body that opens with an indented line keeps its
+    indentation. schema/frontmatter-boundary-parity.json pins this in both
+    languages.
+    """
+    # CR alone becomes LF too (same length, so offsets map back as below).
+    norm = normalize_newlines(text)
+    lead = 0
+    while lead < len(norm) and norm[lead] in PY_WHITESPACE:
+        lead += 1
+    end = len(norm)
+    while end > lead and norm[end - 1] in PY_WHITESPACE:
+        end -= 1
+    s = norm[lead:end]
+    for kind in ('yaml', 'json', 'toml'):
+        first = _delimiter_match(s, 0, kind)
+        if first is not None:
+            break
+    else:
+        return 0
+    p = s.find('\n', first)
+    while p != -1:
+        start = p + 1
+        if _delimiter_match(s, start, kind) is not None:
+            nl = norm.find('\n', lead + start)
+            off = len(norm) if nl == -1 else nl + 1
+            # Map the offset in `norm` back onto `text`: each CRLF before it
+            # was one character shorter in `norm`.
+            pairs = 0
+            i = text.find('\r\n')
+            while i != -1 and i - pairs < off:
+                pairs += 1
+                i = text.find('\r\n', i + 2)
+            return off + pairs
+        p = s.find('\n', start)
+    return 0
+
+
+def note_body_start_line(text: str) -> int:
+    """Number of split_connection_lines lines before the body (see
+    note_body_offset). Writers pass it as scan_connections's `start`."""
+    return len(split_connection_lines(text[:note_body_offset(text)]))
 
 
 def _normalize_concept_slug(value: str) -> str:
@@ -240,6 +706,12 @@ def _concept_axis_rank(rel: Path) -> int:
     return CONCEPT_AXIS_NONE
 
 
+# A `#tag` in a flow collection: `#`, then characters other than the shared
+# whitespace union (not either engine's own \s), `,`, `]` and `}`. Matched at
+# a position (match(line, i)), never on a slice, so the patch is linear.
+_FLOW_HASHTAG_RE = re.compile(f'#[^{re.escape(_SLUG_WS_CHARS)},\\]\\}}]+')
+
+
 def _opens_quoted_scalar(last_significant: str) -> bool:
     return last_significant in {'', '[', '{', ',', ':'}
 
@@ -314,7 +786,7 @@ def _quote_flow_hashtags(line: str) -> str:
             i += 1
             continue
         if ch == '#' and flow_depth > 0:
-            match = HASHTAG_AT_START_RE.match(line[i:])
+            match = _FLOW_HASHTAG_RE.match(line, i)
             if match:
                 tag = match.group(0)
                 result.append(f'"{tag}"')
@@ -331,55 +803,64 @@ def _quote_flow_hashtags(line: str) -> str:
 
 
 def patch_frontmatter_flow_hashtags(content: str) -> str:
-    """Mirror mcp-server parseNote's pre-patch before frontmatter parsing."""
-    lines = content.split('\n')
-    in_fm = False
-    patched = False
-    patched_lines = []
-    for i, ln in enumerate(lines):
-        if i == 0 and ln.strip() == '---':
-            in_fm = True
-            patched_lines.append(ln)
-            continue
-        if in_fm and ln.strip() == '---':
-            in_fm = False
-            patched_lines.append(ln)
-            continue
-        if in_fm:
-            next_ln = _quote_flow_hashtags(ln)
-            patched = patched or next_ln != ln
-            ln = next_ln
-        patched_lines.append(ln)
+    """Quote `#tags` in YAML flow collections of the frontmatter before YAML
+    parsing; mcp-server parseNote applies the same patch.
 
-    return '\n'.join(patched_lines) if patched else content
+    Only the frontmatter is patched: the text before note_body_offset (the
+    rule python-frontmatter splits by), and only when it is YAML (`---`).
+    The body is never changed, so the connections and docs.body come from
+    the note's own text, as every MCP server path reads it.
+    markdown-parser.ts patchFrontmatterFlowHashtags is its twin."""
+    offset = note_body_offset(content)
+    head = content[:offset]
+    if not head.lstrip(PY_WHITESPACE).startswith('---'):
+        return content
+    lines = head.split('\n')
+    patched_lines = [_quote_flow_hashtags(ln) for ln in lines]
+    if patched_lines == lines:
+        return content
+    return '\n'.join(patched_lines) + content[offset:]
+
+
+def scan_note_connections(text: str) -> tuple[list[str], ConnectionScan]:
+    """The connection rule applied to a whole note file's text: its lines
+    (LF-split after normalize_newlines) and the scan of its body, with line
+    indexes into those lines. Writers use this; it finds the same edges as
+    parse_connections(connection_body(text))."""
+    text = normalize_newlines(text)
+    lines = split_connection_lines(text)
+    return lines, scan_connections(lines, note_body_start_line(text))
+
+
+def connection_body(text: str) -> str:
+    """The note body the connection rule reads, and the text ingest stores in
+    docs.body for the viewer to render: CRLF and CR turned into LF, the text
+    after the frontmatter's closing line (note_body_offset), without leading
+    and trailing blank lines (lines of only spaces and tabs). Nothing else is
+    stripped, so the viewer renders the lines the rule read.
+    markdown-parser.ts connectionBody is its twin."""
+    text = normalize_newlines(text)
+    lines = text[note_body_offset(text):].split('\n')
+    a, b = 0, len(lines)
+    while a < b and lines[a].strip(' \t') == '':
+        a += 1
+    while b > a and lines[b - 1].strip(' \t') == '':
+        b -= 1
+    return '\n'.join(lines[a:b])
+
+
+def parse_connection_lines(body: str) -> list[tuple[int, dict]]:
+    """Edges of the ## Connections section of a note body (see
+    scan_connections for the rule), each with its index in
+    split_connection_lines(normalize_newlines(body)). Empty when the rule
+    finds a problem."""
+    return scan_connections(split_connection_lines(normalize_newlines(body))).edges
 
 
 def parse_connections(body: str) -> list[dict]:
-    """Extract connections from ## Connections section."""
-    edges = []
-    in_section = False
-    for line in body.splitlines():
-        stripped = line.strip()
-        if stripped.startswith('## Connections'):
-            in_section = True
-            continue
-        if in_section and stripped.startswith('## '):
-            break
-        if not in_section or not stripped.startswith('- '):
-            continue
-        m = CONNECTION_RE.match(stripped)
-        if m:
-            conn_type, target, quoted_ctx, dash_ctx = m.groups()
-            context = quoted_ctx or dash_ctx or None
-            # Skip bracket references like [Moltbook, Jan 2026]
-            if target.startswith('['):
-                continue
-            edges.append({
-                'type': conn_type,
-                'target': target,
-                'context': context,
-            })
-    return edges
+    """Extract connections from the ## Connections section of a note body,
+    as connection_body returns it."""
+    return [edge for _i, edge in parse_connection_lines(body)]
 
 
 def title_from_filename(filename: str) -> str:
@@ -610,7 +1091,12 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
             patched_text = patch_frontmatter_flow_hashtags(raw_text)
             post = frontmatter.loads(patched_text)
             meta = post.metadata
-            body = post.content
+            # docs.body and the connections come from one text,
+            # connection_body, not python-frontmatter's post.content: its
+            # strip() would turn an indented first line (a code block) into
+            # a heading, and the viewer renders docs.body, so it must show
+            # the lines the edges were read from.
+            body = connection_body(patched_text)
 
             # Per-file edge counter, folded into the total only after RELEASE —
             # a rolled-back file must not inflate the printed count. Concepts

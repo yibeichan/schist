@@ -14,7 +14,7 @@ SPDX-License-Identifier: Apache-2.0
        four pinned CDN scripts and this page's own inline scripts: the build
        (viewer/build.py render_page) fills in a hash of each inline script
        where the policy holds its placeholder. Styles are left unrestricted. -->
-  <meta http-equiv="Content-Security-Policy" content="script-src https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js 'inline-script-hashes'; img-src 'self' data:; media-src 'none'; frame-src 'none'; object-src 'none'; font-src 'self'; connect-src 'self'; base-uri 'none'" />
+  <meta http-equiv="Content-Security-Policy" content="script-src https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js https://cdn.jsdelivr.net/npm/dompurify@3.4.17/dist/purify.min.js 'inline-script-hashes'; img-src 'self' data:; media-src 'none'; frame-src 'none'; object-src 'none'; font-src 'self'; connect-src 'self'; base-uri 'none'" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>schist — knowledge graph</title>
   <link rel="icon" href="data:," />
@@ -190,6 +190,8 @@ SPDX-License-Identifier: Apache-2.0
     #detail-connections h3 { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
     .conn-item { font-size: 12px; padding: 5px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
     .conn-item:hover { color: var(--accent); }
+    .conn-item:disabled { cursor: default; }
+    .conn-item:disabled:hover { color: inherit; }
     .conn-type { font-size: 10px; color: var(--accent); margin-right: 6px; }
 
     /* Tooltip */
@@ -381,7 +383,7 @@ SPDX-License-Identifier: Apache-2.0
 <script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js" integrity="sha384-203J0SNzyqHby3iU6hzvzltrWi/M41wOP5Gu+BiJMz5nwKykbkUx8Kp7iti0Lpli" crossorigin="anonymous"></script>
 <!-- marked (Markdown → HTML) and DOMPurify (sanitizes that HTML) for note bodies -->
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js" integrity="sha384-JEyTNhjM6R1ElGoJns4U2Ln4ofPcqzSsynQkmEc/KGy6336qAZl70tDLufbkla+3" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.17/dist/purify.min.js" integrity="sha384-P0JNneQf81HOl9VwNXK76cQ9VMD6Nfsnepxb0cCOg8+UzEdzgPHAPV4wVQrvYQSx" crossorigin="anonymous"></script>
 
 <script>
 (async () => {
@@ -475,12 +477,18 @@ SPDX-License-Identifier: Apache-2.0
     return e;
   }
 
+  // ── Markdown rendering (mcp-server/tests/connection-dom.test.ts runs the
+  // code between this line and "end of Markdown rendering") ──────────────
   // Note bodies and agent answers are Markdown. They are the one place vault
   // text becomes HTML, and only after DOMPurify sanitizes marked's output: no
   // scripts, event handlers or javascript: URLs survive. Only HTML is kept
   // (no SVG or MathML), and images, media, embeds and the legacy background
   // attribute are dropped, so rendering never fetches from another host; the
   // page's Content-Security-Policy blocks any such fetch that gets past this.
+  // Raw HTML written in a note (marked's html tokens, block and inline) is
+  // shown as text, never parsed, so a tag in a note cannot hide, collapse or
+  // re-title what follows it (an unclosed <textarea>, <details> or <!--
+  // would otherwise swallow the rest of the note, Connections included).
   // Links open in a new tab without a referrer. If either library failed to
   // load, the body is shown as plain text.
   const SANITIZE = {
@@ -488,6 +496,31 @@ SPDX-License-Identifier: Apache-2.0
     FORBID_TAGS: ["img", "picture", "source", "video", "audio", "iframe", "object", "embed", "style", "form", "input", "button"],
     FORBID_ATTR: ["style", "srcset", "background"],
   };
+  function escapeHtml(text) {
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  const markdown = window.marked
+    ? new marked.Marked({
+        gfm: true,
+        breaks: false,
+        renderer: {
+          html(html, block) {
+            return block ? `<p>${escapeHtml(html)}</p>\n` : escapeHtml(html);
+          },
+        },
+        tokenizer: {
+          // marked stops escaping text after a raw pre, code, kbd or script
+          // start tag (its inRawBlock state, which lasts to the matching
+          // close tag, across blocks). Those tags are shown as text here, so
+          // the text after them is escaped too: reset the state and let
+          // marked's own inlineText run (returning false falls back to it).
+          inlineText() {
+            this.lexer.state.inRawBlock = false;
+            return false;
+          },
+        },
+      })
+    : null;
   if (window.DOMPurify) {
     DOMPurify.addHook("afterSanitizeAttributes", elem => {
       if (elem.tagName === "A" && elem.hasAttribute("href")) {
@@ -496,10 +529,15 @@ SPDX-License-Identifier: Apache-2.0
       }
     });
   }
+  // What renderBody writes into the page, as a string (for the tests).
+  function markdownToHtml(text) {
+    return DOMPurify.sanitize(markdown.parse(text), SANITIZE);
+  }
+  // ── end of Markdown rendering ─────────────────────────────────────────────
   function renderBody(target, text) {
-    if (window.marked && window.DOMPurify) {
+    if (markdown && window.DOMPurify) {
       target.classList.remove("plain");
-      target.innerHTML = DOMPurify.sanitize(marked.parse(text, { gfm: true, breaks: false }), SANITIZE);
+      target.innerHTML = DOMPurify.sanitize(markdown.parse(text), SANITIZE);
     } else {
       target.classList.add("plain");
       target.textContent = text;
@@ -776,11 +814,13 @@ SPDX-License-Identifier: Apache-2.0
     // Use store body (full text) — documents[].body is truncated for lunr indexing only
     renderBody(document.getElementById("detail-body"), meta.body || node.description || "");
 
-    const outgoing = links.filter(l => l.source === id || (l.source && l.source.id === id));
+    // Outgoing: every edge the index holds for this note (store edges), not
+    // only those whose target is a node, so the panel shows each indexed
+    // connection however the body renders. Incoming: graph links.
     const incoming = links.filter(l => l.target === id || (l.target && l.target.id === id));
     const allConns = [
-      ...outgoing.map(l => ({ dir: "→", peer: l.target?.id || l.target, type: l.type })),
-      ...incoming.map(l => ({ dir: "←", peer: l.source?.id || l.source, type: l.type })),
+      ...(meta.edges || []).map(e => ({ dir: "→", peer: e.peer, name: e.target, type: e.type, context: e.context })),
+      ...incoming.map(l => ({ dir: "←", peer: l.source?.id || l.source, type: l.type, context: l.context })),
     ];
 
     const connEl = document.getElementById("detail-connections");
@@ -793,8 +833,10 @@ SPDX-License-Identifier: Apache-2.0
         row.type = "button";
         row.setAttribute("data-id", c.peer);
         row.appendChild(txt("span", `${c.dir} ${c.type}`, "conn-type"));
-        row.appendChild(document.createTextNode(peer?.label || c.peer));
-        row.addEventListener("click", () => selectNode(c.peer));
+        row.appendChild(document.createTextNode(peer?.label || c.name || c.peer));
+        if (c.context) row.title = c.context;
+        if (peer) row.addEventListener("click", () => selectNode(c.peer));
+        else row.disabled = true;
         connFrag.appendChild(row);
       }
       connEl.replaceChildren(connFrag);

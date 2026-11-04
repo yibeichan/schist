@@ -16,12 +16,12 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { insertConnectionLine } from "../src/markdown-parser.js";
+import { ConnectionWriteError, edgeOfLine, insertConnectionLine, parseNote } from "../src/markdown-parser.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-type AppendParityCase = { name: string; content: string; line: string; expected: string };
+type AppendParityCase = { name: string; content: string; line: string; expected: string | null };
 
 function loadAppendParityCases(): AppendParityCase[] {
   const fixturePath = path.resolve(__dirname, "..", "..", "schema", "connection-append-parity.json");
@@ -38,7 +38,21 @@ describe("connection-append parity (#365/#366)", () => {
 
   for (const c of cases) {
     test(c.name, () => {
-      expect(insertConnectionLine(c.content, c.line)).toBe(c.expected);
+      if (c.expected === null) {
+        expect(() => insertConnectionLine(c.content, c.line)).toThrow(ConnectionWriteError);
+      } else {
+        expect(insertConnectionLine(c.content, c.line)).toBe(c.expected);
+      }
+    });
+  }
+
+  // Writers agree with the reader: parseNote's view of `expected` holds
+  // exactly the note's edges plus the inserted one.
+  // cli/tests/test_markdown_io.py checks ingest's view.
+  for (const c of cases.filter((x) => x.expected !== null)) {
+    test(`inserted edge is read back: ${c.name}`, () => {
+      const before = parseNote(c.content).connections;
+      expect(parseNote(c.expected!).connections).toEqual([...before, edgeOfLine(c.line)]);
     });
   }
 });

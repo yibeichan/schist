@@ -210,6 +210,110 @@ In the `## Connections` section of a document:
 
 Multiple connections per document are allowed. One connection per line.
 
+The rule that reads the section is deliberately strict. It indexes a
+connection only where the viewer shows it as a top-level list item under the
+`## Connections` heading, and when a note holds Markdown whose rendering the
+rule does not follow, it indexes no connection from that note at all and says
+why (see below). The viewer shows raw HTML written in a note as text, as it
+does the text after a raw `<code>`, `<pre>`, `<kbd>` or `<script>` tag (which
+marked would otherwise pass through unescaped), so a tag written in a note is
+not parsed as HTML; the HTML in the page is marked's own output, sanitized by
+DOMPurify. Ingest, the MCP server and the
+CLI share the rule, and `schema/connection-line-parity.json` pins it in both
+languages. Two tests check every connection the rule reads, over those cases
+and thousands of generated notes: one against the tokens of marked 12.0.2, the
+renderer the viewer loads, and one against the page the viewer's own rendering
+code produces (marked, the HTML escaping and DOMPurify).
+
+**What is read.** The note file is read as UTF-8; a file that is not valid
+UTF-8 is skipped by ingest (nothing is indexed from it), and the MCP server's
+tools refuse to read or write it. The note body: CRLF and CR become LF (as when
+a file is read in text mode), the text after the frontmatter's closing line,
+without leading and trailing blank lines. Before the YAML frontmatter is
+parsed, unquoted `#tags` in its flow lists are quoted; this touches only the
+frontmatter lines, never the body. Ingest stores exactly this text in the index, and the
+viewer renders it unchanged. Frontmatter lines never count, even a YAML block
+scalar holding `## Connections`. Where the frontmatter ends follows the parser
+ingest uses (python-frontmatter): after stripping leading whitespace, a first
+line of three or more `-` (then only whitespace) opens it and the next line of
+three or more `-` closes it, so `-----` closes and `---foo` does not. A
+byte-order mark before the first `---` means the note has no frontmatter, and a
+note whose frontmatter is never closed is all body.
+`schema/frontmatter-boundary-parity.json` pins this rule in the CLI and the MCP
+server.
+
+**The section.** It starts at the first line that is exactly `## Connections`
+at the start of the line (trailing spaces or tabs allowed), outside a fenced
+code block; `## Connections (draft)` and an indented `## Connections` are not
+the heading. It ends at the next heading of any level (`#` to `######` after at
+most three spaces, then whitespace or the end of the line), or at the end of
+the note.
+
+**A connection** is a line in the section that starts with `-` at the start of
+the line and one to three spaces, then `TYPE: TARGET` with optional context.
+The type must start with a letter or digit, and a target starting with `[` (a
+bracket reference) is not a connection. Indented lines, such as an item nested
+under a connection, are not connections.
+
+**Fenced code** is skipped when it is unambiguous: an opening line of at most
+three spaces, three or more backticks or tildes and an optional info word (letters, digits,
+`_+.#-`), closed by the first later line with the same spaces and the same
+run, with every line between blank or indented at least as much and none
+starting with ```` ``` ```` or `~~~`. Lines in such a fence are never the
+heading, a connection or the end of the section, so a note can show an example
+`## Connections` section in a fence.
+
+**When nothing is indexed.** A note indexes no connections when, from the start
+of the body to the end of the section, it has:
+
+- a line holding a vertical tab, form feed, U+001C to U+001F, U+0085, U+2028 or
+  U+2029 (some readers break lines there and Markdown does not);
+- a line starting with ```` ``` ```` or `~~~` that is not part of a fence as
+  above (including one indented four or more spaces);
+- a line starting with `<` (HTML);
+- a line starting with `[` that could open a link reference definition (its
+  first unescaped `]` is followed by `:`, comes after another `[`, or is
+  missing); `[text](url)` is fine;
+
+or, inside the section:
+
+- a line starting with `>` (a block quote);
+- a line indented by a tab or four or more spaces;
+- a line made only of `-`, `=`, `*`, `_`, `+`, `|`, `:` and whitespace (a
+  setext heading underline, a thematic break or a table delimiter row);
+- a list marker followed by a tab or four or more spaces;
+- a list item whose content, past any nested list markers, starts with `#` or
+  `>` (a heading or block quote inside the item).
+
+"Starting with" means after any spaces and tabs. `schist schema --validate`
+warns about such a note with the line and the reason; the MCP server's
+`get_note` returns the line and the reason as `connections_warning`, and
+`create_note` and `update_note` return them as `connectionsWarning` when the
+note they wrote is one of them.
+
+**Writers check their result.** `add_connection`, `create_note`,
+`update_note`, `delete_note`'s cascade, `schist link` and `schist add` read
+what they are about to write with the same rule and refuse, writing nothing,
+unless the note's connections come out exactly as intended (the earlier ones
+plus the new one, or minus the removed ones). A new connection goes after the
+section's last non-blank line; a note without a section gets one at the end.
+Adding a connection to a note the rule indexes nothing from is refused with the
+line and the reason, so the note can be fixed first.
+
+`update_note` exempts out-of-vocabulary connection types only for connections
+the index already holds for the note (from the index's edges table; nothing is
+exempt when the index cannot be read).
+
+The viewer's note panel lists every connection the index holds for the note,
+from the index rather than from the rendered body, so an indexed connection is
+always visible there.
+
+The rule has a version, `CONNECTIONS_RULE_VERSION` in `cli/schist/ingest.py`
+and the same constant in the MCP server. `schist doctor` warns when a
+hand-provisioned `.schist/ingest.py` hook copy or the configured MCP server
+carries a different version, or when the configured server's files cannot be
+found or read (it follows symlinks, a command on `PATH` and `npm root -g`).
+
 ### Implicit Concept Edges
 
 For document notes, every slug in frontmatter `concepts: [...]` creates an
@@ -337,5 +441,6 @@ The `schist schema --validate` command checks:
 4. All connection targets resolve to existing files
 5. All concept slugs match the `slug_pattern`
 6. All note filenames match `YYYY-MM-DD-slug.md` pattern
-7. No concept files have `## Connections` sections
+7. No concept files have `## Connections` sections (by the rule in [Connection Syntax](#connection-syntax); an example inside a fenced code block is allowed)
 8. No orphaned concepts (concepts with zero incoming edges — warning, not error)
+9. Notes the connection rule affects (warning, not error): a note with a `## Connections` heading that holds Markdown the rule does not follow, so no connection is indexed from it (the line and the reason, as in [Connection Syntax](#connection-syntax)); each line whose text starts with `## Connections` but is not the heading (not exactly that text, indented, inside a fenced code block, or a later `## Connections` heading, since only the first section is read); and each connection the earlier rule indexed that is no longer indexed, or the reverse. Each warning names the file, the line number and the reason.

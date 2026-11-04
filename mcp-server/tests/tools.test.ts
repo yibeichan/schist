@@ -12,11 +12,11 @@ import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { load as yamlLoadSync } from "js-yaml";
 import { jest } from "@jest/globals";
-import { loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, formatPushFailure, search_memory, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, ignoredPathsFromPorcelainZ, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES, PULL_AUTOSTASH_CONFLICT_PREFIX } from "../src/tools.js";
+import { get_note, loadVaultConfig, create_note, create_concept, update_note, delete_note, add_connection, get_context, sync_status, sync_retry, triggerSpokePush, triggerIngestion, maybeSpokePull, resetSpokePushTrackerForTesting, resetCanonicalDirsCacheForTesting, classifyPushFailure, parseFailureClass, formatPushFailure, search_memory, DEFAULT_DIRECTORIES_FALLBACK, IGNORE_GUARD_JUNK_BASENAMES, ignoredPathsFromPorcelainZ, DEFAULT_CONNECTION_TYPES, DEFAULT_STATUSES, PULL_AUTOSTASH_CONFLICT_PREFIX } from "../src/tools.js";
 import { writeMutex } from "../src/git-writer.js";
 import Database from "better-sqlite3";
 import { INDEX_SCHEMA_VERSION, memoryDbPath } from "../src/sqlite-reader.js";
-import { parseConnections, parseNote } from "../src/markdown-parser.js";
+import { frontmatterLength, parseConnections, parseNote } from "../src/markdown-parser.js";
 import { localSchistWrapperScript, spawnHolder } from "./local-schist-bin.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -71,6 +71,17 @@ async function makeTempVault(extraYaml = ""): Promise<string> {
   await execFile("git", ["add", "."], { cwd: dir });
   await execFile("git", ["commit", "-m", "init"], { cwd: dir });
   return dir;
+}
+
+/** A minimal index holding `edges` as ingest would have indexed them, for
+ * update_note's grandfathering, which reads the index's edges table. */
+function seedIndexEdges(vault: string, edges: { source: string; target: string; type: string }[]): void {
+  fsSync.mkdirSync(path.join(vault, ".schist"), { recursive: true });
+  const db = new Database(path.join(vault, ".schist", "schist.db"));
+  db.exec("CREATE TABLE IF NOT EXISTS edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, target TEXT NOT NULL, type TEXT NOT NULL, context TEXT, UNIQUE(source, target, type))");
+  const ins = db.prepare("INSERT OR IGNORE INTO edges (source, target, type) VALUES (?, ?, ?)");
+  for (const e of edges) ins.run(e.source, e.target, e.type);
+  db.close();
 }
 
 async function makeTempSpokeVault(): Promise<string> {
@@ -444,27 +455,25 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     expect(entries).toEqual([]);
   }, 30000);
 
-  test("create_note catches a bogus type smuggled across a NEL (U+0085) separator — the split(\"\\n\") bypass (#359)", async () => {
-    // Python ingest's splitlines() breaks on U+0085, so it would index the
-    // bogus edge; the validator must split the same way or the #317 control is
-    // bypassable. `## Connections` and the edge sit on one \n-delimited line.
+  test("a NEL (U+0085) is not a line ending: the joined text is neither validated nor indexed as an edge (#359)", async () => {
+    // Ingest and the validator both split connection lines on CommonMark line
+    // endings only, so `## Connections` and the would-be edge are one line: no
+    // heading, no edge, nothing to validate. A renderer shows one paragraph.
     const vault = await makeTempVault();
     const config = await loadVaultConfig(vault);
 
     const res = await create_note(
       vault,
       {
-        owner: TEST_AGENT, title: "NEL Smuggle",
+        owner: TEST_AGENT, title: "NEL Joined",
         body: "Text.\n\n## Connections\u0085- bogus-type: notes/x.md\n",
       },
       config
-    ) as { error: string; message: string };
+    ) as { id: string; error?: string };
 
-    expect(res.error).toBe("VALIDATION_ERROR");
-    expect(res.message).toMatch(/connection type must be one of/);
-    expect(res.message).toContain('"bogus-type"');
-    const entries = await fs.readdir(path.join(vault, "notes")).catch(() => []);
-    expect(entries).toEqual([]);
+    expect(res.error).toBeUndefined();
+    const written = await fs.readFile(path.join(vault, res.id), "utf-8");
+    expect(parseNote(written).connections).toEqual([]);
   }, 30000);
 
   test("create_note catches a bogus edge smuggled after a valid one via CR on the same physical line (#359)", async () => {
@@ -570,6 +579,7 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     const config = await loadVaultConfig(vault);
     const rel = "notes/2026-07-13-legacy-edge.md";
     await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    seedIndexEdges(vault, [{ source: rel, target: "notes/x.md", type: "legacy-type" }]);
     await fs.writeFile(
       path.join(vault, rel),
       "---\ntitle: Legacy Edge\n---\n\nOriginal prose.\n\n## Connections\n\n- legacy-type: notes/x.md\n",
@@ -592,11 +602,79 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     expect(content).toContain("- legacy-type: notes/x.md");
   }, 30000);
 
+  test("update_note grandfathers only edges ingest indexed, read with ingest's frontmatter rule", async () => {
+    // `---foo: |` does not close the frontmatter for ingest (python-frontmatter),
+    // but gray-matter closes at it, so gray-matter's body holds a section with
+    // a legacy edge that ingest never indexed. That line is not grandfathered.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const rel = "notes/2026-07-13-fm-split.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    const original =
+      "---\ntitle: FM Split\n---foo: |\n  ## Connections\n  - legacy-type: notes/x.md\n---\nProse.\n";
+    await fs.writeFile(path.join(vault, rel), original, "utf-8");
+
+    const res = await update_note(
+      vault,
+      { owner: TEST_AGENT, id: rel, body: "Prose.\n\n## Connections\n\n- legacy-type: notes/x.md\n" },
+      config
+    ) as { error: string; message: string };
+
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toContain('"legacy-type"');
+    expect(await fs.readFile(path.join(vault, rel), "utf-8")).toBe(original);
+  }, 30000);
+
+  test("update_note keeps a body that ingest would read as frontmatter in the body", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const rel = "notes/2026-11-03-plain.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, rel), "# Legacy plain note\n\nProse.\n", "utf-8");
+    await execFile("git", ["add", rel], { cwd: vault });
+    await execFile("git", ["commit", "-m", "add plain note"], { cwd: vault });
+
+    const body = '{\n"concepts": ["x"], "source_agent": "someone-else"\n}\nProse.\n';
+    const res = await update_note(vault, { owner: TEST_AGENT, id: rel, body }, config) as {
+      updated?: boolean; error?: string;
+    };
+    expect(res.error).toBeUndefined();
+    expect(res.updated).toBe(true);
+    const written = await fs.readFile(path.join(vault, rel), "utf-8");
+    // Ingest reads the empty block only; the JSON stays body text.
+    expect(written).toBe(`---\n---\n${body}`);
+    expect(frontmatterLength(written)).toBe("---\n---\n".length);
+  }, 30000);
+
+  test.each([
+    ["five-dash fences", "-----\ntitle: T\nconcepts: [c]\nsource_agent: a\n-----\nbody\n\n## Connections\n\n- extends: notes/a.md\n"],
+    ["a leading blank line", "\n---\ntitle: T\nconcepts: [c]\n---\nbody\n"],
+    ["a BOM", "\uFEFF---\ntitle: T\n---\nbody\n"],
+  ])("update_note refuses a note that opens with %s, whose frontmatter ingest reads differently", async (_name, original) => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const rel = "notes/2026-11-03-split.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, rel), original, "utf-8");
+    await execFile("git", ["add", rel], { cwd: vault });
+    await execFile("git", ["commit", "-m", "add split note"], { cwd: vault });
+
+    for (const args of [{ frontmatter_patch: { status: "draft" } }, { body: "New body.\n" }]) {
+      const res = await update_note(vault, { owner: TEST_AGENT, id: rel, ...args }, config) as {
+        error: string; message: string;
+      };
+      expect(res.error).toBe("VALIDATION_ERROR");
+      expect(res.message).toMatch(/^update_note refused: .*frontmatter.*Nothing was written\.$/);
+      expect(await fs.readFile(path.join(vault, rel), "utf-8")).toBe(original);
+    }
+  }, 30000);
+
   test("update_note still rejects a NEW out-of-vocabulary edge even alongside a grandfathered one (#363)", async () => {
     const vault = await makeTempVault();
     const config = await loadVaultConfig(vault);
     const rel = "notes/2026-07-13-new-bad-edge.md";
     await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    seedIndexEdges(vault, [{ source: rel, target: "notes/x.md", type: "legacy-type" }]);
     const original =
       "---\ntitle: New Bad Edge\n---\n\nProse.\n\n## Connections\n\n- legacy-type: notes/x.md\n";
     await fs.writeFile(path.join(vault, rel), original, "utf-8");
@@ -625,6 +703,7 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     const config = await loadVaultConfig(vault);
     const rel = "notes/2026-07-13-dup-vs-new.md";
     await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    seedIndexEdges(vault, [{ source: rel, target: "notes/x.md", type: "legacy-type" }]);
     const original =
       "---\ntitle: Dup Vs New\n---\n\nProse.\n\n## Connections\n\n- legacy-type: notes/x.md\n";
     await fs.writeFile(path.join(vault, rel), original, "utf-8");
@@ -664,6 +743,7 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     const config = await loadVaultConfig(vault);
     const rel = "notes/2026-07-13-indent-edge.md";
     await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    seedIndexEdges(vault, [{ source: rel, target: "notes/x.md", type: "legacy-type" }]);
     await fs.writeFile(
       path.join(vault, rel),
       "---\ntitle: Indent Edge\n---\n\nProse.\n\n## Connections\n\n- legacy-type: notes/x.md\n",
@@ -1012,6 +1092,38 @@ describe("create_concept", () => {
     ) as { error: string; message: string };
     expect(result.error).toBe("VALIDATION_ERROR");
     expect(result.message).toContain("at most 200 characters");
+  });
+
+  test("accepts a Connections example inside a fenced code block", async () => {
+    const vault = await makeConceptVault();
+    const config = await loadVaultConfig(vault);
+    const body = "definition\n\n```markdown\n## Connections\n\n- extends: concepts/other\n```";
+    const result = await create_concept(
+      vault,
+      { owner: TEST_AGENT, slug: "fenced-example", title: "Fenced Example", body },
+      config,
+    ) as { id: string; error?: string };
+    expect(result.error).toBeUndefined();
+    const parsed = parseNote(await fs.readFile(path.join(vault, result.id), "utf-8"));
+    expect(parsed.body.trim()).toBe(body);
+    expect(parsed.connections).toEqual([]);
+  }, 30000);
+
+  test("refuses a real Connections section after a closed fence", async () => {
+    const vault = await makeConceptVault();
+    const config = await loadVaultConfig(vault);
+    const result = await create_concept(
+      vault,
+      {
+        owner: TEST_AGENT,
+        slug: "after-fence",
+        title: "After Fence",
+        body: "definition\n\n```\ncode\n```\n\n## Connections\n- extends: concepts/other",
+      },
+      config,
+    ) as { error: string; message: string };
+    expect(result.error).toBe("VALIDATION_ERROR");
+    expect(result.message).toContain("cannot contain an outgoing");
   });
 
   test("refuses an outgoing Connections section", async () => {
@@ -1925,6 +2037,18 @@ describe("push failure classification (#501)", () => {
       "remote: ERROR: timed out diffing abc123..def456 — the hub may be under load; " +
       "please retry the push.\n" +
       " ! [remote rejected] other -> other (pre-receive hook declined)\n",
+    ))).toBe("transport");
+    // The hub also asks for a retry when git failed or timed out reading its
+    // own vault.yaml or the branch it serves.
+    expect(classifyPushFailure(failed(
+      "remote: ERROR: the hub could not read vault.yaml (git timed out); please " +
+      "retry the push.\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
+    ))).toBe("transport");
+    expect(classifyPushFailure(failed(
+      "remote: ERROR: the hub could not read the branch it serves (git was killed by signal 9); " +
+      "please retry the push.\n" +
+      " ! [remote rejected] main -> main (pre-receive hook declined)\n",
     ))).toBe("transport");
     // But only the TIMEOUT path. "failed to diff" comes from a
     // CalledProcessError on `git log <old>..<new>` (pre_receive.py:464) — a
@@ -5381,6 +5505,52 @@ describe("delete_note", () => {
     expect(after).not.toContain("Machine Learning");
   }, 30000);
 
+  it.each([
+    ["-----\ntitle: Linker Split\nconcepts:\n  - machine-learning\n-----\n\nb\n", "refused"],
+    ["\uFEFF---\ntitle: Linker BOM\nconcepts:\n  - machine-learning\n---\n\nb\n", "unchanged"],
+  ])("cascade with a linker whose frontmatter ingest reads differently: %j is %s", async (linker, outcome) => {
+    const vault = await makeTempVault();
+    await fs.writeFile(
+      path.join(vault, "schist.yaml"),
+      "name: Test Vault\nwrite_branch: drafts\ndirectories:\n  - notes\n  - papers\n  - concepts\nstatuses:\n  - draft\n  - final\nconnection_types:\n  - extends\n  - supports\n",
+    );
+    await execFile("git", ["add", "schist.yaml"], { cwd: vault });
+    await execFile("git", ["commit", "-m", "add concepts dir"], { cwd: vault });
+    const config = await loadVaultConfig(vault);
+    const conceptId = "concepts/machine-learning.md";
+    const linkerId = "notes/2026-11-03-linker-split.md";
+    await fs.mkdir(path.join(vault, "concepts"), { recursive: true });
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(
+      path.join(vault, conceptId),
+      "---\nconcept: machine-learning\ntitle: Machine Learning\n---\n\nb\n",
+      "utf-8",
+    );
+    await fs.writeFile(path.join(vault, linkerId), linker, "utf-8");
+    await execFile("git", ["add", conceptId, linkerId], { cwd: vault });
+    await execFile("git", ["commit", "-m", "add concept cascade fixtures"], { cwd: vault });
+    await seedEdgesDb(vault, [{ source: linkerId, target: "machine-learning", type: "references" }]);
+
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: conceptId, cascade: true }, config) as {
+      deleted?: boolean; repaired?: string[]; error?: string; message?: string;
+    };
+    if (outcome === "refused") {
+      // Ingest reads `concepts: [machine-learning]`; gray-matter reads no
+      // frontmatter, so a rewrite could not remove it. Nothing is deleted.
+      expect(res.error).toBe("VALIDATION_ERROR");
+      expect(res.message).toContain(linkerId);
+      expect(res.message).toMatch(/reads as body text/);
+      expect(await fs.readFile(path.join(vault, conceptId), "utf-8")).toContain("Machine Learning");
+    } else {
+      // Ingest reads no frontmatter behind a BOM, so there is no reference to
+      // strip, and the linker is left as it is.
+      expect(res.error).toBeUndefined();
+      expect(res.deleted).toBe(true);
+      expect(res.repaired ?? []).not.toContain(linkerId);
+    }
+    expect(await fs.readFile(path.join(vault, linkerId), "utf-8")).toBe(linker);
+  }, 30000);
+
   it("a failed delete rolls back only its own paths, preserving unrelated uncommitted edits (#119)", async () => {
     const vault = await makeTempVault();
     const config = await loadVaultConfig(vault);
@@ -6522,4 +6692,223 @@ esac
     await run(vault);
     expect(await aborts(abortLog)).toBe(1);
   }, 60000);
+});
+
+// Every writer reads back what it is about to write with the connection rule
+// and refuses unless the note's indexed edges come out exactly as meant.
+describe("connection writers check their own result", () => {
+  async function noteIn(vault: string, rel: string, text: string): Promise<string> {
+    await fs.mkdir(path.join(vault, path.dirname(rel)), { recursive: true });
+    await fs.writeFile(path.join(vault, rel), text, "utf-8");
+    return rel;
+  }
+
+  test("update_note does not grandfather an edge from lone-CR frontmatter, and keeps that frontmatter", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const original = "---\rtitle: Legacy\rsummary: |\r  ## Connections\r  - badtype: notes/x.md\r---\rBody\r";
+    const rel = await noteIn(vault, "notes/2026-11-02-cr.md", original);
+
+    const bad = await update_note(
+      vault,
+      { owner: TEST_AGENT, id: rel, body: "Body\n\n## Connections\n\n- badtype: notes/x.md\n" },
+      config,
+    ) as { error: string };
+    expect(bad.error).toBe("VALIDATION_ERROR");
+    expect(await fs.readFile(path.join(vault, rel), "utf-8")).toBe(original);
+
+    const ok = await update_note(vault, { owner: TEST_AGENT, id: rel, body: "New body\n" }, config) as { error?: string };
+    expect(ok.error).toBeUndefined();
+    const written = await fs.readFile(path.join(vault, rel), "utf-8");
+    expect(parseNote(written).metadata.title).toBe("Legacy");
+    expect(written).not.toContain("\r");
+  }, 30000);
+
+  test("update_note: an edge in a section the rule does not read is not indexed, and the response says so", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const rel = await noteIn(vault, "notes/2026-11-02-pi.md", "---\ntitle: PI\n---\nProse.\n");
+    const res = await update_note(
+      vault,
+      { owner: TEST_AGENT, id: rel, body: "Prose.\n\n## Connections\n1.     \n<? ?>\n   - badtype: notes/evil.md\n" },
+      config,
+    ) as { error?: string; connectionsWarning?: string };
+    expect(res.error).toBeUndefined();
+    expect(res.connectionsWarning).toContain("no connections are indexed from this note: line 7");
+    expect(parseNote(await fs.readFile(path.join(vault, rel), "utf-8")).connections).toEqual([]);
+  }, 30000);
+
+  test("update_note refuses a frontmatter patch that would bring in an edge ingest does not index", async () => {
+    // gray-matter ends the frontmatter at `---foo`, ingest (python-frontmatter)
+    // at the later `---`, so gray-matter's body holds a section ingest never
+    // read. Rewriting the note from gray-matter's split would index it.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const original = "---\ntitle: t\n---foo\n## Connections\n- extends: notes/a.md\n# end\n---\nbody\n";
+    const rel = await noteIn(vault, "notes/2026-11-02-split.md", original);
+    expect(parseNote(original).connections).toEqual([]);
+    const res = await update_note(
+      vault,
+      { owner: TEST_AGENT, id: rel, frontmatter_patch: { status: "review" } },
+      config,
+    ) as { error: string; message: string };
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toContain("update_note refused");
+    expect(await fs.readFile(path.join(vault, rel), "utf-8")).toBe(original);
+  }, 30000);
+
+  test("a note that is not valid UTF-8 is refused by get_note, update_note and add_connection", async () => {
+    // Ingest skips such a note (Python's read_text raises), so none of its
+    // lines are indexed edges, and nothing may be grandfathered or rewritten.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const rel = "notes/2026-11-02-bytes.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    const bytes = Buffer.from("---\ntitle: Legacy\n---\n\xff\n\n## Connections\n- badtype: notes/x.md\n", "latin1");
+    await fs.writeFile(path.join(vault, rel), bytes);
+
+    const got = await get_note(vault, { id: rel }, config) as { error: string; message: string };
+    expect(got.error).toBe("VALIDATION_ERROR");
+    expect(got.message).toContain("not valid UTF-8");
+    const upd = await update_note(
+      vault,
+      { owner: TEST_AGENT, id: rel, body: "Body\n\n## Connections\n\n- badtype: notes/x.md\n" },
+      config,
+    ) as { error: string; message: string };
+    expect(upd.error).toBe("VALIDATION_ERROR");
+    const add = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: rel, target: "notes/other.md", type: "extends" },
+      config,
+    ) as { error: string; message: string };
+    expect(add.error).toBe("VALIDATION_ERROR");
+    expect(add.message).toContain("not valid UTF-8");
+    expect(Buffer.compare(await fs.readFile(path.join(vault, rel)), bytes)).toBe(0);
+  }, 30000);
+
+  test("update_note grandfathers nothing when the index holds no such edge, whatever the file's frontmatter", async () => {
+    // A `----` closer once let the frontmatter hashtag patch run over the
+    // body, so ingest and the server read this edge differently.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const original = "---\ntitle: Legacy\n----\n\n## Connections\n- badtype: notes/x.md \"[#a]\"\n";
+    const rel = await noteIn(vault, "notes/2026-11-02-patch.md", original);
+    expect(parseNote(original).connections.map((c) => c.type)).toEqual(["badtype"]);
+    const res = await update_note(
+      vault,
+      { owner: TEST_AGENT, id: rel, body: "Body\n\n## Connections\n\n- badtype: notes/x.md \"[#a]\"\n" },
+      config,
+    ) as { error: string; message: string };
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toContain('"badtype"');
+    expect(await fs.readFile(path.join(vault, rel), "utf-8")).toBe(original);
+  }, 30000);
+
+  test("get_note says when a note's section is not read", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const rel = await noteIn(vault, "notes/2026-11-02-get.md", "---\ntitle: G\n---\n<div>\n\n## Connections\n- extends: notes/a.md\n");
+    const res = await get_note(vault, { id: rel }, config) as { connections: unknown[]; connections_warning?: string };
+    expect(res.connections).toEqual([]);
+    expect(res.connections_warning).toContain('line 4: the line starts with "<" (HTML)');
+    const plain = await noteIn(vault, "notes/2026-11-02-plain.md", "---\ntitle: P\n---\n## Connections\n- extends: notes/a.md\n");
+    const ok = await get_note(vault, { id: plain }, config) as { connections: unknown[]; connections_warning?: string };
+    expect(ok.connections).toHaveLength(1);
+    expect(ok.connections_warning).toBeUndefined();
+  }, 30000);
+
+  test("add_connection refuses a note the rule indexes nothing from, and writes nothing", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const original = "---\ntitle: Div\n---\n<div>\n\n## Connections\n- extends: notes/a.md\n";
+    const rel = await noteIn(vault, "notes/2026-11-02-div.md", original);
+    const res = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: rel, target: "notes/b.md", type: "extends" },
+      config,
+    ) as { error: string; message: string };
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toContain('line 4: the line starts with "<" (HTML)');
+    expect(await fs.readFile(path.join(vault, rel), "utf-8")).toBe(original);
+  }, 30000);
+
+  test("add_connection after a section whose next heading is indented adds exactly one edge", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const rel = await noteIn(
+      vault,
+      "notes/2026-11-02-next.md",
+      "---\ntitle: Next\n---\n## Connections\n- extends: notes/a.md\n\nSee also:\n\n  ## Other\n- supports: notes/x.md\n",
+    );
+    const res = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: rel, target: "notes/z.md", type: "extends" },
+      config,
+    ) as { error?: string };
+    expect(res.error).toBeUndefined();
+    const got = parseNote(await fs.readFile(path.join(vault, rel), "utf-8")).connections.map((c) => c.target);
+    expect(got).toEqual(["notes/a.md", "notes/z.md"]);
+  }, 30000);
+
+  test("create_note refuses connections that the body would keep from being indexed", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const res = await create_note(
+      vault,
+      {
+        owner: TEST_AGENT,
+        title: "Unclosed",
+        body: "Example:\n\n~~~~\ncode\n",
+        connections: [{ target: "notes/a.md", type: "extends" }],
+      },
+      config,
+    ) as { error: string; message: string };
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toContain("Nothing was written");
+    expect(await fs.readdir(path.join(vault, "notes")).catch(() => [])).toEqual([]);
+  }, 30000);
+
+  test("create_note returns a warning when its body's section is not read", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const res = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Quote", body: "Prose.\n\n## Connections\n> - extends: notes/a.md\n" },
+      config,
+    ) as { error?: string; connectionsWarning?: string };
+    expect(res.error).toBeUndefined();
+    expect(res.connectionsWarning).toContain("a block quote in the Connections section");
+  }, 30000);
+});
+
+describe("stripConnectionsTo checks its result", () => {
+  test("an edge after a heading the rule ends the section at is not touched", async () => {
+    const { stripConnectionsTo } = await import("../src/tools.js");
+    const text = "---\ntitle: t\n---\n## Connections\n- extends: dead\n#\tOther\n- supports: dead \"kept\"\n";
+    const { content, removed } = stripConnectionsTo(text, ["dead"]);
+    expect(removed).toBe(1);
+    expect(content).toBe("---\ntitle: t\n---\n\n#\tOther\n- supports: dead \"kept\"\n");
+  });
+
+  test("a note with HTML in its section is left alone", async () => {
+    const { stripConnectionsTo } = await import("../src/tools.js");
+    const text =
+      "---\ntitle: t\n---\n## Connections\n- extends: dead\ntext\n<x-y>\n## Other\n\n- supports: dead \"kept in Other\"\n";
+    expect(stripConnectionsTo(text, ["dead"])).toEqual({ content: text, removed: 0 });
+  });
+
+  test("removing an edge never promotes a nested line", async () => {
+    const { stripConnectionsTo } = await import("../src/tools.js");
+    const text = "---\ntitle: t\n---\n## Connections\n- extends: dead\n  - extends: hidden\n";
+    const { content, removed } = stripConnectionsTo(text, ["dead"]);
+    expect(removed).toBe(1);
+    expect(parseNote(content).connections).toEqual([]);
+  });
+
+  test("a removal that would bring a later section's edges in is refused", async () => {
+    const { stripConnectionsTo } = await import("../src/tools.js");
+    const { ConnectionWriteError } = await import("../src/markdown-parser.js");
+    const text = "---\ntitle: t\n---\n## Connections\n- extends: dead\n\n## Connections\n- extends: other\n";
+    expect(() => stripConnectionsTo(text, ["dead"])).toThrow(ConnectionWriteError);
+  });
 });
