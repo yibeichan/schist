@@ -638,6 +638,98 @@ class TestPrintMcpConfig:
         captured = capsys.readouterr()
         assert ".cursor/mcp.json" in captured.out
 
+    def test_opencode_emits_mcp_add_command(self, tmp_path, capsys):
+        """`--format opencode` prints a runnable `opencode mcp add` command,
+        writing the V2 `mcp.servers` shape — #853."""
+        from schist.sync import _dispatch_init
+
+        fake_mcp = tmp_path / "fake-index.js"
+        fake_mcp.write_text("// fake")
+        _dispatch_init(_args(
+            print_mcp_config=True,
+            mcp_format="opencode",
+            vault=str(tmp_path),
+            identity="test-agent",
+            mcp_server_path=str(fake_mcp),
+        ))
+        out = capsys.readouterr().out
+        assert "opencode mcp add schist --global" in out
+        assert "--env SCHIST_VAULT_PATH=" in out
+        assert "--env SCHIST_AGENT_ID=test-agent" in out
+        assert "--env SCHIST_IDENTITY=test-agent" in out
+        assert f"node {fake_mcp}" in out
+        # The runnable command line must not be raw JSON; the commented
+        # fallback is fine.
+        for line in out.splitlines():
+            if "mcp.servers" in line or '"mcp"' in line:
+                assert line.lstrip().startswith("#"), \
+                    f"raw (uncommented) JSON leaked into output: {line!r}"
+
+    def test_opencode_emits_commented_json_fallback(self, tmp_path, capsys):
+        """The fallback block is the V2 shape `opencode.json` expects:
+        servers under `mcp.servers`, the whole argv in `command`,
+        variables under `environment`."""
+        import json as _json
+        from schist.sync import _dispatch_init
+
+        fake_mcp = tmp_path / "fake-index.js"
+        fake_mcp.write_text("// fake")
+        _dispatch_init(_args(
+            print_mcp_config=True,
+            mcp_format="opencode",
+            vault=str(tmp_path),
+            identity="test-agent",
+            mcp_server_path=str(fake_mcp),
+        ))
+        out = capsys.readouterr().out
+        assert "~/.config/opencode/opencode.json" in out
+
+        lines = out.splitlines()
+        start = lines.index("# {")
+        block = []
+        for line in lines[start:]:
+            if not line.startswith("# "):
+                break
+            block.append(line[2:])
+        parsed = _json.loads("\n".join(block))
+        assert parsed == {
+            "mcp": {
+                "servers": {
+                    "schist": {
+                        "type": "local",
+                        "command": ["node", str(fake_mcp)],
+                        "environment": {
+                            "SCHIST_VAULT_PATH": str(tmp_path),
+                            "SCHIST_AGENT_ID": "test-agent",
+                            "SCHIST_IDENTITY": "test-agent",
+                        },
+                    }
+                }
+            }
+        }
+
+    def test_opencode_quotes_paths_with_spaces(self, tmp_path, capsys):
+        """Same shell-quoting rule as the claude format: the printed
+        `opencode mcp add` line must paste-run for paths with spaces —
+        each value is one single-quoted argument, so a space never splits
+        it."""
+        from schist.sync import _dispatch_init
+
+        spaced_dir = tmp_path / "with space"
+        spaced_dir.mkdir()
+        fake_mcp = spaced_dir / "fake index.js"
+        fake_mcp.write_text("// fake")
+        _dispatch_init(_args(
+            print_mcp_config=True,
+            mcp_format="opencode",
+            vault=str(spaced_dir),
+            identity="test-agent",
+            mcp_server_path=str(fake_mcp),
+        ))
+        out = capsys.readouterr().out
+        assert f"'SCHIST_VAULT_PATH={spaced_dir}'" in out
+        assert f"node '{fake_mcp}'" in out
+
     def test_unknown_format_errors(self, tmp_path, capsys):
         """Unknown --format value exits 1 with a stderr message — guards the
         dispatch's else branch against silent no-ops on typos."""

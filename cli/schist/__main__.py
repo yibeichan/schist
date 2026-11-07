@@ -208,7 +208,7 @@ def main():
                         help='(deprecated, ignored) Retained for backward-compat; flat-convention hubs do not use a per-participant scope prefix')
     p_init.add_argument('--print-mcp-config', action='store_true', dest='print_mcp_config',
                         help='Print MCP server config and exit (no vault creation)')
-    p_init.add_argument('--format', choices=['claude', 'cursor'], default='claude',
+    p_init.add_argument('--format', choices=['claude', 'cursor', 'opencode'], default='claude',
                         dest='mcp_format',
                         help='MCP config format (default: claude)')
     p_init.add_argument('--mcp-server-path', default=None, dest='mcp_server_path',

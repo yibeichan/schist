@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`schist init --print-mcp-config` gains `--format opencode` (#853).** It prints a copy-paste-runnable `opencode mcp add schist --global --env … -- node <path>` command, which writes the V2 `mcp.servers` shape through OpenCode's own CLI, plus a commented JSON fallback for hand-merging the V2 entry (`type: local`, the whole argv under `command`, variables under `environment`) into `~/.config/opencode/opencode.json`. The runnable values are shell-quoted, so paths and identities containing spaces survive the paste. The command form was verified against OpenCode's current CLI: it accepts `--global --env K=V -- <command>`, preserves unrelated sibling `mcp` keys, and writes the same entry shape the fallback emits.
+
 ## [0.3.2] - 2026-11-06
 
 ### Added

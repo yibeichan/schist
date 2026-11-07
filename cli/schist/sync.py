@@ -1946,6 +1946,34 @@ def _print_mcp_config(args) -> None:
         print("# merge under `mcpServers` in ~/.claude.json")
         for line in _json.dumps(fallback, indent=2).splitlines():
             print(f"# {line}")
+    elif fmt == "opencode":
+        # OpenCode V2 keeps servers under `mcp.servers`, runs each entry's
+        # whole argv from one `command` list, and puts the server's
+        # variables under `environment`. Its own CLI writes that shape, so
+        # the copy-paste command is preferred — doctor (#851) validates the
+        # result either way.
+        # Shell-quote each value so paths/identities containing spaces or
+        # metacharacters survive copy-paste-run.
+        env_flags = " ".join(
+            "--env " + shlex.quote(f"{k}={v}") for k, v in env.items())
+        print("# Run to register schist with OpenCode (global):")
+        print(f"opencode mcp add schist --global {env_flags} -- node {shlex.quote(mcp_path)}")
+        fallback = {
+            "mcp": {
+                "servers": {
+                    "schist": {
+                        "type": "local",
+                        "command": ["node", mcp_path],
+                        "environment": env,
+                    }
+                }
+            }
+        }
+        print()
+        print("# Fallback (hand-merge instead of the command):")
+        print("# merge under `mcp.servers` in ~/.config/opencode/opencode.json")
+        for line in _json.dumps(fallback, indent=2).splitlines():
+            print(f"# {line}")
     elif fmt == "cursor":
         config = {
             "mcpServers": {

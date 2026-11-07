@@ -175,6 +175,20 @@ For Cursor format, use `--format cursor`:
 schist --vault ~/my-vault init --print-mcp-config --format cursor --identity local
 ```
 
+**OpenCode**:
+```
+~/.config/opencode/opencode.json
+```
+
+For OpenCode format, use `--format opencode`:
+```bash
+schist --vault ~/my-vault init --print-mcp-config --format opencode --identity local
+```
+
+This prints a runnable `opencode mcp add --global` command (writing the V2
+`mcp.servers` shape) plus a commented JSON fallback to hand-merge under
+`mcp.servers` in `~/.config/opencode/opencode.json`.
+
 `--print-mcp-config` finds the server in a source checkout, or else where
 `npm install -g @schist/mcp-server` put it. If it finds neither, specify the
 path explicitly, for example for the npm install:
