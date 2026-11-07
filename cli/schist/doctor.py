@@ -1871,6 +1871,10 @@ def _mcp_config_candidates(vault_path: Optional[str]) -> list[Path]:
         # that kept breaking was also the one nothing validated.
         Path.home() / ".claude-science" / "mcp" / "local-mcp.json",
         Path.home() / ".cursor" / "mcp.json",
+        # OpenCode V2: global config, MCP servers under `mcp.servers`, and
+        # per-entry field names unlike any Claude shape (`command` is a
+        # list, env is `environment`). #851.
+        _opencode_config_path(),
     ]
     # Claude Code reads $CLAUDE_CONFIG_DIR/.claude.json when that is set.
     claude_dir = os.environ.get("CLAUDE_CONFIG_DIR")
@@ -1880,6 +1884,45 @@ def _mcp_config_candidates(vault_path: Optional[str]) -> list[Path]:
         candidates.append(Path(vault_path) / ".claude" / "settings.json")
         candidates.append(Path(vault_path) / ".claude" / "settings.local.json")
     return candidates
+
+
+def _opencode_config_path() -> Path:
+    """OpenCode's global config: $XDG_CONFIG_HOME/opencode/opencode.json,
+    else ~/.config/opencode/opencode.json."""
+    xdg = os.environ.get("XDG_CONFIG_HOME") or None
+    base = Path(os.path.expanduser(xdg)) if xdg else Path.home() / ".config"
+    return base / "opencode" / "opencode.json"
+
+
+def _normalize_mcp_entry(cfg: dict) -> dict:
+    """Map an OpenCode-shaped MCP entry onto the shape doctor reads
+    (Claude-style: `command` one program string, `args` list, `env` dict).
+
+    OpenCode V2 stores the whole command as a list under `command` and the
+    server's variables under `environment`; nothing downstream understands
+    those names. Claude and Cursor entries have neither a list `command` nor
+    an `environment` block and pass through unchanged. Returns a copy: the
+    parsed-file cache is shared across callers within one run and must not
+    be mutated (visible half-way between the entry discovery that
+    normalizes and the vault-access read that would otherwise normalize
+    again, or worse).
+    """
+    command = cfg.get("command")
+    environment = cfg.get("environment")
+    if not isinstance(command, list) and not isinstance(environment, dict):
+        return cfg
+    out = dict(cfg)
+    if (isinstance(command, list) and command
+            and all(isinstance(c, str) for c in command)):
+        out["command"] = command[0]
+        rest = command[1:]
+        out["args"] = [
+            *rest,
+            *(out["args"] if isinstance(out.get("args"), list) else []),
+        ]
+    if isinstance(environment, dict):
+        out["env"] = environment
+    return out
 
 
 def _looks_like_schist_entry(cfg: dict) -> bool:
@@ -1949,6 +1992,35 @@ def _discover_mcp_schist_entries(
                 # An entry whose command proves it is another program (a
                 # filesystem server on ~/schist-vault matches the loose args
                 # test) is not schist; check_vault_access agrees.
+                if ((name == "schist" or _looks_like_schist_entry(cfg))
+                        and _schist_evidence(cfg) is not False):
+                    found.append((c, str(name), cfg))
+
+        # OpenCode V2: `{"mcp": {"servers": {name: entry}}}`; the V1 compat
+        # spelling puts the names directly under `mcp` (the published schema
+        # still accepts it, and a machine that migrated cannot be told from a
+        # config that never named the wrapper). Entries are normalized BEFORE
+        # the shape tests, which all read the Claude field names (#851). A
+        # `disabled` entry is never started by the client, so doctor skips it
+        # the way `_all_mcp_servers` skips an `enabled: false` one.
+        mcp = data.get("mcp")
+        if isinstance(mcp, dict):
+            block = mcp.get("servers")
+            if not isinstance(block, dict):
+                block = {
+                    k: v for k, v in mcp.items()
+                    if isinstance(v, dict) and (
+                        v.get("type") is not None or "command" in v)
+                }
+            ordered = sorted(block.items(), key=lambda kv: kv[0] != "schist")
+            for name, raw in ordered:
+                if not isinstance(raw, dict):
+                    if include_malformed and name == "schist":
+                        found.append((c, str(name), raw))
+                    continue
+                if raw.get("disabled", False) is True:
+                    continue
+                cfg = _normalize_mcp_entry(raw)
                 if ((name == "schist" or _looks_like_schist_entry(cfg))
                         and _schist_evidence(cfg) is not False):
                     found.append((c, str(name), cfg))
@@ -2220,9 +2292,17 @@ def _all_mcp_servers(
                 skip: frozenset = frozenset()) -> None:
         if isinstance(block, dict):
             for name, cfg in block.items():
-                if (isinstance(cfg, dict) and str(name) not in skip
-                        and cfg.get("enabled", True) is not False):
-                    servers.append(_McpServer(where, str(name), cfg, project))
+                # Claude Code local scope uses `enabled`, OpenCode `disabled`
+                # (#851); a not-started server cannot read anything.
+                if not isinstance(cfg, dict):
+                    continue
+                if (cfg.get("enabled", True) is False
+                        or cfg.get("disabled", False) is True):
+                    continue
+                if str(name) in skip:
+                    continue
+                servers.append(_McpServer(
+                    where, str(name), _normalize_mcp_entry(cfg), project))
 
     def as_path(key: Any) -> Optional[Path]:
         if not isinstance(key, str):
@@ -2247,6 +2327,18 @@ def _all_mcp_servers(
             continue
         project = vault if vault is not None and c.parent == vault / ".claude" else None
         add_map(str(c), data.get("mcpServers"), project)
+        # OpenCode V2: MCP servers under `mcp.servers` (V1 compat: directly
+        # under `mcp`), #851. add_map normalizes the per-entry fields.
+        mcp_block = data.get("mcp")
+        if isinstance(mcp_block, dict):
+            block = mcp_block.get("servers")
+            if not isinstance(block, dict):
+                block = {
+                    k: v for k, v in mcp_block.items()
+                    if isinstance(v, dict) and (
+                        v.get("type") is not None or "command" in v)
+                }
+            add_map(str(c), block, project)
         server_list = data.get("servers")
         if isinstance(server_list, list):
             for cfg in server_list:

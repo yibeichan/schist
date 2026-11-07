@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`schist doctor` also reads OpenCode's global MCP config (#851).** Discovery now scans `$XDG_CONFIG_HOME/opencode/opencode.json` (default `~/.config/opencode/opencode.json`) alongside the Claude Code, Claude Desktop, Claude Science and Cursor configs, in both registry shapes OpenCode accepts — the V2 `{"mcp": {"servers": {...}}}` wrapper and the deprecated compat spelling that puts the names directly under `mcp`. OpenCode's per-entry fields are normalized onto the shapes the checks read (`command` as a list: its first element becomes `command`, the rest merge into `args`; `environment` becomes `env`), so everything that shares the parser follows for free: the MCP presence check with its `args[0]` sub-checks, MCP CLI spawn, the Memory DB path check, and the Vault access audit, which now also sees non-schist servers OpenCode would start. A `disabled` OpenCode server is skipped like a Claude `enabled: false` one, and `mcp.timeout` next to the server names is not mistaken for a server. The JSONC variant of the file (comments) and project-level `opencode.json` discovery are not read yet.
+
 ## [0.3.2] - 2026-11-06
 
 ### Added

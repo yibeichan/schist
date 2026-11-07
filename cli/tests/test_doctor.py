@@ -1665,6 +1665,92 @@ class TestCheckMcpConfig:
             r = check_mcp_config(None)
         assert r.status == "PASS"
 
+    # --- OpenCode V2 global config (#851) ----------------------------------
+    # `mcp.servers` is the V2 shape (per-entry `command` list, `environment`
+    # block); the normalization makes every downstream argument- and
+    # env-based sub-check read the entry unmodified.
+
+    @staticmethod
+    def _write_opencode_config(home, servers, xdg=None):
+        """Write a V2-shaped OpenCode config; XDG_CONFIG_HOME must be
+        unset (or pointing at xdg) when the test runs."""
+        base = (home / xdg) if xdg else home / ".config"
+        path = base / "opencode" / "opencode.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"mcp": {"servers": servers}}))
+        return path
+
+    def test_found_in_opencode_global_config(self, tmp_path, monkeypatch):
+        fake_mcp = tmp_path / "fake-mcp" / "dist" / "index.js"
+        fake_mcp.parent.mkdir(parents=True)
+        fake_mcp.write_text("// stub\n")
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        self._write_opencode_config(tmp_path, {"schist": {
+            "type": "local",
+            "command": ["node", str(fake_mcp)],
+            "environment": {"SCHIST_VAULT_PATH": "/srv/vault"},
+        }})
+        with patch("schist.doctor._auto_detect_mcp_path", return_value=None):
+            r = check_mcp_config(None)
+        assert r.status == "PASS", r
+        assert "opencode.json" in r.message
+
+    def test_opencode_config_found_under_xdg_config_home(
+        self, tmp_path, monkeypatch
+    ):
+        fake_mcp = tmp_path / "fake-mcp" / "dist" / "index.js"
+        fake_mcp.parent.mkdir(parents=True)
+        fake_mcp.write_text("// stub\n")
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        self._write_opencode_config(tmp_path, {"schist": {
+            "type": "local",
+            "command": ["node", str(fake_mcp)],
+            "environment": {},
+        }}, xdg="xdg")
+        with patch("schist.doctor._auto_detect_mcp_path", return_value=None):
+            r = check_mcp_config(None)
+        assert r.status == "PASS", r
+
+    def test_opencode_v1_shaped_mcp_block_still_found(
+        self, tmp_path, monkeypatch
+    ):
+        """The deprecated compat spelling (names directly under `mcp`) is
+        still read, so a machine migrated from V1 does not report green with
+        an unvalidated config."""
+        fake_mcp = tmp_path / "fake-mcp" / "dist" / "index.js"
+        fake_mcp.parent.mkdir(parents=True)
+        fake_mcp.write_text("// stub\n")
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        path = tmp_path / ".config" / "opencode" / "opencode.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"mcp": {"schist": {
+            "type": "local",
+            "command": ["node", str(fake_mcp)],
+            "environment": {},
+        }}}))
+        with patch("schist.doctor._auto_detect_mcp_path", return_value=None):
+            r = check_mcp_config(None)
+        assert r.status == "PASS", r
+
+    def test_opencode_disabled_schist_entry_warns_as_absent(
+        self, tmp_path, monkeypatch
+    ):
+        """A disabled entry is never started by the client, so it must not
+        satisfy the MCP check (mirrors the V1 `enabled: false` rule)."""
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        self._write_opencode_config(tmp_path, {"schist": {
+            "type": "local",
+            "command": ["node", str(tmp_path / "missing.js")],
+            "environment": {},
+            "disabled": True,
+        }})
+        r = check_mcp_config(None)
+        assert r.status == "WARN", r
+        assert "no schist entry found" in r.message
     def test_not_found(self, tmp_path, monkeypatch):
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         r = check_mcp_config(None)
@@ -4303,6 +4389,102 @@ class TestCheckVaultAccess:
         r = check_vault_access(str(vault))
         assert r.status == "PASS", r
         assert "config file(s) read" in r.message
+
+    # --- OpenCode V2 global config (#851) ----------------------------------
+    # Same verdicts as the Claude shapes, through the `mcp.servers` wrapper
+    # and the per-entry field names (`command` list, `environment` block).
+    # XDG_CONFIG_HOME is unset so the config sits under $HOME/.config.
+
+    def _opencode_config(self, home, servers, xdg=None):
+        base = (home / xdg) if xdg else home / ".config"
+        path = base / "opencode" / "opencode.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"mcp": {"servers": servers}}))
+        return path
+
+    def opencode_home(self, monkeypatch, xdg=None):
+        if xdg:
+            monkeypatch.setenv("XDG_CONFIG_HOME", xdg)
+        else:
+            monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+    def test_opencode_schist_entry_passes(
+        self, home, monkeypatch, vault, schist_js
+    ):
+        self.opencode_home(monkeypatch)
+        self._opencode_config(home, {"schist": {
+            "type": "local",
+            "command": ["node", str(schist_js)],
+            "environment": {"SCHIST_VAULT_PATH": str(vault)},
+        }})
+        r = check_vault_access(str(vault))
+        assert r.status == "PASS", r
+
+    def test_opencode_fs_server_naming_vault_fails(self, home, monkeypatch, vault):
+        self.opencode_home(monkeypatch)
+        path = self._opencode_config(home, {"fs": self._fs(str(vault))})
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+        assert "fs (args)" in r.message
+        assert str(path) in r.message
+
+    def test_opencode_environment_block_naming_vault_fails(
+        self, home, monkeypatch, vault
+    ):
+        self.opencode_home(monkeypatch)
+        p = self._opencode_config(home, {"idx": {
+            "type": "local",
+            "command": ["node", "/srv/other/indexer.js"],
+            "environment": {"ROOT": str(vault)},
+        }})
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+        assert "idx (env)" in r.message
+        assert str(p) in r.message
+
+    def test_opencode_disabled_server_is_skipped(
+        self, home, monkeypatch, vault, schist_js
+    ):
+        self.opencode_home(monkeypatch)
+        self._opencode_config(home, {
+            "fs": {
+                "type": "local", "command": ["npx", "-y", "server-filesystem",
+                                             str(vault)],
+                "disabled": True,
+            },
+            "schist": {
+                "type": "local", "command": ["node", str(schist_js)],
+                "environment": {"SCHIST_VAULT_PATH": str(vault)},
+            },
+        })
+        r = check_vault_access(str(vault))
+        assert r.status == "PASS", r
+
+    def test_opencode_config_found_under_xdg_config_home(
+        self, home, monkeypatch, vault
+    ):
+        self.opencode_home(monkeypatch, xdg=str(home / "xdg"))
+        self._opencode_config(home, {"fs": self._fs(str(vault))}, xdg="xdg")
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+
+    def test_opencode_mcp_timeout_object_is_not_a_server(
+        self, home, monkeypatch, vault, schist_js
+    ):
+        """In the V1 compat shape, `mcp.timeout` sits next to the server
+        names and must not be picked up as a server entry (it has neither
+        `type` nor `command`)."""
+        self.opencode_home(monkeypatch)
+        path = self._opencode_config(home, {"schist": {
+            "type": "local", "command": ["node", str(schist_js)],
+            "environment": {"SCHIST_VAULT_PATH": str(vault)},
+        }})
+        data = json.loads(path.read_text())
+        data["mcp"]["timeout"] = {"startup": 45000, "execution": 600000}
+        path.write_text(json.dumps(data))
+        r = check_vault_access(str(vault))
+        assert r.status == "PASS", r
+        assert "mcp timeout" not in r.message
 
     def test_unrelated_server_passes(self, home, vault):
         self._claude_json(home, {
