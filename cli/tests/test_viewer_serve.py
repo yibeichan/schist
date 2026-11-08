@@ -535,6 +535,32 @@ class TestServer:
         assert not srv.build_lock.locked() and not srv.staging.exists()
         assert (srv.out / 'index.html').read_bytes() == page
 
+    def test_rebuild_decodes_build_output_as_utf8_whatever_the_locale(self, vault, db_path,
+                                                                     monkeypatch):
+        # The build log is UTF-8; a byte the locale's encoding cannot decode
+        # must not turn a finished build into an unhandled exception.
+        store = proposals_mod.ProposalStore(vault)
+        srv = serve_mod.ViewerServer(vault, db_path, vault / '.schist' / 'data', '127.0.0.1', 0,
+                                     None, store, TOKEN)
+        real_run = subprocess.run
+
+        def noisy_build(cmd, **kw):
+            if 'build' not in cmd:
+                return real_run(cmd, **kw)
+            out = Path(cmd[cmd.index('--out') + 1])
+            out.mkdir(parents=True, exist_ok=True)
+            (out / 'index.html').write_text('x', encoding='utf-8')
+            return real_run([sys.executable, '-c',
+                             "import sys; sys.stdout.buffer.write(b'caf\\xc3\\xa9 \\x81\\n')"], **kw)
+
+        monkeypatch.setattr(serve_mod.subprocess, 'run', noisy_build)
+        try:
+            with srv.build_lock:
+                ok, log = srv.rebuild()
+        finally:
+            srv.server_close()
+        assert ok and 'café' in log
+
     def test_rebuild_skip_and_cooldown(self, server):
         _, base = server
         h = {'X-Schist-Rebuild': '1'}
