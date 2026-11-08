@@ -235,7 +235,8 @@ class ViewerServer(http.server.ThreadingHTTPServer):
         if shutil.which('nice'):
             cmd = ['nice', '-n', '10', *cmd]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=BUILD_TIMEOUT_S,
+            r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
+                               errors='replace', timeout=BUILD_TIMEOUT_S,
                                stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
             shutil.rmtree(self.staging, ignore_errors=True)

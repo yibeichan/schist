@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`schist serve` reads its build log as UTF-8.** `rebuild()` ran the build with `text=True` and no `encoding`, so on a non-UTF-8 locale a note title in the log could not be decoded and the rebuild raised `UnicodeDecodeError` instead of reporting its result. The log is now decoded as UTF-8, with undecodable bytes replaced.
+
 ## [0.3.2] - 2026-11-06
 
 ### Added
