@@ -167,25 +167,31 @@ SPDX-License-Identifier: Apache-2.0
     #detail h2 { font-size: 15px; font-weight: 600; margin-bottom: 6px; padding-right: 24px; }
     #detail-meta { font-size: 11px; color: var(--muted); margin-bottom: 14px; }
     #detail-meta span { margin-right: 8px; }
-    #detail-body { font-size: 12px; line-height: 1.65; color: #b0b4c0; overflow-wrap: anywhere; }
-    #detail-body.plain { white-space: pre-wrap; }
+    #detail-body, #study-body { font-size: 12px; line-height: 1.65; color: #b0b4c0; overflow-wrap: anywhere; }
+    #detail-body.plain, #study-body.plain { white-space: pre-wrap; }
     /* Rendered Markdown (see renderBody) */
-    #detail-body > :first-child { margin-top: 0; }
-    #detail-body h1, #detail-body h2, #detail-body h3, #detail-body h4 { color: var(--text); font-weight: 600; line-height: 1.3; margin: 16px 0 6px; padding: 0; }
-    #detail-body h1 { font-size: 15px; } #detail-body h2 { font-size: 14px; }
-    #detail-body h3 { font-size: 13px; } #detail-body h4 { font-size: 12px; }
-    #detail-body p, #detail-body ul, #detail-body ol, #detail-body pre, #detail-body blockquote, #detail-body table { margin: 0 0 8px; }
-    #detail-body ul, #detail-body ol { padding-left: 18px; }
-    #detail-body li { margin: 2px 0; }
-    #detail-body strong { color: var(--text); }
-    #detail-body a { color: var(--accent); }
-    #detail-body code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; background: var(--bg); border-radius: 3px; padding: 1px 4px; }
-    #detail-body pre { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; overflow-x: auto; }
-    #detail-body pre code { padding: 0; background: none; }
-    #detail-body blockquote { border-left: 2px solid var(--border); padding-left: 10px; color: var(--muted); }
-    #detail-body table { display: block; overflow-x: auto; border-collapse: collapse; }
-    #detail-body th, #detail-body td { border: 1px solid var(--border); padding: 3px 6px; text-align: left; vertical-align: top; }
-    #detail-body hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
+    #detail-body > :first-child, #study-body > :first-child { margin-top: 0; }
+    #detail-body h1, #detail-body h2, #detail-body h3, #detail-body h4,
+    #study-body h1, #study-body h2, #study-body h3, #study-body h4 { color: var(--text); font-weight: 600; line-height: 1.3; margin: 16px 0 6px; padding: 0; }
+    #detail-body h1, #study-body h1 { font-size: 15px; }
+    #detail-body h2, #study-body h2 { font-size: 14px; }
+    #detail-body h3, #study-body h3 { font-size: 13px; }
+    #detail-body h4, #study-body h4 { font-size: 12px; }
+    #detail-body p, #detail-body ul, #detail-body ol, #detail-body pre, #detail-body blockquote, #detail-body table,
+    #study-body p, #study-body ul, #study-body ol, #study-body pre, #study-body blockquote, #study-body table { margin: 0 0 8px; }
+    #detail-body ul, #detail-body ol, #study-body ul, #study-body ol { padding-left: 18px; }
+    #detail-body li, #study-body li { margin: 2px 0; }
+    #detail-body strong, #study-body strong { color: var(--text); }
+    #detail-body a, #study-body a { color: var(--accent); }
+    #detail-body code, #study-body code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; background: var(--bg); border-radius: 3px; padding: 1px 4px; }
+    #detail-body pre, #study-body pre { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; overflow-x: auto; }
+    #detail-body pre code, #study-body pre code { padding: 0; background: none; }
+    #detail-body blockquote, #study-body blockquote { border-left: 2px solid var(--border); padding-left: 10px; color: var(--muted); }
+    #detail-body table, #study-body table { display: block; overflow-x: auto; border-collapse: collapse; }
+    #detail-body th, #detail-body td, #study-body th, #study-body td { border: 1px solid var(--border); padding: 3px 6px; text-align: left; vertical-align: top; }
+    #detail-body hr, #study-body hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
+    /* [VERIFY: ...] on a card stays visible while reviewing it. */
+    #detail-body .verify, #study-body .verify { color: #e0a43a; font-style: normal; }
     #detail-connections { margin-top: 14px; }
     #detail-connections h3 { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
     .conn-item { font-size: 12px; padding: 5px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
@@ -222,6 +228,25 @@ SPDX-License-Identifier: Apache-2.0
     #ask-btn .badge { margin-left: 6px; }
     .badge { display: inline-block; min-width: 16px; padding: 0 5px; border-radius: 8px; background: #e0a43a; color: #111; font-size: 10px; font-weight: 600; line-height: 16px; text-align: center; }
     .badge[hidden] { display: none; }
+    /* Study review: due cards, flip, self-grade */
+    #study-btn { margin-top: 6px; width: 100%; padding: 6px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
+    #study-btn[hidden] { display: none; }
+    #study-btn:hover { border-color: var(--accent); }
+    #study-btn .badge { margin-left: 6px; }
+    #study-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; font-size: 11px; color: var(--muted); }
+    #study-controls select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font: inherit; font-size: 11px; padding: 2px 4px; }
+    #study-note { font-size: 11px; color: var(--muted); min-height: 14px; margin-bottom: 6px; }
+    .study-title { font-size: 15px; font-weight: 600; margin: 0 0 4px; line-height: 1.35; }
+    .study-meta { font-size: 11px; color: var(--muted); margin-bottom: 12px; }
+    .study-show { padding: 6px 12px; background: var(--accent-dim); border: 1px solid var(--accent); border-radius: 6px; color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
+    .study-grades { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 14px; }
+    .study-grades button { flex: 1; min-width: 64px; padding: 7px 4px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font: inherit; font-size: 11px; cursor: pointer; }
+    .study-grades button:hover:not(:disabled) { border-color: var(--accent); }
+    .study-grades button:disabled { opacity: 0.5; cursor: default; }
+    .study-grades .g-good { border-color: #4caf7d; }
+    .study-grades .g-missed { border-color: #b5655d; }
+    .study-empty { color: var(--muted); font-size: 12px; line-height: 1.6; }
+    #study-tab-badge { margin-left: 2px; }
     #ask {
       position: absolute; left: 0; top: 0; bottom: 0;
       width: min(400px, 100%); background: var(--surface);
@@ -316,6 +341,7 @@ SPDX-License-Identifier: Apache-2.0
         <button id="rebuild-btn" type="button">Rebuild</button>
       </div>
       <button id="ask-btn" type="button" hidden>Ask the vault<span id="ask-badge" class="badge" hidden></span></button>
+      <button id="study-btn" type="button" hidden>Study<span id="study-badge" class="badge" hidden></span></button>
     </div>
     <div id="search-wrap">
       <input id="search" type="search" placeholder="Search notes…" autocomplete="off" />
@@ -360,9 +386,23 @@ SPDX-License-Identifier: Apache-2.0
       <div id="ask-tabs">
         <button class="ask-tab active" type="button" data-pane="ask-log">Chat</button>
         <button class="ask-tab" type="button" data-pane="proposals">Proposals <span id="tab-badge" class="badge" hidden></span></button>
+        <button class="ask-tab" type="button" data-pane="study">Study <span id="study-tab-badge" class="badge" hidden></span></button>
       </div>
       <div id="ask-log" class="ask-pane"></div>
       <div id="proposals" class="ask-pane" hidden></div>
+      <div id="study" class="ask-pane" hidden>
+        <div id="study-controls">
+          <span id="study-counts"></span>
+          <select id="study-view" aria-label="Which cards">
+            <option value="due">Due</option>
+            <option value="new">New</option>
+            <option value="all">All</option>
+          </select>
+          <select id="study-project" aria-label="Project"><option value="">All projects</option></select>
+        </div>
+        <div id="study-note"></div>
+        <div id="study-card"></div>
+      </div>
       <div id="ask-note"></div>
       <form id="ask-form">
         <textarea id="ask-input" rows="1" placeholder="Ask about your notes…"></textarea>
@@ -599,6 +639,21 @@ SPDX-License-Identifier: Apache-2.0
     return i > 0 ? n.id.slice(0, i) : "notes";
   }
 
+  // Study cards keep their directory type but are also addressable by the
+  // `learning` tag: the sidebar's study chip is a label over the tag, not a
+  // new directory, so a card still appears under notes.
+  function isStudy(n) {
+    return (n.tags || []).includes("learning");
+  }
+
+  // What the type facet counts for a node: its directory, plus "study" when
+  // it is a card. The chip is OR-ed with the directory chips like any other
+  // value in the facet.
+  function typeKinds(n) {
+    const kind = nodeKind(n);
+    return isStudy(n) ? [kind, "study"] : kind;
+  }
+
   // A note's projects are its `project:<repo>` tags; a note can have several.
   function nodeProjects(n) {
     return (n.tags || []).filter(t => t.startsWith("project:")).map(t => t.slice(8));
@@ -610,7 +665,10 @@ SPDX-License-Identifier: Apache-2.0
 
   // `skip` names a facet to ignore, for that facet's own counts.
   function matchesFilters(n, f, skip = null) {
-    if (skip !== "type" && f.type.size && !f.type.has(nodeKind(n))) return false;
+    if (skip !== "type" && f.type.size) {
+      const byType = [...f.type].some(k => k === "study" ? isStudy(n) : nodeKind(n) === k);
+      if (!byType) return false;
+    }
     if (skip !== "project" && f.project.size && !nodeProjects(n).some(p => f.project.has(p))) return false;
     if (skip !== "status" && f.status.size && !f.status.has(n.status)) return false;
     if (skip !== "tag" && f.tag.size) {
@@ -635,7 +693,7 @@ SPDX-License-Identifier: Apache-2.0
 
   // Values in order of their count over the whole vault, so chips do not
   // jump around as other filters change; concepts last.
-  const typeOrder = [...facetCounts(nodes, filters, "type", nodeKind)]
+  const typeOrder = [...facetCounts(nodes, filters, "type", typeKinds)]
     .sort((a, b) => (a[0] === "concepts") - (b[0] === "concepts") || b[1] - a[1]).map(e => e[0]);
   const statusOrder = [...facetCounts(nodes.filter(n => n.type === "note"), filters, "status", n => n.status)]
     .sort((a, b) => b[1] - a[1]).map(e => e[0]);
@@ -682,11 +740,16 @@ SPDX-License-Identifier: Apache-2.0
   }
 
   function renderFacets(pool) {
-    const types = facetCounts(pool, filters, "type", nodeKind);
+    const types = facetCounts(pool, filters, "type", typeKinds);
     const typeFrag = document.createDocumentFragment();
     typeFrag.appendChild(chip("All", null, filters.type.size === 0, () => { filters.type.clear(); renderList(); },
       "Show every type"));
+    if ((types.get("study") || 0) > 0) {
+      typeFrag.appendChild(chip("study", types.get("study"), filters.type.has("study"),
+        () => toggle("type", "study"), "Learning cards: notes tagged learning"));
+    }
     for (const k of typeOrder) {
+      if (k === "study") continue;
       typeFrag.appendChild(chip(k, types.get(k) || 0, filters.type.has(k), () => toggle("type", k)));
     }
     document.getElementById("type-facet").replaceChildren(typeFrag);
@@ -1409,19 +1472,226 @@ SPDX-License-Identifier: Apache-2.0
     scroll();
   }
 
+  // ── Study review ──────────────────────────────────────────────────────────
+  // The page grades by calling /api/study/grade with X-Schist-Study: 1. The
+  // card sha is the one the server read; a grade on a card an agent graded
+  // meanwhile gets 409, and the page reloads instead of overwriting it.
+  const studyBtn = $("study-btn"), studyPane = $("study"), studyCardEl = $("study-card");
+  const studyView = $("study-view"), studyProject = $("study-project");
+  const studyCounts = $("study-counts"), studyNote = $("study-note");
+  const study = { cards: [], index: 0, flipped: false, counts: null, loaded: false };
+  const GRADES = ["missed", "partial", "good", "busy", "known"];
+  const GRADE_LABEL = { missed: "Missed", partial: "Partial", good: "Good", busy: "Busy", known: "Known" };
+  const GRADE_TITLE = {
+    missed: "Could not explain it — review tomorrow",
+    partial: "Explained it with a gap — a little longer",
+    good: "Explained it — a longer interval",
+    busy: "No time today — keep the interval, ask tomorrow",
+    known: "Already knew it — one spot check in 90 days",
+  };
+
+  function setBadge(id, n) {
+    const badge = $(id);
+    if (!badge) return;
+    badge.textContent = String(n);
+    badge.hidden = !n;
+  }
+
+  // [VERIFY: ...] is a claim the agent marked unchecked. Keep it visible
+  // while reviewing: wrap each marker in a <span class="verify">, in text
+  // nodes only, so the sanitized Markdown structure is not rebuilt.
+  function highlightVerify(root) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const texts = [];
+    while (walker.nextNode()) {
+      const text = walker.currentNode;
+      if (/\[VERIFY/.test(text.nodeValue)) texts.push(text);
+    }
+    for (const textNode of texts) {
+      const frag = document.createDocumentFragment();
+      const re = /\[VERIFY[^\]]*\]/g;
+      let done = 0, match;
+      while ((match = re.exec(textNode.nodeValue)) !== null) {
+        if (match.index > done) frag.appendChild(document.createTextNode(textNode.nodeValue.slice(done, match.index)));
+        const mark = document.createElement("span");
+        mark.className = "verify";
+        mark.textContent = match[0];
+        frag.appendChild(mark);
+        done = match.index + match[0].length;
+      }
+      if (done < textNode.nodeValue.length) frag.appendChild(document.createTextNode(textNode.nodeValue.slice(done)));
+      textNode.parentNode.replaceChild(frag, textNode);
+    }
+  }
+
+  function studyEmpty(text) {
+    studyCardEl.replaceChildren(el("div", "study-empty", text));
+  }
+
+  async function loadStudy() {
+    if (!studyView.value) studyView.value = "due";
+    const params = new URLSearchParams({ view: studyView.value });
+    if (studyProject.value) params.set("project", studyProject.value);
+    let data;
+    try {
+      const r = await fetch(`api/study/cards?${params}`, { cache: "no-store" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      data = await r.json();
+      if (!data || !Array.isArray(data.cards)) throw new Error("bad card list");
+    } catch {
+      studyBtn.hidden = true;
+      studyEmpty("Study needs `schist serve` on this vault; this page has no study API.");
+      return;
+    }
+    studyBtn.hidden = false;
+    study.loaded = true;
+    study.cards = data.cards;
+    study.index = 0;
+    study.flipped = false;
+    study.counts = data.counts;
+    setBadge("study-badge", data.counts.due);
+    setBadge("study-tab-badge", data.counts.due);
+    renderStudy();
+  }
+
+  function renderStudy() {
+    const counts = study.counts;
+    studyCounts.textContent = counts
+      ? `${counts.due} due · ${counts.new} new · ${counts.all} cards` : "";
+    const projects = [...new Set(study.cards.flatMap(card => card.projects))].sort();
+    const current = studyProject.value;
+    const all = el("option", null, "All projects");
+    all.value = "";
+    studyProject.replaceChildren(all);
+    for (const project of projects) {
+      const option = el("option", null, project);
+      option.value = project;
+      studyProject.appendChild(option);
+    }
+    if (projects.includes(current)) studyProject.value = current;
+
+    if (!study.cards.length) {
+      studyEmpty(counts && counts.new
+        ? `Nothing due. ${counts.new} new card${counts.new === 1 ? "" : "s"} waiting to be taught at handoff.`
+        : "No cards in this view.");
+      return;
+    }
+    const card = study.cards[study.index];
+    const box = el("div");
+    box.appendChild(el("h3", "study-title", card.title || card.id));
+    box.appendChild(el("div", "study-meta",
+      `${card.projects.join(", ") || "no project"} · ${card.state} · interval ${card.interval} day${card.interval === 1 ? "" : "s"}` +
+      (card.next ? ` · next ${card.next}` : "")));
+    if (!study.flipped) {
+      const show = el("button", "study-show", "Show answer");
+      show.type = "button";
+      show.addEventListener("click", () => { study.flipped = true; renderStudy(); });
+      box.appendChild(show);
+    } else {
+      const bodyEl = el("div");
+      bodyEl.id = "study-body";
+      // The review-state lines above the first section are machinery, not
+      // the explanation: keep them off the card face.
+      const shownBody = /^## /m.test(card.body)
+        ? card.body.slice(card.body.search(/^## /m)) : card.body;
+      const paint = window.schistViewer && window.schistViewer.renderMarkdown;
+      if (paint) paint(bodyEl, shownBody); else bodyEl.textContent = shownBody;
+      highlightVerify(bodyEl);
+      box.appendChild(bodyEl);
+      if (card.state === "new") {
+        // A new card was never taught; quizzing it would be a test, not a
+        // review. Teaching happens at handoff (the agent writes `taught`).
+        box.appendChild(el("div", "study-empty", "New card: taught at handoff, not quizzed here."));
+        studyCardEl.replaceChildren(box);
+        return;
+      }
+      const grades = el("div", "study-grades");
+      for (const grade of GRADES) {
+        const button = el("button", `g-${grade}`, GRADE_LABEL[grade]);
+        button.type = "button";
+        button.title = GRADE_TITLE[grade];
+        button.addEventListener("click", () => gradeStudy(grade));
+        grades.appendChild(button);
+      }
+      box.appendChild(grades);
+    }
+    studyCardEl.replaceChildren(box);
+  }
+
+  async function gradeStudy(grade) {
+    const card = study.cards[study.index];
+    const buttons = studyCardEl.querySelectorAll(".study-grades button");
+    buttons.forEach(button => { button.disabled = true; });
+    studyNote.textContent = "grading…";
+    try {
+      const r = await fetch("api/study/grade", {
+        method: "POST",
+        headers: { ...HDR, "X-Schist-Study": "1" },
+        body: JSON.stringify({ id: card.id, grade, body_sha: card.sha }),
+      });
+      const out = await r.json().catch(() => ({}));
+      if (!r.ok || !out.ok) {
+        buttons.forEach(button => { button.disabled = false; });
+        if (r.status === 409) {   // an agent graded it meanwhile
+          await loadStudy();
+          studyNote.textContent = `not graded: ${out.reason}`;
+          return;
+        }
+        studyNote.textContent = `not graded: ${out.reason || "HTTP " + r.status}`;
+        return;
+      }
+      const when = out.card.next ? `next ${out.card.next}` : "retired";
+      studyNote.textContent = `graded ${grade} — ${when}`;
+      if (studyView.value === "due") {
+        if (study.counts) study.counts.due = Math.max(0, study.counts.due - 1);
+        study.cards.splice(study.index, 1);
+        study.index = study.cards.length ? study.index % study.cards.length : 0;
+      } else {
+        study.cards[study.index] = out.card;
+        study.index = (study.index + 1) % study.cards.length;
+      }
+      study.flipped = false;
+      setBadge("study-badge", study.counts ? study.counts.due : 0);
+      setBadge("study-tab-badge", study.counts ? study.counts.due : 0);
+      renderStudy();
+    } catch (err) {
+      studyNote.textContent = `not graded: ${err.message}`;
+      buttons.forEach(button => { button.disabled = false; });
+    }
+  }
+
+  async function probeStudy() {
+    try {
+      const r = await fetch("api/study/cards?view=due", { cache: "no-store" });
+      if (!r.ok) return;
+      const data = await r.json();
+      studyBtn.hidden = false;
+      study.counts = data.counts;
+      setBadge("study-badge", data.counts.due);
+      setBadge("study-tab-badge", data.counts.due);
+    } catch { /* a static copy of the site has no API */ }
+  }
+
   // ── wiring ──
   function showPane(id) {
     document.querySelectorAll(".ask-tab").forEach(b => b.classList.toggle("active", b.dataset.pane === id));
     log.hidden = id !== "ask-log";
     props.hidden = id !== "proposals";
+    studyPane.hidden = id !== "study";
     form.hidden = id !== "ask-log";
+    note.hidden = id !== "ask-log";
+    $("ask-head").querySelector("h2").textContent = id === "study" ? "Study" : "Ask the vault";
     if (id === "proposals") loadProposals();
+    if (id === "study") loadStudy();
   }
   document.querySelectorAll(".ask-tab").forEach(b => b.addEventListener("click", () => showPane(b.dataset.pane)));
   btn.addEventListener("click", () => {
     panel.classList.toggle("open");
-    if (panel.classList.contains("open")) { status(); loadProposals(); input.focus(); }
+    if (panel.classList.contains("open")) { showPane("ask-log"); status(); loadProposals(); input.focus(); }
   });
+  studyBtn.addEventListener("click", () => { panel.classList.add("open"); showPane("study"); });
+  studyView.addEventListener("change", () => { studyProject.value = ""; studyNote.textContent = ""; loadStudy(); });
+  studyProject.addEventListener("change", () => { studyNote.textContent = ""; loadStudy(); });
   $("ask-close").addEventListener("click", () => panel.classList.remove("open"));
   $("ask-new").addEventListener("click", () => {
     if (controller) controller.abort();
@@ -1445,7 +1715,8 @@ SPDX-License-Identifier: Apache-2.0
 
   status();
   loadProposals();
-  setInterval(() => { status(); loadProposals(); }, 60000);
+  probeStudy();
+  setInterval(() => { status(); loadProposals(); probeStudy(); }, 60000);
 })();
 </script>
 </body>

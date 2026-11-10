@@ -581,6 +581,110 @@ class TestServer:
         assert code == 200 and out['status'] == 'approved' and out['rebuilding'] is False
 
 
+class TestStudy:
+    """GET /api/study/cards and POST /api/study/grade, end to end."""
+
+    @staticmethod
+    def _write_card(vault, name='mantel.md'):
+        (vault / 'notes' / name).write_text(
+            "---\n"
+            "title: 'Learning: Mantel test'\n"
+            "date: '2026-11-09'\n"
+            "tags:\n"
+            "  - learning\n"
+            "  - 'project:demo'\n"
+            "status: active\n"
+            "---\n"
+            "**State:** learning\n"
+            "**Next review:** 2020-01-01\n"
+            "**Interval:** 3 days\n"
+            "\n"
+            "## In one line\n"
+            "Correlate two distance matrices.\n"
+            "\n"
+            "## Check question\n"
+            "Why is a plain shuffle wrong?\n"
+            "\n"
+            "## Review log\n"
+            "- 2026-11-09 · taught · interval 0→1\n",
+            encoding='utf-8')
+        _git(vault, 'add', '-A')
+        _git(vault, 'commit', '-q', '-m', 'study card')
+
+    def test_due_cards_include_body_and_sha(self, server):
+        srv, base = server
+        self._write_card(srv.vault)
+        code, body = _req(base + '/api/study/cards?view=due')
+        out = json.loads(body)
+        assert code == 200
+        assert out['counts'] == {'due': 1, 'new': 0, 'all': 1}
+        card = out['cards'][0]
+        assert card['id'] == 'notes/mantel.md'
+        assert card['projects'] == ['demo']
+        assert card['sha'] and not card['body'].startswith('---')
+        assert 'Why is a plain shuffle wrong?' in card['body']
+
+    def test_new_and_all_views_and_project_filter(self, server):
+        srv, base = server
+        self._write_card(srv.vault)
+        code, body = _req(base + '/api/study/cards?view=new')
+        assert code == 200 and json.loads(body)['cards'] == []
+        code, body = _req(base + '/api/study/cards?view=all&project=demo')
+        assert [card['id'] for card in json.loads(body)['cards']] == ['notes/mantel.md']
+        code, body = _req(base + '/api/study/cards?view=all&project=other')
+        assert json.loads(body)['cards'] == []
+
+    def test_bad_view_is_a_400(self, server):
+        _, base = server
+        assert _req(base + '/api/study/cards?view=later')[0] == 400
+
+    def test_grade_needs_its_own_header(self, server):
+        srv, base = server
+        self._write_card(srv.vault)
+        code, body = _req(base + '/api/study/grade', 'POST', {'X-Schist-Agent': '1'},
+                          {'id': 'notes/mantel.md', 'grade': 'good'})
+        assert code == 403
+        code, body = _req(base + '/api/study/grade', 'POST',
+                          {'X-Schist-Study': '1'}, {'id': 'notes/mantel.md', 'grade': 'good'})
+        assert code == 200
+
+    def test_grade_writes_the_card_and_commits(self, server):
+        srv, base = server
+        self._write_card(srv.vault)
+        _, body = _req(base + '/api/study/cards?view=due')
+        card = json.loads(body)['cards'][0]
+        code, body = _req(base + '/api/study/grade', 'POST', {'X-Schist-Study': '1'},
+                          {'id': card['id'], 'grade': 'good', 'body_sha': card['sha']})
+        out = json.loads(body)
+        assert code == 200 and out['ok'] is True
+        assert out['card']['state'] == 'learning' and out['card']['interval'] == 8
+        text = (srv.vault / 'notes' / 'mantel.md').read_text(encoding='utf-8')
+        assert '2026-11-09 · taught' in text
+        assert ' · good · ' in text and ' · page' in text
+        assert _git(srv.vault, 'log', '-1', '--format=%s') == 'study: Learning: Mantel test — good'
+
+    def test_stale_sha_is_a_conflict(self, server):
+        srv, base = server
+        self._write_card(srv.vault)
+        code, body = _req(base + '/api/study/grade', 'POST', {'X-Schist-Study': '1'},
+                          {'id': 'notes/mantel.md', 'grade': 'good', 'body_sha': '0' * 64})
+        assert code == 409
+        assert 'changed since it was read' in json.loads(body)['reason']
+
+    def test_page_cannot_claim_taught(self, server):
+        srv, base = server
+        self._write_card(srv.vault)
+        code, body = _req(base + '/api/study/grade', 'POST', {'X-Schist-Study': '1'},
+                          {'id': 'notes/mantel.md', 'grade': 'taught'})
+        assert code == 400 and 'grade must be one of' in json.loads(body)['reason']
+
+    def test_unknown_card_is_a_400(self, server):
+        _, base = server
+        code, body = _req(base + '/api/study/grade', 'POST', {'X-Schist-Study': '1'},
+                          {'id': 'notes/nope.md', 'grade': 'good'})
+        assert code == 400 and 'no study card' in json.loads(body)['reason']
+
+
 class TestToken:
     def test_created_private_and_reused(self, tmp_path):
         token = serve_mod.load_or_create_token(tmp_path)

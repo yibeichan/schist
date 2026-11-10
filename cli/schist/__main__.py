@@ -99,7 +99,7 @@ def main():
         from . import lock_cmd
         sys.exit(lock_cmd.hold(*fast))
 
-    from . import commands, doctor as doctor_mod, sync
+    from . import commands, doctor as doctor_mod, study as study_mod, sync
 
     parser = argparse.ArgumentParser(prog='schist', description='Agent-first knowledge graph CLI')
     # default None, then SCHIST_VAULT_PATH after parsing: `init` must tell a
@@ -144,6 +144,36 @@ def main():
     p_link.add_argument('--target', required=True)
     p_link.add_argument('--type', required=True, dest='link_type')
     p_link.add_argument('--context', default=None)
+
+    # study
+    p_study = sub.add_parser('study', help='Study cards: due, new, next, status, grade')
+    study_sub = p_study.add_subparsers(dest='study_action')
+    for _name, _help in (('due', 'Cards due for review'),
+                         ('new', 'Cards recorded but not taught yet')):
+        _p = study_sub.add_parser(_name, help=_help)
+        _p.add_argument('--today', default=None, help='YYYY-MM-DD (default: today)')
+        _p.add_argument('--project', default=None,
+                        help='List this project\'s cards first, then the others (not a filter)')
+        _p.add_argument('--limit', type=int, default=0, help='At most N cards (default: all)')
+    _p = study_sub.add_parser('status', help='Counts by state and project')
+    _p.add_argument('--today', default=None, help='YYYY-MM-DD (default: today)')
+    _p = study_sub.add_parser('lint', help='Check cards against the card standard (sections, links, detail)')
+    _p.add_argument('--strict', action='store_true', help='Exit 1 if any card has a warning')
+    _p = study_sub.add_parser('next', help='Compute the next review for one grade, write nothing')
+    _p.add_argument('--state', required=True, choices=study_mod.STATES)
+    _p.add_argument('--interval', required=True, type=int)
+    _p.add_argument('--grade', required=True, choices=study_mod.GRADES)
+    _p.add_argument('--today', default=None, help='YYYY-MM-DD (default: today)')
+    _p = study_sub.add_parser('grade', help='Grade one card and commit the review fields')
+    _p.add_argument('card', help='Card id, e.g. notes/<file>.md (a bare file name means notes/)')
+    _p.add_argument('grade', choices=study_mod.GRADES)
+    _p.add_argument('--body-sha', dest='body_sha', default=None,
+                    help='Refuse with a conflict if the card no longer has this sha256')
+    _p.add_argument('--source', default='session', choices=['session', 'page'],
+                    help='Where the grade was given (recorded in the review log)')
+    _p.add_argument('--note', default=None,
+                    help='The user\'s answer, at most 200 characters, recorded in the log')
+    _p.add_argument('--today', default=None, help='YYYY-MM-DD (default: today)')
 
     # search
     p_search = sub.add_parser('search', help='Full-text search')
@@ -450,6 +480,10 @@ def main():
             print('Usage: schist lock hold', file=sys.stderr)
             sys.exit(2)
         sys.exit(lock_cmd.hold(vault_path, args.timeout, args.max_hold))
+
+    if args.command == 'study':
+        study_mod.command(args, vault_path)
+        sys.exit(0)
 
     dispatch = {
         'add': commands.add,
