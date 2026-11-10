@@ -41,6 +41,22 @@ STATES: tuple[str, ...] = ("new", "learning", "known", "retired")
 RETIRE_AFTER = 180   # days; an interval past this is retired
 KNOWN_SPOT_CHECK = 90   # days until the one spot check of a card marked known
 DEFAULT_LOCK_TIMEOUT = 30.0
+# Card standard, checked by `schist study lint`. One idea a reader could
+# explain back in a short paragraph, not a textbook section: the detail
+# budget is what keeps two cards on the same topic comparable.
+CARD_SECTIONS: tuple[str, ...] = (
+    "In one line",
+    "What it is",
+    "Why we chose it",
+    "How it works",
+    "How it connects to existing work",
+    "Where we used it",
+    "Check question",
+    "Review log",
+)
+MAX_WORDS = 500
+MIN_WORDS = 250
+MAX_ONELINE_WORDS = 60
 
 
 class StudyError(Exception):
@@ -77,6 +93,30 @@ def _unquote(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
         return value[1:-1]
     return value
+
+
+def _title(frontmatter: str) -> str:
+    """The `title:` value, including YAML's folded and literal block forms.
+
+    Agents do write `title: >-` followed by indented lines; the one-line
+    regex would return ">-" and the card would look untitled.
+    """
+    match = re.search(r"^title:\s*(.*)$", frontmatter, re.M)
+    if not match:
+        return ""
+    raw = match.group(1).strip()
+    if raw not in (">", ">-", ">+", "|", "|-", "|+"):
+        return _unquote(raw)
+    parts: list[str] = []
+    for line in frontmatter[match.end():].splitlines():
+        if not line.strip():
+            if parts:
+                break
+            continue
+        if not line.startswith((" ", "\t")):
+            break
+        parts.append(line.strip())
+    return ("\n" if raw.startswith("|") else " ").join(parts)
 
 
 def parse_tags(frontmatter: str) -> list[str]:
@@ -133,10 +173,7 @@ def card_from_text(card_id: str, text: str) -> dict | None:
     tags = parse_tags(frontmatter)
     if "learning" not in tags:
         return None
-    title = ""
-    match = re.search(r"^title:\s*(.+)$", frontmatter, re.M)
-    if match:
-        title = _unquote(match.group(1))
+    title = _title(frontmatter)
     projects = [t[len("project:"):] for t in tags if t.startswith("project:")]
     return {
         "id": card_id,
@@ -215,6 +252,60 @@ def next_review(state: str, interval: int, grade: str,
     if new > RETIRE_AFTER:
         return "retired", new, None
     return "learning", new, today + dt.timedelta(days=new)
+
+
+# -- lint --------------------------------------------------------------------
+
+def section_text(body: str, name: str) -> str | None:
+    """The text under `## <name>`, or None when the section is absent."""
+    lines = body.splitlines()
+    start = next((i for i, line in enumerate(lines) if line.strip() == f"## {name}"), None)
+    if start is None:
+        return None
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    return "\n".join(lines[start + 1:end]).strip()
+
+
+def connection_lines(body: str) -> list[str]:
+    """`- <type>: <target>` lines in `## Connections` (the ingest rule)."""
+    section = section_text(body, "Connections") or ""
+    return [line for line in section.splitlines()
+            if re.match(r"^- [A-Za-z][\w-]*:\s+\S", line)]
+
+
+def _body_before_log(body: str) -> str:
+    idx = body.find("\n## Review log")
+    return body[:idx] if idx >= 0 else body
+
+
+def lint_card(card: dict) -> list[str]:
+    """Warnings for one card, empty when it meets the card standard."""
+    body = card["body"]
+    warnings: list[str] = []
+    if not card["title"].startswith("Learning:"):
+        warnings.append('title does not start with "Learning:"')
+    sections = [line[3:].strip() for line in body.splitlines() if line.startswith("## ")]
+    for name in CARD_SECTIONS:
+        if name not in sections:
+            warnings.append(f'missing "## {name}"')
+    words = len(_body_before_log(body).split())
+    if words > MAX_WORDS:
+        warnings.append(f"long: {words} words (target ≤ {MAX_WORDS})")
+    elif words < MIN_WORDS:
+        warnings.append(f"thin: {words} words (target ≥ {MIN_WORDS})")
+    one = section_text(body, "In one line")
+    if one is not None and len(one.split()) > MAX_ONELINE_WORDS:
+        warnings.append(f'"In one line" is {len(one.split())} words (target ≤ {MAX_ONELINE_WORDS})')
+    if not connection_lines(body):
+        warnings.append("no links: add ## Connections to the project note or to the note that used it")
+    for name in ("State", "Next review", "Interval"):
+        hits = len(re.findall(r"^\*\*" + re.escape(name) + r":\*\*", body, re.M))
+        if hits != 1:
+            warnings.append(f'{hits} "**{name}:**" lines (expected 1)')
+    question = section_text(body, "Check question")
+    if question is not None and not question:
+        warnings.append('"## Check question" is empty')
+    return warnings
 
 
 # -- grading -----------------------------------------------------------------
@@ -421,6 +512,23 @@ def command(args, vault_path: str) -> None:
             print("state={} interval={} next={}".format(
                 state, interval, new_next.isoformat() if new_next else "-"
             ))
+        elif action == "lint":
+            cards = load_cards(vault_path)
+            flagged = 0
+            for card in cards:
+                warnings = lint_card(card)
+                words = len(_body_before_log(card["body"]).split())
+                links = len(connection_lines(card["body"]))
+                print("{}  {}w  {} link{}  {}".format(
+                    card["id"], words, links, "" if links == 1 else "s",
+                    "ok" if not warnings else "needs work",
+                ))
+                for warning in warnings:
+                    print(f"  - {warning}")
+                flagged += 1 if warnings else 0
+            print(f"{len(cards)} cards, {flagged} with warnings")
+            if getattr(args, "strict", False) and flagged:
+                sys.exit(1)
         elif action == "grade":
             def check(relpath: str) -> None:
                 # The hub would refuse this commit, so refuse it here first.

@@ -121,6 +121,16 @@ def test_non_learning_notes_are_ignored(vault):
     assert study.load_cards(vault) == []
 
 
+def test_a_folded_yaml_title_is_parsed(vault):
+    path = vault / 'notes' / 'folded.md'
+    path.write_text(card_text().replace(
+        "title: 'Learning: A card'", "title: >-\n  Learning: A folded\n  title"),
+        encoding='utf-8')
+    card = study.load_cards(vault)[0]
+    assert card['title'] == 'Learning: A folded title'
+    assert study.lint_card(card) == [] or not any('title does not start' in w for w in study.lint_card(card))
+
+
 def test_card_fields_are_parsed(vault):
     write_card(vault, 'card.md', state='known', next_review='2027-02-04', interval=90)
     card = study.load_cards(vault)[0]
@@ -316,3 +326,106 @@ def test_cli_grade_refuses_a_path_the_spoke_cannot_write(vault, capsys):
         study.command(args, str(vault))
     assert exc.value.code == 1
     assert 'may not write' in capsys.readouterr().err
+
+
+def full_card_text() -> str:
+    """A card that meets the standard: all sections, links, 300+ words."""
+    return (
+        "---\n"
+        "title: 'Learning: A complete card'\n"
+        "date: '2026-11-09'\n"
+        "tags:\n  - learning\n  - 'project:demo'\n"
+        "status: active\n---\n"
+        "**State:** learning\n"
+        "**Next review:** 2026-11-10\n"
+        "**Interval:** 3 days\n"
+        "**First studied:** 2026-11-09 (demo)\n"
+        "**Projects:** demo\n"
+        "\n"
+        "## In one line\n"
+        "A single idea, stated once, in the words the project would use for it.\n"
+        "\n"
+        "## What it is\n"
+        "The concept is the mechanism that turns an input into the thing the analysis compares. "
+        "It is not the implementation and not the paper; it is the move a reader has to be able to "
+        "reproduce in a sentence. When the mechanism has a parameter, the card names it and says "
+        "what changing it does. When the mechanism has a known failure mode, the card names that too. "
+        "The same idea often appears under two names in the literature, so the card picks the name "
+        "this project uses and keeps the other in the connections section. A reader who can explain "
+        "the mechanism, the parameter and the failure mode has the card; anything else is detail "
+        "that belongs in the note the card links to.\n"
+        "\n"
+        "## Why we chose it\n"
+        "This project needed a comparison that survived the dependence between units. "
+        "The alternatives were simpler but would have answered a different question, and the "
+        "decision note records why they were not taken. The choice was made once, before the "
+        "results were seen, and the card exists so a later session does not relitigate it from "
+        "memory. The decision note is the place for the alternatives; the card keeps the reason "
+        "short enough to say out loud.\n"
+        "\n"
+        "## How it works\n"
+        "1. Build the two things being compared.\n"
+        "2. Compute the statistic on them.\n"
+        "3. Replace the labels that carry the confound, recompute, and repeat.\n"
+        "4. Compare the observed value with that null.\n"
+        "\n"
+        "## How it connects to existing work\n"
+        "The original test is older and simpler; later work showed the unconstrained version is "
+        "anti-conservative when the covariate drifts, which is why the restricted form is used here.\n"
+        "\n"
+        "## Where we used it\n"
+        "- notes/2026-11-09-demo.md (the analysis that used it)\n"
+        "\n"
+        "## Connections\n"
+        "- related: notes/2026-11-09-demo.md \"the analysis this card explains\"\n"
+        "\n"
+        "## Check question\n"
+        "Why would the unrestricted version give a misleadingly small p-value here?\n"
+        "\n"
+        "## Review log\n"
+        "- 2026-11-09 · taught · interval 0→1\n"
+    )
+
+
+def test_lint_passes_a_card_that_meets_the_standard(vault):
+    path = vault / 'notes' / 'complete.md'
+    path.write_text(full_card_text(), encoding='utf-8')
+    card = study.load_cards(vault)[0]
+    assert study.lint_card(card) == []
+    assert len(study.connection_lines(card['body'])) == 1
+
+
+def test_lint_flags_the_minimal_fixture_card(vault):
+    write_card(vault)
+    card = study.load_cards(vault)[0]
+    warnings = study.lint_card(card)
+    assert any('missing "## What it is"' in w for w in warnings)
+    assert any('no links' in w for w in warnings)
+    assert any(w.startswith('thin:') for w in warnings)
+
+
+def test_lint_flags_a_long_card(vault):
+    text = full_card_text().replace(
+        "\n## Why we chose it\n",
+        "\n## Why we chose it\n" + ("padding " * 260) + "\n")
+    (vault / 'notes' / 'long.md').write_text(text, encoding='utf-8')
+    card = study.load_cards(vault)[0]
+    assert any(w.startswith('long:') for w in study.lint_card(card))
+
+
+def test_lint_flags_a_missing_connections_section(vault):
+    text = full_card_text().split("## Connections")[0] + "## Check question\nq\n\n## Review log\n"
+    (vault / 'notes' / 'unlinked.md').write_text(text, encoding='utf-8')
+    card = study.load_cards(vault)[0]
+    assert any('no links' in w for w in study.lint_card(card))
+
+
+def test_lint_cli_strict_exits_1_for_a_warning(vault, capsys):
+    from types import SimpleNamespace
+    write_card(vault)
+    args = SimpleNamespace(study_action='lint', strict=True, today=None)
+    with pytest.raises(SystemExit) as exc:
+        study.command(args, str(vault))
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert 'needs work' in out and '1 cards, 1 with warnings' in out

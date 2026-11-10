@@ -157,6 +157,8 @@ def main():
         _p.add_argument('--limit', type=int, default=0, help='At most N cards (default: all)')
     _p = study_sub.add_parser('status', help='Counts by state and project')
     _p.add_argument('--today', default=None, help='YYYY-MM-DD (default: today)')
+    _p = study_sub.add_parser('lint', help='Check cards against the card standard (sections, links, detail)')
+    _p.add_argument('--strict', action='store_true', help='Exit 1 if any card has a warning')
     _p = study_sub.add_parser('next', help='Compute the next review for one grade, write nothing')
     _p.add_argument('--state', required=True, choices=study_mod.STATES)
     _p.add_argument('--interval', required=True, type=int)

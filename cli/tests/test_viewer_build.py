@@ -662,6 +662,46 @@ process.stdout.write(JSON.stringify(out));
         assert 'kind === "cited"' in self.PAGE
 
 
+    def test_the_study_label_filters_learning_cards(self):
+        """The sidebar's study chip is a tag label, not a directory: a card
+        in notes/ or decisions/ matches it, and its type count is the number
+        of cards while `notes` still counts every note."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node not installed")
+        fns = []
+        for name in ("nodeKind", "isStudy", "typeKinds", "nodeProjects", "filtersOn", "matchesFilters", "facetCounts"):
+            m = re.search(rf"function {name}\(.*?\n  \}}\n", self.PAGE, re.S)
+            assert m, f"{name} not found"
+            fns.append(m.group(0))
+        script = "\n".join(fns) + """
+const nodes = [
+  { id: "notes/card.md", type: "note", status: "active", tags: ["learning", "project:alpha"] },
+  { id: "notes/plain.md", type: "note", status: "active", tags: ["project:alpha"] },
+  { id: "decisions/learning.md", type: "note", status: "accepted", tags: ["learning"] },
+  { id: "locking", type: "concept" },
+];
+const F = (type = []) => ({ type: new Set(type), project: new Set(), status: new Set(), tag: new Set() });
+const ids = f => nodes.filter(n => matchesFilters(n, f)).map(n => n.id);
+const counts = (f, facet, fn) => Object.fromEntries(facetCounts(nodes, f, facet, fn));
+process.stdout.write(JSON.stringify({
+  study: ids(F(["study"])),
+  notes: ids(F(["notes"])),
+  both: ids(F(["study", "notes"])),
+  kinds: nodes.map(typeKinds),
+  counts: counts(F(), "type", typeKinds),
+}));
+"""
+        res = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+        assert res.returncode == 0, res.stderr
+        out = json.loads(res.stdout)
+        assert out["study"] == ["notes/card.md", "decisions/learning.md"]
+        # A card still counts as a note; the label is additive.
+        assert out["notes"] == ["notes/card.md", "notes/plain.md"]
+        assert out["both"] == ["notes/card.md", "notes/plain.md", "decisions/learning.md"]
+        assert out["counts"]["study"] == 2 and out["counts"]["notes"] == 2
+        assert out["kinds"][0] == ["notes", "study"]
+
     def test_list_filters_by_type_status_and_tags(self):
         """The list filters by vault directory (a note's type), status and
         tags: values within a facet are alternatives, facets combine, every
@@ -670,7 +710,7 @@ process.stdout.write(JSON.stringify(out));
         if node is None:
             pytest.skip("node not installed")
         fns = []
-        for name in ("nodeKind", "nodeProjects", "filtersOn", "matchesFilters", "facetCounts"):
+        for name in ("nodeKind", "isStudy", "nodeProjects", "filtersOn", "matchesFilters", "facetCounts"):
             m = re.search(rf"function {name}\(.*?\n  \}}\n", self.PAGE, re.S)
             assert m, f"{name} not found"
             fns.append(m.group(0))

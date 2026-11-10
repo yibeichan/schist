@@ -639,6 +639,21 @@ SPDX-License-Identifier: Apache-2.0
     return i > 0 ? n.id.slice(0, i) : "notes";
   }
 
+  // Study cards keep their directory type but are also addressable by the
+  // `learning` tag: the sidebar's study chip is a label over the tag, not a
+  // new directory, so a card still appears under notes.
+  function isStudy(n) {
+    return (n.tags || []).includes("learning");
+  }
+
+  // What the type facet counts for a node: its directory, plus "study" when
+  // it is a card. The chip is OR-ed with the directory chips like any other
+  // value in the facet.
+  function typeKinds(n) {
+    const kind = nodeKind(n);
+    return isStudy(n) ? [kind, "study"] : kind;
+  }
+
   // A note's projects are its `project:<repo>` tags; a note can have several.
   function nodeProjects(n) {
     return (n.tags || []).filter(t => t.startsWith("project:")).map(t => t.slice(8));
@@ -650,7 +665,10 @@ SPDX-License-Identifier: Apache-2.0
 
   // `skip` names a facet to ignore, for that facet's own counts.
   function matchesFilters(n, f, skip = null) {
-    if (skip !== "type" && f.type.size && !f.type.has(nodeKind(n))) return false;
+    if (skip !== "type" && f.type.size) {
+      const byType = [...f.type].some(k => k === "study" ? isStudy(n) : nodeKind(n) === k);
+      if (!byType) return false;
+    }
     if (skip !== "project" && f.project.size && !nodeProjects(n).some(p => f.project.has(p))) return false;
     if (skip !== "status" && f.status.size && !f.status.has(n.status)) return false;
     if (skip !== "tag" && f.tag.size) {
@@ -675,7 +693,7 @@ SPDX-License-Identifier: Apache-2.0
 
   // Values in order of their count over the whole vault, so chips do not
   // jump around as other filters change; concepts last.
-  const typeOrder = [...facetCounts(nodes, filters, "type", nodeKind)]
+  const typeOrder = [...facetCounts(nodes, filters, "type", typeKinds)]
     .sort((a, b) => (a[0] === "concepts") - (b[0] === "concepts") || b[1] - a[1]).map(e => e[0]);
   const statusOrder = [...facetCounts(nodes.filter(n => n.type === "note"), filters, "status", n => n.status)]
     .sort((a, b) => b[1] - a[1]).map(e => e[0]);
@@ -722,11 +740,16 @@ SPDX-License-Identifier: Apache-2.0
   }
 
   function renderFacets(pool) {
-    const types = facetCounts(pool, filters, "type", nodeKind);
+    const types = facetCounts(pool, filters, "type", typeKinds);
     const typeFrag = document.createDocumentFragment();
     typeFrag.appendChild(chip("All", null, filters.type.size === 0, () => { filters.type.clear(); renderList(); },
       "Show every type"));
+    if ((types.get("study") || 0) > 0) {
+      typeFrag.appendChild(chip("study", types.get("study"), filters.type.has("study"),
+        () => toggle("type", "study"), "Learning cards: notes tagged learning"));
+    }
     for (const k of typeOrder) {
+      if (k === "study") continue;
       typeFrag.appendChild(chip(k, types.get(k) || 0, filters.type.has(k), () => toggle("type", k)));
     }
     document.getElementById("type-facet").replaceChildren(typeFrag);
