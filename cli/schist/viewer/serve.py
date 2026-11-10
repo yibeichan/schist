@@ -25,6 +25,8 @@ timer's `if_changed` rebuild does not skip it.
   GET  /api/proposals               pending and failed proposals
   POST /api/proposals/<id>/approve  write it through `schist add` / `schist link`
   POST /api/proposals/<id>/reject
+  GET  /api/study/cards?view=...    study cards: due, new or all
+  POST /api/study/grade             grade one card; needs `X-Schist-Study: 1`
 
 The site holds the full text of every note, and approve writes to the vault,
 so the server binds 127.0.0.1 by default and guards every request:
@@ -35,9 +37,10 @@ so the server binds 127.0.0.1 by default and guards every request:
     for the page; scripts send an `X-Schist-Token` header instead. Delete the
     file and restart to issue a new token;
   * the Host header must name this server on a loopback address (DNS rebinding);
-  * every POST needs an `X-Schist-Rebuild: 1` or `X-Schist-Agent: 1` header. A
-    custom header forces a CORS preflight, which this server never approves,
-    so another site open in the browser cannot POST here.
+  * every POST needs an `X-Schist-Rebuild: 1`, `X-Schist-Agent: 1` or
+    `X-Schist-Study: 1` header. A custom header forces a CORS preflight, which
+    this server never approves, so another site open in the browser cannot POST
+    here.
 """
 
 from __future__ import annotations
@@ -55,9 +58,11 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import date
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from .. import study as study_mod
 from ..sync import PULL_LOCK_BUSY_EXIT
 from . import agent as agent_mod
 from . import proposals as proposals_mod
@@ -378,6 +383,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._json(200, self.server.agent.status())
         if path == '/api/proposals':
             return self._json(200, self.server.store.list())
+        if path == '/api/study/cards':
+            return self._study_cards(url)
         if path.startswith('/api/'):
             return self.send_error(404)
         return super().do_GET()
@@ -393,6 +400,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if self.headers.get('X-Schist-Rebuild') != '1':
                 return self.send_error(403, 'missing X-Schist-Rebuild header')
             return self._rebuild('1' in parse_qs(url.query).get('if_changed', []))
+        if path == '/api/study/grade':
+            if self.headers.get('X-Schist-Study') != '1':
+                return self.send_error(403, 'missing X-Schist-Study header')
+            return self._study_grade()
         if self.headers.get('X-Schist-Agent') != '1':
             return self.send_error(403, 'missing X-Schist-Agent header')
         if path == '/api/agent/chat':
@@ -473,6 +484,83 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     srv.build_lock.release()
             threading.Thread(target=run, daemon=True).start()
         return self._json(200, {'ok': p['status'] != proposals_mod.FAILED, 'rebuilding': rebuilding, **p})
+
+    # -- study --------------------------------------------------------------
+
+    def _study_cards(self, url):
+        srv = self.server
+        query = parse_qs(url.query)
+        view = (query.get('view') or ['due'])[0]
+        if view not in ('due', 'new', 'all'):
+            return self._json(400, {'ok': False, 'reason': 'view must be due, new or all'})
+        project = (query.get('project') or [''])[0].strip()
+        today = date.today()
+        cards = study_mod.load_cards(srv.vault)
+        due = sum(1 for card in cards if study_mod.is_due(card, today))
+        new = sum(1 for card in cards if card['state'] == 'new')
+        if view == 'due':
+            shown = [card for card in cards if study_mod.is_due(card, today)]
+        elif view == 'new':
+            shown = [card for card in cards if card['state'] == 'new']
+        else:
+            shown = list(cards)
+        if project:
+            shown = [card for card in shown if project in card['projects']]
+        def order(card):
+            # Due first (oldest first), then never-taught cards, then the rest.
+            if card['state'] == 'new':
+                group = 1
+            elif study_mod.is_due(card, today):
+                group = 0
+            else:
+                group = 2
+            return (group, card['next'] or date.max, card['id'])
+
+        shown.sort(key=order)
+        return self._json(200, {
+            'today': today.isoformat(),
+            'view': view,
+            'project': project,
+            'counts': {'due': due, 'new': new, 'all': len(cards)},
+            'cards': [study_mod.public_card(card) for card in shown],
+        })
+
+    def _study_grade(self):
+        srv = self.server
+        body = self._body()
+        if body is None:
+            return
+        card_id, grade = body.get('id'), body.get('grade')
+        expected_sha = body.get('body_sha')
+        if not isinstance(card_id, str) or not card_id:
+            return self._json(400, {'ok': False, 'reason': 'id must be a card id'})
+        if grade not in study_mod.PAGE_GRADES:
+            return self._json(400, {'ok': False, 'reason':
+                                    'grade must be one of ' + ', '.join(study_mod.PAGE_GRADES)})
+        if expected_sha is not None and not isinstance(expected_sha, str):
+            return self._json(400, {'ok': False, 'reason': 'body_sha must be a string'})
+
+        def check(relpath: str) -> None:
+            # The hub would refuse this commit, so refuse it here first and
+            # keep the failure one click away from the page instead of one
+            # push later. ProposalError is the only thing the store raises.
+            try:
+                srv.store.check_writable(relpath)
+            except proposals_mod.ProposalError as exc:
+                raise study_mod.StudyError(str(exc)) from None
+
+        try:
+            card = study_mod.grade_card(
+                srv.vault, card_id, grade, expected_sha=expected_sha,
+                source='page', check=check,
+            )
+        except study_mod.StudyConflict as exc:
+            return self._json(409, {'ok': False, 'reason': str(exc)})
+        except study_mod.StudyBusy as exc:
+            return self._json(503, {'ok': False, 'reason': f'vault is busy: {exc}'})
+        except study_mod.StudyError as exc:
+            return self._json(400, {'ok': False, 'reason': str(exc)})
+        return self._json(200, {'ok': True, 'card': study_mod.public_card(card)})
 
 
 def serve(vault: str, db: str, out: str | None, host: str, port: int,

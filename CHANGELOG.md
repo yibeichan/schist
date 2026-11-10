@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The viewer reviews study cards, in a Study tab.** `schist study due|new|next|status|grade` moves the `/study` scheduler out of the skill's `study.py` and into the CLI, sharing one card parser and `next_review()` with the viewer. `schist serve` adds `GET /api/study/cards?view=due|new|all` and `POST /api/study/grade`, which needs its own `X-Schist-Study: 1` header, so a cross-site page cannot grade a card. The page shows one due card at a time, flips from the title to its sanitized body with `[VERIFY]` markers highlighted, and grades missed / partial / good / busy / known; a new card is not quizzed, and `taught` stays agent-only. A grade rewrites only `**State:**`, `**Next review:**`, `**Interval:**` and one `## Review log` line, under the vault write lock, refusing with 409 when the card changed since the page read it and rolling the card back if the commit fails; on a spoke it runs the hub's ACL check first. Page grades are self-grades and are logged with source `page`, next to the handoff's explain-backs; the card is the only scheduler either way.
+
 ## [0.3.2] - 2026-11-06
 
 ### Added
