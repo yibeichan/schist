@@ -5384,9 +5384,11 @@ describe("delete_note", () => {
     expect((await execFile("git", ["rev-parse", "HEAD"], { cwd: vault })).stdout.trim()).toBe(head);
   }, 30000);
 
-  it.each(["-----", "---foo"])(
-    "cascade refuses a linker whose frontmatter closes on %j, which gray-matter and ingest split differently (#846, #863)",
-    async (closer) => {
+  // `-----`: ingest closes the block there and gray-matter does not.
+  // `---foo` then `---`: gray-matter closes at `---foo`, ingest at `---`.
+  it.each([["-----", "-----"], ["---foo, then ---", "---foo\nmid\n---"]])(
+    "cascade refuses a linker whose frontmatter closes on %s, which gray-matter and ingest split differently (#846, #863)",
+    async (_label, closer) => {
       // The YAML parses, so "cannot read the frontmatter" and "update_note
       // cannot read it" would be wrong: the cascade refuses to rewrite it.
       const vault = await makeTempVault();
