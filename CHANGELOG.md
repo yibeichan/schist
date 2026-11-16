@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Connection types the rule cannot index are ignored with a warning.** The connection rule indexes an edge only when its type starts with an ASCII letter or digit, so an entry such as `élargit`, `_private` or `[weird]` in `connection_types` could be configured but never indexed, and writing it failed with a message that did not name the type. The CLI and the MCP server now drop such entries when they load the vocabulary, with a warning that says why, and SCHEMA.md now says "ASCII letter or digit".
+
 ## [0.3.2] - 2026-11-06
 
 ### Added
