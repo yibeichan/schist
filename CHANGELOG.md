@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A `## Connections` line inside a code fence is no longer taken as the heading after a problem in that fence.** When the first line the connection rule stops at sat inside a fenced block, `schist schema --validate` reported the real heading below the fence as a later, ignored one, and a concept body whose only such line was in the fence was refused as having a Connections section. Both the CLI and the MCP server now look for the heading after the fence.
+
 ## [0.3.2] - 2026-11-06
 
 ### Added
