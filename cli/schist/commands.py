@@ -450,8 +450,9 @@ def add(args, vault_path: str, db_path: str):
 
 
 def _warn_unindexed_connections(filepath: str) -> None:
-    """Warn on stderr when the connection rule indexes no edge from the
-    note just written although it has a `## Connections` heading. write_note
+    """Warn on stderr when a problem line (Markdown the connection rule does
+    not follow) stops the `## Connections` section of the note just written
+    from being indexed. write_note
     checks that the file reads the body's own edges, and both sides are empty
     for such a note, so the write succeeds. MCP create_note returns the same
     text as `connectionsWarning`."""
