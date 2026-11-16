@@ -20,6 +20,7 @@ from .ingest import (
     CONNECTION_RE,
     connections_heading_near_misses,
     has_connections_heading,
+    is_indexable_connection_type,
     normalize_newlines,
     note_body_offset,
     note_body_start_line,
@@ -180,6 +181,14 @@ def _connection_types(vault_path: str) -> list:
                 f'Warning: ignoring connection_types entry {s!r}: not a '
                 f'single whitespace-free token — a connection line using it '
                 f'could never round-trip through the parser',
+                file=sys.stderr,
+            )
+            continue
+        if not is_indexable_connection_type(s):
+            print(
+                f'Warning: ignoring connection_types entry {s!r}: it does not '
+                f'start with an ASCII letter or digit, so the connection rule '
+                f'indexes no edge of this type',
                 file=sys.stderr,
             )
             continue

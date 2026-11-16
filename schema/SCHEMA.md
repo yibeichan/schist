@@ -251,7 +251,8 @@ the note.
 
 **A connection** is a line in the section that starts with `-` at the start of
 the line and one to three spaces, then `TYPE: TARGET` with optional context.
-The type must start with a letter or digit, and a target starting with `[` (a
+The type must start with an ASCII letter or digit (`A`–`Z`, `a`–`z`, `0`–`9`;
+`élargit` and `_private` are not types), and a target starting with `[` (a
 bracket reference) is not a connection. Indented lines, such as an item nested
 under a connection, are not connections.
 
@@ -428,6 +429,10 @@ directories:
 # Slug validation regex (default)
 slug_pattern: "^[a-z0-9-]+$"
 ```
+
+A `connection_types` entry that is not one whitespace-free token, or that does
+not start with an ASCII letter or digit, is ignored with a warning: the
+connection rule could never index an edge of that type.
 
 If no `schist.yaml` exists at the vault root, the canonical defaults are read from `cli/schist/default.yaml` (shipped inside the schist Python package). This is the single source of truth for the directory list — both the Python and TypeScript layers will load it at runtime (see Tasks 2 and 5 of the flatten-spoke-dirs refactor).
 
