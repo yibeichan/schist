@@ -39,7 +39,7 @@ schist doctor --vault /tmp/test-vault
 
 - Python ≥ 3.12
 - Node.js ≥ 22
-- npm ≥ 11.11 for work in `mcp-server/` (Node 22 bundles npm 10; run `npm install -g npm@latest`). `mcp-server/package.json` enforces this through `devEngines`, because npm before 11.11 rewrites `package-lock.json` without the `libc` fields that select glibc or musl builds of native dev dependencies. Install npm 11 so it is first on `PATH` (globally, or with `npm install --prefix <dir> npm@11` and `<dir>/node_modules/.bin` first on `PATH`). Running `npx npm@11 ci` instead fails with `EBADDEVENGINES`.
+- npm ≥ 11.11 for work in `mcp-server/` (Node 22 bundles npm 10; run `npm install -g npm@latest`). `mcp-server/package.json` enforces this through `devEngines`, because npm before 11.11 rewrites `package-lock.json` without the `libc` fields that select glibc or musl builds of native dev dependencies. Put an npm that meets that floor first on `PATH` (installed globally, or with `npm install --prefix <dir> npm@latest` and `<dir>/node_modules/.bin` first on `PATH`). Running the newer npm through `npx` instead fails with `EBADDEVENGINES`.
 - Git ≥ 2.30
 - SQLite ≥ 3.39 (with FTS5 support)
 
@@ -69,10 +69,12 @@ Open a [GitHub Issue](https://github.com/yibeichan/schist/issues/new). Include:
    python -m pytest cli/tests
    cd mcp-server && npm test
    ```
-   Run them with the environment under test first on `PATH` (for example
-   `export PATH="$PWD/.venv/bin:$PATH"`): the hub pre-receive hook tests and the
-   MCP tests start `schist` and `schist-ingest` from `PATH`, and an older
-   install found first fails them.
+   Run them with the Python environment you installed `cli/` into first on
+   `PATH` (for example `export PATH="<venv>/bin:$PATH"`). The hub pre-receive
+   hook the tests install starts with `#!/usr/bin/env python3` and imports
+   `schist`, so the first `python3` on `PATH` must be Python 3.12 or newer with
+   this checkout's `schist` installed; a system Python, or an older install,
+   fails those tests.
 5. **Push** your branch and open a Pull Request against `main`
 
 ### PR Conventions
