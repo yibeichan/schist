@@ -1,5 +1,5 @@
 {
-  "description": "Pins the connection rule in cli/schist/ingest.py (CONNECTION_RE, scan_connections, connection_body) and mcp-server/src/markdown-parser.ts (the same names in camelCase). `lines`: CONNECTION_RE on one line. `bodies`: the edges a body yields, the 0-based line of the first problem (null when there is none; a problem means no edges), the 0-based line of the ## Connections heading (null when there is none; after a problem, the first later heading line outside the problem's fence) and the 0-based line that ends the section (the line count when nothing ends it). `files`: whole note files, written to disk as UTF-8 bytes and read back the way each side reads notes (Python read_text, TS readNoteText); `body` is connection_body of the text, which ingest stores in docs.body for the viewer, and `edges` what ingest indexes. mcp-server/tests/connection-marked.test.ts also checks every body and file here against marked 12.0.2. `byte_files`: note files given as bytes (hex): whether they decode as UTF-8 (ingest skips a note that does not; the MCP server refuses it) and the edges ingest indexes.",
+  "description": "Pins the connection rule in cli/schist/ingest.py (CONNECTION_RE, scan_connections, connection_body) and mcp-server/src/markdown-parser.ts (the same names in camelCase). `lines`: CONNECTION_RE on one line. `bodies`: the edges a body yields, the 0-based line of the first problem (null when there is none; a problem means no edges), the 0-based line of the ## Connections heading (null when there is none; after a problem, the first later line of that shape, fenced or not) and the 0-based line that ends the section (the line count when nothing ends it). `files`: whole note files, written to disk as UTF-8 bytes and read back the way each side reads notes (Python read_text, TS readNoteText); `body` is connection_body of the text, which ingest stores in docs.body for the viewer, and `edges` what ingest indexes. mcp-server/tests/connection-marked.test.ts also checks every body and file here against marked 12.0.2. `byte_files`: note files given as bytes (hex): whether they decode as UTF-8 (ingest skips a note that does not; the MCP server refuses it) and the edges ingest indexes.",
   "lines": [
     {
       "name": "plain edge",
@@ -2272,19 +2272,19 @@
       "end": 5
     },
     {
-      "name": "a problem inside a fence: the heading line in that fence is not the heading, the later one is",
+      "name": "a problem inside a fence: the first heading-shaped line after the problem is the heading, even inside that fence",
       "body": "```\n\u0085\n## Connections\n```\n## Connections\n- a: b",
       "edges": [],
       "problem": 1,
-      "heading": 4,
-      "end": 6
+      "heading": 2,
+      "end": 4
     },
     {
-      "name": "a problem inside a fence: a heading line only in that fence leaves no heading",
+      "name": "a problem inside a fence: a heading-shaped line only inside that fence is the heading",
       "body": "```\n\u0085\n## Connections\n```\ntext",
       "edges": [],
       "problem": 1,
-      "heading": null,
+      "heading": 2,
       "end": 5
     }
   ],

@@ -368,10 +368,6 @@ export function scanConnections(lines: string[], start = 0): ConnectionScan {
   let end = n;
   let edges: ConnectionScan["edges"] = [];
   let problem: ConnectionScan["problem"] = null;
-  // Where the search for a heading after the problem starts: past the fence
-  // that holds the problem, when it is inside one, since a line in that
-  // fence is not a heading.
-  let afterProblem = -1;
   let i = start;
   scan: while (i < n) {
     const line = lines[i];
@@ -385,7 +381,6 @@ export function scanConnections(lines: string[], start = 0): ConnectionScan {
       for (let j = i; j <= close; j++) {
         if (NON_MARKDOWN_SEPARATOR_RE.test(lines[j])) {
           problem = { index: j, reason: lineProblem(lines[j], false)! };
-          afterProblem = close + 1;
           break scan;
         }
       }
@@ -416,8 +411,7 @@ export function scanConnections(lines: string[], start = 0): ConnectionScan {
   if (problem !== null) {
     edges = [];
     if (heading === -1) {
-      const first = afterProblem === -1 ? problem.index + 1 : afterProblem;
-      for (let k = first; k < n; k++) {
+      for (let k = problem.index + 1; k < n; k++) {
         if (isConnectionsHeading(lines[k])) {
           heading = k;
           break;

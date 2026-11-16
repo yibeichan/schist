@@ -2732,10 +2732,10 @@ def test_ingest_reads_note_bytes_as_shared_cases(tmp_path: Path, case: dict) -> 
     assert rows == [(e["type"], e["target"]) for e in case["edges"]]
 
 
-def test_near_misses_after_a_problem_inside_a_fence() -> None:
-    """A problem inside a fence: the heading-shaped line in that fence is
-    reported as fenced, and the first real heading after the fence is the
-    heading, not "a later ## Connections heading"."""
+def test_near_misses_after_a_problem_report_no_later_heading_as_ignored() -> None:
+    """When a problem means no section is read, a later heading is not
+    reported as ignored for being later ("only the first section is read"):
+    the note's warning already says no connections are indexed."""
     from schist.ingest import (
         connections_heading_near_misses,
         normalize_newlines,
@@ -2747,7 +2747,8 @@ def test_near_misses_after_a_problem_inside_a_fence() -> None:
     lines = split_connection_lines(normalize_newlines(body))
     scan = scan_connections(lines)
     assert scan.problem is not None and scan.problem[0] == 1
-    assert scan.heading == 4
-    assert connections_heading_near_misses(lines, scan.heading) == [
-        (2, 'inside a fenced code block, so it is not a heading'),
-    ]
+    later = 'a later ## Connections heading; only the first section is read'
+    assert (4, later) not in connections_heading_near_misses(lines, scan.heading, problem=True)
+    # Without a problem the later heading is still reported.
+    clean = split_connection_lines("## Connections\n- a: b\n## Connections\n")
+    assert (2, later) in connections_heading_near_misses(clean, scan_connections(clean).heading)

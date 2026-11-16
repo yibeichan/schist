@@ -187,8 +187,7 @@ class ConnectionScan:
     """What the connection rule finds in a list of lines.
 
     heading: index of the `## Connections` heading, or None. When a problem
-        comes before it, the first later line of that shape, outside the
-        fence that holds the problem when it is inside one.
+        comes before it, the first later line of that shape.
     end: index of the line that ends the section, or len(lines).
     edges: (line index, {'type', 'target', 'context'}) for each edge line,
         always empty when `problem` is set.
@@ -360,10 +359,6 @@ def scan_connections(lines: list[str], start: int = 0) -> ConnectionScan:
     end = n
     edges: list[tuple[int, dict]] = []
     problem = None
-    # Where the search for a heading after the problem starts: past the
-    # fence that holds the problem, when it is inside one, since a line in
-    # that fence is not a heading.
-    after_problem = None
     i = start
     while i < n:
         line = lines[i]
@@ -376,7 +371,6 @@ def scan_connections(lines: list[str], start: int = 0) -> ConnectionScan:
             for j in range(i, close + 1):
                 if _NON_MARKDOWN_SEPARATOR_RE.search(lines[j]):
                     problem = (j, _line_problem(lines[j], False))
-                    after_problem = close + 1
                     break
             if problem is not None:
                 break
@@ -399,8 +393,7 @@ def scan_connections(lines: list[str], start: int = 0) -> ConnectionScan:
         edges = []
         if heading is None:
             # Report whether a heading follows, so the problem can be shown.
-            first = problem[0] + 1 if after_problem is None else after_problem
-            for k in range(first, n):
+            for k in range(problem[0] + 1, n):
                 if is_connections_heading(lines[k]):
                     heading = k
                     break
@@ -436,12 +429,15 @@ def _fenced_lines(lines: list[str]) -> set[int]:
 
 
 def connections_heading_near_misses(
-    lines: list[str], heading: int | None = None,
+    lines: list[str], heading: int | None = None, problem: bool = False,
 ) -> list[tuple[int, str]]:
     """Lines whose stripped text starts with `## Connections` (the earlier,
     looser heading rule) that the current rule does not take as the heading,
     each with the reason. `heading` is the heading scan_connections found on
-    the same lines (or None). `schist schema --validate` warns on these."""
+    the same lines (or None), and `problem` whether it found a problem: then
+    no section is read, so a later heading is not reported as ignored for
+    being later (the caller already says no connections are indexed).
+    `schist schema --validate` warns on these."""
     out: list[tuple[int, str]] = []
     fenced: set[int] | None = None
     for i, ln in enumerate(lines):
@@ -452,7 +448,7 @@ def connections_heading_near_misses(
                 fenced = _fenced_lines(lines)
             if heading is None or i < heading or i in fenced:
                 out.append((i, 'inside a fenced code block, so it is not a heading'))
-            elif i > heading:
+            elif i > heading and not problem:
                 out.append((
                     i, 'a later ## Connections heading; only the first section is read',
                 ))
