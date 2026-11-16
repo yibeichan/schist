@@ -5619,12 +5619,118 @@ class TestCheckMcpConnectionsRule:
         assert r.status == "WARN", r.message
         assert "rule is unknown" in r.message
 
+        # A script with no markdown-parser.js beside it or above it is not a
+        # server doctor can read: it reports the server's files as not found,
+        # not a markdown-parser.js path that does not exist (#856).
         dist = self._dist(tmp_path, 2)
         (dist / "markdown-parser.js").unlink()
         self._config(tmp_path, monkeypatch, {"command": "node", "args": [str(dist / "index.js")]})
         r = check_mcp_connections_rule(None)
         assert r.status == "WARN", r.message
-        assert "cannot read" in r.message
+        assert "cannot find the configured MCP server's files" in r.message
+        assert "markdown-parser.js" not in r.message
+
+    def test_skips_the_value_of_a_node_require_option(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+
+        dist = self._dist(tmp_path, 1)
+        self._config(tmp_path, monkeypatch, {
+            "command": "node", "args": ["-r", "dotenv/config", str(dist / "index.js")],
+        })
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "rule v1" in r.message
+
+    def test_unwraps_an_env_wrapper(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+
+        dist = self._dist(tmp_path, 1)
+        self._config(tmp_path, monkeypatch, {
+            "command": "/usr/bin/env",
+            "args": ["-u", "DEBUG", "SCHIST_VAULT_PATH=/v", "node", str(dist / "index.js")],
+        })
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "rule v1" in r.message
+
+    def _versioned_dist(self, tmp_path: Path, rule: int, version: str) -> Path:
+        dist = self._dist(tmp_path, rule)
+        (dist.parent / "package.json").write_text(json.dumps({"version": version}))
+        return dist
+
+    def test_npx_pinned_to_the_global_version_reads_the_global_install(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+
+        dist = self._versioned_dist(tmp_path, 1, "0.3.1")
+        self._config(tmp_path, monkeypatch, {"command": "npx", "args": ["-y", "@schist/mcp-server@0.3.1"]})
+        monkeypatch.setattr("schist.mcp_locate._npm_global_entry", lambda: dist / "index.js")
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "rule v1" in r.message
+
+    def test_npx_pinned_to_another_version_is_not_read_from_the_global_install(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+        from schist.ingest import CONNECTIONS_RULE_VERSION
+
+        # The global install is in sync, but npx runs 0.3.0 from its cache.
+        dist = self._versioned_dist(tmp_path, CONNECTIONS_RULE_VERSION, "0.3.1")
+        self._config(tmp_path, monkeypatch, {"command": "npx", "args": ["-y", "@schist/mcp-server@0.3.0"]})
+        monkeypatch.setattr("schist.mcp_locate._npm_global_entry", lambda: dist / "index.js")
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "npx runs @schist/mcp-server@0.3.0" in r.message
+        assert "the npm global install is 0.3.1" in r.message
+
+    @pytest.mark.parametrize("make_entry", [
+        lambda wrapper, dist: {"command": str(wrapper), "args": []},
+        lambda wrapper, dist: {"command": "bash", "args": ["-c", f"node {dist / 'index.js'}"]},
+        lambda wrapper, dist: {"command": "bunx", "args": ["@schist/mcp-server@0.3.0"]},
+    ], ids=["wrapper-script", "bash-c", "bunx-pinned"])
+    def test_a_command_doctor_cannot_follow_is_not_read_from_the_global_install(
+        self, tmp_path, monkeypatch, make_entry,
+    ):
+        """The npm global install stands in only for an npx-style runner of
+        @schist/mcp-server at that version. A wrapper or shell command whose
+        server doctor cannot find must not PASS from an in-sync global."""
+        from schist.doctor import check_mcp_connections_rule
+        from schist.ingest import CONNECTIONS_RULE_VERSION
+
+        old = tmp_path / "old"
+        old.mkdir()
+        old_dist = self._dist(old, 1)
+        glob = tmp_path / "glob"
+        glob.mkdir()
+        global_dist = self._versioned_dist(glob, CONNECTIONS_RULE_VERSION, "0.3.1")
+        wrapper = tmp_path / "run-schist.sh"
+        wrapper.write_text(f"#!/bin/sh\nexec node {old_dist / 'index.js'}\n")
+        wrapper.chmod(0o755)
+        self._config(tmp_path, monkeypatch, make_entry(wrapper, old_dist))
+        monkeypatch.setattr("schist.mcp_locate._npm_global_entry", lambda: global_dist / "index.js")
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+
+    def test_npx_package_option_pin_is_read(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+        from schist.ingest import CONNECTIONS_RULE_VERSION
+
+        dist = self._versioned_dist(tmp_path, CONNECTIONS_RULE_VERSION, "0.3.1")
+        self._config(tmp_path, monkeypatch, {
+            "command": "npx", "args": ["-y", "--package=@schist/mcp-server@0.3.0", "schist-mcp"],
+        })
+        monkeypatch.setattr("schist.mcp_locate._npm_global_entry", lambda: dist / "index.js")
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "npx runs @schist/mcp-server@0.3.0" in r.message
+        assert "drop the pin" in (r.fix or "")
+
+    def test_npx_pinned_with_no_global_install(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+
+        self._config(tmp_path, monkeypatch, {"command": "npx", "args": ["-y", "@schist/mcp-server@0.3.0"]})
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "npx runs @schist/mcp-server@0.3.0" in r.message
+        assert "global install is" not in r.message
 
     def test_real_source_carries_the_cli_version(self):
         """The TypeScript source declares the same version as ingest.py, in

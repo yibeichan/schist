@@ -2993,12 +2993,107 @@ def _mcp_config_entries(vault_path: Optional[str]):
         yield entry
 
 
+# node options that take the next argument as their value, so it is not
+# the script: `node -r dotenv/config dist/index.js`.
+_NODE_VALUE_OPTIONS = frozenset({
+    "-r", "--require", "--import", "--loader", "--experimental-loader",
+    "--env-file", "--env-file-if-exists", "--input-type", "--conditions", "-C",
+    "--title", "--disable-warning", "--watch-path", "--inspect-port",
+    "--openssl-config", "--redirect-warnings",
+})
+
+
+def _unwrap_env(command: str, args: list) -> tuple[str, list]:
+    """The command and args an `env` wrapper runs: `env [-i] [-u NAME]
+    [NAME=VALUE ...] node dist/index.js` runs `node dist/index.js`. Any other
+    command is returned unchanged. `env -S` (one string to split) is not
+    split, so its entry finds no server."""
+    if _runner_name(command) != "env":
+        return command, args
+    rest = [str(a) for a in args]
+    while rest:
+        a = rest[0]
+        if a in ("-S", "--split-string") or a.startswith("--split-string="):
+            return "", []
+        if a in ("-u", "--unset", "-C", "--chdir"):
+            rest = rest[2:]
+        elif a.startswith("-") or "=" in a:
+            rest = rest[1:]
+        else:
+            return a, rest[1:]
+    return "", []
+
+
+def _runner_packages(args: list) -> tuple[list[str], list[str]]:
+    """The packages an npx-style runner is told to run (`-p`/`--package`
+    values) and its positional arguments, as _schist_evidence reads them."""
+    packages: list[str] = []
+    positional: list[str] = []
+    it = iter(str(a) for a in args)
+    for a in it:
+        if a in ("-p", "--package"):
+            packages.append(next(it, ""))
+        elif a.startswith("--package="):
+            packages.append(a.split("=", 1)[1])
+        elif a in _NPX_VALUE_OPTIONS:
+            next(it, None)
+        elif not a.startswith("-"):
+            positional.append(a)
+    return packages, positional
+
+
+def _npx_pinned_version(args: list) -> Optional[str]:
+    """The version an npx-style entry pins for @schist/mcp-server
+    (`@schist/mcp-server@0.3.0`, as the package run or a `--package` value),
+    or None when it pins none."""
+    packages, positional = _runner_packages(args)
+    for spec in packages or positional[:1]:
+        m = _SCHIST_NPM_SPEC.fullmatch(spec)
+        if m and m.group(1):
+            return m.group(1)[1:]
+    return None
+
+
+def _package_version(dist_dir: Path) -> Optional[str]:
+    """The version in the package.json beside `dist_dir`, or None."""
+    try:
+        data = json.loads((dist_dir.parent / "package.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    version = data.get("version") if isinstance(data, dict) else None
+    return version if isinstance(version, str) else None
+
+
+def _node_script(args: list) -> Optional[str]:
+    """The script a node-style runner runs: the first argument ending in a
+    script suffix, else the first argument that is neither an option nor
+    the value of one."""
+    args = [str(a) for a in args]
+    for a in args:
+        if not a.startswith("-") and a.endswith(_SCRIPT_SUFFIXES):
+            return a
+    skip_value = False
+    for a in args:
+        if skip_value:
+            skip_value = False
+            continue
+        if a.startswith("-"):
+            skip_value = a in _NODE_VALUE_OPTIONS
+            continue
+        return a
+    return None
+
+
 def _mcp_server_dist_dir(entry: dict) -> Optional[Path]:
     """The dist/ directory of the server `entry` starts, or None when it
     cannot be found. Follows symlinks: `node <link>` where the link points
     into dist/, and a bare command (a bin link on PATH, found with
-    shutil.which and resolved). `npx` and a command whose target has no
-    dist/ fall back to the npm global install (`npm root -g`)."""
+    shutil.which and resolved). An `env` wrapper is unwrapped. Only an
+    npx-style runner of @schist/mcp-server falls back to the npm global
+    install (`npm root -g`), and check_mcp_connections_rule handles one
+    that pins another version; any other command whose target has no
+    markdown-parser.js near it is not found, since the global install may
+    not be what it runs."""
     def dist_of(path: Path) -> Optional[Path]:
         try:
             real = path.expanduser().resolve(strict=True)
@@ -3012,33 +3107,30 @@ def _mcp_server_dist_dir(entry: dict) -> Optional[Path]:
                 return d
             if (d / "dist" / "markdown-parser.js").is_file():
                 return d / "dist"
-        return real.parent
+        return None
 
     command = str(entry.get("command") or "")
     args = entry.get("args") if isinstance(entry.get("args"), list) else []
-    base = Path(command).name
-    if base in ("node", "node.exe", "nodejs") or not command:
-        for a in args:
-            a = str(a)
-            if a.startswith("-"):
-                continue
-            found = dist_of(Path(a))
-            if found is not None:
-                return found
-            break
-        return None
-    if base not in ("npx", "npx.cmd"):
-        on_path = shutil.which(command) if os.sep not in command else command
-        if on_path:
-            found = dist_of(Path(on_path))
-            if found is not None:
-                return found
-    from .mcp_locate import _npm_global_entry
+    command, args = _unwrap_env(command, args)
+    runner = _runner_name(command)
+    if runner in _NODE_RUNNERS or not command:
+        script = _node_script(args)
+        return None if script is None else dist_of(Path(script))
+    if runner in _PACKAGE_RUNNERS:
+        packages, positional = _runner_packages(args)
+        if not packages and len(positional) > 1 and positional[0] in _NODE_RUNNERS:
+            # `npx tsx <script>`: the script is the server.
+            return dist_of(Path(positional[1]))
+        if not any(_SCHIST_NPM_SPEC.fullmatch(p) for p in packages or positional[:1]):
+            return None
+        from .mcp_locate import _npm_global_entry
 
-    npm = _npm_global_entry()
-    if npm is not None and npm.is_file():
-        return npm.resolve().parent
-    return None
+        npm = _npm_global_entry()
+        if npm is not None and npm.is_file():
+            return npm.resolve().parent
+        return None
+    on_path = shutil.which(command) if os.sep not in command else command
+    return None if not on_path else dist_of(Path(on_path))
 
 
 def _extract_mcp_required_columns(dist_dir: Path) -> Optional[set[str]]:
@@ -3345,6 +3437,25 @@ def check_mcp_connections_rule(vault_path: Optional[str]) -> CheckResult:
     # A configured server whose rule cannot be read is reported, not
     # skipped: an old server is exactly the skew this check is for.
     dist_dir = _mcp_server_dist_dir(entry)
+    command, args = _unwrap_env(
+        str(entry.get("command") or ""),
+        entry.get("args") if isinstance(entry.get("args"), list) else [],
+    )
+    runner = _runner_name(command)
+    pinned = _npx_pinned_version(args) if runner in _PACKAGE_RUNNERS else None
+    if pinned is not None:
+        installed = None if dist_dir is None else _package_version(dist_dir)
+        if installed != pinned:
+            return CheckResult(
+                "WARN", name,
+                f"{runner} runs @schist/mcp-server@{pinned} from its own cache, which doctor "
+                "cannot read, so its ## Connections rule is unknown"
+                + ("" if installed is None else f" (the npm global install is {installed})"),
+                fix=(
+                    "Pin the MCP config to the version installed with the CLI, or drop the "
+                    "pin, then restart the MCP client."
+                ),
+            )
     if dist_dir is None:
         return CheckResult(
             "WARN", name,
