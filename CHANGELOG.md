@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A connection context holding U+001F is written instead of refused.** `schist link` and `add_connection` turn each line break in a context into a space, but not U+001F, which the connection rule refuses in a line, so such a context failed the write. Every separator the rule refuses is now turned into a space.
+
 ## [0.3.2] - 2026-11-06
 
 ### Added
