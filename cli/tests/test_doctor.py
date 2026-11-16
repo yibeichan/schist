@@ -5681,6 +5681,48 @@ class TestCheckMcpConnectionsRule:
         assert "npx runs @schist/mcp-server@0.3.0" in r.message
         assert "the npm global install is 0.3.1" in r.message
 
+    @pytest.mark.parametrize("make_entry", [
+        lambda wrapper, dist: {"command": str(wrapper), "args": []},
+        lambda wrapper, dist: {"command": "bash", "args": ["-c", f"node {dist / 'index.js'}"]},
+        lambda wrapper, dist: {"command": "bunx", "args": ["@schist/mcp-server@0.3.0"]},
+    ], ids=["wrapper-script", "bash-c", "bunx-pinned"])
+    def test_a_command_doctor_cannot_follow_is_not_read_from_the_global_install(
+        self, tmp_path, monkeypatch, make_entry,
+    ):
+        """The npm global install stands in only for an npx-style runner of
+        @schist/mcp-server at that version. A wrapper or shell command whose
+        server doctor cannot find must not PASS from an in-sync global."""
+        from schist.doctor import check_mcp_connections_rule
+        from schist.ingest import CONNECTIONS_RULE_VERSION
+
+        old = tmp_path / "old"
+        old.mkdir()
+        old_dist = self._dist(old, 1)
+        glob = tmp_path / "glob"
+        glob.mkdir()
+        global_dist = self._versioned_dist(glob, CONNECTIONS_RULE_VERSION, "0.3.1")
+        wrapper = tmp_path / "run-schist.sh"
+        wrapper.write_text(f"#!/bin/sh\nexec node {old_dist / 'index.js'}\n")
+        wrapper.chmod(0o755)
+        self._config(tmp_path, monkeypatch, make_entry(wrapper, old_dist))
+        monkeypatch.setattr("schist.mcp_locate._npm_global_entry", lambda: global_dist / "index.js")
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+
+    def test_npx_package_option_pin_is_read(self, tmp_path, monkeypatch):
+        from schist.doctor import check_mcp_connections_rule
+        from schist.ingest import CONNECTIONS_RULE_VERSION
+
+        dist = self._versioned_dist(tmp_path, CONNECTIONS_RULE_VERSION, "0.3.1")
+        self._config(tmp_path, monkeypatch, {
+            "command": "npx", "args": ["-y", "--package=@schist/mcp-server@0.3.0", "schist-mcp"],
+        })
+        monkeypatch.setattr("schist.mcp_locate._npm_global_entry", lambda: dist / "index.js")
+        r = check_mcp_connections_rule(None)
+        assert r.status == "WARN", r.message
+        assert "npx runs @schist/mcp-server@0.3.0" in r.message
+        assert "drop the pin" in (r.fix or "")
+
     def test_npx_pinned_with_no_global_install(self, tmp_path, monkeypatch):
         from schist.doctor import check_mcp_connections_rule
 
