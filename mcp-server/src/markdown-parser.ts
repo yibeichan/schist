@@ -879,7 +879,8 @@ function sanitizeContext(context: string): string {
   // SLUG_WS_CHARS union while trim() uses JS's WhiteSpace set, and the
   // prefix regex above uses native \s/\S where the CLI uses the union class
   // — so the two writers can serialize byte-different context for inputs
-  // carrying exotic control chars (U+001F, U+FEFF edges). With boundaries
+  // carrying exotic whitespace (U+FEFF edges; U+001F is now flattened to a
+  // space first on both sides). With boundaries
   // already flattened every such divergence is cosmetic, never a forged
   // edge; pin a parity fixture before relying on byte-identical context.
   return safe.trim();

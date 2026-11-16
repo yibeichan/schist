@@ -106,10 +106,9 @@ def sanitize_context(context: str) -> str:
     format delimits context with "..." (CONNECTION_RE: [^"]*). The prefix
     regex and the edge strip use the pinned SLUG_WS_CHARS union class per
     the #338 convention rather than replicating JS's \\s/trim() exactly, so
-    the two implementations CAN disagree on exotic control chars (e.g. TS
-    trim() drops a leading U+FEFF but keeps U+001F; the union strips both,
-    and a U+001F embedded in a prefix word stops Python's non-ws run where
-    TS's \\S continues). With boundaries already flattened every such
+    the two implementations CAN disagree on exotic whitespace in the prefix
+    strip and edge strip. (U+001F, once the example, is now flattened to a
+    space first on both sides.) With boundaries already flattened every such
     divergence is cosmetic — a byte-different context string, never a
     forged edge.
 
