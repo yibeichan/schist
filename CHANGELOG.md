@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **SCHEMA.md describes every frontmatter block ingest recognizes.** It said the frontmatter follows python-frontmatter and opens only with `---`. Ingest also takes a JSON `{` … `}` block and a TOML `+++` block as frontmatter; without python-frontmatter's TOML handler it reads no keys from the `+++` block but still leaves it out of the stored body, where python-frontmatter alone would keep it.
+
 ## [0.3.2] - 2026-11-06
 
 ### Added
