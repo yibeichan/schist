@@ -429,12 +429,15 @@ def _fenced_lines(lines: list[str]) -> set[int]:
 
 
 def connections_heading_near_misses(
-    lines: list[str], heading: int | None = None,
+    lines: list[str], heading: int | None = None, problem: bool = False,
 ) -> list[tuple[int, str]]:
     """Lines whose stripped text starts with `## Connections` (the earlier,
     looser heading rule) that the current rule does not take as the heading,
     each with the reason. `heading` is the heading scan_connections found on
-    the same lines (or None). `schist schema --validate` warns on these."""
+    the same lines (or None), and `problem` whether it found a problem: then
+    no section is read, so a later heading is not reported as ignored for
+    being later (the caller already says no connections are indexed).
+    `schist schema --validate` warns on these."""
     out: list[tuple[int, str]] = []
     fenced: set[int] | None = None
     for i, ln in enumerate(lines):
@@ -445,7 +448,7 @@ def connections_heading_near_misses(
                 fenced = _fenced_lines(lines)
             if heading is None or i < heading or i in fenced:
                 out.append((i, 'inside a fenced code block, so it is not a heading'))
-            elif i > heading:
+            elif i > heading and not problem:
                 out.append((
                     i, 'a later ## Connections heading; only the first section is read',
                 ))

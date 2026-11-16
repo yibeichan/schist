@@ -998,7 +998,9 @@ def _connections_rule_warnings(rel: Path, raw_text: str, lines: list[str], scan)
             f'no connections are indexed from this note: {scan.problem[1]}',
         ))
     heading = None if scan.heading is None else scan.heading - body_start
-    for i, reason in connections_heading_near_misses(lines[body_start:], heading):
+    for i, reason in connections_heading_near_misses(
+        lines[body_start:], heading, problem=scan.problem is not None,
+    ):
         out.append((
             body_start + i,
             f'line starting with "## Connections" is not a connections '

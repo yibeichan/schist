@@ -264,6 +264,24 @@ class TestSchemaCommand:
         assert "WARN: notes/two.md:9: " in out
         assert "only the first section is read" in out
 
+    def test_validate_does_not_call_a_heading_later_when_nothing_is_indexed(self, tmp_path, capsys):
+        # The NEL inside the fence stops the rule: no section is read, so the
+        # heading below the fence is not "later; only the first is read".
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir()
+        (notes_dir / "n.md").write_text(
+            "---\ntitle: N\n---\n```\n\u0085\n## Connections\n```\n"
+            "## Connections\n- extends: notes/a\n",
+            encoding="utf-8",
+        )
+        commands.schema(
+            _schema_args(validate=True), str(tmp_path),
+            str(tmp_path / ".schist" / "schist.db"),
+        )
+        out = capsys.readouterr().out
+        assert "no connections are indexed from this note" in out
+        assert "only the first section is read" not in out
+
     @pytest.mark.parametrize("line,reason", [
         ("## Connections (x)", "heading text is not exactly '## Connections'"),
         (" ## Connections (x)", "indented (the heading must start at column 0)"),

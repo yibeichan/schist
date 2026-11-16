@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`schist schema --validate` no longer calls a `## Connections` heading ignored for coming later when nothing in the note is indexed.** When a line stops the connection rule (a NEL inside a fenced block, say), no section is read and the warning already says so; the heading below it was also reported as "a later ## Connections heading; only the first section is read", which pointed at the wrong cause.
+
 ## [0.3.2] - 2026-11-06
 
 ### Added
