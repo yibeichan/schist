@@ -524,6 +524,27 @@ def test_sanitize_context_flattens_boundaries_and_strips_forgery() -> None:
     assert sanitize_context("\ufeffhello") == "hello"
 
 
+def test_sanitize_context_flattens_every_separator_the_rule_refuses(tmp_path) -> None:
+    """U+001F is not a splitlines boundary, but the connection rule refuses
+    a line holding it (or any other non-Markdown separator). The sanitizer
+    flattens them all, so such a context is written and indexed, not
+    refused. markdown-parser.ts sanitizeContext does the same."""
+    from schist.ingest import _NON_MARKDOWN_SEPARATORS, parse_connections
+    from schist.markdown_io import append_connection, sanitize_context
+
+    assert sanitize_context("a\x1fb") == "a b"
+    for ch in _NON_MARKDOWN_SEPARATORS:
+        assert sanitize_context(f"a{ch}b") == "a b", hex(ord(ch))
+
+    note = tmp_path / "note.md"
+    note.write_text("---\ntitle: A\n---\n\n## Connections\n", encoding="utf-8")
+    append_connection(str(note), "extends", "notes/b.md", context="a\x1fb")
+    edges = parse_connections(note.read_text(encoding="utf-8"))
+    assert [(e["type"], e["target"], e["context"]) for e in edges] == [
+        ("extends", "notes/b.md", "a b"),
+    ]
+
+
 def test_append_connection_context_injection_yields_single_edge(tmp_path) -> None:
     """#405: a context payload carrying a boundary + forged entry must come
     back from ingest's parser as ONE edge, exactly like the MCP #398 fix."""

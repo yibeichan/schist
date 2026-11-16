@@ -14,6 +14,7 @@ import tempfile
 import frontmatter
 
 from .ingest import (
+    _NON_MARKDOWN_SEPARATORS,
     connection_line_edge,
     normalize_newlines,
     parse_connections,
@@ -111,9 +112,13 @@ def sanitize_context(context: str) -> str:
     TS's \\S continues). With boundaries already flattened every such
     divergence is cosmetic — a byte-different context string, never a
     forged edge.
+
+    The separators the connection rule refuses anywhere in a line
+    (_NON_MARKDOWN_SEPARATORS, which adds U+001F to the boundaries) are
+    flattened too, so a context holding one is written, not refused.
     """
     safe = context
-    for ch in LINE_BOUNDARY_CHARS:
+    for ch in LINE_BOUNDARY_CHARS + _NON_MARKDOWN_SEPARATORS:
         if ch in safe:
             safe = safe.replace(ch, ' ')
     safe = _FORGED_PREFIX_RE.sub('', safe)

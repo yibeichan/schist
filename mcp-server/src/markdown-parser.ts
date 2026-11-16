@@ -165,6 +165,7 @@ const LIST_MARKER_WS_RE = /^[ \t]*(?:[-+*]|[0-9]{1,9}[.)])([ \t]+)/;
 const LIST_MARKER_WS_STICKY = /[ \t]*(?:[-+*]|[0-9]{1,9}[.)])([ \t]+)/y;
 const EDGE_PREFIX_RE = /^- {1,3}[^ \t]/;
 const NON_MARKDOWN_SEPARATOR_RE = /[\u000b\u000c\u001c-\u001f\u0085\u2028\u2029]/;
+const NON_MARKDOWN_SEPARATOR_GLOBAL_RE = new RegExp(NON_MARKDOWN_SEPARATOR_RE.source, "g");
 const RULE_LINE_RE = /^[-=*_+|: \t]+$/;
 const ASCII_ALNUM_RE = /^[A-Za-z0-9]/;
 
@@ -863,6 +864,10 @@ function sanitizeContext(context: string): string {
   for (const ch of LINE_BOUNDARY) {
     if (safe.includes(ch)) safe = safe.split(ch).join(" ");
   }
+  // The separators the connection rule refuses anywhere in a line (adding
+  // U+001F to the boundaries) are flattened too, so a context holding one is
+  // written, not refused. cli markdown_io.sanitize_context does the same.
+  safe = safe.replace(NON_MARKDOWN_SEPARATOR_GLOBAL_RE, " ");
   // Defense-in-depth: drop a leading connection-entry-looking prefix. With
   // boundaries already flattened this can no longer forge a multi-line edge.
   safe = safe.replace(/^-\s+\S+:\s+/gm, "");
