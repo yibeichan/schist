@@ -187,7 +187,8 @@ class ConnectionScan:
     """What the connection rule finds in a list of lines.
 
     heading: index of the `## Connections` heading, or None. When a problem
-        comes before it, the first later line of that shape.
+        comes before it, the first later line of that shape, outside the
+        fence that holds the problem when it is inside one.
     end: index of the line that ends the section, or len(lines).
     edges: (line index, {'type', 'target', 'context'}) for each edge line,
         always empty when `problem` is set.
@@ -359,6 +360,10 @@ def scan_connections(lines: list[str], start: int = 0) -> ConnectionScan:
     end = n
     edges: list[tuple[int, dict]] = []
     problem = None
+    # Where the search for a heading after the problem starts: past the
+    # fence that holds the problem, when it is inside one, since a line in
+    # that fence is not a heading.
+    after_problem = None
     i = start
     while i < n:
         line = lines[i]
@@ -371,6 +376,7 @@ def scan_connections(lines: list[str], start: int = 0) -> ConnectionScan:
             for j in range(i, close + 1):
                 if _NON_MARKDOWN_SEPARATOR_RE.search(lines[j]):
                     problem = (j, _line_problem(lines[j], False))
+                    after_problem = close + 1
                     break
             if problem is not None:
                 break
@@ -393,7 +399,8 @@ def scan_connections(lines: list[str], start: int = 0) -> ConnectionScan:
         edges = []
         if heading is None:
             # Report whether a heading follows, so the problem can be shown.
-            for k in range(problem[0] + 1, n):
+            first = problem[0] + 1 if after_problem is None else after_problem
+            for k in range(first, n):
                 if is_connections_heading(lines[k]):
                     heading = k
                     break

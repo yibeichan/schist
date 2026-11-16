@@ -388,6 +388,10 @@ def test_parse_connections_matches_shared_body_parity_cases(case: dict) -> None:
     assert got == case["edges"]
     scan = scan_connections(split_connection_lines(normalize_newlines(case["body"])))
     assert (None if scan.problem is None else scan.problem[0]) == case["problem"]
+    # has_connections_heading (the concept-body refusal) and the near-miss
+    # warnings read `heading`, so both languages must agree on it and `end`.
+    assert scan.heading == case["heading"]
+    assert scan.end == case["end"]
 
 
 def test_ingest_deduplicates_implicit_concept_edges(tmp_path: Path) -> None:
@@ -2726,3 +2730,24 @@ def test_ingest_reads_note_bytes_as_shared_cases(tmp_path: Path, case: dict) -> 
         conn.close()
     assert docs == (1 if case["decodes"] else 0)
     assert rows == [(e["type"], e["target"]) for e in case["edges"]]
+
+
+def test_near_misses_after_a_problem_inside_a_fence() -> None:
+    """A problem inside a fence: the heading-shaped line in that fence is
+    reported as fenced, and the first real heading after the fence is the
+    heading, not "a later ## Connections heading"."""
+    from schist.ingest import (
+        connections_heading_near_misses,
+        normalize_newlines,
+        scan_connections,
+        split_connection_lines,
+    )
+
+    body = "```\n\u0085\n## Connections\n```\n## Connections\n- a: b\n"
+    lines = split_connection_lines(normalize_newlines(body))
+    scan = scan_connections(lines)
+    assert scan.problem is not None and scan.problem[0] == 1
+    assert scan.heading == 4
+    assert connections_heading_near_misses(lines, scan.heading) == [
+        (2, 'inside a fenced code block, so it is not a heading'),
+    ]
