@@ -2993,12 +2993,61 @@ def _mcp_config_entries(vault_path: Optional[str]):
         yield entry
 
 
+# node options that take the next argument as their value, so it is not
+# the script: `node -r dotenv/config dist/index.js`.
+_NODE_VALUE_OPTIONS = frozenset({
+    "-r", "--require", "--import", "--loader", "--experimental-loader",
+    "--env-file", "--input-type", "--conditions", "-C", "--title",
+})
+
+
+def _unwrap_env(command: str, args: list) -> tuple[str, list]:
+    """The command and args an `env` wrapper runs: `env [-i] [-u NAME]
+    [NAME=VALUE ...] node dist/index.js` runs `node dist/index.js`. Any other
+    command is returned unchanged."""
+    if Path(command).name != "env":
+        return command, args
+    rest = [str(a) for a in args]
+    while rest:
+        a = rest[0]
+        if a in ("-u", "--unset", "-C", "--chdir", "-S", "--split-string"):
+            rest = rest[2:]
+        elif a.startswith("-") or "=" in a:
+            rest = rest[1:]
+        else:
+            return a, rest[1:]
+    return "", []
+
+
+def _npx_pinned_version(args: list) -> Optional[str]:
+    """The version an `npx @schist/mcp-server@<version>` entry pins, or None
+    when it pins none (npx then runs whatever it resolves)."""
+    for a in args:
+        m = _SCHIST_NPM_SPEC.fullmatch(str(a))
+        if m and m.group(1):
+            return m.group(1)[1:]
+    return None
+
+
+def _package_version(dist_dir: Path) -> Optional[str]:
+    """The version in the package.json beside `dist_dir`, or None."""
+    try:
+        data = json.loads((dist_dir.parent / "package.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    version = data.get("version") if isinstance(data, dict) else None
+    return version if isinstance(version, str) else None
+
+
 def _mcp_server_dist_dir(entry: dict) -> Optional[Path]:
     """The dist/ directory of the server `entry` starts, or None when it
     cannot be found. Follows symlinks: `node <link>` where the link points
     into dist/, and a bare command (a bin link on PATH, found with
-    shutil.which and resolved). `npx` and a command whose target has no
-    dist/ fall back to the npm global install (`npm root -g`)."""
+    shutil.which and resolved). An `env` wrapper is unwrapped, and the values
+    of node options such as `-r` are not taken as the script. `npx` and a
+    command whose target has no dist/ fall back to the npm global install
+    (`npm root -g`); check_mcp_connections_rule handles an npx entry that
+    pins another version than that install."""
     def dist_of(path: Path) -> Optional[Path]:
         try:
             real = path.expanduser().resolve(strict=True)
@@ -3012,20 +3061,23 @@ def _mcp_server_dist_dir(entry: dict) -> Optional[Path]:
                 return d
             if (d / "dist" / "markdown-parser.js").is_file():
                 return d / "dist"
-        return real.parent
+        return None
 
     command = str(entry.get("command") or "")
     args = entry.get("args") if isinstance(entry.get("args"), list) else []
+    command, args = _unwrap_env(command, args)
     base = Path(command).name
     if base in ("node", "node.exe", "nodejs") or not command:
+        skip_value = False
         for a in args:
             a = str(a)
-            if a.startswith("-"):
+            if skip_value:
+                skip_value = False
                 continue
-            found = dist_of(Path(a))
-            if found is not None:
-                return found
-            break
+            if a.startswith("-"):
+                skip_value = a in _NODE_VALUE_OPTIONS
+                continue
+            return dist_of(Path(a))
         return None
     if base not in ("npx", "npx.cmd"):
         on_path = shutil.which(command) if os.sep not in command else command
@@ -3345,6 +3397,21 @@ def check_mcp_connections_rule(vault_path: Optional[str]) -> CheckResult:
     # A configured server whose rule cannot be read is reported, not
     # skipped: an old server is exactly the skew this check is for.
     dist_dir = _mcp_server_dist_dir(entry)
+    command, args = _unwrap_env(
+        str(entry.get("command") or ""),
+        entry.get("args") if isinstance(entry.get("args"), list) else [],
+    )
+    pinned = _npx_pinned_version(args) if Path(command).name in ("npx", "npx.cmd") else None
+    if pinned is not None:
+        installed = None if dist_dir is None else _package_version(dist_dir)
+        if installed != pinned:
+            return CheckResult(
+                "WARN", name,
+                f"npx runs @schist/mcp-server@{pinned} from its own cache, which doctor "
+                "cannot read, so its ## Connections rule is unknown"
+                + ("" if installed is None else f" (the npm global install is {installed})"),
+                fix=fix,
+            )
     if dist_dir is None:
         return CheckResult(
             "WARN", name,

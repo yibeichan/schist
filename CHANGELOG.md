@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`schist doctor` checks the MCP server the config actually runs.** Its "MCP connection rule" check took the value of a node option such as `-r dotenv/config` as the server's script, read `/usr/bin/env` itself for an `env node …` entry, and for `npx @schist/mcp-server@<version>` read the npm global install even when npx runs another version from its cache, reporting it in sync when it might not be. It now skips option values, unwraps `env`, and says when a pinned npx version cannot be read. A script with no `markdown-parser.js` near it is reported as not found, not as an unreadable file beside it (#856).
+
 ## [0.3.2] - 2026-11-06
 
 ### Added
