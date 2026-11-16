@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- **The delete cascade says why it cannot repair a linking note.** Every refusal was reported as frontmatter that cannot be read, with advice that `update_note` cannot read the note. A note whose frontmatter the MCP server and ingest end at different lines (a `-----` closing line, say) is now reported as one the cascade cannot rewrite, with how to fix its opening and closing lines, and a repair that would change the note's other connections is reported as such. A linking note that opens with a BOM, from which ingest reads no frontmatter, no longer blocks the cascade.
+- **The delete cascade says why it cannot rewrite a linking note's frontmatter.** A linking note whose frontmatter the MCP server and ingest end at different lines (a `-----` closing line, say) was reported as frontmatter that cannot be read, with advice that `update_note` cannot read it. It is now reported as frontmatter the cascade cannot rewrite, with how to fix it, and a caller who may not write that note gets `ACL_DENIED` first, as for other linking notes the cascade refuses.
 
 ## [0.3.2] - 2026-11-06
 

@@ -5407,7 +5407,7 @@ describe("delete_note", () => {
       expect(res.message).toContain(linkerId);
       expect(res.message).toMatch(/different lines/);
       expect(res.message).toContain("Cascade cannot rewrite the frontmatter of");
-      expect(res.message).toContain("open and close with a plain `---` line");
+      expect(res.message).toContain("rewrite its frontmatter as YAML between plain `---` lines");
       expect(res.message).not.toContain("cannot read");
       expect(res.message).not.toContain("not YAML");
       await fs.access(path.join(vault, target.id));
@@ -5480,7 +5480,10 @@ describe("delete_note", () => {
     expect(await fs.readFile(path.join(vault, linkerId), "utf-8")).toBe(linkerText);
   }, 30000);
 
-  it("cascade checks the write ACL before refusing a non-YAML linker", async () => {
+  it.each([
+    ["non-YAML", (t: string) => `---js\n{ title: "old" }\n---\nbody\n\n## Connections\n\n- extends: ${t}\n`],
+    ["split-frontmatter", (t: string) => `---\ntitle: old\n-----\nbody\n\n## Connections\n\n- extends: ${t}\n`],
+  ])("cascade checks the write ACL before refusing a %s linker", async (_kind, makeLinker) => {
     // A caller who may not write the linker is told so, not asked to fix it.
     // The ACL identity falls back to the owner only with SCHIST_IDENTITY unset.
     const savedIdentity = process.env.SCHIST_IDENTITY;
@@ -5492,7 +5495,7 @@ describe("delete_note", () => {
         vault, { owner: TEST_AGENT, title: "TargetAcl", body: "t", directory: "notes" }, config,
       ) as { id: string };
       const linkerId = "papers/old-js-linker.md";
-      const linkerText = `---js\n{ title: "old" }\n---\nbody\n\n## Connections\n\n- extends: ${target.id}\n`;
+      const linkerText = makeLinker(target.id);
       const head = await commitOldLinker(vault, linkerId, linkerText, target.id);
 
       const res = await delete_note(vault, { owner: TEST_AGENT, id: target.id, cascade: true }, config) as {

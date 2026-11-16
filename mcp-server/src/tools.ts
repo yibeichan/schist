@@ -3613,9 +3613,10 @@ export async function delete_note(
           // The frontmatter may still hold a reference ingest indexed, so the
           // note cannot be repaired safely. Each refusal gets its own advice:
           // - ConnectionWriteError: the rebuilt note would index other edges
-          //   than the strip meant (the YAML parsed fine);
+          //   than the strip meant (defensive: no input is known to reach it
+          //   once parseNoteForRewrite has passed);
           // - FrontmatterSplitError: gray-matter and ingest read different
-          //   frontmatter blocks (the YAML parsed fine);
+          //   frontmatter blocks;
           // - anything else: the YAML itself does not parse (js-yaml refuses a
           //   duplicate key that PyYAML and the hub accept). js-yaml's message
           //   continues with a source excerpt; keep its first line.
@@ -3639,7 +3640,7 @@ export async function delete_note(
       if (acl !== null) {
         const denied = [
           ...repairs.map((r) => r.relPath), ...nonYaml, ...parseErrors.map((p) => p.relPath),
-          ...stripErrors.map((p) => p.relPath),
+          ...stripErrors.map((p) => p.relPath), ...splitErrors.map((p) => p.relPath),
         ]
           .filter((rel) => !canWrite(acl, aclIdentity, deriveScope(rel)));
         if (denied.length > 0) {
@@ -3667,8 +3668,8 @@ export async function delete_note(
           message:
             "Cascade cannot rewrite the frontmatter of: " +
             splitErrors.map((p) => `${p.relPath} (${p.message})`).join("; ") +
-            ". Edit each file directly: make its frontmatter open and close with a plain `---` line, " +
-            "commit, then retry the delete.",
+            ". Edit each file directly: rewrite its frontmatter as YAML between plain `---` lines, " +
+            "with no line inside it starting with `---`, commit, then retry the delete.",
         } satisfies ToolError;
       }
       if (nonYaml.length > 0 || parseErrors.length > 0) {
