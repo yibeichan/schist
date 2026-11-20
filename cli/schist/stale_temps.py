@@ -21,16 +21,21 @@ removal cover the whole directory even though each writer only creates its own
 format. Nothing else is matched: other files and directories under
 `.schist/tmp/` are never touched, and symlinks are never followed.
 
-A temp is stale when it is old enough that no live write can own it:
+A temp is stale when it is at least `ANY_AGE` seconds old, whatever its pid
+says. A vault shared over NFS can be written from another node, where a pid
+that looks dead on this host belongs to a live writer, so age alone is the
+default rule.
 
-* its owning pid (MCP format only) is gone and it is at least
-  `DEAD_PID_MIN_AGE` seconds old, or
-* it is at least `ANY_AGE` seconds old, whatever the pid says. A vault shared
-  over NFS can be written from another node, where a pid check on this node
-  means nothing, so age alone has to be enough.
+`trust_pid=True` adds a shortcut for single-host vaults only: a temp whose
+owning pid (MCP format only) is gone is also stale once it is
+`DEAD_PID_MIN_AGE` seconds old. Never pass it for a vault that another host
+can write.
 
-Every filesystem error is swallowed per file: reaping must never stop a write
-or a startup.
+Every per-file error is swallowed: reaping must never stop a write or a
+startup. `find_stale_temps` raises OSError only when the directory itself
+cannot be listed (a missing directory gives an empty list), so a caller that
+reports can tell "nothing there" from "could not look"; `reap_stale_temps`
+never raises.
 """
 
 from __future__ import annotations
@@ -90,15 +95,19 @@ def find_stale_temps(
     vault_root: str | os.PathLike,
     *,
     now: Optional[float] = None,
+    trust_pid: bool = False,
     pid_alive: Callable[[int], bool] = _pid_alive,
 ) -> list[StaleTemp]:
-    """List stale atomic-write temps under `<vault_root>/.schist/tmp/`."""
+    """List stale atomic-write temps under `<vault_root>/.schist/tmp/`.
+
+    `trust_pid`: single-host vaults only, see the module docstring.
+    """
     if now is None:
         now = time.time()
     root = staging_dir(vault_root)
     try:
         names = os.listdir(root)
-    except OSError:
+    except FileNotFoundError:
         return []
     found: list[StaleTemp] = []
     for name in sorted(names):
@@ -111,10 +120,13 @@ def find_stale_temps(
             if not stat.S_ISREG(st.st_mode):
                 continue  # symlinks and directories are never touched
             age = now - st.st_mtime
-            if age < DEAD_PID_MIN_AGE:
+            if age < ANY_AGE and not (
+                trust_pid
+                and pid is not None
+                and age >= DEAD_PID_MIN_AGE
+                and not pid_alive(pid)
+            ):
                 continue  # also skips a future mtime
-            if age < ANY_AGE and (pid is None or pid_alive(pid)):
-                continue
             found.append(StaleTemp(path, age, pid))
         except Exception:
             continue
@@ -125,12 +137,15 @@ def reap_stale_temps(
     vault_root: str | os.PathLike,
     *,
     now: Optional[float] = None,
+    trust_pid: bool = False,
     pid_alive: Callable[[int], bool] = _pid_alive,
 ) -> list[Path]:
     """Unlink the stale temps and return the paths removed. Never raises."""
     removed: list[Path] = []
     try:
-        stale = find_stale_temps(vault_root, now=now, pid_alive=pid_alive)
+        stale = find_stale_temps(
+            vault_root, now=now, trust_pid=trust_pid, pid_alive=pid_alive
+        )
     except Exception:
         return removed
     for item in stale:

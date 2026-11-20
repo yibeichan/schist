@@ -70,7 +70,7 @@ class TestNameFormats:
     def test_mcp_writer_name_is_matched_with_pid(self, tmp_path):
         d = _stage(tmp_path)
         _make(d, f".note.md.4242.{HEX}.tmp", DEAD_PID_MIN_AGE + 5)
-        found = find_stale_temps(tmp_path, now=NOW, pid_alive=_dead)
+        found = find_stale_temps(tmp_path, now=NOW, trust_pid=True, pid_alive=_dead)
         assert [(s.path.name, s.pid) for s in found] == [(f".note.md.4242.{HEX}.tmp", 4242)]
 
     @pytest.mark.parametrize("name", [
@@ -91,36 +91,45 @@ class TestNameFormats:
     def test_foreign_names_are_ignored(self, tmp_path, name):
         d = _stage(tmp_path)
         _make(d, name, ANY_AGE * 10)
-        assert find_stale_temps(tmp_path, now=NOW, pid_alive=_dead) == []
+        assert find_stale_temps(tmp_path, now=NOW, trust_pid=True, pid_alive=_dead) == []
 
 
 class TestStaleRule:
     def test_dead_pid_and_old_enough(self, tmp_path):
         d = _stage(tmp_path)
         _make(d, f".a.md.99.{HEX}.tmp", DEAD_PID_MIN_AGE + 1)
-        assert len(find_stale_temps(tmp_path, now=NOW, pid_alive=_dead)) == 1
+        assert len(find_stale_temps(tmp_path, now=NOW, trust_pid=True, pid_alive=_dead)) == 1
 
     def test_dead_pid_but_young_is_kept(self, tmp_path):
         d = _stage(tmp_path)
         _make(d, f".a.md.99.{HEX}.tmp", DEAD_PID_MIN_AGE - 1)
-        assert find_stale_temps(tmp_path, now=NOW, pid_alive=_dead) == []
+        assert find_stale_temps(tmp_path, now=NOW, trust_pid=True, pid_alive=_dead) == []
 
     def test_live_pid_and_old_but_under_any_age_is_kept(self, tmp_path):
         d = _stage(tmp_path)
         _make(d, f".a.md.99.{HEX}.tmp", ANY_AGE - 1)
-        assert find_stale_temps(tmp_path, now=NOW, pid_alive=_alive) == []
+        assert find_stale_temps(tmp_path, now=NOW, trust_pid=True, pid_alive=_alive) == []
+
+    def test_default_ignores_the_pid_even_when_it_looks_dead(self, tmp_path):
+        # On a shared vault a remote writer's pid looks dead here: only age counts.
+        d = _stage(tmp_path)
+        _make(d, f".a.md.99.{HEX}.tmp", DEAD_PID_MIN_AGE + 1)
+        assert find_stale_temps(tmp_path, now=NOW, pid_alive=_dead) == []
+        assert reap_stale_temps(tmp_path, now=NOW, pid_alive=_dead) == []
+        _make(d, f".b.md.99.{HEX}.tmp", ANY_AGE + 1)
+        assert _names(find_stale_temps(tmp_path, now=NOW, pid_alive=_dead)) == [f".b.md.99.{HEX}.tmp"]
 
     def test_age_alone_suffices_over_any_age(self, tmp_path):
         # Another node may own the pid: a "live" pid here proves nothing.
         d = _stage(tmp_path)
         _make(d, f".a.md.99.{HEX}.tmp", ANY_AGE + 1)
-        assert len(find_stale_temps(tmp_path, now=NOW, pid_alive=_alive)) == 1
+        assert len(find_stale_temps(tmp_path, now=NOW, trust_pid=True, pid_alive=_alive)) == 1
 
     def test_cli_format_has_no_pid_and_waits_for_any_age(self, tmp_path):
         d = _stage(tmp_path)
         _make(d, "tmpabcdefgh.tmp", ANY_AGE - 1)
         _make(d, "tmpabcdefgi.tmp", ANY_AGE + 1)
-        assert _names(find_stale_temps(tmp_path, now=NOW, pid_alive=_dead)) == ["tmpabcdefgi.tmp"]
+        assert _names(find_stale_temps(tmp_path, now=NOW, trust_pid=True, pid_alive=_dead)) == ["tmpabcdefgi.tmp"]
 
     def test_future_mtime_is_kept(self, tmp_path):
         d = _stage(tmp_path)
@@ -172,6 +181,13 @@ class TestNeverTouchesOthers:
 
 
 class TestNeverRaises:
+    def test_unreadable_directory_raises_from_find_but_not_reap(self, tmp_path):
+        (tmp_path / ".schist").mkdir()
+        (tmp_path / ".schist" / "tmp").write_text("x")  # not a directory
+        with pytest.raises(OSError):
+            find_stale_temps(tmp_path, now=NOW)
+        assert reap_stale_temps(tmp_path, now=NOW) == []
+
     def test_missing_directory(self, tmp_path):
         assert find_stale_temps(tmp_path, now=NOW) == []
         assert reap_stale_temps(tmp_path, now=NOW) == []
@@ -218,4 +234,4 @@ class TestNeverRaises:
         def boom(_pid):
             raise RuntimeError("probe failed")
 
-        assert _names(find_stale_temps(tmp_path, now=NOW, pid_alive=boom)) == ["tmpbbbbbbbb.tmp"]
+        assert _names(find_stale_temps(tmp_path, now=NOW, trust_pid=True, pid_alive=boom)) == ["tmpbbbbbbbb.tmp"]

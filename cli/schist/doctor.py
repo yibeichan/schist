@@ -869,17 +869,26 @@ def check_stale_atomic_temps(vault_path: Optional[str]) -> CheckResult:
     label = "Stale write temps"
     if not vault_path:
         return CheckResult("SKIP", label, "skipped (no vault)")
-    stale = find_stale_temps(vault_path)
+    staging = Path(vault_path) / ".schist" / "tmp"
+    try:
+        stale = find_stale_temps(vault_path)
+    except OSError as e:
+        return CheckResult(
+            "WARN", label, f"cannot read {staging}: {e}",
+            "Fix the directory's permissions or type so stale temps can be checked.",
+        )
     if not stale:
         return CheckResult("PASS", label, "no stale temp files in .schist/tmp/")
     shown = ", ".join(s.path.name for s in stale[:5])
     more = f" and {len(stale) - 5} more" if len(stale) > 5 else ""
     return CheckResult(
         "WARN", label,
-        f"{len(stale)} stale atomic-write temp file(s) in .schist/tmp/: "
+        f"{len(stale)} stale atomic-write temp file(s) in {staging}: "
         f"{shown}{more}",
-        "A write was killed before its rename. The files are gitignored and "
-        "inert; delete the listed files from <vault>/.schist/tmp/.",
+        f"A write was killed before its rename. The files are gitignored and "
+        f"inert. Delete every file in {staging} named `tmp` + 8 characters "
+        f"of [a-z0-9_] + `.tmp`, or `.<note>.<pid>.<12 hex>.tmp`, that is "
+        f"at least an hour old; {len(stale)} match.",
     )
 
 

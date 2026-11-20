@@ -5679,6 +5679,15 @@ class TestCheckStaleAtomicTemps:
         r = check_stale_atomic_temps(str(tmp_path))
         assert r.status == "WARN"
         assert "8 stale" in r.message and "and 3 more" in r.message
+        assert str(tmp_path / ".schist" / "tmp") in r.message
+        assert "8 match" in r.fix and "[a-z0-9_]" in r.fix
+
+    def test_unreadable_staging_dir_warns_not_passes(self, tmp_path):
+        (tmp_path / ".schist").mkdir()
+        (tmp_path / ".schist" / "tmp").write_text("x")  # not a directory
+        r = check_stale_atomic_temps(str(tmp_path))
+        assert r.status == "WARN"
+        assert "cannot read" in r.message and "Not a directory" in r.message
 
     def test_run_doctor_includes_the_check(self, tmp_path):
         labels = {r.label for r in run_doctor(str(tmp_path), None)}
