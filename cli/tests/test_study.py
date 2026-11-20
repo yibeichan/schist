@@ -318,6 +318,30 @@ def test_grade_card_refuses_a_card_swapped_for_a_symlink_while_waiting_for_the_l
     assert target.read_text(encoding='utf-8') == card_text()
 
 
+def test_grade_card_refuses_notes_swapped_for_a_symlink_while_waiting_for_the_lock(
+        vault, tmp_path, monkeypatch):
+    import contextlib
+    write_card(vault)
+    commit(vault)
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'card.md').write_text(card_text(), encoding='utf-8')
+    real_lock = study.git_ops.vault_write_lock
+
+    @contextlib.contextmanager
+    def swap_then_lock(*args, **kwargs):
+        with real_lock(*args, **kwargs):
+            (vault / 'notes' / 'card.md').unlink()
+            (vault / 'notes').rmdir()
+            (vault / 'notes').symlink_to(outside, target_is_directory=True)
+            yield
+
+    monkeypatch.setattr(study.git_ops, 'vault_write_lock', swap_then_lock)
+    with pytest.raises(study.StudyError, match='outside the vault'):
+        study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
+    assert (outside / 'card.md').read_text(encoding='utf-8') == card_text()
+
+
 def test_grade_card_refuses_a_symlink(vault, tmp_path):
     write_card(vault)
     target = tmp_path / 'outside.md'

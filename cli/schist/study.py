@@ -432,6 +432,16 @@ def _unstage(vault_path: Path, rel: str) -> str | None:
     return None if staged.returncode == 0 else f"{rel} is still staged"
 
 
+def _check_path(vault_path: Path, path: Path, rel: str) -> None:
+    """Refuse a card that is a symlink or resolves outside the vault."""
+    if path.is_symlink():
+        raise StudyError(f"{rel} is a symlink; refusing to grade it")
+    try:
+        path.resolve().relative_to(vault_path.resolve())
+    except ValueError:
+        raise StudyError(f"{rel} resolves outside the vault") from None
+
+
 def _staged_problem(vault_path: Path, rel: str) -> str | None:
     """A refusal message when `rel` has staged changes, else None.
 
@@ -487,14 +497,9 @@ def grade_card(vault: str | Path, card_id: str, grade: str, *,
     vault_path = Path(vault)
     rel = normalize_card_id(card_id)
     path = vault_path / rel
-    if path.is_symlink():
-        raise StudyError(f"{rel} is a symlink; refusing to grade it")
+    _check_path(vault_path, path, rel)
     if not path.is_file():
         raise StudyError(f"no study card at {rel}")
-    try:
-        path.resolve().relative_to(vault_path.resolve())
-    except ValueError:
-        raise StudyError(f"{rel} resolves outside the vault") from None
     if check is not None:
         check(rel)
     day = today or dt.date.today()
@@ -502,9 +507,8 @@ def grade_card(vault: str | Path, card_id: str, grade: str, *,
     try:
         with git_ops.vault_write_lock(str(vault_path), timeout=lock_timeout):
             # The checks above ran before the lock; a pull can replace the
-            # file with a link while this call waited for it.
-            if path.is_symlink():
-                raise StudyError(f"{rel} is a symlink; refusing to grade it")
+            # file, or notes/, with a link while this call waited for it.
+            _check_path(vault_path, path, rel)
             try:
                 text = read_card_text(path)
             except UnicodeDecodeError:
