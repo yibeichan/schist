@@ -1327,10 +1327,14 @@ def check_hub_acl_drift(hub_path: Optional[str]) -> CheckResult:
 
 
 def _axis_dirs_from_text(text: str, name: str) -> list[str]:
-    """Content-axis directories from a schist.yaml's `directories`, in either
-    shape (the packaged default is a mapping, an authored one is often a
-    list). Raises ValueError naming `name` when the text is not a mapping or
-    `directories` is neither a mapping nor a list."""
+    """The vault's content axes from a schist.yaml's `directories`, for both
+    axis checks. Both shapes are read (the packaged default is a mapping, an
+    authored one is often a list); null and non-string entries are dropped; the
+    result is normalised by the loader the CLI stages and builds cones with
+    (`git_ops.scope_dirs_from_config`: first path segment, unsafe names
+    dropped, duplicates merged). Raises ValueError naming `name` when the text
+    is not a mapping, `directories` is neither a mapping nor a list, or no
+    axis is left."""
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError:
@@ -1340,15 +1344,26 @@ def _axis_dirs_from_text(text: str, name: str) -> list[str]:
     if not isinstance(data, dict):
         raise ValueError(f"{name} is not a mapping")
     dirs = data.get("directories")
-    if dirs is None:
-        return []
     if isinstance(dirs, dict):
         vals = list(dirs.values())
     elif isinstance(dirs, list):
         vals = dirs
+    elif dirs is None:
+        vals = []
     else:
         raise ValueError(f"{name} 'directories' field is malformed")
-    return [d for d in (str(v).strip().rstrip("/") for v in vals) if d]
+    axes = git_ops.scope_dirs_from_config(
+        {"directories": [v for v in vals if isinstance(v, str)]}) or []
+    if not axes:
+        raise ValueError(f"{name} lists no content directories")
+    return axes
+
+
+def _paste_arg(s: str) -> Optional[str]:
+    """`s` quoted for a shell command line, or None when it holds a character
+    that is not printable: such a name is shown escaped, never as a command
+    that would put the raw character on the terminal."""
+    return shlex.quote(s) if _printable(s) == s else None
 
 
 def _scope_names_axis(scope: str, axes: list[str]) -> bool:
@@ -1402,12 +1417,13 @@ def check_hub_axis_grants(hub_path: Optional[str]) -> CheckResult:
     names = sorted(acl.access.keys())
     if not names:
         return CheckResult("SKIP", label, "vault.yaml has no access entries")
-    if not axes:
-        return CheckResult("SKIP", label, "schist.yaml lists no content directories")
-
+    # A grant inside an axis (research/mario under the subdirectory convention)
+    # lets its holder write into the axis, so the axis is not dead.
     dead = [a for a in axes
             if a not in _INFRA_DIRS
-            and not any(_scope_matches(acl.access[n].write, a) for n in names)]
+            and not any(_scope_matches(acl.access[n].write, a)
+                        or any(g.startswith(a + "/") for g in acl.access[n].write)
+                        for n in names)]
 
     typos: dict[str, list[str]] = {}
     for n in names:
@@ -1423,16 +1439,26 @@ def check_hub_axis_grants(hub_path: Optional[str]) -> CheckResult:
     parts: list[str] = []
     fixes: list[str] = []
     for a in dead:
-        parts.append(f"axis '{_printable(a)}' has no participant with a write grant")
+        parts.append(f"axis '{_printable(a)}' has no participant who can write it")
+    if dead:
         fixes.append(
-            f"`schist hub grant <participant> --write {shlex.quote(a)} --hub-path {shlex.quote(hub_path)}`")
-    for s in sorted(typos):
-        who = ", ".join(_printable(n) for n in typos[s])
+            "decide which participants should write the dead axes and grant each "
+            "the narrowest scope that fits (see 'Adding a content axis' in "
+            "docs/hub-spoke-setup.md)")
+    hub_arg = _paste_arg(hub_path)
+    for s_ in sorted(typos):
+        who = ", ".join(_printable(n) for n in typos[s_])
         parts.append(
-            f"write grant '{_printable(s)}' (held by {who}) is not a content axis or shared/*")
-        fixes.append(
-            f"`schist hub revoke <participant> --write {shlex.quote(s)} --hub-path {shlex.quote(hub_path)}` "
-            f"if '{_printable(s)}' is a typo, or add it to schist.yaml directories")
+            f"write grant '{_printable(s_)}' (held by {who}) is not a content axis or shared/*")
+        scope_arg = _paste_arg(s_)
+        if scope_arg is None or hub_arg is None:
+            fixes.append(
+                f"remove '{_printable(s_)}' from the write list in vault.yaml by hand, "
+                "or add it to schist.yaml directories")
+        else:
+            fixes.append(
+                f"`schist hub revoke <participant> --write={scope_arg} --hub-path {hub_arg}` "
+                f"if '{_printable(s_)}' is a typo, or add it to schist.yaml directories")
     return CheckResult("WARN", label, "; ".join(parts), fix="; ".join(fixes))
 
 
@@ -1461,19 +1487,18 @@ def check_spoke_sparse_axes(vault_path: Optional[str]) -> CheckResult:
             "SKIP", label,
             f"spoke scope '{_printable(cfg.scope)}' is not global; its cone is narrower by design")
 
-    # An unreadable schist.yaml makes the shared resolver fall back to the
-    # packaged list, which would let this check PASS against axes the vault
-    # does not use. Name the file instead.
-    schist_yaml = Path(vault_path) / "schist.yaml"
+    # The same reader as the hub check, so one file gives one axis list. An
+    # unreadable file is named, not replaced by the packaged list, which would
+    # let this check PASS against axes the vault does not use.
     try:
-        _axis_dirs_from_text(schist_yaml.read_text(encoding="utf-8"), "schist.yaml")
+        axes = _axis_dirs_from_text(
+            (Path(vault_path) / "schist.yaml").read_text(encoding="utf-8"),
+            "schist.yaml")
     except FileNotFoundError:
-        pass
+        axes = git_ops._global_scope_dirs(vault_path)
     except (ValueError, OSError, UnicodeDecodeError) as e:
         return CheckResult(
             "SKIP", label, f"could not read schist.yaml: {_printable(str(e))}")
-
-    axes = git_ops._global_scope_dirs(vault_path)
     cone = git_ops._sparse_cone_dirs(vault_path)
     if cone is None:
         return CheckResult(
@@ -1485,13 +1510,18 @@ def check_spoke_sparse_axes(vault_path: Optional[str]) -> CheckResult:
         return CheckResult(
             "PASS", label, f"all {len(axes)} content axes are in the sparse checkout")
     shown = ", ".join(_printable(a) for a in missing)
-    fix = (f"git -C {shlex.quote(vault_path)} sparse-checkout add "
-           + " ".join(shlex.quote(a) for a in missing))
+    vault_arg = _paste_arg(vault_path)
+    axis_args = [_paste_arg(a) for a in missing]
+    if vault_arg is None or None in axis_args:
+        fix = ("run `git sparse-checkout add -- <axis>` in the vault for each axis "
+               "named above (a name holds a character that is not printed as a command)")
+    else:
+        fix = (f"`git -C {vault_arg} sparse-checkout add -- " + " ".join(axis_args) + "`")
     return CheckResult(
         "WARN", label,
         f"schist.yaml axes outside this spoke's sparse checkout: {shown}; "
         "git add refuses files under them",
-        fix=f"`{fix}`")
+        fix=fix)
 
 
 def _hub_file_text(hub: Path, rel: str, *, required: bool = True) -> Optional[str]:
