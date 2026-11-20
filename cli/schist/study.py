@@ -61,6 +61,11 @@ MIN_WORDS = 250
 MAX_ONELINE_WORDS = 60
 
 
+def _reason(exc: BaseException) -> str:
+    """An OSError's reason without its filename, which is an absolute path."""
+    return getattr(exc, "strerror", None) or type(exc).__name__
+
+
 class StudyError(Exception):
     """A card cannot be read, graded, or written as asked."""
 
@@ -455,7 +460,7 @@ def _restore(vault_path: Path, rel: str, path: Path, text: str) -> str | None:
     try:
         markdown_io._atomic_write(str(path), text, str(vault_path))
     except OSError as exc:
-        problems.append(f"could not restore the card ({exc})")
+        problems.append(f"could not restore the card ({_reason(exc)})")
     stuck = _unstage(vault_path, rel)
     if stuck:
         problems.append(f"the grade is still staged ({stuck})")
@@ -505,7 +510,7 @@ def grade_card(vault: str | Path, card_id: str, grade: str, *,
             except UnicodeDecodeError:
                 raise StudyError(f"{rel} is not valid UTF-8") from None
             except OSError as exc:
-                raise StudyWriteError(f"could not read {rel}: {exc}") from exc
+                raise StudyWriteError(f"could not read {rel}: {_reason(exc)}") from exc
             card = card_from_text(rel, text)
             if card is None:
                 raise StudyError(f"{rel} is not a learning card")
@@ -534,7 +539,7 @@ def grade_card(vault: str | Path, card_id: str, grade: str, *,
                 stuck = _restore(vault_path, rel, path, text)
                 if isinstance(exc, OSError):
                     raise StudyWriteError(
-                        f"could not grade {rel}: {exc}" + (f"; {stuck}" if stuck else "")
+                        f"could not grade {rel}: {_reason(exc)}" + (f"; {stuck}" if stuck else "")
                     ) from exc
                 if stuck and hasattr(exc, "add_note"):
                     exc.add_note(stuck)

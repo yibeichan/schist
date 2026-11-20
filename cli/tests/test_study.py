@@ -423,6 +423,29 @@ def test_grade_card_says_so_when_the_rollback_fails_after_a_failed_commit(vault,
         study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
 
 
+def test_write_errors_do_not_carry_absolute_paths(vault, monkeypatch):
+    write_card(vault)
+    commit(vault)
+
+    def denied(src, dst):
+        raise OSError(13, 'Permission denied', str(vault / 'notes' / 'card.md'))
+
+    monkeypatch.setattr(study.markdown_io.os, 'replace', denied)
+    with pytest.raises(study.StudyWriteError) as exc:
+        study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
+    assert 'notes/card.md' in str(exc.value) and 'Permission denied' in str(exc.value)
+    assert str(vault) not in str(exc.value)
+    monkeypatch.undo()
+
+    def unreadable(self):
+        raise OSError(13, 'Permission denied', str(vault / 'notes' / 'card.md'))
+
+    monkeypatch.setattr(Path, 'read_bytes', unreadable)
+    with pytest.raises(study.StudyWriteError) as exc:
+        study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
+    assert 'Permission denied' in str(exc.value) and str(vault) not in str(exc.value)
+
+
 def test_grade_card_leaves_the_card_whole_when_the_write_fails(vault, monkeypatch):
     path = write_card(vault)
     commit(vault)

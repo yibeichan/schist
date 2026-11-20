@@ -696,12 +696,13 @@ class TestStudy:
         self._write_card(srv.vault)
 
         def disk_full(src, dst):
-            raise OSError(28, 'No space left on device')
+            raise OSError(28, 'No space left on device', str(srv.vault / 'notes' / 'mantel.md'))
 
         monkeypatch.setattr(serve_mod.study_mod.markdown_io.os, 'replace', disk_full)
         code, body = _req(base + '/api/study/grade', 'POST', {'X-Schist-Study': '1'},
                           {'id': 'notes/mantel.md', 'grade': 'good'})
         assert code == 500 and 'No space' in json.loads(body)['reason']
+        assert str(srv.vault) not in body.decode() if isinstance(body, bytes) else str(srv.vault) not in body
 
     def test_unknown_card_is_a_400(self, server):
         _, base = server
