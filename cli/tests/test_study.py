@@ -452,6 +452,24 @@ def test_lint_flags_a_missing_connections_section(vault):
     assert any('no links' in w for w in study.lint_card(card))
 
 
+@pytest.mark.parametrize('section', [
+    '> a quote first\n- related: notes/x.md "why"\n',
+    '---\n- related: notes/x.md "why"\n',
+    '### sub\n- related: notes/x.md "why"\n',
+    '    - related: notes/x.md "why"\n',
+], ids=['blockquote', 'rule', 'subheading', 'indented'])
+def test_lint_counts_only_the_connections_ingest_indexes(vault, section):
+    from schist import ingest
+    text = full_card_text().replace(
+        '- related: notes/2026-11-09-demo.md "the analysis this card explains"\n', section)
+    assert text != full_card_text()
+    (vault / 'notes' / 'odd.md').write_text(text, encoding='utf-8')
+    card = study.load_cards(vault)[0]
+    assert ingest.parse_connections(card['body']) == []
+    assert study.connection_lines(card['body']) == []
+    assert any('no links' in w for w in study.lint_card(card))
+
+
 def test_lint_cli_strict_exits_1_for_a_warning(vault, capsys):
     from types import SimpleNamespace
     write_card(vault)

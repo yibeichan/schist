@@ -268,11 +268,16 @@ def section_text(body: str, name: str) -> str | None:
     return "\n".join(lines[start + 1:end]).strip()
 
 
-def connection_lines(body: str) -> list[str]:
-    """`- <type>: <target>` lines in `## Connections` (the ingest rule)."""
-    section = section_text(body, "Connections") or ""
-    return [line for line in section.splitlines()
-            if re.match(r"^- [A-Za-z][\w-]*:\s+\S", line)]
+def connection_lines(body: str) -> list[dict]:
+    """The edges ingest indexes from `## Connections`.
+
+    Counted by ingest's own parser, so a card the lint passes is a card with
+    edges in the graph (a blockquote first, a `---` rule, a sub-heading or an
+    indented item all stop ingest's scan).
+    """
+    from . import ingest
+
+    return ingest.parse_connections(body)
 
 
 def _body_before_log(body: str) -> str:
