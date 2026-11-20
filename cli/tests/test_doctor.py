@@ -4728,6 +4728,12 @@ class TestCheckVaultAccess:
         ("env HOME={env:HOME}/schist-vault",
          {"command": ["srv"], "environment": {"HOME": "{env:HOME}/schist-vault"}},
          {}, "PASS"),
+        ("{env:SUB} whose value is ${HOME}/schist-vault",
+         {"command": ["srv", "{env:SUB}"]},
+         {"SUB": "${HOME}/schist-vault"}, "PASS"),
+        ("env ROOT={env:SUB} whose value is ${HOME}/schist-vault",
+         {"command": ["srv"], "environment": {"ROOT": "{env:SUB}"}},
+         {"SUB": "${HOME}/schist-vault"}, "PASS"),
         ("{file:{env:HOME}/p.txt} arg",
          {"command": ["srv", "{file:{env:HOME}/p.txt}"]}, {}, "PASS"),
         ("{env:X} arg, X is a file reference",
@@ -4739,9 +4745,11 @@ class TestCheckVaultAccess:
         """Status of the audit on each input when OpenCode's variables were
         not read (recorded from the previous implementation). A server can
         expand variables itself, so no input may become less severe: no
-        FAIL turns into WARN or PASS, no WARN into PASS."""
+        FAIL turns into WARN or PASS, no WARN into PASS. The two `SUB` rows
+        passed before and must FAIL: they name the vault through a variable
+        whose value holds `${HOME}`."""
         self.opencode_home(monkeypatch)
-        for k in ("VAULTX", "N", "UNSET1", "VD", "X", "NOPE"):
+        for k in ("VAULTX", "N", "UNSET1", "VD", "X", "NOPE", "SUB"):
             monkeypatch.delenv(k, raising=False)
         prefix = str(home) + "/"
         for k, v in env.items():
@@ -4753,6 +4761,8 @@ class TestCheckVaultAccess:
         r = check_vault_access(str(vault))
         rank = {"PASS": 0, "WARN": 1, "FAIL": 2}
         assert rank[r.status] >= rank[base], (name, base, r)
+        if "SUB" in env:
+            assert r.status == "FAIL", (name, r)
 
     def test_opencode_shell_command_still_expands_shell_variables(
         self, home, monkeypatch, vault

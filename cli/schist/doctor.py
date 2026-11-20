@@ -2805,11 +2805,13 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
                         if files:
                             doubts.append(f"{field}: cannot read a "
                                           "{file:...} reference")
-                        if shell and field == "args":
-                            # The shell expands what OpenCode passed on.
-                            text, more = _expand_mcp_vars(
-                                text, s.project, shell=True, local=own_env)
-                            missing += more
+                        # What OpenCode substituted can hold ${NAME} (a
+                        # variable whose value names one): a shell, or a
+                        # server that expands variables itself, resolves it.
+                        text, more = _expand_mcp_vars(
+                            text, s.project,
+                            shell=shell and field == "args", local=own_env)
+                        missing += more
                     else:
                         text, missing = _expand_mcp_vars(
                             v, s.project, shell=shell and field == "args",
