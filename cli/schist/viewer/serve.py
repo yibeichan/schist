@@ -558,6 +558,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._json(409, {'ok': False, 'reason': str(exc)})
         except study_mod.StudyBusy as exc:
             return self._json(503, {'ok': False, 'reason': f'vault is busy: {exc}'})
+        except study_mod.StudyWriteError as exc:
+            return self._json(500, {'ok': False, 'reason': str(exc)})
         except study_mod.StudyError as exc:
             return self._json(400, {'ok': False, 'reason': str(exc)})
         return self._json(200, {'ok': True, 'card': study_mod.public_card(card)})

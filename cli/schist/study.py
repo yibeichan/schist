@@ -33,7 +33,7 @@ import re
 import subprocess
 from pathlib import Path, PurePosixPath
 
-from . import git_ops, writable
+from . import git_ops, markdown_io, writable
 
 GRADES: tuple[str, ...] = ("taught", "good", "partial", "missed", "busy", "known")
 # `taught` is the first-teach move; it stays agent-only, so the page may not
@@ -67,6 +67,11 @@ class StudyError(Exception):
 
 class StudyConflict(StudyError):
     """The card changed between the read and the grade."""
+
+
+class StudyWriteError(StudyError):
+    """The card could not be read or written (disk full, permissions, a git
+    binary that will not start); a server fault, not a bad request."""
 
 
 class StudyBusy(StudyError):
@@ -422,6 +427,22 @@ def _unstage(vault_path: Path, rel: str) -> str | None:
     return None if staged.returncode == 0 else f"{rel} is still staged"
 
 
+def _restore(vault_path: Path, rel: str, path: Path, text: str) -> str | None:
+    """Put the card's original text back and unstage it; a message on failure.
+
+    Never raises: it runs while another error is already on its way out.
+    """
+    problems: list[str] = []
+    try:
+        markdown_io._atomic_write(str(path), text, str(vault_path))
+    except OSError as exc:
+        problems.append(f"could not restore the card ({exc})")
+    stuck = _unstage(vault_path, rel)
+    if stuck:
+        problems.append(f"the grade is still staged ({stuck})")
+    return "; ".join(problems) or None
+
+
 def grade_card(vault: str | Path, card_id: str, grade: str, *,
                expected_sha: str | None = None, today: dt.date | None = None,
                source: str = "session", note: str | None = None, check=None,
@@ -453,7 +474,12 @@ def grade_card(vault: str | Path, card_id: str, grade: str, *,
 
     try:
         with git_ops.vault_write_lock(str(vault_path), timeout=lock_timeout):
-            text = read_card_text(path)
+            try:
+                text = read_card_text(path)
+            except UnicodeDecodeError:
+                raise StudyError(f"{rel} is not valid UTF-8") from None
+            except OSError as exc:
+                raise StudyWriteError(f"could not read {rel}: {exc}") from exc
             card = card_from_text(rel, text)
             if card is None:
                 raise StudyError(f"{rel} is not a learning card")
@@ -468,19 +494,26 @@ def grade_card(vault: str | Path, card_id: str, grade: str, *,
                     f"{rel} changed since it was read (now {body_sha(text)[:12]})"
                 )
             new_text, _ = apply_grade(text, grade, today=day, source=source, note=note)
-            path.write_text(new_text, encoding="utf-8")
-            ok, output = git_ops.commit(
-                str(vault_path), f"study: {card['title'] or rel} — {grade}", [rel]
-            )
+            try:
+                markdown_io._atomic_write(str(path), new_text, str(vault_path))
+                ok, output = git_ops.commit(
+                    str(vault_path), f"study: {card['title'] or rel} — {grade}", [rel]
+                )
+            except BaseException as exc:
+                # Whatever stopped the write or the commit, leave the card as
+                # it was and out of the index, then let the error through.
+                _restore(vault_path, rel, path, text)
+                if isinstance(exc, OSError):
+                    raise StudyWriteError(f"could not grade {rel}: {exc}") from exc
+                raise
             if not ok:
                 # Leave the card as it was: an ungraded card that did not
                 # move is recoverable, an uncommitted grade would block the
                 # next pull and surprise the next writer.
-                path.write_text(text, encoding="utf-8")
-                stuck = _unstage(vault_path, rel)
                 detail = output.strip()[:200]
+                stuck = _restore(vault_path, rel, path, text)
                 if stuck:
-                    detail += f"; and the grade is still staged ({stuck})"
+                    detail += f"; {stuck}"
                 raise StudyError(f"could not grade {rel}; the commit failed: {detail}")
     except git_ops.VaultLockTimeout as exc:
         raise StudyBusy(str(exc)) from None

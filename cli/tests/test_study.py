@@ -360,6 +360,39 @@ def test_grade_card_still_teaches_a_new_card_from_a_session(vault):
     assert card['state'] == 'learning' and card['interval'] == 1
 
 
+def test_grade_card_restores_and_unstages_when_the_commit_raises(vault, monkeypatch):
+    path = write_card(vault)
+    commit(vault)
+    before = path.read_text(encoding='utf-8')
+
+    def staging_then_crash(vault_path, message, files):
+        _git(vault, 'add', '--', *files)
+        raise FileNotFoundError('git')
+
+    monkeypatch.setattr(study.git_ops, 'commit', staging_then_crash)
+    with pytest.raises(study.StudyWriteError, match='could not grade'):
+        study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
+    assert path.read_text(encoding='utf-8') == before
+    assert _git(vault, 'status', '--porcelain') == ''
+
+
+def test_grade_card_leaves_the_card_whole_when_the_write_fails(vault, monkeypatch):
+    path = write_card(vault)
+    commit(vault)
+    before = path.read_bytes()
+
+    def disk_full(src, dst):
+        raise OSError(28, 'No space left on device')
+
+    monkeypatch.setattr(study.markdown_io.os, 'replace', disk_full)
+    with pytest.raises(study.StudyWriteError, match='No space'):
+        study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
+    monkeypatch.undo()
+    assert path.read_bytes() == before
+    assert _git(vault, 'status', '--porcelain') == ''
+    assert not list((vault / '.schist' / 'tmp').glob('*'))
+
+
 def test_apply_grade_records_the_answer_in_the_log():
     new_text, _ = study.apply_grade(
         card_text(), 'partial', today=TODAY, note='  right idea,\n\nmissing the null  ')

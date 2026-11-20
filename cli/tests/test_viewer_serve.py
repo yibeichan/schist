@@ -691,6 +691,18 @@ class TestStudy:
         assert code == 400 and 'not been taught' in json.loads(body)['reason']
         assert path.read_text(encoding='utf-8') == before
 
+    def test_unwritable_card_is_a_json_500(self, server, monkeypatch):
+        srv, base = server
+        self._write_card(srv.vault)
+
+        def disk_full(src, dst):
+            raise OSError(28, 'No space left on device')
+
+        monkeypatch.setattr(serve_mod.study_mod.markdown_io.os, 'replace', disk_full)
+        code, body = _req(base + '/api/study/grade', 'POST', {'X-Schist-Study': '1'},
+                          {'id': 'notes/mantel.md', 'grade': 'good'})
+        assert code == 500 and 'No space' in json.loads(body)['reason']
+
     def test_unknown_card_is_a_400(self, server):
         _, base = server
         code, body = _req(base + '/api/study/grade', 'POST', {'X-Schist-Study': '1'},
