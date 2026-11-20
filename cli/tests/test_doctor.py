@@ -1751,6 +1751,48 @@ class TestCheckMcpConfig:
         r = check_mcp_config(None)
         assert r.status == "WARN", r
         assert "no schist entry found" in r.message
+
+    def test_opencode_enabled_false_schist_entry_warns_as_absent(
+        self, tmp_path, monkeypatch
+    ):
+        """The older `enabled: false` spelling leaves an entry unstarted too:
+        the MCP check must not validate it (the Vault access audit already
+        skips it)."""
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        path = tmp_path / ".config" / "opencode" / "opencode.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"mcp": {"schist": {
+            "type": "local",
+            "command": ["node", str(tmp_path / "missing.js")],
+            "enabled": False,
+        }}}))
+        r = check_mcp_config(None)
+        assert r.status == "WARN", r
+        assert "no schist entry found" in r.message
+
+    def test_opencode_entry_reaches_the_alignment_checks(
+        self, tmp_path, monkeypatch
+    ):
+        """check_mcp_schema_alignment, check_mcp_vocab_alignment and
+        check_mcp_connections_rule read their entry through
+        `_mcp_config_entry`: an OpenCode-only machine must be seen there,
+        in the shape the checks read (`command` a program, `args` the rest)."""
+        from schist.doctor import _mcp_config_entry
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        self._write_opencode_config(tmp_path, {
+            "off": {"type": "local", "disabled": True,
+                    "command": ["node", "/x/schist/mcp-server/dist/index.js"]},
+            "schist": {"type": "local",
+                       "command": ["node", "/y/mcp-server/dist/index.js"],
+                       "environment": {"SCHIST_VAULT_PATH": "/srv/vault"}},
+        })
+        entry = _mcp_config_entry(None)
+        assert entry is not None
+        assert entry["command"] == "node"
+        assert entry["args"] == ["/y/mcp-server/dist/index.js"]
+
     def test_not_found(self, tmp_path, monkeypatch):
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         r = check_mcp_config(None)
@@ -4471,20 +4513,119 @@ class TestCheckVaultAccess:
     def test_opencode_mcp_timeout_object_is_not_a_server(
         self, home, monkeypatch, vault, schist_js
     ):
-        """In the V1 compat shape, `mcp.timeout` sits next to the server
-        names and must not be picked up as a server entry (it has neither
-        `type` nor `command`)."""
+        """In the compat shape (no `servers` wrapper) `mcp.timeout` sits
+        next to the server names. It has neither `type` nor `command`, so
+        it is not a server, even when it carries fields a server has: read
+        as one, this block would name the vault in its environment and
+        FAIL."""
         self.opencode_home(monkeypatch)
-        path = self._opencode_config(home, {"schist": {
-            "type": "local", "command": ["node", str(schist_js)],
-            "environment": {"SCHIST_VAULT_PATH": str(vault)},
-        }})
-        data = json.loads(path.read_text())
-        data["mcp"]["timeout"] = {"startup": 45000, "execution": 600000}
-        path.write_text(json.dumps(data))
+        path = home / ".config" / "opencode" / "opencode.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"mcp": {
+            "schist": {
+                "type": "local", "command": ["node", str(schist_js)],
+                "environment": {"SCHIST_VAULT_PATH": str(vault)},
+            },
+            "timeout": {"environment": {"ROOT": str(vault)}},
+        }}))
         r = check_vault_access(str(vault))
         assert r.status == "PASS", r
-        assert "mcp timeout" not in r.message
+
+    def test_opencode_env_reference_in_args_is_expanded(
+        self, home, monkeypatch, vault
+    ):
+        """OpenCode writes variables as `{env:NAME}`; one that names a folder
+        containing the vault is seen like the literal path."""
+        self.opencode_home(monkeypatch)
+        self._opencode_config(home, {"fs": {
+            "type": "local",
+            "command": ["npx", "-y", "server-filesystem", "{env:HOME}"],
+        }})
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+        assert "fs (args)" in r.message
+
+    def test_opencode_env_reference_in_environment_is_expanded(
+        self, home, monkeypatch, vault
+    ):
+        self.opencode_home(monkeypatch)
+        self._opencode_config(home, {"idx": {
+            "type": "local",
+            "command": ["node", "/srv/other/indexer.js"],
+            "environment": {"ROOT": "{env:HOME}/schist-vault"},
+        }})
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+        assert "idx (env)" in r.message
+
+    def test_opencode_unset_env_reference_warns(
+        self, home, monkeypatch, vault
+    ):
+        """OpenCode turns an unset variable into an empty string, but its
+        environment may differ from doctor's: neither PASS nor FAIL."""
+        self.opencode_home(monkeypatch)
+        monkeypatch.delenv("SCHIST_TEST_UNSET_ROOT", raising=False)
+        self._opencode_config(home, {
+            "fs": {"type": "local", "command": [
+                "npx", "-y", "server-filesystem", "{env:SCHIST_TEST_UNSET_ROOT}"]},
+            "idx": {"type": "local", "command": ["node", "/srv/i.js"],
+                    "environment": {"ROOT": "{env:SCHIST_TEST_UNSET_ROOT}"}},
+        })
+        r = check_vault_access(str(vault))
+        assert r.status == "WARN", r
+        assert "fs (args: cannot expand" in r.message
+        assert "idx (env: cannot expand" in r.message
+
+    def test_opencode_file_reference_warns(self, home, monkeypatch, vault):
+        """`{file:path}` is replaced by the file's content, which doctor does
+        not read."""
+        self.opencode_home(monkeypatch)
+        self._opencode_config(home, {"fs": {
+            "type": "local",
+            "command": ["npx", "-y", "server-filesystem", "{file:~/root.txt}"],
+        }})
+        r = check_vault_access(str(vault))
+        assert r.status == "WARN", r
+
+    def test_opencode_shell_variable_is_not_expanded_for_a_program(
+        self, home, monkeypatch, vault
+    ):
+        """OpenCode does not expand `$NAME` or `${NAME}` in a JSON string, so
+        a program started directly receives them as typed."""
+        self.opencode_home(monkeypatch)
+        self._opencode_config(home, {
+            "a": {"type": "local", "command": [
+                "npx", "-y", "server-filesystem", "$HOME/schist-vault"]},
+            "b": {"type": "local", "command": [
+                "npx", "-y", "server-filesystem", "${HOME}/schist-vault"]},
+        })
+        r = check_vault_access(str(vault))
+        assert r.status == "PASS", r
+
+    def test_opencode_shell_command_still_expands_shell_variables(
+        self, home, monkeypatch, vault
+    ):
+        """A shell started by OpenCode expands `$HOME` itself, and sees what
+        `{env:HOME}` was replaced with."""
+        self.opencode_home(monkeypatch)
+        self._opencode_config(home, {
+            "a": {"type": "local", "command": [
+                "sh", "-c", "cat $HOME/schist-vault/x"]},
+            "b": {"type": "local", "command": [
+                "sh", "-c", "cat {env:HOME}/schist-vault/x"]},
+        })
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+        assert "a (args)" in r.message and "b (args)" in r.message
+
+    def test_opencode_fix_text_names_the_disabled_flag(
+        self, home, monkeypatch, vault
+    ):
+        self.opencode_home(monkeypatch)
+        self._opencode_config(home, {"fs": self._fs(str(vault))})
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+        assert '"disabled": true' in r.fix
 
     def test_unrelated_server_passes(self, home, vault):
         self._claude_json(home, {
