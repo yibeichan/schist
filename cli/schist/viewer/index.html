@@ -614,6 +614,18 @@ SPDX-License-Identifier: Apache-2.0
     return counts;
   }
 
+  // The repo named by a `project:<repo>` tag, or null for any other tag.
+  function projectOfTag(t) {
+    return t.startsWith("project:") ? t.slice(8) : null;
+  }
+
+  // A hash entry as the filter it selects: links made when project tags were offered as tags
+  // (#tag=project:x) now select the project filter.
+  function hashFilter(facet, v) {
+    const p = facet === "tag" ? projectOfTag(v) : null;
+    return p === null ? [facet, v] : ["project", p];
+  }
+
   function filtersOn(f) {
     return f.type.size > 0 || f.project.size > 0 || f.status.size > 0 || f.tag.size > 0;
   }
@@ -762,11 +774,12 @@ SPDX-License-Identifier: Apache-2.0
     let params;
     try { params = new URLSearchParams(location.hash.slice(1)); } catch { return; }
     for (const facet of Object.keys(filters)) {
-      for (const v of params.getAll(facet)) {
+      for (const raw of params.getAll(facet)) {
+        const [fa, v] = hashFilter(facet, raw);
         const known = { tag: tagCounts.has(v), type: typeOrder.includes(v),
                         project: projectOrder.includes(v), status: statusOrder.includes(v) };
-        if (known[facet]) {
-          filters[facet].add(v);
+        if (known[fa]) {
+          filters[fa].add(v);
         }
       }
     }
@@ -814,8 +827,15 @@ SPDX-License-Identifier: Apache-2.0
     for (const t of (meta.tags || [])) {
       const b = txt("button", t, "tag tag-btn");
       b.type = "button";
-      b.title = filters.tag.has(t) ? "Already filtering by this tag" : "Show only notes with this tag";
-      b.addEventListener("click", () => addTag(t));
+      const p = projectOfTag(t);
+      if (p !== null) {
+        // Project tags are filtered with the project chips, not the tag filter.
+        b.title = filters.project.has(p) ? "Stop filtering by this project" : "Show only notes in this project";
+        b.addEventListener("click", () => { document.getElementById("more-filters").open = true; toggle("project", p); });
+      } else {
+        b.title = filters.tag.has(t) ? "Already filtering by this tag" : "Show only notes with this tag";
+        b.addEventListener("click", () => addTag(t));
+      }
       metaFrag.appendChild(b);
     }
     metaEl.replaceChildren(metaFrag);
