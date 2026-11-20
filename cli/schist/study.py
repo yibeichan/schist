@@ -454,15 +454,21 @@ def _staged_problem(vault_path: Path, rel: str) -> str | None:
     in the index, either would commit it under a "study:" message or lose it.
     """
     try:
-        diff = subprocess.run(
-            ['git', 'diff', '--cached', '--quiet', '--', rel], cwd=vault_path,
+        status = subprocess.run(
+            ['git', 'status', '--porcelain', '--', rel], cwd=vault_path,
             capture_output=True, text=True, timeout=60,
         )
     except (OSError, subprocess.SubprocessError):
         return f"could not check whether {rel} has staged changes"
-    if diff.returncode == 0:
-        return None
-    return f"{rel} has staged changes; commit or unstage them before grading it"
+    if status.returncode != 0:
+        return f"could not check whether {rel} has staged changes"
+    for line in status.stdout.splitlines():
+        index, worktree = line[0:1], line[1:2]
+        # Column 1 is the index; " A" is an intent-to-add entry (git add -N),
+        # which git diff --cached does not list and a rollback would drop.
+        if index not in (" ", "?") or (index == " " and worktree == "A"):
+            return f"{rel} has staged changes; commit or unstage them before grading it"
+    return None
 
 
 def _restore(vault_path: Path, rel: str, path: Path, text: str) -> str | None:

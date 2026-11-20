@@ -548,6 +548,17 @@ def test_grade_card_leaves_the_card_whole_when_the_write_fails(vault, monkeypatc
     assert not list((vault / '.schist' / 'tmp').glob('*'))
 
 
+def test_grade_card_refuses_an_intent_to_add_card(vault):
+    path = vault / 'notes' / 'card.md'
+    path.write_text(card_text(), encoding='utf-8')
+    _git(vault, 'add', '-N', '--', 'notes/card.md')
+    before = path.read_bytes()
+    with pytest.raises(study.StudyError, match='staged changes'):
+        study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
+    assert path.read_bytes() == before
+    assert _git(vault, 'status', '--porcelain', '--', 'notes/card.md') == 'A notes/card.md'
+
+
 @pytest.mark.parametrize('worktree_edit', [False, True], ids=['staged-X-worktree-X', 'staged-X-worktree-Y'])
 def test_grade_card_refuses_a_card_with_staged_changes(vault, worktree_edit):
     path = write_card(vault)
