@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Yibei Chen
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """`_install_local_hooks` and core.hooksPath (#669): init must not skip silently."""
 from __future__ import annotations
 
