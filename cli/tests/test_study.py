@@ -466,6 +466,15 @@ def test_grade_card_says_so_when_the_rollback_fails_too(vault, monkeypatch):
     assert 'git reset failed' in str(exc.value)
 
 
+def test_a_silent_commit_failure_still_gives_a_reason(vault, monkeypatch):
+    write_card(vault)
+    commit(vault)
+    monkeypatch.setattr(study.git_ops, 'commit', lambda *a, **k: (False, ''))
+    with pytest.raises(study.StudyError) as exc:
+        study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
+    assert not str(exc.value).endswith(': ')
+
+
 def test_grade_card_says_so_when_the_rollback_fails_after_a_failed_commit(vault, monkeypatch):
     write_card(vault)
     commit(vault)

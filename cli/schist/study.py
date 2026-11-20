@@ -563,7 +563,7 @@ def grade_card(vault: str | Path, card_id: str, grade: str, *,
                 # Leave the card as it was: an ungraded card that did not
                 # move is recoverable, an uncommitted grade would block the
                 # next pull and surprise the next writer.
-                detail = output.strip()[:200]
+                detail = output.strip()[:200] or "git printed nothing"
                 stuck = _restore(vault_path, rel, path, text)
                 if stuck:
                     detail += f"; {stuck}"
