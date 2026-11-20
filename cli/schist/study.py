@@ -453,7 +453,8 @@ def grade_card(vault: str | Path, card_id: str, grade: str, *,
     expected to raise if this spoke may not write it (the viewer passes the
     proposal queue's hub-ACL check). `expected_sha` is the sha256 of the file
     text the caller read; a mismatch is a StudyConflict, checked again under
-    the lock so a concurrent grade cannot be overwritten.
+    the lock so a concurrent grade cannot be overwritten. Without it (None or
+    empty) the conflict check is skipped; the page always sends one.
     """
     if grade not in GRADES:
         raise StudyError(f"grade must be one of: {', '.join(GRADES)}")
@@ -634,7 +635,7 @@ def command(args, vault_path: str) -> None:
             ))
             print(f"card={card['id']} grade={args.grade}")
         else:
-            print("Usage: schist study {due|new|next|status|grade}", file=sys.stderr)
+            print("Usage: schist study {due|new|next|status|lint|grade}", file=sys.stderr)
             sys.exit(2)
     except StudyBusy as exc:
         print(f"Error: vault is busy: {exc}", file=sys.stderr)

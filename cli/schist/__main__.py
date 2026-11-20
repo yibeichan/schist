@@ -146,7 +146,7 @@ def main():
     p_link.add_argument('--context', default=None)
 
     # study
-    p_study = sub.add_parser('study', help='Study cards: due, new, next, status, grade')
+    p_study = sub.add_parser('study', help='Study cards: due, new, next, status, lint, grade')
     study_sub = p_study.add_subparsers(dest='study_action')
     for _name, _help in (('due', 'Cards due for review'),
                          ('new', 'Cards recorded but not taught yet')):

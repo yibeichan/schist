@@ -557,6 +557,14 @@ def test_lint_counts_only_the_connections_ingest_indexes(vault, section):
     assert any('no links' in w for w in study.lint_card(card))
 
 
+def test_cli_usage_line_lists_lint(vault, capsys):
+    from types import SimpleNamespace
+    with pytest.raises(SystemExit) as exc:
+        study.command(SimpleNamespace(study_action=None, today=None), str(vault))
+    assert exc.value.code == 2
+    assert 'lint' in capsys.readouterr().err
+
+
 def test_lint_cli_strict_exits_1_for_a_warning(vault, capsys):
     from types import SimpleNamespace
     write_card(vault)

@@ -1479,7 +1479,7 @@ SPDX-License-Identifier: Apache-2.0
   const studyBtn = $("study-btn"), studyPane = $("study"), studyCardEl = $("study-card");
   const studyView = $("study-view"), studyProject = $("study-project");
   const studyCounts = $("study-counts"), studyNote = $("study-note");
-  const study = { cards: [], index: 0, flipped: false, counts: null, loaded: false };
+  const study = { cards: [], index: 0, flipped: false, counts: null, loaded: false, projects: new Set() };
   const GRADES = ["missed", "partial", "good", "busy", "known"];
   const GRADE_LABEL = { missed: "Missed", partial: "Partial", good: "Good", busy: "Busy", known: "Known" };
   const GRADE_TITLE = {
@@ -1558,7 +1558,10 @@ SPDX-License-Identifier: Apache-2.0
     const counts = study.counts;
     studyCounts.textContent = counts
       ? `${counts.due} due · ${counts.new} new · ${counts.all} cards` : "";
-    const projects = [...new Set(study.cards.flatMap(card => card.projects))].sort();
+    // The server filters by project, so remember every project seen: the
+    // dropdown must still offer the others after one is picked.
+    for (const card of study.cards) for (const project of card.projects) study.projects.add(project);
+    const projects = [...study.projects].sort();
     const current = studyProject.value;
     const all = el("option", null, "All projects");
     all.value = "";
