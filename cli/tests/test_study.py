@@ -310,6 +310,24 @@ def test_grade_card_leaves_nothing_staged_when_a_hook_refuses_the_commit(vault):
     assert _git(vault, 'status', '--porcelain') == ''
 
 
+def test_grade_card_refuses_a_page_grade_for_a_new_card(vault):
+    path = write_card(vault, state='new', next_review='-', interval=0)
+    commit(vault)
+    before = path.read_text(encoding='utf-8')
+    head = _git(vault, 'rev-parse', 'HEAD')
+    with pytest.raises(study.StudyError, match='not been taught'):
+        study.grade_card(vault, 'notes/card.md', 'good', today=TODAY, source='page')
+    assert path.read_text(encoding='utf-8') == before
+    assert _git(vault, 'rev-parse', 'HEAD') == head
+
+
+def test_grade_card_still_teaches_a_new_card_from_a_session(vault):
+    write_card(vault, state='new', next_review='-', interval=0)
+    commit(vault)
+    card = study.grade_card(vault, 'notes/card.md', 'taught', today=TODAY)
+    assert card['state'] == 'learning' and card['interval'] == 1
+
+
 def test_apply_grade_records_the_answer_in_the_log():
     new_text, _ = study.apply_grade(
         card_text(), 'partial', today=TODAY, note='  right idea,\n\nmissing the null  ')

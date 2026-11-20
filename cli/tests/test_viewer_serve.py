@@ -678,6 +678,19 @@ class TestStudy:
                           {'id': 'notes/mantel.md', 'grade': 'taught'})
         assert code == 400 and 'grade must be one of' in json.loads(body)['reason']
 
+    def test_page_cannot_grade_a_new_card(self, server):
+        srv, base = server
+        self._write_card(srv.vault)
+        path = srv.vault / 'notes' / 'mantel.md'
+        path.write_text(path.read_text(encoding='utf-8').replace(
+            '**State:** learning', '**State:** new'), encoding='utf-8')
+        _git(srv.vault, 'commit', '-qam', 'untaught')
+        before = path.read_text(encoding='utf-8')
+        code, body = _req(base + '/api/study/grade', 'POST', {'X-Schist-Study': '1'},
+                          {'id': 'notes/mantel.md', 'grade': 'good'})
+        assert code == 400 and 'not been taught' in json.loads(body)['reason']
+        assert path.read_text(encoding='utf-8') == before
+
     def test_unknown_card_is_a_400(self, server):
         _, base = server
         code, body = _req(base + '/api/study/grade', 'POST', {'X-Schist-Study': '1'},

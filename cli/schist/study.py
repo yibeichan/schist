@@ -21,7 +21,8 @@ written.
 Grading writes exactly four things — the three state lines and one appended
 log line — while holding the vault write lock, and refuses (409) if the card
 changed since the reader saw it. `taught` is agent-only: teaching happens in a
-session, not on the page.
+session, not on the page, and the page may not grade a card still in state
+`new`.
 """
 
 from __future__ import annotations
@@ -439,6 +440,12 @@ def grade_card(vault: str | Path, card_id: str, grade: str, *,
             card = card_from_text(rel, text)
             if card is None:
                 raise StudyError(f"{rel} is not a learning card")
+            if source == "page" and card["state"] == "new":
+                # A new card has not been taught; the page hides its grade
+                # buttons, so a page grade for one is a stale page or a script.
+                raise StudyError(
+                    f"{rel} has not been taught yet; a session teaches it before it is graded"
+                )
             if expected_sha and body_sha(text) != expected_sha:
                 raise StudyConflict(
                     f"{rel} changed since it was read (now {body_sha(text)[:12]})"
