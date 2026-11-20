@@ -450,6 +450,7 @@ class ProposalStore:
                 raise ProposalError(f'proposal {pid} is already {p["status"]}')
             # vault.yaml may have changed since the proposal was filed.
             self.check_writable(p['args']['source'] if p['kind'] == 'link' else p['target'])
+            self._refuse_standard_edit(p)
             p['decided_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
             body = p['args']['body'] if p['kind'] == 'create' else ''
             try:
@@ -470,6 +471,27 @@ class ProposalStore:
             p['output'] = ((r.stdout or '') + (r.stderr or ''))[-2000:]
             p['status'] = APPROVED if r.returncode == 0 else FAILED
             return self._save(p)
+
+    def _refuse_standard_edit(self, p: dict) -> None:
+        """The filing checks again at approval, for a proposal filed before
+        they existed or edited on disk since: a note may not carry the standard
+        tags, and a link may not write into a standard."""
+        if p['kind'] == 'create':
+            tags = p['args'].get('tags') or []
+            if any(is_reserved_tag(t) for t in tags):
+                raise ProposalError(STANDARDS_ONLY_BY_REJECTING + '; reject this proposal')
+            return
+        try:
+            uri = Path(self.db_path).absolute().as_uri() + '?mode=ro'
+            db = sqlite3.connect(uri, uri=True)
+            try:
+                row = db.execute('SELECT tags FROM docs WHERE id = ?', (p['args']['source'],)).fetchone()
+            finally:
+                db.close()
+        except sqlite3.Error as e:
+            raise ProposalError(f'cannot check whether the source note is a standard: {e}') from None
+        if row and any(is_reserved_tag(t) for t in json.loads(row[0] or '[]')):
+            raise ProposalError(STANDARDS_ONLY_BY_REJECTING + '; reject this proposal')
 
     def reject(self, pid: str, reason: str = '', save_standard: bool = False,
                runner=subprocess.run) -> dict:

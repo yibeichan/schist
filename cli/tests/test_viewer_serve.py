@@ -1552,3 +1552,24 @@ class TestReservedTagsAndStandardsDirectory:
             for tag in (a, b):
                 with pytest.raises(proposals_mod.ProposalError, match='standards are set only by rejecting'):
                     store.propose_note(ro, title='T', body='b', rationale='r', tags=[tag])
+
+    def test_approve_refuses_a_note_with_standard_tags_filed_before_the_check(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='Old', body='b', rationale='r')
+        p['args']['tags'] = ['# #standard', '# #applies-to:notes']
+        store._save(p)
+        with pytest.raises(proposals_mod.ProposalError, match='standards are set only by rejecting'):
+            store.approve(p['id'], runner=_never)
+        assert store.get(p['id'])['status'] == proposals_mod.PENDING
+        _reindex(vault)
+        assert proposals_mod.standards_for(ro, 'notes') == []
+
+    def test_approve_refuses_a_link_whose_source_became_a_standard(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_link(ro, source='notes/sync.md', target='locking', type='supports', rationale='r')
+        (vault / 'notes' / 'sync.md').write_text(
+            '---\ntitle: Spoke sync\nstatus: draft\ntags: [standard, applies-to:notes]\n---\n\nSync.\n',
+            encoding='utf-8')
+        _reindex(vault)
+        with pytest.raises(proposals_mod.ProposalError, match='standards are set only by rejecting'):
+            store.approve(p['id'], runner=_never)
