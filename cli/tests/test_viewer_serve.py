@@ -1500,3 +1500,31 @@ class TestReservedTagsAndStandardsDirectory:
         _reindex(vault)
         res = proposals_mod.standards_result('notes', proposals_mod.standards_for(ro, 'notes'))
         assert 'truncated' not in res['standards'][0]
+
+    @pytest.fixture
+    def with_root_note(self, vault):
+        (vault / 'rootnote.md').write_text('---\ntitle: Root note\nstatus: draft\n---\n\nRoot.\n',
+                                           encoding='utf-8')
+        _git(vault, 'add', 'rootnote.md')
+        _git(vault, 'commit', '-q', '-m', 'root note')
+        _reindex(vault)
+
+    def test_a_proposal_records_the_directory_whose_standards_it_answers_to(self, vault, ro, with_root_note):
+        (vault / 'notes' / 'sub').mkdir()
+        (vault / 'notes' / 'sub' / 'x.md').write_text('---\ntitle: Nested\n---\n\nx\n', encoding='utf-8')
+        _reindex(vault)
+        store = proposals_mod.ProposalStore(vault)
+        assert store.propose_note(ro, title='T', body='b', rationale='r')['standards_dir'] == 'notes'
+        link = store.propose_link(ro, source='notes/sub/x.md', target='locking', type='supports', rationale='r')
+        assert link['standards_dir'] == 'notes'
+        root = store.propose_link(ro, source='rootnote.md', target='notes/sync.md', type='related', rationale='r')
+        assert root['standards_dir'] == ''
+
+    def test_a_proposal_in_no_directory_cannot_save_a_standard(self, vault, ro, with_root_note):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_link(ro, source='rootnote.md', target='notes/sync.md', type='related', rationale='r')
+        with pytest.raises(proposals_mod.ProposalError, match='in no configured directory'):
+            store.reject(p['id'], reason='Bad link', save_standard=True, runner=_never)
+        assert store.get(p['id'])['status'] == proposals_mod.PENDING
+        done = store.reject(p['id'], reason='Bad link')
+        assert done['status'] == proposals_mod.REJECTED and done['reason'] == 'Bad link'

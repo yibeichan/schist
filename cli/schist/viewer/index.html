@@ -1241,8 +1241,9 @@ SPDX-License-Identifier: Apache-2.0
 
     // Reject asks why. A reason saved as a standard becomes a note the agent
     // must check every later proposal into the same directory against.
-    const dir = p.kind === "link" ? String((p.args && p.args.source) || "").split("/")[0]
-                                  : String((p.args && p.args.directory) || "");
+    // The directory is the server's (standards_dir, empty for a link whose
+    // source is in no configured directory, which cannot carry a standard).
+    const dir = String(p.standards_dir || "");
     const box = el("div", "p-reason");
     box.hidden = true;
     const why = el("textarea");
@@ -1254,6 +1255,7 @@ SPDX-License-Identifier: Apache-2.0
     const keep = el("input");
     keep.type = "checkbox";
     keepLabel.append(keep, document.createTextNode(` save as a standard for ${dir}/`));
+    keepLabel.hidden = !dir;
     const confirm = el("button", "p-reject", "Reject"), cancel = el("button", null, "Cancel");
     confirm.type = cancel.type = "button";
     const row = el("div", "p-actions");

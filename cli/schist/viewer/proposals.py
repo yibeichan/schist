@@ -154,7 +154,9 @@ def _configured_dir(vault, note_id: str) -> str:
 
 def _directory_of(vault, p: dict) -> str:
     """The directory a proposal writes into: the new note's, or for a link the
-    configured directory of the source note, which `schist link` rewrites."""
+    configured directory of the source note, which `schist link` rewrites.
+    '' when there is none. Filing records it as `standards_dir`, which the
+    page shows instead of working it out again."""
     if p['kind'] == 'create':
         return p['args']['directory']
     return _configured_dir(vault, p['args']['source'])
@@ -363,6 +365,7 @@ class ProposalStore:
         diff = '\n'.join(f'+{line}' for line in ['---', *fm, '---', '', *body.splitlines()])
         return self._new('create', target=target, title=title, rationale=str(rationale or ''),
                          question=str(question or ''), diff=diff, checked_standards=checked,
+                         standards_dir=directory,
                          args={'title': title, 'body': body, 'directory': directory,
                                'tags': tags, 'concepts': concepts})
 
@@ -387,12 +390,14 @@ class ProposalStore:
         if any(markdown_io.contains_line_boundary(x) for x in (source, target)):
             raise ProposalError('ids may not contain line breaks')
         self.check_writable(source)   # `schist link` rewrites and commits the source note
-        checked = _require_checked(db, _configured_dir(self.vault, source), checked_standards)
+        standards_dir = _configured_dir(self.vault, source)
+        checked = _require_checked(db, standards_dir, checked_standards)
         context = markdown_io.sanitize_context(context) if context else None
         line = f'- {link_type}: {target}' + (f' "{context}"' if context else '')
         return self._new('link', target=source, title=f'{src[0]} —{link_type}→ {tgt[0]}',
                          rationale=str(rationale or ''), question=str(question or ''),
                          diff=f'@@ {source} · ## Connections @@\n+{line}', checked_standards=checked,
+                         standards_dir=standards_dir,
                          args={'source': source, 'target': target, 'type': link_type,
                                'context': context})
 
@@ -473,6 +478,9 @@ class ProposalStore:
 
     def _save_standard(self, p: dict, reason: str, runner) -> dict:
         directory = _directory_of(self.vault, p)
+        if not directory:
+            raise ProposalError('this proposal is in no configured directory, so it cannot '
+                                'carry a standard; reject it without saving one')
         self.check_writable(f'{directory}/x.md')   # vault.yaml may have changed since filing
         # The prefix keeps the slug non-empty (a reason in CJK or punctuation
         # only) and the title from starting with a date, both of which
