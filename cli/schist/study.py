@@ -449,9 +449,11 @@ def _check_path(vault_path: Path, path: Path, rel: str) -> None:
 def _staged_problem(vault_path: Path, rel: str) -> str | None:
     """A refusal message when `rel` has staged changes, else None.
 
-    The grade commits the card with whatever the index holds for it, and a
-    failed commit resets that entry to HEAD; with a staged edit of the user's
-    in the index, either would commit it under a "study:" message or lose it.
+    The card's own staged changes: the grade commits the card with whatever
+    the index holds for it, and a failed commit resets that entry to HEAD;
+    with a staged edit of the user's in the index, either would commit it
+    under a "study:" message or lose it. Other files the user staged are not
+    looked at (every writer commits what is staged).
     """
     try:
         status = subprocess.run(
