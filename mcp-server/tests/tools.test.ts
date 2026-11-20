@@ -5344,7 +5344,7 @@ describe("delete_note", () => {
 
   // Commit a linker as an older writer left it, index it as linking to
   // `targetId`, and return HEAD.
-  async function commitOldLinker(vault: string, linkerId: string, text: string, targetId: string) {
+  async function commitOldLinker(vault: string, linkerId: string, text: string | Buffer, targetId: string) {
     await fs.mkdir(path.dirname(path.join(vault, linkerId)), { recursive: true });
     await fs.writeFile(path.join(vault, linkerId), text);
     await execFile("git", ["add", linkerId], { cwd: vault });
@@ -5438,6 +5438,48 @@ describe("delete_note", () => {
     30000,
   );
 
+  it("cascade refuses, naming the file, when a linker is not valid UTF-8 (#871)", async () => {
+    // readNoteText throws NoteDecodeError for a file that exists but cannot be
+    // read. That is not "the linker vanished": the cascade cannot repair it, so
+    // it refuses before deleting instead of reporting success with the edge left.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const target = await create_note(
+      vault, { owner: TEST_AGENT, title: "TargetUtf8", body: "t", directory: "notes" }, config,
+    ) as { id: string };
+    const linkerId = "notes/latin1-linker.md";
+    const linkerBytes = Buffer.from(`---\ntitle: caf\xe9\n---\nbody\n\n## Connections\n\n- extends: ${target.id}\n`, "latin1");
+    const head = await commitOldLinker(vault, linkerId, linkerBytes, target.id);
+
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: target.id, cascade: true }, config) as {
+      error?: string; message?: string;
+    };
+    expect(res.error).toBe("VALIDATION_ERROR");
+    expect(res.message).toContain("Cascade cannot read");
+    expect(res.message).toContain(linkerId);
+    expect(res.message).toContain("not valid UTF-8");
+    expect(res.message).toContain("Re-save each file as UTF-8");
+    await fs.access(path.join(vault, target.id));
+    expect(await fs.readFile(path.join(vault, linkerId))).toEqual(linkerBytes);
+    expect((await execFile("git", ["rev-parse", "HEAD"], { cwd: vault })).stdout.trim()).toBe(head);
+  }, 30000);
+
+  it("cascade still skips a linker that vanished since the index was built (#871)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const target = await create_note(
+      vault, { owner: TEST_AGENT, title: "TargetGone", body: "t", directory: "notes" }, config,
+    ) as { id: string };
+    const linkerId = "notes/gone-linker.md";
+    await seedEdgesDb(vault, [{ source: linkerId, target: target.id, type: "extends" }]);
+
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: target.id, cascade: true }, config) as {
+      error?: string; deleted?: boolean;
+    };
+    expect(res.error).toBeUndefined();
+    await expect(fs.access(path.join(vault, target.id))).rejects.toThrow();
+  }, 30000);
+
   it("cascade deletes when a linker opens with a BOM, from which ingest reads no frontmatter (#846)", async () => {
     // Ingest reads no frontmatter from this note, so its index row holds no
     // concept reference; stripConceptRefs must not refuse it as a split.
@@ -5504,7 +5546,8 @@ describe("delete_note", () => {
   it.each([
     ["non-YAML", (t: string) => `---js\n{ title: "old" }\n---\nbody\n\n## Connections\n\n- extends: ${t}\n`],
     ["split-frontmatter", (t: string) => `---\ntitle: old\n-----\nbody\n\n## Connections\n\n- extends: ${t}\n`],
-  ])("cascade checks the write ACL before refusing a %s linker", async (_kind, makeLinker) => {
+    ["undecodable", (t: string): string | Buffer => Buffer.from(`---\ntitle: caf\xe9\n---\nbody\n\n## Connections\n\n- extends: ${t}\n`, "latin1")],
+  ] as Array<[string, (t: string) => string | Buffer]>)("cascade checks the write ACL before refusing a %s linker", async (_kind, makeLinker) => {
     // A caller who may not write the linker is told so, not asked to fix it.
     // The ACL identity falls back to the owner only with SCHIST_IDENTITY unset.
     const savedIdentity = process.env.SCHIST_IDENTITY;
@@ -5524,7 +5567,7 @@ describe("delete_note", () => {
       };
       expect(res.error).toBe("ACL_DENIED");
       expect(res.message).toContain(linkerId);
-      expect(await fs.readFile(path.join(vault, linkerId), "utf-8")).toBe(linkerText);
+      expect(await fs.readFile(path.join(vault, linkerId))).toEqual(Buffer.from(linkerText));
       expect((await execFile("git", ["rev-parse", "HEAD"], { cwd: vault })).stdout.trim()).toBe(head);
     } finally {
       if (savedIdentity === undefined) delete process.env.SCHIST_IDENTITY;

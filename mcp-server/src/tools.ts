@@ -3572,6 +3572,7 @@ export async function delete_note(
     const parseErrors: Array<{ relPath: string; message: string }> = [];
     const stripErrors: Array<{ relPath: string; message: string }> = [];
     const splitErrors: Array<{ relPath: string; message: string }> = [];
+    const decodeErrors: Array<{ relPath: string; message: string }> = [];
     if (args.cascade === true && inbound.length > 0) {
       const sources = [...new Set(inbound.map((e) => e.source))];
       for (const source of sources) {
@@ -3585,7 +3586,14 @@ export async function delete_note(
         let content: string;
         try {
           content = await readNoteText(path.join(vaultRoot, source));
-        } catch {
+        } catch (e: unknown) {
+          if (e instanceof NoteDecodeError) {
+            // The file exists but is not valid UTF-8, so the cascade cannot
+            // read or repair it and the edge stays in the index. Refuse like
+            // the other linkers it cannot rewrite, below.
+            decodeErrors.push({ relPath: source, message: "it is not valid UTF-8" });
+            continue;
+          }
           // Source vanished since the index was built — nothing to repair.
           continue;
         }
@@ -3650,6 +3658,7 @@ export async function delete_note(
         const denied = [
           ...repairs.map((r) => r.relPath), ...nonYaml, ...parseErrors.map((p) => p.relPath),
           ...stripErrors.map((p) => p.relPath), ...splitErrors.map((p) => p.relPath),
+          ...decodeErrors.map((p) => p.relPath),
         ]
           .filter((rel) => !canWrite(acl, aclIdentity, deriveScope(rel)));
         if (denied.length > 0) {
@@ -3669,6 +3678,15 @@ export async function delete_note(
             "Cascade cannot remove the connections safely from: " +
             stripErrors.map((p) => `${p.relPath} (${p.message})`).join("; ") +
             " Edit each file directly, commit, then retry the delete.",
+        } satisfies ToolError;
+      }
+      if (decodeErrors.length > 0) {
+        return {
+          error: "VALIDATION_ERROR",
+          message:
+            "Cascade cannot read: " +
+            decodeErrors.map((p) => `${p.relPath} (${p.message})`).join("; ") +
+            ". Re-save each file as UTF-8, commit, then retry the delete.",
         } satisfies ToolError;
       }
       if (splitErrors.length > 0) {
