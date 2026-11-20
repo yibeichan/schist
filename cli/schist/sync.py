@@ -172,18 +172,45 @@ def _atomic_write_hook(hook_path: Path, body: str) -> None:
         raise
 
 
-def _install_local_hooks(vault_path) -> None:
+def _install_local_hooks(vault_path) -> str | None:
     """Write the post-commit and pre-commit hooks into a working-tree repo.
 
     Shared by standalone and spoke init so either flavor of vault gets the
     SQLite auto-rebuild and the staged-secret guard. Caller must have already
-    created `<vault>/.git/`. Also called by `schist hooks reinstall` to refresh
-    spokes initialized with an older hook template (issue #103).
+    created `<vault>/.git/`.
+
+    The hooks always go into the repository's own `.git/hooks/`. A
+    `core.hooksPath` (often a global one shared by every repo) redirects Git
+    elsewhere, and writing schist's hooks into a directory other repos use
+    would change them too, so init does not. It returns a warning when the
+    setting is present, because Git then ignores the hooks written here; it
+    returns None otherwise.
     """
     hooks_dir = Path(vault_path) / ".git" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     _atomic_write_hook(hooks_dir / "post-commit", POST_COMMIT_HOOK)
     _atomic_write_hook(hooks_dir / "pre-commit", PRE_COMMIT_HOOK)
+
+    from .doctor import _configured_hooks_path
+
+    configured = _configured_hooks_path(["-C", str(vault_path)])
+    if configured is None:
+        return None
+    if configured == "":
+        where = "core.hooksPath is set to an empty value, so Git runs no hooks"
+    else:
+        where = f"core.hooksPath is set to '{configured}', so Git runs hooks from there"
+    return (
+        f"{where} and ignores the post-commit ingest and pre-commit secret scan "
+        f"installed in the vault's .git/hooks/. Unset it for this vault "
+        f"(`git config --unset core.hooksPath`) or install the hooks in that "
+        f"directory yourself; `schist doctor` reports the state."
+    )
+
+
+def _warn_hooks_not_active(warning: str | None) -> None:
+    if warning:
+        print(f"Warning: {warning}", file=sys.stderr)
 
 
 def _install_staging_tree(staging: Path, target: Path, display_path: str) -> None:
@@ -395,7 +422,7 @@ def _build_spoke_in_staging(
         comment="schist runtime state + spoke config (never pushed to hub)",
     )
 
-    _install_local_hooks(str(staging))
+    _warn_hooks_not_active(_install_local_hooks(str(staging)))
 
 
 def _ensure_ignore_lines(path: Path, lines: list[str], comment: str | None = None) -> None:
@@ -1859,7 +1886,7 @@ def _build_standalone_in_staging(
         if r.returncode != 0:
             raise _InitError(f"{' '.join(cmd)} failed: {r.stderr.strip()}")
 
-    _install_local_hooks(staging)
+    _warn_hooks_not_active(_install_local_hooks(staging))
 
 
 def _build_standalone_vault(name: str, identity: str) -> dict:
