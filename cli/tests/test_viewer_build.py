@@ -729,6 +729,28 @@ process.stdout.write(JSON.stringify({
         # A note in two projects counts for both; the project filter itself is skipped.
         assert out["projectCounts"] == {"alpha": 2, "beta": 1}
 
+    def test_tag_suggestions_leave_out_project_tags(self):
+        """project:<repo> tags have their own chips (alternatives), while a tag
+        filter needs every tag; offering them as tags would give the same
+        selection two meanings."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node not installed")
+        m = re.search(r"function tagCountsOf\(.*?\n  \}\n", self.PAGE, re.S)
+        assert m, "tagCountsOf not found"
+        assert "tagCountsOf(nodes)" in self.PAGE
+        script = m.group(0) + """
+const nodes = [
+  { id: "a", tags: ["security", "project:alpha"] },
+  { id: "b", tags: ["security", "hub", "project:beta"] },
+  { id: "c" },
+];
+process.stdout.write(JSON.stringify([...tagCountsOf(nodes)]));
+"""
+        res = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+        assert res.returncode == 0, res.stderr
+        assert json.loads(res.stdout) == [["security", 2], ["hub", 1]]
+
     def test_filter_controls_are_accessible_and_restored_from_the_url(self):
         assert 'b.setAttribute("aria-pressed"' in self.PAGE
         assert 'role="group" aria-labelledby="type-label"' in self.PAGE

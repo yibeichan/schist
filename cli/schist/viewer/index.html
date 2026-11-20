@@ -604,6 +604,16 @@ SPDX-License-Identifier: Apache-2.0
     return (n.tags || []).filter(t => t.startsWith("project:")).map(t => t.slice(8));
   }
 
+  // The tags offered to the tag filter. `project:<repo>` tags are left out: the project chips
+  // cover them with "any of" semantics, while the tag filter requires every tag.
+  function tagCountsOf(nodes) {
+    const counts = new Map();
+    for (const n of nodes) for (const t of (n.tags || [])) {
+      if (!t.startsWith("project:")) counts.set(t, (counts.get(t) || 0) + 1);
+    }
+    return counts;
+  }
+
   function filtersOn(f) {
     return f.type.size > 0 || f.project.size > 0 || f.status.size > 0 || f.tag.size > 0;
   }
@@ -641,8 +651,7 @@ SPDX-License-Identifier: Apache-2.0
     .sort((a, b) => b[1] - a[1]).map(e => e[0]);
   const projectOrder = [...facetCounts(nodes, filters, "project", nodeProjects)]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(e => e[0]);
-  const tagCounts = new Map();
-  for (const n of nodes) for (const t of (n.tags || [])) tagCounts.set(t, (tagCounts.get(t) || 0) + 1);
+  const tagCounts = tagCountsOf(nodes);
   const tagByLower = new Map([...tagCounts.keys()].map(t => [t.toLowerCase(), t]));
   {
     const opts = document.createDocumentFragment();
