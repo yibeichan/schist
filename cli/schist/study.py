@@ -165,6 +165,12 @@ def next_of(body: str) -> dt.date | None:
         return None
 
 
+def read_card_text(path: Path) -> str:
+    """The file's text with its line endings as written (read_text would fold
+    CRLF and bare CR into LF, and a grade would write the folded text back)."""
+    return path.read_bytes().decode("utf-8")
+
+
 def body_sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -215,7 +221,7 @@ def load_cards(vault: str | Path) -> list[dict]:
         return cards
     for path in sorted(notes.glob("*.md")):
         try:
-            text = path.read_text(encoding="utf-8")
+            text = read_card_text(path)
         except (OSError, UnicodeDecodeError):
             continue
         card = card_from_text(f"notes/{path.name}", text)
@@ -339,7 +345,9 @@ def _replace_one(lines: list[str], name: str, value: str) -> None:
         raise StudyError(
             f'card has {len(hits)} "**{name}:**" lines; expected exactly one'
         )
-    lines[hits[0]] = f"**{name}:** {value}"
+    # Lines come from split("\n"), so a CRLF card keeps its \r on each line.
+    eol = "\r" if lines[hits[0]].endswith("\r") else ""
+    lines[hits[0]] = f"**{name}:** {value}{eol}"
 
 
 def _append_log(lines: list[str], line: str) -> None:
@@ -348,7 +356,9 @@ def _append_log(lines: list[str], line: str) -> None:
         raise StudyError('card has no "## Review log" section')
     end = next((i for i in range(heading + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
     last = next((i for i in range(end - 1, heading, -1) if lines[i].strip()), None)
-    lines.insert(last + 1 if last is not None else heading + 1, line)
+    at = last if last is not None else heading
+    eol = "\r" if lines[at].endswith("\r") else ""
+    lines.insert(at + 1, line + eol)
 
 
 def _log_note(note: str | None) -> str:
@@ -369,7 +379,9 @@ def apply_grade(text: str, grade: str, *, today: dt.date,
     frontmatter, body, offset = split_note(text)
     old_state, old_interval = state_of(body), interval_of(body)
     new_state, new_interval, new_next = next_review(old_state, old_interval, grade, today)
-    lines = body.splitlines()
+    # Split on "\n" only: splitlines() would also break on \r, \x0b, \x0c,
+    # U+2028 and friends, rewriting body text the user wrote.
+    lines = body.split("\n")
     _replace_one(lines, "State", new_state)
     _replace_one(lines, "Next review", new_next.isoformat() if new_next else "-")
     _replace_one(lines, "Interval", f"{new_interval} days")
@@ -379,7 +391,7 @@ def apply_grade(text: str, grade: str, *, today: dt.date,
         f" · next {new_next.isoformat() if new_next else '-'} · {source}"
         + _log_note(note),
     )
-    new_body = "\n".join(lines) + ("\n" if body.endswith("\n") else "")
+    new_body = "\n".join(lines)
     return text[:offset] + new_body, {
         "state": new_state,
         "interval": new_interval,
@@ -441,7 +453,7 @@ def grade_card(vault: str | Path, card_id: str, grade: str, *,
 
     try:
         with git_ops.vault_write_lock(str(vault_path), timeout=lock_timeout):
-            text = path.read_text(encoding="utf-8")
+            text = read_card_text(path)
             card = card_from_text(rel, text)
             if card is None:
                 raise StudyError(f"{rel} is not a learning card")

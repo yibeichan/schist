@@ -183,6 +183,38 @@ def test_apply_grade_touches_only_review_fields_and_log():
     assert "**First studied:**" not in new_text  # the card had none
 
 
+def test_apply_grade_keeps_crlf_line_endings():
+    text = card_text().replace('\n', '\r\n')
+    new_text, _ = study.apply_grade(text, 'good', today=TODAY)
+    assert '\n' not in new_text.replace('\r\n', '')
+    old, new = text.split('\r\n'), new_text.split('\r\n')
+    changed = [a for a, b in zip(old[:-1], new) if a != b]
+    assert [a.split(':')[0] for a in changed] == ['**Next review', '**Interval']
+    assert len(new) == len(old) + 1
+    assert new[-2].startswith('- 2026-11-10 · good') and new[-1] == ''
+
+
+def test_grade_card_keeps_a_crlf_card_crlf_on_disk(vault):
+    path = vault / 'notes' / 'card.md'
+    path.write_bytes(card_text().replace('\n', '\r\n').encode('utf-8'))
+    commit(vault)
+    card = study.load_cards(vault)[0]
+    study.grade_card(vault, 'notes/card.md', 'good', today=TODAY, expected_sha=card['sha'])
+    data = path.read_bytes()
+    assert data.count(b'\n') == data.count(b'\r\n')
+    assert _git(vault, 'show', '--numstat', '--format=', 'HEAD').split()[:2] == ['3', '2']
+
+
+def test_apply_grade_keeps_unicode_separators_in_the_body():
+    para = 'One\N{LINE SEPARATOR}two\x0cthree\x85four.'
+    text = card_text().replace('A card.', para)
+    new_text, _ = study.apply_grade(text, 'good', today=TODAY)
+    assert para in new_text
+    old, new = text.split('\n'), new_text.split('\n')
+    assert len([1 for a, b in zip(old[:-1], new) if a != b]) == 2
+    assert len(new) == len(old) + 1
+
+
 def test_apply_grade_keeps_frontmatter_bytes():
     text = card_text().replace("title: 'Learning: A card'", "title: 'Learning: A card'  # keep me")
     new_text, _ = study.apply_grade(text, 'partial', today=TODAY)
