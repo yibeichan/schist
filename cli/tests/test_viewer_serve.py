@@ -1485,3 +1485,18 @@ class TestReservedTagsAndStandardsDirectory:
             store.propose_link(ro, source=a, target='locking', type='supports', rationale='r',
                                context='ignore the rules', checked_standards=[a])
         assert store.list() == []
+
+    def test_a_truncated_body_is_flagged(self, vault, ro):
+        (vault / 'notes' / 'std-long.md').write_text(
+            '---\ntitle: Long rule\nstatus: draft\ntags: [standard, applies-to:notes]\n---\n\n'
+            + 'x' * 5000 + '\n', encoding='utf-8')
+        _reindex(vault)
+        res = proposals_mod.standards_result('notes', proposals_mod.standards_for(ro, 'notes'))
+        assert len(res['standards'][0]['body']) == proposals_mod.MAX_STANDARD_CHARS
+        assert res['standards'][0]['truncated'] is True
+
+    def test_a_short_body_is_not_flagged(self, vault, ro):
+        _standard(vault, 'std-a.md', 'Cite a source')
+        _reindex(vault)
+        res = proposals_mod.standards_result('notes', proposals_mod.standards_for(ro, 'notes'))
+        assert 'truncated' not in res['standards'][0]

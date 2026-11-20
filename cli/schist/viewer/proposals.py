@@ -87,7 +87,8 @@ def standards_for(db, directory: str) -> list[dict]:
         "   AND COALESCE(d.status, '') != 'archived'"
         " ORDER BY d.id",
         (len(prefix), prefix, len(prefix), STANDARD_TAG, applies_tag(directory))).fetchall()
-    return [{'id': r[0], 'title': r[1], 'body': (r[2] or '')[:MAX_STANDARD_CHARS]}
+    return [{'id': r[0], 'title': r[1], 'body': (r[2] or '')[:MAX_STANDARD_CHARS],
+             'body_chars': len(r[2] or '')}
             for r in rows]
 
 
@@ -108,7 +109,8 @@ def standards_result(directory: str, found: list[dict]) -> dict:
                 item['title'] = s['title'][:title_cap]
             if share:
                 item['body'] = s['body'][:share]
-            if len(s['body']) > share or len(s['title']) > title_cap:
+            if (s.get('body_chars', len(s['body'])) > len(item.get('body', ''))
+                    or len(s['title']) > title_cap):
                 item['truncated'] = True
             items.append(item)
         res = {'directory': directory, 'standards': items,
