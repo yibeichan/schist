@@ -1573,3 +1573,20 @@ class TestReservedTagsAndStandardsDirectory:
         _reindex(vault)
         with pytest.raises(proposals_mod.ProposalError, match='standards are set only by rejecting'):
             store.approve(p['id'], runner=_never)
+
+    def test_a_proposal_without_a_recorded_directory_cannot_save_a_standard(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='Old', body='b', rationale='r')
+        del p['standards_dir']
+        store._save(p)
+        with pytest.raises(proposals_mod.ProposalError, match='does not record its directory'):
+            store.reject(p['id'], reason='Too vague', save_standard=True, runner=_never)
+        assert store.reject(p['id'], reason='Too vague')['status'] == proposals_mod.REJECTED
+
+    def test_a_standard_goes_where_the_reviewer_was_shown(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='T', body='b', rationale='r')
+        p['standards_dir'] = 'papers'
+        store._save(p)
+        with pytest.raises(proposals_mod.ProposalError, match='no longer configures'):
+            store.reject(p['id'], reason='Too vague', save_standard=True, runner=_never)

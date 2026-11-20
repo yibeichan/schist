@@ -519,10 +519,19 @@ class ProposalStore:
             return self._save(p)
 
     def _save_standard(self, p: dict, reason: str, runner) -> dict:
-        directory = _directory_of(self.vault, p)
+        # The directory recorded at filing is the one the reviewer was shown.
+        # A proposal without one (filed by an earlier build) or in none, or one
+        # whose directory is no longer what the vault configures, saves nothing.
+        if 'standards_dir' not in p:
+            raise ProposalError('this proposal does not record its directory, so it cannot '
+                                'carry a standard; reject it without saving one')
+        directory = p['standards_dir']
         if not directory:
             raise ProposalError('this proposal is in no configured directory, so it cannot '
                                 'carry a standard; reject it without saving one')
+        if _directory_of(self.vault, p) != directory:
+            raise ProposalError(f'the vault no longer configures {directory}/ for this proposal; '
+                                'reject it without saving a standard')
         self.check_writable(f'{directory}/x.md')   # vault.yaml may have changed since filing
         # The prefix keeps the slug non-empty (a reason in CJK or punctuation
         # only) and the title from starting with a date, both of which
