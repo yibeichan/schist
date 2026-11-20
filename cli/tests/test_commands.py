@@ -31,6 +31,7 @@ import pytest
 import yaml
 
 from schist import commands, git_ops, markdown_io
+from schist.ingest import scan_note_connections
 
 
 def _add_args(title, *, body="body", tags=None, concepts=None, file_ref=None,
@@ -408,6 +409,43 @@ class TestAddCollision:
         suffixed = [f.name for f in files if re.fullmatch(
             r"\d{4}-\d{2}-\d{2}-daily-note-\d{2}-\d{2}-\d{2}\.md", f.name)]
         assert len(suffixed) == 1
+
+
+class TestAddWarnsWhenNoConnectionsAreIndexed:
+    """`add` warns, like MCP create_note's connectionsWarning, when the note
+    has a ## Connections heading but the rule indexes nothing from it."""
+
+    def test_warns_with_the_line_and_reason(self, tmp_path, capsys):
+        body = "<details>\nhidden\n</details>\n\n## Connections\n\n- extends: notes/b.md\n"
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.add(_add_args("Note", body=body),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        out, err = capsys.readouterr()
+        rel = out.strip()
+        text = (tmp_path / rel).read_text(encoding="utf-8")
+        _lines, scan = scan_note_connections(text)
+        assert scan.problem is not None and scan.heading is not None
+        assert scan.edges == []
+        line = scan.problem[0] + 1
+        assert text.splitlines()[line - 1] == "<details>"
+        assert f"Warning: no connections are indexed from this note: line {line}: " in err
+        assert "see schema/SCHEMA.md" in err
+
+    def test_no_warning_when_the_section_is_indexed(self, tmp_path, capsys):
+        body = "text\n\n## Connections\n\n- extends: notes/b.md\n"
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.add(_add_args("Note", body=body),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        _out, err = capsys.readouterr()
+        assert "no connections are indexed" not in err
+
+    def test_no_warning_without_a_connections_heading(self, tmp_path, capsys):
+        body = "<details>\nhidden\n</details>\n"
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.add(_add_args("Note", body=body),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        _out, err = capsys.readouterr()
+        assert "no connections are indexed" not in err
 
 
 class TestAddStatusVocabulary:
