@@ -427,6 +427,25 @@ def _unstage(vault_path: Path, rel: str) -> str | None:
     return None if staged.returncode == 0 else f"{rel} is still staged"
 
 
+def _staged_problem(vault_path: Path, rel: str) -> str | None:
+    """A refusal message when `rel` has staged changes, else None.
+
+    The grade commits the card with whatever the index holds for it, and a
+    failed commit resets that entry to HEAD; with a staged edit of the user's
+    in the index, either would commit it under a "study:" message or lose it.
+    """
+    try:
+        diff = subprocess.run(
+            ['git', 'diff', '--cached', '--quiet', '--', rel], cwd=vault_path,
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return f"could not check whether {rel} has staged changes"
+    if diff.returncode == 0:
+        return None
+    return f"{rel} has staged changes; commit or unstage them before grading it"
+
+
 def _restore(vault_path: Path, rel: str, path: Path, text: str) -> str | None:
     """Put the card's original text back and unstage it; a message on failure.
 
@@ -498,6 +517,9 @@ def grade_card(vault: str | Path, card_id: str, grade: str, *,
                 raise StudyConflict(
                     f"{rel} changed since it was read (now {body_sha(text)[:12]})"
                 )
+            staged = _staged_problem(vault_path, rel)
+            if staged:
+                raise StudyError(staged)
             new_text, _ = apply_grade(text, grade, today=day, source=source, note=note)
             try:
                 markdown_io._atomic_write(str(path), new_text, str(vault_path))

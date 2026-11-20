@@ -415,6 +415,29 @@ def test_grade_card_leaves_the_card_whole_when_the_write_fails(vault, monkeypatc
     assert not list((vault / '.schist' / 'tmp').glob('*'))
 
 
+@pytest.mark.parametrize('worktree_edit', [False, True], ids=['staged-X-worktree-X', 'staged-X-worktree-Y'])
+def test_grade_card_refuses_a_card_with_staged_changes(vault, worktree_edit):
+    path = write_card(vault)
+    commit(vault)
+    path.write_text(card_text() + 'staged edit\n', encoding='utf-8')
+    _git(vault, 'add', '--', 'notes/card.md')
+    if worktree_edit:
+        path.write_text(card_text() + 'staged edit\nand more\n', encoding='utf-8')
+    hook = vault / '.git' / 'hooks' / 'pre-commit'
+    hook.write_text('#!/bin/sh\nexit 1\n', encoding='utf-8')
+    hook.chmod(0o755)
+    before_file = path.read_bytes()
+    before_index = _git(vault, 'ls-files', '-s', '--', 'notes/card.md')
+    before_cached = _git(vault, 'diff', '--cached')
+    head = _git(vault, 'rev-parse', 'HEAD')
+    with pytest.raises(study.StudyError, match='staged changes'):
+        study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
+    assert path.read_bytes() == before_file
+    assert _git(vault, 'ls-files', '-s', '--', 'notes/card.md') == before_index
+    assert _git(vault, 'diff', '--cached') == before_cached
+    assert _git(vault, 'rev-parse', 'HEAD') == head
+
+
 def test_apply_grade_records_the_answer_in_the_log():
     new_text, _ = study.apply_grade(
         card_text(), 'partial', today=TODAY, note='  right idea,\n\nmissing the null  ')
