@@ -4587,20 +4587,172 @@ class TestCheckVaultAccess:
         r = check_vault_access(str(vault))
         assert r.status == "WARN", r
 
-    def test_opencode_shell_variable_is_not_expanded_for_a_program(
+    def test_opencode_dollar_variables_for_a_program_still_fail(
         self, home, monkeypatch, vault
     ):
-        """OpenCode does not expand `$NAME` or `${NAME}` in a JSON string, so
-        a program started directly receives them as typed."""
+        """OpenCode passes `${HOME}` on as written, but a server can expand
+        it itself, so a value that reaches the vault once expanded still
+        FAILs, as it did before OpenCode's own syntax was read."""
         self.opencode_home(monkeypatch)
-        self._opencode_config(home, {
-            "a": {"type": "local", "command": [
-                "npx", "-y", "server-filesystem", "$HOME/schist-vault"]},
-            "b": {"type": "local", "command": [
-                "npx", "-y", "server-filesystem", "${HOME}/schist-vault"]},
-        })
+        for name, arg in (("a", "${HOME}/schist-vault"), ("b", "${HOME}"),
+                          ("c", "--root=${HOME}"), ("d", "${userHome}")):
+            self._opencode_config(home, {name: {"type": "local", "command": [
+                "npx", "-y", "server-filesystem", arg]}})
+            r = check_vault_access(str(vault))
+            assert r.status == "FAIL", (arg, r)
+
+    def test_opencode_file_reference_warns_in_any_field(
+        self, home, monkeypatch, vault
+    ):
+        """OpenCode replaces `{file:...}` with the file's content in a second
+        pass over the result of the `{env:}` pass; doctor does not read it."""
+        self.opencode_home(monkeypatch)
+        for entry in (
+            {"command": ["srv", "{file:{env:HOME}/p.txt}"]},
+            {"command": ["srv"], "environment": {
+                "ROOT": "{file:{env:HOME}/p.txt}"}},
+            {"command": ["srv"], "environment": {"CONFIG": "{file:~/p.txt}"}},
+            {"command": ["srv", "{env:SCHIST_TEST_FILEREF}"]},
+        ):
+            monkeypatch.setenv("SCHIST_TEST_FILEREF", "{file:~/p.txt}")
+            self._opencode_config(home, {"x": {"type": "local", **entry}})
+            r = check_vault_access(str(vault))
+            assert r.status == "WARN", (entry, r)
+            assert "{file:...}" in r.message
+
+    def test_opencode_env_name_runs_to_the_next_closing_brace(
+        self, home, monkeypatch, vault
+    ):
+        """`{env:A{B}<path>` names the variable `A{B` (unset: empty), as
+        OpenCode reads it; the vault path after it is not a path doctor can
+        be sure of."""
+        self.opencode_home(monkeypatch)
+        self._opencode_config(home, {"x": {"type": "local", "command": [
+            "srv", "{env:A{B}" + str(vault)]}})
         r = check_vault_access(str(vault))
-        assert r.status == "PASS", r
+        assert r.status in ("WARN", "FAIL"), r
+
+    def test_opencode_expansion_applies_to_opencode_files_only(
+        self, home, monkeypatch, vault
+    ):
+        """An `mcp` block in another client's file keeps that client's
+        variable rules."""
+        self.opencode_home(monkeypatch)
+        (home / ".claude.json").write_text(json.dumps({"mcp": {"servers": {
+            "x": {"type": "local", "command": ["srv", "${HOME}"]}}}}))
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+
+    @pytest.mark.parametrize("name,entry,env,base", [
+        ("literal vault arg", {"command": ["srv", "H/schist-vault"]}, {}, "FAIL"),
+        ("{env:HOME} arg", {"command": ["srv", "{env:HOME}"]}, {}, "PASS"),
+        ("{env:HOME}/schist-vault arg",
+         {"command": ["srv", "{env:HOME}/schist-vault"]}, {}, "PASS"),
+        ("${HOME}/schist-vault arg",
+         {"command": ["srv", "${HOME}/schist-vault"]}, {}, "FAIL"),
+        ("$HOME/schist-vault arg",
+         {"command": ["srv", "$HOME/schist-vault"]}, {}, "PASS"),
+        ("${HOME} arg", {"command": ["srv", "${HOME}"]}, {}, "FAIL"),
+        ("${env:HOME} arg", {"command": ["srv", "${env:HOME}"]}, {}, "FAIL"),
+        ("${userHome} arg", {"command": ["srv", "${userHome}"]}, {}, "FAIL"),
+        ("${NOPE:-default} arg",
+         {"command": ["srv", "${NOPE:-H/schist-vault}"]}, {}, "FAIL"),
+        ("--root=${HOME} arg", {"command": ["srv", "--root=${HOME}"]}, {}, "FAIL"),
+        ("${VAULTX} arg set", {"command": ["srv", "${VAULTX}"]},
+         {"VAULTX": "H/schist-vault"}, "FAIL"),
+        ("$VAULTX arg set", {"command": ["srv", "$VAULTX"]},
+         {"VAULTX": "H/schist-vault"}, "PASS"),
+        ("${VD} arg, VD in own environment",
+         {"command": ["srv", "${VD}"], "environment": {"VD": "H/schist-vault"}},
+         {}, "FAIL"),
+        ("{env:VD} arg, VD in own environment",
+         {"command": ["srv", "{env:VD}"], "environment": {"VD": "H/schist-vault"}},
+         {}, "FAIL"),
+        ("env ROOT=${HOME}/schist-vault",
+         {"command": ["srv"], "environment": {"ROOT": "${HOME}/schist-vault"}},
+         {}, "FAIL"),
+        ("env CONFIG=${HOME}/schist-vault",
+         {"command": ["srv"], "environment": {"CONFIG": "${HOME}/schist-vault"}},
+         {}, "FAIL"),
+        ("env ROOT={env:HOME}/schist-vault",
+         {"command": ["srv"], "environment": {"ROOT": "{env:HOME}/schist-vault"}},
+         {}, "PASS"),
+        ("env CONFIG={env:UNSET1}/x",
+         {"command": ["srv"], "environment": {"CONFIG": "{env:UNSET1}/x"}},
+         {}, "PASS"),
+        ("env CONFIG={file:~/p.txt}",
+         {"command": ["srv"], "environment": {"CONFIG": "{file:~/p.txt}"}},
+         {}, "PASS"),
+        ("env ROOT={file:~/p.txt}",
+         {"command": ["srv"], "environment": {"ROOT": "{file:~/p.txt}"}},
+         {}, "PASS"),
+        ("{file:~/p.txt} arg", {"command": ["srv", "{file:~/p.txt}"]}, {}, "PASS"),
+        ("{env:UNSET1} arg", {"command": ["srv", "{env:UNSET1}"]}, {}, "PASS"),
+        ("{env:UNSET1}H/schist-vault arg",
+         {"command": ["srv", "{env:UNSET1}H/schist-vault"]}, {}, "PASS"),
+        ("{env:A{B}H/schist-vault arg",
+         {"command": ["srv", "{env:A{B}H/schist-vault"]}, {}, "PASS"),
+        ("{env:} arg", {"command": ["srv", "{env:}H/schist-vault"]}, {}, "PASS"),
+        ("nested {env:{env:N}}", {"command": ["srv", "{env:{env:N}}"]},
+         {"N": "HOME"}, "PASS"),
+        ("~ arg", {"command": ["srv", "~"]}, {}, "FAIL"),
+        ("~/schist-vault arg", {"command": ["srv", "~/schist-vault"]}, {}, "FAIL"),
+        ("relative ./schist-vault, no cwd",
+         {"command": ["srv", "./schist-vault"]}, {}, "WARN"),
+        ("relative, cwd={env:HOME}",
+         {"command": ["srv", "schist-vault"], "cwd": "{env:HOME}"}, {}, "PASS"),
+        ("relative, cwd=${HOME}",
+         {"command": ["srv", "schist-vault"], "cwd": "${HOME}"}, {}, "FAIL"),
+        ("relative, cwd=~",
+         {"command": ["srv", "schist-vault"], "cwd": "~"}, {}, "FAIL"),
+        ("relative ./, cwd=${HOME}",
+         {"command": ["srv", "./schist-vault"], "cwd": "${HOME}"}, {}, "FAIL"),
+        ("sh -c $HOME", {"command": ["sh", "-c", "cat $HOME/schist-vault"]},
+         {}, "FAIL"),
+        ("sh -c {env:HOME}",
+         {"command": ["sh", "-c", "cat {env:HOME}/schist-vault"]}, {}, "PASS"),
+        ("sh -c $VD",
+         {"command": ["sh", "-c", "cat $VD"],
+          "environment": {"VD": "H/schist-vault"}}, {}, "FAIL"),
+        ("bash -lc cd ~", {"command": ["bash", "-lc", "cd ~ && srv"]}, {}, "FAIL"),
+        ("docker -v ${HOME}",
+         {"command": ["docker", "run", "-v", "${HOME}:/data", "img"]}, {}, "FAIL"),
+        ("command[0] {env:HOME}", {"command": ["{env:HOME}/schist-vault/bin"]},
+         {}, "PASS"),
+        ("disabled true", {"command": ["srv", "H/schist-vault"], "disabled": True},
+         {}, "PASS"),
+        ("enabled false", {"command": ["srv", "H/schist-vault"], "enabled": False},
+         {}, "PASS"),
+        ("disabled false", {"command": ["srv", "H/schist-vault"], "disabled": False},
+         {}, "FAIL"),
+        ("env HOME={env:HOME}/schist-vault",
+         {"command": ["srv"], "environment": {"HOME": "{env:HOME}/schist-vault"}},
+         {}, "PASS"),
+        ("{file:{env:HOME}/p.txt} arg",
+         {"command": ["srv", "{file:{env:HOME}/p.txt}"]}, {}, "PASS"),
+        ("{env:X} arg, X is a file reference",
+         {"command": ["srv", "{env:X}"]}, {"X": "{file:~/p.txt}"}, "PASS"),
+    ])
+    def test_opencode_entry_is_never_less_severe_than_on_the_base(
+        self, home, monkeypatch, vault, name, entry, env, base
+    ):
+        """Status of the audit on each input when OpenCode's variables were
+        not read (recorded from the previous implementation). A server can
+        expand variables itself, so no input may become less severe: no
+        FAIL turns into WARN or PASS, no WARN into PASS."""
+        self.opencode_home(monkeypatch)
+        for k in ("VAULTX", "N", "UNSET1", "VD", "X", "NOPE"):
+            monkeypatch.delenv(k, raising=False)
+        prefix = str(home) + "/"
+        for k, v in env.items():
+            monkeypatch.setenv(k, v.replace("H/", prefix))
+        text = json.dumps({"type": "local", **entry}).replace("H/", prefix)
+        path = home / ".config" / "opencode" / "opencode.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"mcp": {"servers": {"x": json.loads(text)}}}))
+        r = check_vault_access(str(vault))
+        rank = {"PASS": 0, "WARN": 1, "FAIL": 2}
+        assert rank[r.status] >= rank[base], (name, base, r)
 
     def test_opencode_shell_command_still_expands_shell_variables(
         self, home, monkeypatch, vault

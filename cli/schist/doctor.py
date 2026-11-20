@@ -2350,8 +2350,11 @@ def _all_mcp_servers(
         add_map(str(c), data.get("mcpServers"), project)
         # OpenCode V2: MCP servers under `mcp.servers` (V1 compat: directly
         # under `mcp`), #851. add_map normalizes the per-entry fields.
-        add_map(str(c), _opencode_server_block(data.get("mcp")), project,
-                opencode=True)
+        if c == _opencode_config_path():
+            add_map(str(c), _opencode_server_block(data.get("mcp")), project,
+                    opencode=True)
+        else:
+            add_map(str(c), _opencode_server_block(data.get("mcp")), project)
         server_list = data.get("servers")
         if isinstance(server_list, list):
             for cfg in server_list:
@@ -2446,32 +2449,34 @@ _SHELL_VAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
 
 
-# OpenCode's substitution runs on the config's strings before anything
-# starts: `{env:NAME}` (an unset variable becomes empty) and
-# `{file:path}`. `$NAME` is not touched, so it reaches the server as typed.
-_OPENCODE_VAR = re.compile(r"\{(env|file):([^{}]*)\}")
+# OpenCode substitutes in two passes over each string of the config text
+# (packages/core/src/config/variable.ts in the OpenCode source): first
+# `{env:NAME}` (the name is everything up to the next `}`; an unset variable
+# becomes an empty string), then `{file:path}` over that result. `$NAME` is
+# not touched.
+_OPENCODE_ENV = re.compile(r"\{env:([^}]+)\}")
+_OPENCODE_FILE = re.compile(r"\{file:[^}]+\}")
 
 
-def _expand_opencode_vars(s: str) -> tuple[str, list[str]]:
+def _expand_opencode_vars(s: str) -> tuple[str, list[str], list[str]]:
     """`s` with OpenCode's `{env:NAME}` replaced from doctor's environment,
-    and the references it could not expand. OpenCode turns an unset variable
-    into an empty string, but its environment may differ from doctor's, so
-    an unset one is left in place and reported: guessing "empty" could hide
-    a path. A `{file:...}` reference is always reported, since its content is
-    not read."""
+    the `{env:}` names it could not expand, and the `{file:...}` references
+    left in the result (including ones an `{env:}` value or expansion
+    produced). OpenCode turns an unset variable into an empty string, but its
+    environment may differ from doctor's, so an unset one is left in place
+    and reported rather than guessed to be empty, which could hide a path.
+    The content of a `{file:...}` reference is not read."""
     missing: list[str] = []
 
     def sub(m: "re.Match[str]") -> str:
-        if m.group(1) == "env":
-            value = _getenv(m.group(2))
-            if value is not None:
-                return value
-            missing.append(f"env:{m.group(2)}")
-        else:
-            missing.append(f"file:{m.group(2)}")
+        value = _getenv(m.group(1))
+        if value is not None:
+            return value
+        missing.append(f"env:{m.group(1)}")
         return m.group(0)
 
-    return _OPENCODE_VAR.sub(sub, s), missing
+    text = _OPENCODE_ENV.sub(sub, s)
+    return text, missing, _OPENCODE_FILE.findall(text)
 
 
 def _expand_mcp_vars(s: str, project: Optional[Path], shell: bool = False,
@@ -2781,7 +2786,7 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
         shell = isinstance(command, str) and _runner_name(command) in _SHELLS
 
         def scan(field: str, items: list[tuple[str, Any]],
-                 start: Optional[Path]) -> None:
+                 start: Optional[Path], oc: bool = False) -> None:
             hit = False
             prev: Any = None
             for key, v in items:
@@ -2795,8 +2800,11 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
                     doubts.append(f"{field}: value too long to check")
                     continue
                 try:
-                    if s.opencode:
-                        text, missing = _expand_opencode_vars(v)
+                    if oc:
+                        text, missing, files = _expand_opencode_vars(v)
+                        if files:
+                            doubts.append(f"{field}: cannot read a "
+                                          "{file:...} reference")
                         if shell and field == "args":
                             # The shell expands what OpenCode passed on.
                             text, more = _expand_mcp_vars(
@@ -2831,37 +2839,50 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
             if hit:
                 fields.append(field)
 
-        base = s.project
         cwd = cfg.get("cwd")
-        if isinstance(cwd, str):
-            try:
-                if s.opencode:
-                    text, missing = _expand_opencode_vars(cwd)
-                else:
-                    text, missing = _expand_mcp_vars(cwd, s.project)
-                text = os.path.expanduser(text)
-                if missing:
+
+        def start_folder(oc: bool) -> Optional[Path]:
+            base = s.project
+            if isinstance(cwd, str):
+                try:
+                    if oc:
+                        text, missing, files = _expand_opencode_vars(cwd)
+                        missing += files
+                    else:
+                        text, missing = _expand_mcp_vars(cwd, s.project)
+                    text = os.path.expanduser(text)
+                    if missing:
+                        base = None
+                    elif os.path.isabs(text):
+                        base = Path(text)
+                    elif s.project is not None:
+                        base = s.project / text
+                    else:
+                        base = None
+                except (RuntimeError, ValueError, UnicodeError):
                     base = None
-                elif os.path.isabs(text):
-                    base = Path(text)
-                elif s.project is not None:
-                    base = s.project / text
-                else:
-                    base = None
-            except (RuntimeError, ValueError, UnicodeError):
-                base = None
+            return base
+
+        # An OpenCode entry is read twice: with OpenCode's own substitution,
+        # and as every other client's entry is, with `${NAME}` expanded. A
+        # server can expand variables itself, so what OpenCode passes on as
+        # written still counts when it reaches the vault once expanded.
+        passes = [False, True] if s.opencode else [False]
         try:
-            scan("command", [("", command)], base)
-            args = cfg.get("args")
-            scan("args", [("", a) for a in args] if isinstance(args, list)
-                 else [], base)
-            if own_env is not None:
-                scan("env", [(str(k), v) for k, v in own_env.items()], base)
-            forwarded = cfg.get("env_vars")
-            if isinstance(forwarded, list):
-                # Codex passes these through from its own environment.
-                scan("env_vars", [(str(n), _getenv(n)) for n in forwarded
-                                  if isinstance(n, str)], base)
+            for oc in passes:
+                base = start_folder(oc)
+                scan("command", [("", command)], base, oc)
+                args = cfg.get("args")
+                scan("args", [("", a) for a in args]
+                     if isinstance(args, list) else [], base, oc)
+                if own_env is not None:
+                    scan("env", [(str(k), v) for k, v in own_env.items()],
+                         base, oc)
+                forwarded = cfg.get("env_vars")
+                if isinstance(forwarded, list):
+                    # Codex passes these through from its own environment.
+                    scan("env_vars", [(str(n), _getenv(n)) for n in forwarded
+                                      if isinstance(n, str)], base, oc)
         except _ScanBudgetExceeded:
             too_much = f"{_printable(s.where)}: {_printable(s.name)}"
             break
@@ -2874,7 +2895,8 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
                 allowed_hits.append(entry)
             continue
         if fields:
-            offenders.append(f"{entry} ({', '.join(fields)})")
+            offenders.append(
+                f"{entry} ({', '.join(dict.fromkeys(fields))})")
         unsure += [f"{entry} ({d})" for d in dict.fromkeys(doubts)]
 
     offenders = list(dict.fromkeys(offenders))
