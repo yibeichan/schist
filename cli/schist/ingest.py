@@ -430,6 +430,7 @@ def _fenced_lines(lines: list[str]) -> set[int]:
 
 def connections_heading_near_misses(
     lines: list[str], heading: int | None = None, problem: bool = False,
+    section_failed: bool = False,
 ) -> list[tuple[int, str]]:
     """Lines whose stripped text starts with `## Connections` (the earlier,
     looser heading rule) that the current rule does not take as the heading,
@@ -437,7 +438,9 @@ def connections_heading_near_misses(
     the same lines (or None), and `problem` whether that heading was found by
     searching past a problem: then no section is read, so a later heading is
     not reported as ignored for being later (the caller already says no
-    connections are indexed).
+    connections are indexed). `section_failed` is set when the first section
+    holds the problem: a later heading is then reported without saying the
+    first section is read, since nothing is indexed from it.
     `schist schema --validate` warns on these."""
     out: list[tuple[int, str]] = []
     fenced: set[int] | None = None
@@ -451,7 +454,10 @@ def connections_heading_near_misses(
                 out.append((i, 'inside a fenced code block, so it is not a heading'))
             elif i > heading and not problem:
                 out.append((
-                    i, 'a later ## Connections heading; only the first section is read',
+                    i,
+                    'a later ## Connections heading, which is not read either'
+                    if section_failed else
+                    'a later ## Connections heading; only the first section is read',
                 ))
             continue
         indent = ln[:len(ln) - len(ln.lstrip())]

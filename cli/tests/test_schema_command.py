@@ -301,7 +301,8 @@ class TestSchemaCommand:
         out = capsys.readouterr().out
         assert "no connections are indexed from this note" in out
         assert "WARN: notes/n.md:7: " in out, out
-        assert "a later ## Connections heading; only the first section is read" in out
+        assert "a later ## Connections heading, which is not read either" in out
+        assert "only the first section is read" not in out
 
     @pytest.mark.parametrize("line,reason", [
         ("## Connections (x)", "heading text is not exactly '## Connections'"),

@@ -1008,6 +1008,7 @@ def _connections_rule_warnings(rel: Path, raw_text: str, lines: list[str], scan)
     )
     for i, reason in connections_heading_near_misses(
         lines[body_start:], heading, problem=heading_follows_problem,
+        section_failed=scan.problem is not None,
     ):
         out.append((
             body_start + i,
