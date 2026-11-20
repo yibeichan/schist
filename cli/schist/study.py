@@ -29,6 +29,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import re
+import subprocess
 from pathlib import Path, PurePosixPath
 
 from . import git_ops, writable
@@ -380,6 +381,29 @@ def apply_grade(text: str, grade: str, *, today: dt.date,
     }
 
 
+def _unstage(vault_path: Path, rel: str) -> str | None:
+    """Drop `rel` from the index; an error message, or None when it is clean.
+
+    git_ops.commit stages the path before it commits. A commit that then fails
+    (a pre-commit hook, signing, a timeout) leaves the graded blob in the
+    index, and every writer commits whatever is staged.
+    """
+    try:
+        reset = subprocess.run(
+            ['git', 'reset', '-q', '--', rel], cwd=vault_path,
+            capture_output=True, text=True, timeout=60,
+        )
+        if reset.returncode != 0:
+            return (reset.stdout + reset.stderr).strip()[:200] or "git reset failed"
+        staged = subprocess.run(
+            ['git', 'diff', '--cached', '--quiet', '--', rel], cwd=vault_path,
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return str(exc)[:200]
+    return None if staged.returncode == 0 else f"{rel} is still staged"
+
+
 def grade_card(vault: str | Path, card_id: str, grade: str, *,
                expected_sha: str | None = None, today: dt.date | None = None,
                source: str = "session", note: str | None = None, check=None,
@@ -429,9 +453,11 @@ def grade_card(vault: str | Path, card_id: str, grade: str, *,
                 # move is recoverable, an uncommitted grade would block the
                 # next pull and surprise the next writer.
                 path.write_text(text, encoding="utf-8")
-                raise StudyError(
-                    f"could not grade {rel}; the commit failed: {output.strip()[:200]}"
-                )
+                stuck = _unstage(vault_path, rel)
+                detail = output.strip()[:200]
+                if stuck:
+                    detail += f"; and the grade is still staged ({stuck})"
+                raise StudyError(f"could not grade {rel}; the commit failed: {detail}")
     except git_ops.VaultLockTimeout as exc:
         raise StudyBusy(str(exc)) from None
     return card_from_text(rel, new_text)

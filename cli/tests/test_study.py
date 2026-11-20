@@ -296,6 +296,20 @@ def test_grade_card_rolls_the_card_back_when_the_commit_fails(vault, monkeypatch
     assert path.read_text(encoding='utf-8') == before
 
 
+def test_grade_card_leaves_nothing_staged_when_a_hook_refuses_the_commit(vault):
+    path = write_card(vault)
+    commit(vault)
+    before = path.read_text(encoding='utf-8')
+    hook = vault / '.git' / 'hooks' / 'pre-commit'
+    hook.write_text('#!/bin/sh\necho refused >&2\nexit 1\n', encoding='utf-8')
+    hook.chmod(0o755)
+    with pytest.raises(study.StudyError, match='could not grade'):
+        study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
+    assert path.read_text(encoding='utf-8') == before
+    assert _git(vault, 'diff', '--cached') == ''
+    assert _git(vault, 'status', '--porcelain') == ''
+
+
 def test_apply_grade_records_the_answer_in_the_log():
     new_text, _ = study.apply_grade(
         card_text(), 'partial', today=TODAY, note='  right idea,\n\nmissing the null  ')
