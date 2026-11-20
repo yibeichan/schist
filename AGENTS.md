@@ -94,7 +94,9 @@ keep its reason as a standard: a note tagged `standard` and
 `applies-to:<directory>`, written by `schist add` directly in that directory after
 the same scope check (only a note in the directory itself counts).
 The agent reads a directory's standards with `get_standards`, and a proposal
-that does not list every one in `checked_standards` is refused). A site is stale
+that does not list every one in `checked_standards` is refused; the agent
+cannot create or edit a standard: `propose_note` refuses the `standard` and
+`applies-to:*` tags, and `propose_link` refuses a standard as its source). A site is stale
 when the vault moved past its build or when other viewer code built it
 (`.schist/viewer-built-version`, a hash of `build.py` + `index.html`); the
 server rebuilds such a site at startup and the `if_changed` timer does not
