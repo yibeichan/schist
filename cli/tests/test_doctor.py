@@ -4636,12 +4636,12 @@ class TestCheckVaultAccess:
         self, home, monkeypatch, vault
     ):
         """An `mcp` block in another client's file keeps that client's
-        variable rules."""
+        variable rules: `{env:HOME}` means nothing there."""
         self.opencode_home(monkeypatch)
         (home / ".claude.json").write_text(json.dumps({"mcp": {"servers": {
-            "x": {"type": "local", "command": ["srv", "${HOME}"]}}}}))
+            "x": {"type": "local", "command": ["srv", "{env:HOME}"]}}}}))
         r = check_vault_access(str(vault))
-        assert r.status == "FAIL", r
+        assert r.status == "PASS", r
 
     @pytest.mark.parametrize("name,entry,env,base", [
         ("literal vault arg", {"command": ["srv", "H/schist-vault"]}, {}, "FAIL"),
