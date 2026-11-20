@@ -37,7 +37,9 @@ import secrets
 import stat
 import subprocess
 import sys
+import re
 import threading
+import unicodedata
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -186,6 +188,26 @@ def _require_checked(db, directory: str, checked) -> list[str]:
     return required
 
 
+_RESERVED_TAG = re.compile(r'(standard|applies-to\s*:.*)\Z', re.DOTALL)
+
+
+def is_reserved_tag(tag) -> bool:
+    """True for the tags that make a note a standard: `standard` and
+    `applies-to:<directory>`. The tag is first reduced the way the writer
+    stores it (`schist add` strips whitespace and leading `#`), then case-
+    and width-folded and stripped of invisible format characters, so no
+    spelling the writer would store as one of these gets through."""
+    t = unicodedata.normalize('NFKC', str(tag))
+    t = ''.join(c for c in t if unicodedata.category(c) != 'Cf')
+    t = t.strip().lstrip('#').strip().casefold()
+    return bool(_RESERVED_TAG.match(t))
+
+
+STANDARDS_ONLY_BY_REJECTING = (
+    'standards are set only by rejecting a proposal: the tags "standard" and "applies-to:*" '
+    'cannot be proposed, and a standard note cannot be edited by a proposal')
+
+
 def _clean_list(values, what: str) -> list[str]:
     if values is None:
         return []
@@ -322,6 +344,8 @@ class ProposalStore:
         if directory not in allowed:
             raise ProposalError(f'directory must be one of: {", ".join(allowed) or "(none this spoke can write)"}')
         tags = _clean_list(tags, 'tag')
+        if any(is_reserved_tag(t) for t in tags):
+            raise ProposalError(STANDARDS_ONLY_BY_REJECTING)
         concepts = _clean_list(concepts, 'concept')
         known = {r[0] for r in db.execute('SELECT slug FROM concepts')}
         unknown = [c for c in concepts if c not in known]
@@ -344,9 +368,13 @@ class ProposalStore:
                      question: str = '', context: str | None = None,
                      checked_standards=None) -> dict:
         source, target, link_type = (str(x or '').strip() for x in (source, target, type))
-        src = db.execute('SELECT title FROM docs WHERE id = ?', (source,)).fetchone()
+        src = db.execute('SELECT title, tags FROM docs WHERE id = ?', (source,)).fetchone()
         if src is None:
             raise ProposalError(f'source {source!r} is not a note id')
+        # `schist link` writes into the source note; a standard's text is a rule
+        # the agent reads back, so the agent may not append to one.
+        if any(is_reserved_tag(t) for t in json.loads(src[1] or '[]')):
+            raise ProposalError(STANDARDS_ONLY_BY_REJECTING)
         tgt = (db.execute('SELECT title FROM docs WHERE id = ?', (target,)).fetchone()
                or db.execute('SELECT title FROM concepts WHERE slug = ?', (target,)).fetchone())
         if tgt is None:
