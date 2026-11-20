@@ -176,9 +176,13 @@ def next_of(body: str) -> dt.date | None:
 
 
 def read_card_text(path: Path) -> str:
-    """The file's text with its line endings as written (read_text would fold
-    CRLF and bare CR into LF, and a grade would write the folded text back)."""
-    return path.read_bytes().decode("utf-8")
+    """The file's text with CRLF kept as written (read_text would fold it to
+    LF, and a grade would write the folded text back).
+
+    A bare CR is the one ending the field and section patterns cannot see, so
+    it is folded to LF; a card written that way is rewritten with LF.
+    """
+    return re.sub(r"\r(?!\n)", "\n", path.read_bytes().decode("utf-8"))
 
 
 def body_sha(text: str) -> str:

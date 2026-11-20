@@ -205,6 +205,17 @@ def test_grade_card_keeps_a_crlf_card_crlf_on_disk(vault):
     assert _git(vault, 'show', '--numstat', '--format=', 'HEAD').split()[:2] == ['3', '2']
 
 
+def test_a_bare_cr_card_is_still_a_card_and_can_be_graded(vault):
+    path = vault / 'notes' / 'card.md'
+    path.write_bytes(card_text().replace('\n', '\r').encode('utf-8'))
+    commit(vault)
+    cards = study.load_cards(vault)
+    assert [c['id'] for c in cards] == ['notes/card.md']
+    study.grade_card(vault, 'notes/card.md', 'good', today=TODAY, expected_sha=cards[0]['sha'])
+    assert b'\r' not in path.read_bytes()
+    assert b'2026-11-10 \xc2\xb7 good' in path.read_bytes()
+
+
 def test_apply_grade_keeps_unicode_separators_in_the_body():
     para = 'One\N{LINE SEPARATOR}two\x0cthree\x85four.'
     text = card_text().replace('A card.', para)
