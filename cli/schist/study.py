@@ -459,7 +459,9 @@ def _restore(vault_path: Path, rel: str, path: Path, text: str) -> str | None:
     stuck = _unstage(vault_path, rel)
     if stuck:
         problems.append(f"the grade is still staged ({stuck})")
-    return "; ".join(problems) or None
+    if not problems:
+        return None
+    return "the grade may still be on disk or staged (" + "; ".join(problems) + ")"
 
 
 def grade_card(vault: str | Path, card_id: str, grade: str, *,
@@ -529,9 +531,13 @@ def grade_card(vault: str | Path, card_id: str, grade: str, *,
             except BaseException as exc:
                 # Whatever stopped the write or the commit, leave the card as
                 # it was and out of the index, then let the error through.
-                _restore(vault_path, rel, path, text)
+                stuck = _restore(vault_path, rel, path, text)
                 if isinstance(exc, OSError):
-                    raise StudyWriteError(f"could not grade {rel}: {exc}") from exc
+                    raise StudyWriteError(
+                        f"could not grade {rel}: {exc}" + (f"; {stuck}" if stuck else "")
+                    ) from exc
+                if stuck and hasattr(exc, "add_note"):
+                    exc.add_note(stuck)
                 raise
             if not ok:
                 # Leave the card as it was: an ungraded card that did not

@@ -398,6 +398,31 @@ def test_grade_card_restores_and_unstages_when_the_commit_raises(vault, monkeypa
     assert _git(vault, 'status', '--porcelain') == ''
 
 
+def test_grade_card_says_so_when_the_rollback_fails_too(vault, monkeypatch):
+    path = write_card(vault)
+    commit(vault)
+
+    def staging_then_crash(vault_path, message, files):
+        _git(vault, 'add', '--', *files)
+        raise OSError('fork failed')
+
+    monkeypatch.setattr(study.git_ops, 'commit', staging_then_crash)
+    monkeypatch.setattr(study, '_unstage', lambda *args: 'git reset failed')
+    with pytest.raises(study.StudyWriteError) as exc:
+        study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
+    assert 'may still be on disk or staged' in str(exc.value)
+    assert 'git reset failed' in str(exc.value)
+
+
+def test_grade_card_says_so_when_the_rollback_fails_after_a_failed_commit(vault, monkeypatch):
+    write_card(vault)
+    commit(vault)
+    monkeypatch.setattr(study.git_ops, 'commit', lambda *a, **k: (False, 'boom'))
+    monkeypatch.setattr(study, '_unstage', lambda *args: 'git reset failed')
+    with pytest.raises(study.StudyError, match='may still be on disk or staged'):
+        study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
+
+
 def test_grade_card_leaves_the_card_whole_when_the_write_fails(vault, monkeypatch):
     path = write_card(vault)
     commit(vault)
