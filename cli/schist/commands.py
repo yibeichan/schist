@@ -998,8 +998,16 @@ def _connections_rule_warnings(rel: Path, raw_text: str, lines: list[str], scan)
             f'no connections are indexed from this note: {scan.problem[1]}',
         ))
     heading = None if scan.heading is None else scan.heading - body_start
+    # The heading is "later" for a reader only when the scan found it by
+    # searching past the problem; a heading before the problem is the real
+    # first section, and a second heading after it is not read.
+    heading_follows_problem = (
+        scan.problem is not None
+        and scan.heading is not None
+        and scan.heading > scan.problem[0]
+    )
     for i, reason in connections_heading_near_misses(
-        lines[body_start:], heading, problem=scan.problem is not None,
+        lines[body_start:], heading, problem=heading_follows_problem,
     ):
         out.append((
             body_start + i,

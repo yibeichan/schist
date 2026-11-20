@@ -282,6 +282,27 @@ class TestSchemaCommand:
         assert "no connections are indexed from this note" in out
         assert "only the first section is read" not in out
 
+    def test_validate_still_calls_a_heading_later_when_it_follows_a_real_first_section(
+        self, tmp_path, capsys,
+    ):
+        # The first section is the heading and the problem is a line inside
+        # it, so the second heading really is a later one that is not read.
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir()
+        (notes_dir / "n.md").write_text(
+            "---\ntitle: N\n---\n## Connections\n- extends: notes/a\n"
+            "- extends: notes/b\x85\n## Connections\n- extends: notes/c\n",
+            encoding="utf-8",
+        )
+        commands.schema(
+            _schema_args(validate=True), str(tmp_path),
+            str(tmp_path / ".schist" / "schist.db"),
+        )
+        out = capsys.readouterr().out
+        assert "no connections are indexed from this note" in out
+        assert "WARN: notes/n.md:7: " in out, out
+        assert "a later ## Connections heading; only the first section is read" in out
+
     @pytest.mark.parametrize("line,reason", [
         ("## Connections (x)", "heading text is not exactly '## Connections'"),
         (" ## Connections (x)", "indented (the heading must start at column 0)"),
