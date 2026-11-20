@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`schist add` warns when a line stops a note's `## Connections` section from being indexed.** A note holding Markdown the connection rule does not follow (a `<details>` line before the section, say) was written with only its path printed, though none of its connection lines would be indexed. It now prints the same warning, with the line and the reason, that MCP `create_note` returns.
+
 ## [0.3.2] - 2026-11-06
 
 ### Added
