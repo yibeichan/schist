@@ -1461,7 +1461,9 @@ class TestReservedTagsAndStandardsDirectory:
         'standard', '#standard', '##standard', '# standard', ' Standard ', 'STANDARD', '#Standard',
         'applies-to:notes', '#applies-to:notes', 'Applies-To:notes', 'applies-to: notes',
         'applies-to :notes', 'applies-to:anything', 'applies-to:', '\N{FULLWIDTH LATIN SMALL LETTER S}tandard',
-        'applies-to\N{FULLWIDTH COLON}notes'])
+        'applies-to\N{FULLWIDTH COLON}notes',
+        '# #standard', '# # applies-to:notes', '#\N{IDEOGRAPHIC SPACE}#standard',
+        '#\N{NO-BREAK SPACE}#applies-to:notes', '## ##\t# standard', ' # # #Standard'])
     def test_the_agent_cannot_tag_a_proposal_as_a_standard(self, vault, ro, tag):
         store = proposals_mod.ProposalStore(vault)
         for tags in ([tag], ['ok', tag], tag):
@@ -1528,3 +1530,25 @@ class TestReservedTagsAndStandardsDirectory:
         assert store.get(p['id'])['status'] == proposals_mod.PENDING
         done = store.reject(p['id'], reason='Bad link')
         assert done['status'] == proposals_mod.REJECTED and done['reason'] == 'Bad link'
+
+    def test_every_spelling_the_index_reads_as_a_standard_is_refused(self, vault, ro):
+        # End to end through the real writer and ingest: whatever spellings end up
+        # indexed as the standard tags must have been refused at filing.
+        std = ['standard', '#standard', '# #standard', '# # #standard', '#  #standard',
+               '\t#\t#\tstandard', '#\N{IDEOGRAPHIC SPACE}#standard', '#\N{NO-BREAK SPACE}#standard']
+        app = ['applies-to:notes', '#applies-to:notes', '# #applies-to:notes', '# # applies-to:notes']
+        store = proposals_mod.ProposalStore(vault)
+        pairs = [(a, b) for a in std for b in app]
+        for n, (a, b) in enumerate(pairs):
+            r = subprocess.run([sys.executable, '-m', 'schist', f'--vault={vault}',
+                                f'--db={vault / ".schist" / "schist.db"}', 'add', f'--title=Probe {n}',
+                                '--dir=notes', f'--tags={a},{b}'],
+                               input='b\n', capture_output=True, text=True)
+            assert r.returncode == 0, r.stdout + r.stderr
+        _reindex(vault)
+        found = proposals_mod.standards_for(ro, 'notes')
+        assert len(found) > 4   # positive control: the writer and ingest do turn some spellings into standards
+        for a, b in pairs:
+            for tag in (a, b):
+                with pytest.raises(proposals_mod.ProposalError, match='standards are set only by rejecting'):
+                    store.propose_note(ro, title='T', body='b', rationale='r', tags=[tag])

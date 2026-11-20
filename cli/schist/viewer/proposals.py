@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -46,6 +47,7 @@ from pathlib import Path
 import yaml
 
 from .. import commands, markdown_io
+from ..ingest import _normalize_tag
 from ..acl import ACLError, parse_vault_yaml
 from ..pre_receive import derive_scope
 from ..spoke_config import is_spoke, load_spoke_config
@@ -195,16 +197,34 @@ def _require_checked(db, directory: str, checked) -> list[str]:
 _RESERVED_TAG = re.compile(r'(standard|applies-to\s*:.*)\Z', re.DOTALL)
 
 
+def _tag_forms(tag) -> list[str]:
+    """Every form a tag takes between the agent and the index. `schist add`
+    stores it through ingest's `_normalize_tag` and ingest applies the same
+    function again when it indexes the note, and one pass does not reach a
+    fixed point (it strips leading whitespace and `#` only once), so the
+    function is applied until the value stops changing and every stage is
+    kept. Each starting point (the raw text, and the text with compatibility
+    forms folded and invisible format characters removed) is followed the
+    same way."""
+    raw = str(tag)
+    folded = ''.join(c for c in unicodedata.normalize('NFKC', raw)
+                     if unicodedata.category(c) != 'Cf')
+    forms = []
+    for t in (raw, folded):
+        while True:
+            forms.append(t)
+            nxt = _normalize_tag(t)
+            if nxt == t:
+                break
+            t = nxt
+    return forms
+
+
 def is_reserved_tag(tag) -> bool:
-    """True for the tags that make a note a standard: `standard` and
-    `applies-to:<directory>`. The tag is first reduced the way the writer
-    stores it (`schist add` strips whitespace and leading `#`), then case-
-    and width-folded and stripped of invisible format characters, so no
-    spelling the writer would store as one of these gets through."""
-    t = unicodedata.normalize('NFKC', str(tag))
-    t = ''.join(c for c in t if unicodedata.category(c) != 'Cf')
-    t = t.strip().lstrip('#').strip().casefold()
-    return bool(_RESERVED_TAG.match(t))
+    """True when any form of the tag (see `_tag_forms`), compared ignoring
+    case, is `standard` or `applies-to:<directory>`, the tags that make a
+    note a standard."""
+    return any(_RESERVED_TAG.match(f.strip().casefold()) for f in _tag_forms(tag))
 
 
 STANDARDS_ONLY_BY_REJECTING = (
