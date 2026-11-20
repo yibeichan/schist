@@ -684,9 +684,11 @@ def _configured_content_roots(vault: Path) -> set[str]:
     return roots
 
 
-# Authority tiers for a concept definition, LOWER wins. Three tiers and not
-# two, because `concepts/` and `Concepts/` are the SAME directory on a
-# case-insensitive filesystem (APFS/HFS+) but DIFFERENT ones on a
+# Authority tiers for a concept definition, LOWER wins. Four tiers: a direct
+# child of `concepts/`, a file in one of its subdirectories, the case-folded
+# `Concepts/` axis, and everything else. The case-folded tier is separate
+# from the literal axis because `concepts/` and `Concepts/` are the SAME
+# directory on a case-insensitive filesystem (APFS/HFS+) but DIFFERENT ones on a
 # case-sensitive filesystem (ext4 — the hub). Collapsing the two axis tiers
 # into one would let `Concepts/x.md`, which sorts BEFORE `concepts/x.md`, take
 # the slug from the literal axis on ext4 — the very hijack this ranking exists
