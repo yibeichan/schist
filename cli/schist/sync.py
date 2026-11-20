@@ -182,24 +182,40 @@ def _install_local_hooks(vault_path) -> str | None:
     The hooks always go into the repository's own `.git/hooks/`. A
     `core.hooksPath` (often a global one shared by every repo) redirects Git
     elsewhere, and writing schist's hooks into a directory other repos use
-    would change them too, so init does not. It returns a warning when the
-    setting is present, because Git then ignores the hooks written here; it
-    returns None otherwise.
+    would change them too, so init does not. It returns a warning when Git's
+    effective hooks directory is not the one written here, because Git then
+    ignores these hooks; it returns None otherwise (including a hooksPath that
+    names the repository's own hooks directory).
+
+    Limit: init calls this on a staging directory that is renamed afterwards,
+    so Git is asked about the staging path. An `includeIf "gitdir:"` condition
+    or an absolute value that names the final vault path is therefore judged
+    against the wrong location.
     """
     hooks_dir = Path(vault_path) / ".git" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     _atomic_write_hook(hooks_dir / "post-commit", POST_COMMIT_HOOK)
     _atomic_write_hook(hooks_dir / "pre-commit", PRE_COMMIT_HOOK)
 
-    from .doctor import _configured_hooks_path
+    from .doctor import _configured_hooks_path, _effective_hooks_dir
 
     configured = _configured_hooks_path(["-C", str(vault_path)])
     if configured is None:
         return None
+    effective, _, error = _effective_hooks_dir(str(vault_path))
+    if effective is not None and not error:
+        try:
+            if effective.resolve() == hooks_dir.resolve():
+                return None
+        except OSError:
+            pass
     if configured == "":
         where = "core.hooksPath is set to an empty value, so Git runs no hooks"
     else:
-        where = f"core.hooksPath is set to '{configured}', so Git runs hooks from there"
+        where = (
+            f"core.hooksPath is set to '{configured}' (a relative value is "
+            f"taken from the working tree root), so Git runs hooks from there"
+        )
     return (
         f"{where} and ignores the post-commit ingest and pre-commit secret scan "
         f"installed in the vault's .git/hooks/. Unset it for this vault "
