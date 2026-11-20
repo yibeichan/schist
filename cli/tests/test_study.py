@@ -433,6 +433,23 @@ def test_grade_card_restores_and_unstages_when_the_commit_raises(vault, monkeypa
     assert _git(vault, 'status', '--porcelain') == ''
 
 
+def test_grade_card_keeps_a_grade_that_landed_before_an_interrupt(vault, monkeypatch):
+    path = write_card(vault)
+    commit(vault)
+    real_commit = study.git_ops.commit
+
+    def commit_then_interrupt(*args, **kwargs):
+        real_commit(*args, **kwargs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(study.git_ops, 'commit', commit_then_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
+    assert ' · good · ' in path.read_text(encoding='utf-8')
+    assert _git(vault, 'status', '--porcelain') == ''
+    assert _git(vault, 'log', '-1', '--format=%s').startswith('study:')
+
+
 def test_grade_card_says_so_when_the_rollback_fails_too(vault, monkeypatch):
     path = write_card(vault)
     commit(vault)
