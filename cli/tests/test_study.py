@@ -450,6 +450,30 @@ def test_grade_card_keeps_a_grade_that_landed_before_an_interrupt(vault, monkeyp
     assert _git(vault, 'log', '-1', '--format=%s').startswith('study:')
 
 
+def test_grade_card_reports_an_unknown_commit_state_when_git_cannot_start(vault, monkeypatch):
+    write_card(vault)
+    commit(vault)
+
+    def commit_with_git_gone(vault_path, message, files):
+        monkeypatch.setenv('PATH', '')
+        raise FileNotFoundError('git')
+
+    monkeypatch.setattr(study.git_ops, 'commit', commit_with_git_gone)
+    with pytest.raises(study.StudyWriteError, match='unknown whether the commit landed'):
+        study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
+
+
+def test_grade_card_says_so_when_git_cannot_start_before_anything_is_written(vault, monkeypatch):
+    path = write_card(vault)
+    commit(vault)
+    before = path.read_bytes()
+    monkeypatch.setattr(study.git_ops, '_head_sha',
+                        lambda vault_path: (_ for _ in ()).throw(FileNotFoundError('git')))
+    with pytest.raises(study.StudyWriteError, match='git could not be run'):
+        study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
+    assert path.read_bytes() == before
+
+
 def test_grade_card_says_so_when_the_rollback_fails_too(vault, monkeypatch):
     path = write_card(vault)
     commit(vault)

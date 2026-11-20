@@ -536,7 +536,12 @@ def grade_card(vault: str | Path, card_id: str, grade: str, *,
             if staged:
                 raise StudyError(staged)
             new_text, _ = apply_grade(text, grade, today=day, source=source, note=note)
-            pre_head = git_ops._head_sha(str(vault_path))
+            try:
+                pre_head = git_ops._head_sha(str(vault_path))
+            except OSError as exc:
+                raise StudyWriteError(
+                    f"could not grade {rel}: git could not be run ({_reason(exc)})"
+                ) from exc
             try:
                 markdown_io._atomic_write(str(path), new_text, str(vault_path))
                 ok, output = git_ops.commit(
@@ -546,7 +551,20 @@ def grade_card(vault: str | Path, card_id: str, grade: str, *,
                 # An interrupt after git moved HEAD means the grade is in
                 # history; undoing the file then would leave a reverted
                 # working tree under a committed grade.
-                post_head = git_ops._head_sha(str(vault_path))
+                try:
+                    post_head = git_ops._head_sha(str(vault_path))
+                except OSError:
+                    # git cannot run, so whether the commit landed is unknown.
+                    # Restoring could undo a grade that is in history (the
+                    # working tree would then differ from HEAD); skipping
+                    # leaves, at worst, a graded card the user can see in git
+                    # status. Neither guess is silent, so do not restore.
+                    raise StudyWriteError(
+                        f"could not grade {rel}: git could not be run, so it is unknown "
+                        f"whether the commit landed; check git status and git log in "
+                        f"the vault, and restore {rel} with git checkout if it is "
+                        f"modified and not committed"
+                    ) from exc
                 if post_head and post_head != pre_head:
                     raise
                 # Whatever stopped the write or the commit, leave the card as
