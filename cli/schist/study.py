@@ -474,6 +474,10 @@ def grade_card(vault: str | Path, card_id: str, grade: str, *,
 
     try:
         with git_ops.vault_write_lock(str(vault_path), timeout=lock_timeout):
+            # The checks above ran before the lock; a pull can replace the
+            # file with a link while this call waited for it.
+            if path.is_symlink():
+                raise StudyError(f"{rel} is a symlink; refusing to grade it")
             try:
                 text = read_card_text(path)
             except UnicodeDecodeError:
