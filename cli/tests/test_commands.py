@@ -919,6 +919,25 @@ class TestConnectionTypeVocabTokens:
         dropped_warned = [e for e in fixture["entries"] if not e["kept"] and e["entry"]]
         assert err.count("ignoring connection_types entry") == len(dropped_warned)
 
+    def test_type_the_rule_cannot_index_is_rejected_at_link_with_the_reason(self, tmp_path, capsys):
+        import json
+        (tmp_path / "schist.yaml").write_text(
+            f"connection_types: {json.dumps(['extends', 'élargit'])}\n"
+            "directories:\n  notes: notes/\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "notes").mkdir()
+        (tmp_path / "notes" / "a.md").write_text("---\ntitle: A\n---\nbody\n", encoding="utf-8")
+        with pytest.raises(SystemExit):
+            commands.link(
+                _link_args("notes/a.md", "notes/b.md", "élargit"),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        err = capsys.readouterr().err
+        assert "ignoring connection_types entry 'élargit': it does not start with an ASCII letter or digit" in err
+        assert "connection type 'élargit' is not in the configured connection_types: extends" in err
+        assert "## Connections" not in (tmp_path / "notes" / "a.md").read_text(encoding="utf-8")
+
     def test_dropped_junk_type_is_rejected_at_link(self, tmp_path, capsys):
         import json
         (tmp_path / "schist.yaml").write_text(

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Connection types the rule cannot index are ignored with a warning.** The connection rule indexes an edge only when its type starts with an ASCII letter or digit, so an entry such as `élargit`, `_private` or `[weird]` in `connection_types` could be configured but never indexed, and writing it failed with a message that did not say why. The CLI and the MCP server now drop such entries when they load the vocabulary, with a warning that says why, and SCHEMA.md now says "ASCII letter or digit".
 - **A connection context holding U+001F is written instead of refused.** `schist link`, `add_connection` and the MCP `create_note` and `update_note` connections turn each line break in a context into a space, but not U+001F, which the connection rule refuses in a line, so such a context failed the write. Every separator the rule refuses is now turned into a space.
 - **`schist add` warns when a line stops a note's `## Connections` section from being indexed.** A note holding Markdown the connection rule does not follow (a `<details>` line before the section, say) was written with only its path printed, though none of its connection lines would be indexed. It now prints the same warning, with the line and the reason, that MCP `create_note` returns.
 

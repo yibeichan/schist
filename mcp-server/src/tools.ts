@@ -11,7 +11,7 @@ import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote, rewriteNote, updateNote, deleteNote, writeMutex, vaultLockWaitMs } from "./git-writer.js";
 import { withVaultLock, VaultLockTimeout, VaultLockFailed } from "./vault-lock.js";
-import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, parseNoteForRewrite, frontmatterLength, hasNonYamlOpener, SLUG_WS_CHARS, containsLineBoundary, isRoundTrippableTarget, hasConnectionsHeading, trimConnectionWs, splitConnectionLines, normalizeNewlines, scanConnections, scanNoteConnections, connectionsProblemOf, verifyNoteConnections, isBlank, decodeNoteBytes, NoteDecodeError } from "./markdown-parser.js";
+import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, parseNoteForRewrite, frontmatterLength, hasNonYamlOpener, SLUG_WS_CHARS, containsLineBoundary, isRoundTrippableTarget, hasConnectionsHeading, trimConnectionWs, splitConnectionLines, normalizeNewlines, scanConnections, scanNoteConnections, connectionsProblemOf, verifyNoteConnections, isBlank, decodeNoteBytes, NoteDecodeError, isIndexableConnectionType } from "./markdown-parser.js";
 import type { Connection } from "./types.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
@@ -371,12 +371,21 @@ export async function loadVaultConfig(vaultRoot: string): Promise<VaultConfig> {
   // mode. Pinned against the CLI by schema/vocab-token-parity.json.
   const connectionTypes = getStringList("connection_types", [...DEFAULT_CONNECTION_TYPES])
     .filter((t) => {
-      if (isRoundTrippableTarget(t)) return true;
-      console.error(
-        `[schist] Ignoring connection_types entry ${JSON.stringify(t)}: ` +
-        `not a single whitespace-free token — a connection line using it could never round-trip through the parser`
-      );
-      return false;
+      if (!isRoundTrippableTarget(t)) {
+        console.error(
+          `[schist] Ignoring connection_types entry ${JSON.stringify(t)}: ` +
+          `not a single whitespace-free token — a connection line using it could never round-trip through the parser`
+        );
+        return false;
+      }
+      if (!isIndexableConnectionType(t)) {
+        console.error(
+          `[schist] Ignoring connection_types entry ${JSON.stringify(t)}: ` +
+          `it does not start with an ASCII letter or digit, so the connection rule indexes no edge of this type`
+        );
+        return false;
+      }
+      return true;
     });
 
   return {
