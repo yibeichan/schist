@@ -1574,6 +1574,25 @@ class TestReservedTagsAndStandardsDirectory:
         with pytest.raises(proposals_mod.ProposalError, match='standards are set only by rejecting'):
             store.approve(p['id'], runner=_never)
 
+    def test_approve_reads_the_source_file_not_only_the_index(self, vault, ro):
+        # The note became a standard on disk and the index has not caught up.
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_link(ro, source='notes/sync.md', target='locking', type='supports', rationale='r')
+        (vault / 'notes' / 'sync.md').write_text(
+            '---\ntitle: Spoke sync\nstatus: draft\ntags: [\'# #standard\', applies-to:notes]\n---\n\nSync.\n',
+            encoding='utf-8')
+        assert proposals_mod.standards_for(ro, 'notes') == []   # no reindex
+        with pytest.raises(proposals_mod.ProposalError, match='standards are set only by rejecting'):
+            store.approve(p['id'], runner=_never)
+        assert store.get(p['id'])['status'] == proposals_mod.PENDING
+
+    def test_approve_refuses_a_source_file_it_cannot_parse(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_link(ro, source='notes/sync.md', target='locking', type='supports', rationale='r')
+        (vault / 'notes' / 'sync.md').write_text('---\ntags: [unbalanced\n---\n\nx\n', encoding='utf-8')
+        with pytest.raises(proposals_mod.ProposalError, match='cannot parse the source note'):
+            store.approve(p['id'], runner=_never)
+
     def test_a_proposal_without_a_recorded_directory_cannot_save_a_standard(self, vault, ro):
         store = proposals_mod.ProposalStore(vault)
         p = store.propose_note(ro, title='Old', body='b', rationale='r')

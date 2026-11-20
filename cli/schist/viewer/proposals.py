@@ -44,10 +44,11 @@ import unicodedata
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import frontmatter
 import yaml
 
 from .. import commands, markdown_io
-from ..ingest import _normalize_tag
+from ..ingest import _normalize_tag, patch_frontmatter_flow_hashtags
 from ..acl import ACLError, parse_vault_yaml
 from ..pre_receive import derive_scope
 from ..spoke_config import is_spoke, load_spoke_config
@@ -490,8 +491,41 @@ class ProposalStore:
                 db.close()
         except sqlite3.Error as e:
             raise ProposalError(f'cannot check whether the source note is a standard: {e}') from None
-        if row and any(is_reserved_tag(t) for t in json.loads(row[0] or '[]')):
+        tags = json.loads(row[0] or '[]') if row else []
+        # The index can lag the file (a note edited or pulled since the last
+        # reindex), and the file is what `schist link` rewrites, so read it too.
+        # `schist link` takes the vault write lock in its own process, which this
+        # one cannot hold across it without deadlocking, so the read is made
+        # immediately before the command starts.
+        tags += self._file_tags(p['args']['source'])
+        if any(is_reserved_tag(t) for t in tags):
             raise ProposalError(STANDARDS_ONLY_BY_REJECTING + '; reject this proposal')
+
+    def _file_tags(self, note_id: str) -> list:
+        """The tags in a note's frontmatter, parsed as ingest parses it. A note
+        that is missing has none (the command will report it); one that cannot
+        be read or parsed is refused, since it cannot be shown not to be a standard."""
+        root = Path(self.vault).resolve()
+        path = (root / note_id).resolve()
+        if root not in path.parents:
+            raise ProposalError(f'source {note_id!r} is outside the vault')
+        try:
+            text = path.read_text(encoding='utf-8')
+        except FileNotFoundError:
+            return []
+        except (OSError, UnicodeError) as e:
+            raise ProposalError(f'cannot read the source note to check it: {e}') from None
+        try:
+            tags = frontmatter.loads(patch_frontmatter_flow_hashtags(text)).metadata.get('tags')
+        except Exception as e:  # noqa: BLE001 - any parser error means it cannot be checked
+            raise ProposalError(f'cannot parse the source note to check it: {e}') from None
+        if tags is None:
+            return []
+        if isinstance(tags, (str, int, float)):
+            return [str(tags)]
+        if isinstance(tags, dict):
+            return [str(k) for k in tags]
+        return [str(t) for t in tags]
 
     def reject(self, pid: str, reason: str = '', save_standard: bool = False,
                runner=subprocess.run) -> dict:
