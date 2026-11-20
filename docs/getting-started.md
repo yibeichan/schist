@@ -279,7 +279,9 @@ schist --vault ~/my-vault hooks reinstall
 `doctor` names the exact path it checked, and that is not always
 `.git/hooks/` — if `core.hooksPath` is set, git looks in the configured
 directory instead and schist's hooks there are the ones that count. Either
-symlink them in, or unset the redirect:
+symlink them in, or unset the redirect. `schist init` and `schist init-spoke`
+always write the hooks into the vault's own `.git/hooks/` and print a warning
+when `core.hooksPath` is set, since git then ignores them:
 
 ```bash
 git -C ~/my-vault config --unset core.hooksPath
