@@ -5635,3 +5635,224 @@ class TestCheckMcpConnectionsRule:
         src = (Path(__file__).resolve().parents[2] / "mcp-server" / "src" / "markdown-parser.ts").read_text()
         m = _MCP_RULE_VERSION_RE.search(src)
         assert m is not None and int(m.group(1)) == CONNECTIONS_RULE_VERSION
+
+
+# ---------------------------------------------------------------------------
+# check_hub_axis_grants / check_spoke_sparse_axes (#503)
+# ---------------------------------------------------------------------------
+
+
+def _git(cwd: Path, *args: str) -> str:
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True)
+    return r.stdout
+
+
+class TestHubAxisGrants:
+    def _hub(self, tmp_path: Path, schist_yaml: str | None, vault_yaml: str) -> Path:
+        """A bare hub whose HEAD holds the given files."""
+        work = tmp_path / "work"
+        work.mkdir()
+        _git(work, "init", "-q", "-b", "main")
+        (work / "vault.yaml").write_text(vault_yaml)
+        files = ["vault.yaml"]
+        if schist_yaml is not None:
+            (work / "schist.yaml").write_text(schist_yaml)
+            files.append("schist.yaml")
+        _git(work, "add", *files)
+        _git(work, "-c", "user.name=t", "-c", "user.email=t@example.com",
+             "commit", "-q", "-m", "seed")
+        hub = tmp_path / "hub.git"
+        _git(tmp_path, "clone", "-q", "--bare", str(work), str(hub))
+        return hub
+
+    @staticmethod
+    def _vault_yaml(write_a, write_b=None) -> str:
+        data = {
+            "vault_version": 1, "name": "v", "scope_convention": "flat",
+            "participants": [{"name": "alpha", "type": "spoke", "default_scope": "global"}],
+            "access": {"alpha": {"read": ["*"], "write": write_a}},
+        }
+        if write_b is not None:
+            data["participants"].append(
+                {"name": "beta", "type": "spoke", "default_scope": "global"})
+            data["access"]["beta"] = {"read": ["*"], "write": write_b}
+        return yaml.dump(data)
+
+    def test_skip_without_hub_path(self):
+        from schist.doctor import check_hub_axis_grants
+        assert check_hub_axis_grants(None).status == "SKIP"
+
+    def test_skip_when_not_a_repo(self, tmp_path):
+        from schist.doctor import check_hub_axis_grants
+        assert check_hub_axis_grants(str(tmp_path)).status == "SKIP"
+
+    def test_new_axis_nobody_can_write_warns(self, tmp_path):
+        from schist.doctor import check_hub_axis_grants
+        hub = self._hub(
+            tmp_path, "directories: [notes, figures]\n",
+            self._vault_yaml(["notes"], ["notes"]))
+        r = check_hub_axis_grants(str(hub))
+        assert r.status == "WARN"
+        assert "figures" in r.message
+        assert "notes'" not in r.message
+        assert "schist hub grant" in r.fix and "--write figures" in r.fix
+
+    def test_one_writer_is_enough(self, tmp_path):
+        from schist.doctor import check_hub_axis_grants
+        hub = self._hub(
+            tmp_path, "directories: [notes, figures]\n",
+            self._vault_yaml(["notes"], ["notes", "figures"]))
+        assert check_hub_axis_grants(str(hub)).status == "PASS"
+
+    def test_wildcard_writer_covers_every_axis(self, tmp_path):
+        from schist.doctor import check_hub_axis_grants
+        hub = self._hub(
+            tmp_path, "directories: [notes, figures]\n", self._vault_yaml(["*"]))
+        assert check_hub_axis_grants(str(hub)).status == "PASS"
+
+    def test_mapping_form_directories_are_read(self, tmp_path):
+        from schist.doctor import check_hub_axis_grants
+        hub = self._hub(
+            tmp_path, "directories:\n  notes: notes/\n  figures: figures/\n",
+            self._vault_yaml(["notes"]))
+        r = check_hub_axis_grants(str(hub))
+        assert r.status == "WARN" and "figures" in r.message
+
+    def test_typo_grant_warns(self, tmp_path):
+        from schist.doctor import check_hub_axis_grants
+        hub = self._hub(
+            tmp_path, "directories: [notes, figures]\n",
+            self._vault_yaml(["notes", "figures", "figurse"]))
+        r = check_hub_axis_grants(str(hub))
+        assert r.status == "WARN"
+        assert "figurse" in r.message and "alpha" in r.message
+        assert "schist hub revoke" in r.fix
+
+    def test_shared_child_and_infra_scopes_are_not_typos(self, tmp_path):
+        from schist.doctor import check_hub_axis_grants
+        hub = self._hub(
+            tmp_path, "directories: [notes, research, logs]\n",
+            self._vault_yaml(["notes", "research", "research/mario", "shared/skills", "shared", "logs"]))
+        assert check_hub_axis_grants(str(hub)).status == "PASS"
+
+    def test_infra_axis_is_not_reported_dead(self, tmp_path):
+        from schist.doctor import check_hub_axis_grants
+        hub = self._hub(
+            tmp_path, "directories: [notes, logs, projects]\n", self._vault_yaml(["notes"]))
+        assert check_hub_axis_grants(str(hub)).status == "PASS"
+
+    def test_hub_without_schist_yaml_uses_packaged_axes(self, tmp_path):
+        from schist.doctor import check_hub_axis_grants
+        hub = self._hub(tmp_path, None, self._vault_yaml(["notes", "papers"]))
+        r = check_hub_axis_grants(str(hub))
+        assert r.status == "WARN" and "research" in r.message
+
+    @pytest.mark.parametrize("text", [
+        "directories: [unclosed\n", "- a\n- b\n", "directories: 7\n"])
+    def test_unreadable_schist_yaml_names_the_file(self, tmp_path, text):
+        from schist.doctor import check_hub_axis_grants
+        hub = self._hub(tmp_path, text, self._vault_yaml(["notes"]))
+        r = check_hub_axis_grants(str(hub))
+        assert r.status == "SKIP"
+        assert "schist.yaml" in r.message
+
+    def test_malformed_vault_yaml_skips(self, tmp_path):
+        from schist.doctor import check_hub_axis_grants
+        hub = self._hub(tmp_path, "directories: [notes]\n", "- not a mapping\n")
+        r = check_hub_axis_grants(str(hub))
+        assert r.status == "SKIP" and "vault.yaml" in r.message
+
+    def test_vault_derived_names_are_escaped(self, tmp_path):
+        from schist.doctor import check_hub_axis_grants
+        esc = chr(27)
+        hub = self._hub(
+            tmp_path, yaml.dump({"directories": ["notes", f"fig{esc}[31mures"]}),
+            self._vault_yaml(["notes", f"bad{esc}[2Jscope"]))
+        r = check_hub_axis_grants(str(hub))
+        assert r.status == "WARN"
+        assert esc not in r.message
+        assert "\\x1b" in r.message
+
+    def test_registered_with_hub_path(self, tmp_path):
+        hub = self._hub(
+            tmp_path, "directories: [notes]\n", self._vault_yaml(["notes"]))
+        results = run_doctor(None, None, as_json=False, hub_path=str(hub))
+        assert "Hub axis grants" in [r.label for r in results]
+
+
+class TestSpokeSparseAxes:
+    def _spoke(self, tmp_path: Path, schist_yaml: str, cone: list[str] | None,
+               scope: str = "global") -> Path:
+        v = tmp_path / "vault"
+        v.mkdir()
+        _git(v, "init", "-q", "-b", "main")
+        (v / "schist.yaml").write_text(schist_yaml)
+        for d in ("notes", "papers", "figures"):
+            (v / d).mkdir()
+            (v / d / "x.md").write_text("x")
+        _git(v, "add", ".")
+        _git(v, "-c", "user.name=t", "-c", "user.email=t@example.com",
+             "commit", "-q", "-m", "seed")
+        if cone is not None:
+            _git(v, "sparse-checkout", "init", "--cone")
+            _git(v, "sparse-checkout", "set", *cone)
+        (v / ".schist").mkdir()
+        (v / ".schist" / "spoke.yaml").write_text(
+            f"hub: file:///fake\nidentity: alpha\nscope: {scope}\n")
+        return v
+
+    def test_skip_without_vault(self):
+        from schist.doctor import check_spoke_sparse_axes
+        assert check_spoke_sparse_axes(None).status == "SKIP"
+
+    def test_skip_when_not_a_spoke(self, tmp_path):
+        from schist.doctor import check_spoke_sparse_axes
+        assert check_spoke_sparse_axes(str(tmp_path)).status == "SKIP"
+
+    def test_axis_missing_from_cone_warns_with_the_add_command(self, tmp_path):
+        from schist.doctor import check_spoke_sparse_axes
+        v = self._spoke(tmp_path, "directories: [notes, papers, figures]\n",
+                        ["notes", "papers"])
+        r = check_spoke_sparse_axes(str(v))
+        assert r.status == "WARN"
+        assert "figures" in r.message and "papers" not in r.message
+        assert "sparse-checkout add figures" in r.fix
+        # The remedy it prints works.
+        subprocess.run(r.fix.strip("`").split(), check=True, capture_output=True)
+        assert check_spoke_sparse_axes(str(v)).status == "PASS"
+
+    def test_every_axis_in_cone_passes(self, tmp_path):
+        from schist.doctor import check_spoke_sparse_axes
+        v = self._spoke(tmp_path, "directories: [notes, papers, figures]\n",
+                        ["notes", "papers", "figures"])
+        assert check_spoke_sparse_axes(str(v)).status == "PASS"
+
+    def test_non_sparse_clone_skips(self, tmp_path):
+        from schist.doctor import check_spoke_sparse_axes
+        v = self._spoke(tmp_path, "directories: [notes, figures]\n", None)
+        r = check_spoke_sparse_axes(str(v))
+        assert r.status == "SKIP" and "sparse" in r.message
+
+    def test_non_cone_sparse_clone_skips(self, tmp_path):
+        from schist.doctor import check_spoke_sparse_axes
+        v = self._spoke(tmp_path, "directories: [notes, figures]\n", None)
+        _git(v, "sparse-checkout", "init", "--no-cone")
+        assert check_spoke_sparse_axes(str(v)).status == "SKIP"
+
+    def test_narrow_scope_spoke_skips(self, tmp_path):
+        from schist.doctor import check_spoke_sparse_axes
+        v = self._spoke(tmp_path, "directories: [notes, figures]\n", ["notes"],
+                        scope="notes")
+        r = check_spoke_sparse_axes(str(v))
+        assert r.status == "SKIP" and "scope" in r.message
+
+    def test_unreadable_schist_yaml_names_the_file(self, tmp_path):
+        from schist.doctor import check_spoke_sparse_axes
+        v = self._spoke(tmp_path, "directories: [unclosed\n", ["notes"])
+        r = check_spoke_sparse_axes(str(v))
+        assert r.status == "SKIP" and "schist.yaml" in r.message
+
+    def test_registered_in_run_doctor(self, tmp_path):
+        v = self._spoke(tmp_path, "directories: [notes]\n", ["notes"])
+        results = run_doctor(str(v), None, as_json=False)
+        assert "Spoke sparse checkout" in [r.label for r in results]

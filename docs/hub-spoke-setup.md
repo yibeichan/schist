@@ -605,3 +605,16 @@ flag directories in the schema that no participant can write, or directories
 some participants can write but others cannot. Spokes get the matching
 spoke-side warning automatically from `schist doctor` (it checks the local
 schema against the spoke's hub write grant).
+
+**Adding a content axis.** A new directory in `schist.yaml` needs three
+changes that nothing else ties together: the schema entry, a `write` grant on
+the hub, and `git sparse-checkout add <axis>` on each cone-mode sparse spoke.
+Two doctor checks report a mismatch. `schist doctor --hub-path <hub>` WARNs
+("Hub axis grants") for an axis that no participant can write (a wildcard or
+parent grant counts as a writer; `logs` and `projects` are never expected to be
+granted) and for a write grant that is neither a content axis, a path inside
+one, nor `shared` or `shared/...`. `schist doctor` on a spoke with scope
+`global` and a cone-mode sparse checkout WARNs ("Spoke sparse checkout") for each
+`schist.yaml` axis missing from `git sparse-checkout list` and prints the
+`git sparse-checkout add` command that fixes it. A spoke with a narrower scope,
+a non-sparse clone and a non-cone sparse clone are skipped.

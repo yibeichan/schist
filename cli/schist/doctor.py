@@ -1326,6 +1326,174 @@ def check_hub_acl_drift(hub_path: Optional[str]) -> CheckResult:
     )
 
 
+def _axis_dirs_from_text(text: str, name: str) -> list[str]:
+    """Content-axis directories from a schist.yaml's `directories`, in either
+    shape (the packaged default is a mapping, an authored one is often a
+    list). Raises ValueError naming `name` when the text is not a mapping or
+    `directories` is neither a mapping nor a list."""
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        raise ValueError(f"{name} is not valid YAML") from None
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{name} is not a mapping")
+    dirs = data.get("directories")
+    if dirs is None:
+        return []
+    if isinstance(dirs, dict):
+        vals = list(dirs.values())
+    elif isinstance(dirs, list):
+        vals = dirs
+    else:
+        raise ValueError(f"{name} 'directories' field is malformed")
+    return [d for d in (str(v).strip().rstrip("/") for v in vals) if d]
+
+
+def _scope_names_axis(scope: str, axes: list[str]) -> bool:
+    """True when a grant scope is a content axis, a path inside one, a parent
+    of a nested one (`research` for `research/ai`), or the `shared`
+    namespace."""
+    if scope == "shared" or scope.startswith("shared/"):
+        return True
+    return any(scope == a or scope.startswith(a + "/") or a.startswith(scope + "/")
+               for a in axes)
+
+
+def check_hub_axis_grants(hub_path: Optional[str]) -> CheckResult:
+    """Flag a content axis that no participant can write, and a write grant
+    that names something that is not an axis.
+
+    The axes come from HEAD:schist.yaml on the hub (the packaged list when the
+    hub has none), the grants from HEAD:vault.yaml. Coverage is effective, as
+    in the ACL drift check: a wildcard or parent grant covers an axis without
+    naming it. Infra directories (logs, projects) are not expected to be
+    granted, so they are never reported as dead, but a grant naming one is not
+    a typo. `shared` and `shared/...` scopes are accepted as they are.
+    """
+    label = "Hub axis grants"
+    if not hub_path:
+        return CheckResult("SKIP", label, "no --hub-path supplied")
+
+    hub = Path(hub_path)
+    if not (hub / "objects").is_dir():
+        return CheckResult("SKIP", label, f"not a git repository: {_printable(hub_path)}")
+
+    try:
+        from schist.acl import _scope_matches
+        acl = _load_hub_acl(hub)
+    except Exception as e:  # noqa: BLE001 — surface as SKIP so doctor never crashes
+        return CheckResult(
+            "SKIP", label,
+            f"could not read/parse hub vault.yaml: {_printable(str(e))}")
+
+    try:
+        text = _hub_file_text(hub, "schist.yaml", required=False)
+        if text is None:
+            text = (Path(__file__).resolve().parent / "default.yaml").read_text(
+                encoding="utf-8")
+        axes = _axis_dirs_from_text(text, "schist.yaml on the hub")
+    except Exception as e:  # noqa: BLE001
+        return CheckResult(
+            "SKIP", label,
+            f"could not read the axes from hub schist.yaml: {_printable(str(e))}")
+
+    names = sorted(acl.access.keys())
+    if not names:
+        return CheckResult("SKIP", label, "vault.yaml has no access entries")
+    if not axes:
+        return CheckResult("SKIP", label, "schist.yaml lists no content directories")
+
+    dead = [a for a in axes
+            if a not in _INFRA_DIRS
+            and not any(_scope_matches(acl.access[n].write, a) for n in names)]
+
+    typos: dict[str, list[str]] = {}
+    for n in names:
+        for s in acl.access[n].write:
+            if s != "*" and not _scope_names_axis(s, axes):
+                typos.setdefault(s, []).append(n)
+
+    if not dead and not typos:
+        return CheckResult(
+            "PASS", label,
+            f"every content axis has a writer and every write grant names an axis ({len(names)} participants)")
+
+    parts: list[str] = []
+    fixes: list[str] = []
+    for a in dead:
+        parts.append(f"axis '{_printable(a)}' has no participant with a write grant")
+        fixes.append(
+            f"`schist hub grant <participant> --write {shlex.quote(a)} --hub-path {shlex.quote(hub_path)}`")
+    for s in sorted(typos):
+        who = ", ".join(_printable(n) for n in typos[s])
+        parts.append(
+            f"write grant '{_printable(s)}' (held by {who}) is not a content axis or shared/*")
+        fixes.append(
+            f"`schist hub revoke <participant> --write {shlex.quote(s)} --hub-path {shlex.quote(hub_path)}` "
+            f"if '{_printable(s)}' is a typo, or add it to schist.yaml directories")
+    return CheckResult("WARN", label, "; ".join(parts), fix="; ".join(fixes))
+
+
+def check_spoke_sparse_axes(vault_path: Optional[str]) -> CheckResult:
+    """Flag content axes missing from a cone-mode sparse spoke's checkout.
+
+    A new axis added to schist.yaml is outside every existing cone, so `git
+    add` refuses files under it until `git sparse-checkout add <axis>` runs.
+    The expected axes are the ones `setup_sparse_checkout` puts in the cone of
+    a `global` spoke; a spoke with a narrower scope has a narrower cone on
+    purpose and is skipped.
+    """
+    label = "Spoke sparse checkout"
+    if not vault_path:
+        return CheckResult("SKIP", label, "no vault path supplied")
+    if not is_spoke(vault_path):
+        return CheckResult("SKIP", label, "not a spoke")
+
+    try:
+        cfg = load_spoke_config(vault_path)
+    except Exception as e:  # noqa: BLE001
+        return CheckResult(
+            "SKIP", label, f"could not read spoke.yaml: {_printable(str(e))}")
+    if cfg.scope != "global":
+        return CheckResult(
+            "SKIP", label,
+            f"spoke scope '{_printable(cfg.scope)}' is not global; its cone is narrower by design")
+
+    # An unreadable schist.yaml makes the shared resolver fall back to the
+    # packaged list, which would let this check PASS against axes the vault
+    # does not use. Name the file instead.
+    schist_yaml = Path(vault_path) / "schist.yaml"
+    try:
+        _axis_dirs_from_text(schist_yaml.read_text(encoding="utf-8"), "schist.yaml")
+    except FileNotFoundError:
+        pass
+    except (ValueError, OSError, UnicodeDecodeError) as e:
+        return CheckResult(
+            "SKIP", label, f"could not read schist.yaml: {_printable(str(e))}")
+
+    axes = git_ops._global_scope_dirs(vault_path)
+    cone = git_ops._sparse_cone_dirs(vault_path)
+    if cone is None:
+        return CheckResult(
+            "SKIP", label,
+            "not a cone-mode sparse checkout (or git could not list it)")
+
+    missing = [a for a in axes if a not in cone]
+    if not missing:
+        return CheckResult(
+            "PASS", label, f"all {len(axes)} content axes are in the sparse checkout")
+    shown = ", ".join(_printable(a) for a in missing)
+    fix = (f"git -C {shlex.quote(vault_path)} sparse-checkout add "
+           + " ".join(shlex.quote(a) for a in missing))
+    return CheckResult(
+        "WARN", label,
+        f"schist.yaml axes outside this spoke's sparse checkout: {shown}; "
+        "git add refuses files under them",
+        fix=f"`{fix}`")
+
+
 def _hub_file_text(hub: Path, rel: str, *, required: bool = True) -> Optional[str]:
     """`HEAD:<rel>` from a bare hub as text.
 
@@ -3936,6 +4104,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_spoke(vault_path),
         check_spoke_identity_env(vault_path),
         check_spoke_acl_drift(vault_path),
+        check_spoke_sparse_axes(vault_path),
         check_mcp_config(vault_path),
         check_mcp_cli_spawn(vault_path),
         check_mcp_schema_alignment(vault_path),
@@ -3949,6 +4118,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
     if hub_path:
         checks.append(check_hub_vault_yaml(hub_path))
         checks.append(check_hub_acl_drift(hub_path))
+        checks.append(check_hub_axis_grants(hub_path))
         checks.append(check_hub_pre_receive_hook(hub_path))
         checks.append(check_hub_key_pinning(hub_path, authorized_keys))
         checks.append(check_hub_sshd_acceptenv(hub_path))
