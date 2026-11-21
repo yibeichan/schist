@@ -238,7 +238,16 @@ ingest uses (python-frontmatter): after stripping leading whitespace, a first
 line of three or more `-` (then only whitespace) opens it and the next line of
 three or more `-` closes it, so `-----` closes and `---foo` does not. A
 byte-order mark before the first `---` means the note has no frontmatter, and a
-note whose frontmatter is never closed is all body.
+note whose frontmatter is never closed is all body. Two other opening blocks
+are also frontmatter, so their lines never count as body either. A JSON block
+opens with a first line that is exactly `{` or `}` and closes at the next line
+that is exactly `{` or `}`; ingest reads keys from it, so a nested object
+written with its brace alone at the start of a line ends the block early, the
+JSON does not parse and ingest skips the note. A TOML block sits between two
+lines of three or more `+`; ingest reads no keys from it unless
+python-frontmatter has its TOML handler (the `toml` package is installed).
+Without it, ingest still drops the block from the stored body, so the viewer
+does not show it, while python-frontmatter alone would keep it as body.
 `schema/frontmatter-boundary-parity.json` pins this rule in the CLI and the MCP
 server.
 

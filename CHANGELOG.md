@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **SCHEMA.md describes every frontmatter block ingest recognizes.** It said the frontmatter follows python-frontmatter and opens only with `---`. Ingest also takes a JSON `{` … `}` block and a TOML `+++` block as frontmatter; without python-frontmatter's TOML handler it reads no keys from the `+++` block but still leaves it out of the stored body, where python-frontmatter alone would keep it.
 ### Fixed
 - **The delete cascade says why it cannot rewrite a linking note's frontmatter.** A linking note whose frontmatter the MCP server and ingest end at different lines (a `-----` closing line, say) was reported as frontmatter that cannot be read, with advice that `update_note` cannot read it. It is now reported as frontmatter the cascade cannot rewrite, with how to fix it, and a caller who may not write that note gets `ACL_DENIED` first, as for other linking notes the cascade refuses.
 - **Connection types the rule cannot index are ignored with a warning.** The connection rule indexes an edge only when its type starts with an ASCII letter or digit, so an entry such as `élargit`, `_private` or `[weird]` in `connection_types` could be configured but never indexed, and writing it failed with a message that did not say why. The CLI and the MCP server now drop such entries when they load the vocabulary, with a warning that says why, and SCHEMA.md now says "ASCII letter or digit".
