@@ -1,5 +1,5 @@
 {
-  "description": "Pins the connection-type vocabulary token filter (#413) across cli/schist/commands.py _connection_types and mcp-server loadVaultConfig. An entry serializes into `- {type}: target` connection lines, so it must satisfy the same single-token rule as a target: non-empty and free of every SLUG_WS_CHARS codepoint (CONNECTION_RE's token groups are each one non-whitespace run). Entries are the POST-COERCION strings (after str()/String()); `kept` says whether the entry survives into the effective vocabulary. Non-ASCII test codepoints are stored as uXXXX escapes on purpose (ensure_ascii JSON) - keep it that way. Consumed by cli/tests/test_commands.py and mcp-server/tests/tools.test.ts.",
+  "description": "Pins the connection-type vocabulary token filter (#413) across cli/schist/commands.py _connection_types and mcp-server loadVaultConfig. An entry serializes into `- {type}: target` connection lines, so it must satisfy the same single-token rule as a target: non-empty and free of every SLUG_WS_CHARS codepoint (CONNECTION_RE's token groups are each one non-whitespace run), and it must start with an ASCII letter or digit, since the connection rule indexes no edge whose type starts with anything else. Entries are the POST-COERCION strings (after str()/String()); `kept` says whether the entry survives into the effective vocabulary. Non-ASCII test codepoints are stored as uXXXX escapes on purpose (ensure_ascii JSON) - keep it that way. Consumed by cli/tests/test_commands.py and mcp-server/tests/tools.test.ts.",
   "entries": [
     {
       "name": "plain token",
@@ -22,9 +22,9 @@
       "kept": true
     },
     {
-      "name": "leading bracket is valid for a TYPE (ingest's bracket skip applies to targets only)",
+      "name": "leading bracket: the connection rule indexes no edge of this type",
       "entry": "[weird]",
-      "kept": true
+      "kept": false
     },
     {
       "name": "empty string (dropped silently - getStringList filter(Boolean) parity)",
@@ -75,6 +75,21 @@
       "name": "trailing space",
       "entry": "extends ",
       "kept": false
+    },
+    {
+      "name": "non-ASCII first letter: the connection rule indexes no edge of this type",
+      "entry": "\u00e9largit",
+      "kept": false
+    },
+    {
+      "name": "leading underscore",
+      "entry": "_private",
+      "kept": false
+    },
+    {
+      "name": "non-ASCII letter after an ASCII first letter",
+      "entry": "r\u00e9fute",
+      "kept": true
     }
   ]
 }
