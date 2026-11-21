@@ -36,6 +36,13 @@ describe("markdown-parser", () => {
     expect(line).toContain("safe context");
   });
 
+  test("sanitizeContext flattens every separator the connection rule refuses, U+001F included", () => {
+    for (const ch of ["\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x1f", "\x85", "\u2028", "\u2029"]) {
+      const line = buildConnectionLine({ target: "notes/b.md", type: "extends", context: `a${ch}b` });
+      expect(line).toBe('- extends: notes/b.md "a b"');
+    }
+  });
+
   test("Connection injection (#398): NON-\\n line boundaries in context cannot forge an edge", () => {
     // sanitizeContext once flattened only "\n". Every other codepoint
     // splitLinesLikePython splits on (\r \v \f \x1c \x1d \x1e \x85 U+2028

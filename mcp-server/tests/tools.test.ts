@@ -4729,6 +4729,27 @@ describe("connection target line-break injection (#398)", () => {
     expect(res.path).toBeUndefined();
   }, 30000);
 
+  test("add_connection: a context holding U+001F is flattened and written, not refused", async () => {
+    // U+001F is not a line boundary, but the connection rule refuses a line
+    // holding it; sanitizeContext flattens it like the boundaries.
+    const vault = await makeTempVault();
+    const rel = "notes/unit-sep.md";
+    await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+    await fs.writeFile(path.join(vault, rel), "---\ntitle: U\n---\n\n## Connections\n", "utf-8");
+    await execFile("git", ["add", "."], { cwd: vault });
+    await execFile("git", ["commit", "-m", "u"], { cwd: vault });
+
+    const res = await add_connection(
+      vault,
+      { owner: TEST_AGENT, source: rel, target: "notes/legit.md", type: "extends", context: "a\u001fb" },
+      await loadVaultConfig(vault),
+    ) as { error?: string; message?: string };
+
+    expect(res.error).toBeUndefined();
+    const edges = parseConnections(await fs.readFile(path.join(vault, rel), "utf-8"));
+    expect(edges).toEqual([{ type: "extends", target: "notes/legit.md", context: "a b" }]);
+  }, 30000);
+
   test("add_connection: crafted context cannot forge an edge via non-\\n boundaries", async () => {
     // Parallel #398 vector: the context field reaches buildConnectionLine too.
     // A \r-separated double-prefix payload once survived sanitizeContext and
