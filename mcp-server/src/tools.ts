@@ -11,7 +11,7 @@ import { load as yamlLoad } from "js-yaml";
 import * as sqliteReader from "./sqlite-reader.js";
 import { writeNote, rewriteNote, updateNote, deleteNote, writeMutex, vaultLockWaitMs } from "./git-writer.js";
 import { withVaultLock, VaultLockTimeout, VaultLockFailed } from "./vault-lock.js";
-import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, parseNoteForRewrite, frontmatterLength, hasNonYamlOpener, SLUG_WS_CHARS, containsLineBoundary, isRoundTrippableTarget, hasConnectionsHeading, trimConnectionWs, splitConnectionLines, normalizeNewlines, scanConnections, scanNoteConnections, connectionsProblemOf, verifyNoteConnections, isBlank, decodeNoteBytes, NoteDecodeError, isIndexableConnectionType } from "./markdown-parser.js";
+import { buildNote, buildConnectionLine, insertConnectionLine, parseNote, parseNoteForRewrite, frontmatterLength, hasNonYamlOpener, SLUG_WS_CHARS, containsLineBoundary, isRoundTrippableTarget, hasConnectionsHeading, trimConnectionWs, splitConnectionLines, normalizeNewlines, scanConnections, scanNoteConnections, connectionsProblemOf, verifyNoteConnections, isBlank, decodeNoteBytes, NoteDecodeError, ConnectionWriteError, FrontmatterSplitError, isIndexableConnectionType } from "./markdown-parser.js";
 import type { Connection } from "./types.js";
 import { validateOwner, resolveActiveOwner } from "./agent-identity.js";
 import { noteIdShapeError } from "./note-id.js";
@@ -3571,6 +3571,7 @@ export async function delete_note(
     const nonYaml: string[] = [];
     const parseErrors: Array<{ relPath: string; message: string }> = [];
     const stripErrors: Array<{ relPath: string; message: string }> = [];
+    const splitErrors: Array<{ relPath: string; message: string }> = [];
     if (args.cascade === true && inbound.length > 0) {
       const sources = [...new Set(inbound.map((e) => e.source))];
       for (const source of sources) {
@@ -3618,13 +3619,24 @@ export async function delete_note(
         try {
           ({ content: repaired, changed } = stripConceptRefs(bodyStripped, refTokens));
         } catch (e: unknown) {
-          // The opener is fine, so either the YAML itself does not parse
-          // (js-yaml refuses a duplicate key that PyYAML and the hub accept),
-          // or gray-matter and ingest read different frontmatter blocks
-          // (FrontmatterSplitError). The frontmatter may still hold a
-          // reference ingest indexed, so the note cannot be repaired safely.
-          // js-yaml's message continues with a source excerpt; keep its first line.
-          parseErrors.push({ relPath: source, message: (e instanceof Error ? e.message : String(e)).split("\n")[0] });
+          // The frontmatter may still hold a reference ingest indexed, so the
+          // note cannot be repaired safely. Each refusal gets its own advice:
+          // - ConnectionWriteError: the rebuilt note would index other edges
+          //   than the strip meant (defensive: no input is known to reach it
+          //   once parseNoteForRewrite has passed);
+          // - FrontmatterSplitError: gray-matter and ingest read different
+          //   frontmatter blocks;
+          // - anything else: the YAML itself does not parse (js-yaml refuses a
+          //   duplicate key that PyYAML and the hub accept). js-yaml's message
+          //   continues with a source excerpt; keep its first line.
+          const message = e instanceof Error ? e.message : String(e);
+          if (e instanceof ConnectionWriteError) {
+            stripErrors.push({ relPath: source, message });
+          } else if (e instanceof FrontmatterSplitError) {
+            splitErrors.push({ relPath: source, message });
+          } else {
+            parseErrors.push({ relPath: source, message: message.split("\n")[0] });
+          }
           continue;
         }
         if (removed > 0 || changed) repairs.push({ relPath: source, content: repaired });
@@ -3637,7 +3649,7 @@ export async function delete_note(
       if (acl !== null) {
         const denied = [
           ...repairs.map((r) => r.relPath), ...nonYaml, ...parseErrors.map((p) => p.relPath),
-          ...stripErrors.map((p) => p.relPath),
+          ...stripErrors.map((p) => p.relPath), ...splitErrors.map((p) => p.relPath),
         ]
           .filter((rel) => !canWrite(acl, aclIdentity, deriveScope(rel)));
         if (denied.length > 0) {
@@ -3657,6 +3669,16 @@ export async function delete_note(
             "Cascade cannot remove the connections safely from: " +
             stripErrors.map((p) => `${p.relPath} (${p.message})`).join("; ") +
             " Edit each file directly, commit, then retry the delete.",
+        } satisfies ToolError;
+      }
+      if (splitErrors.length > 0) {
+        return {
+          error: "VALIDATION_ERROR",
+          message:
+            "Cascade cannot rewrite the frontmatter of: " +
+            splitErrors.map((p) => `${p.relPath} (${p.message})`).join("; ") +
+            ". Edit each file directly: rewrite its frontmatter as YAML between plain `---` lines, " +
+            "with no line inside it starting with `---`, commit, then retry the delete.",
         } satisfies ToolError;
       }
       if (nonYaml.length > 0 || parseErrors.length > 0) {
