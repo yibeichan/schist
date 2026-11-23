@@ -530,6 +530,26 @@ def _hooks_dir(git_args: list[str], base: Path, *,
     return (d if d.is_absolute() else base / d), configured, None
 
 
+def _local_hooks_destination(vault: Path, hooks: Path) -> bool:
+    """Allow the vault tree and the repository's own common hooks directory."""
+    try:
+        destination = hooks.resolve()
+        if destination.is_relative_to(vault.resolve()):
+            return True
+        common = git_ops.run_git_for_path(
+            ["git", "-C", str(vault), "rev-parse", "--git-common-dir"])
+        if common.returncode or not common.stdout.strip():
+            return False
+        return destination == (vault / common.stdout.rstrip("\n")).resolve() / "hooks"
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        return False
+
+
+def _external_hooks_fix() -> str:
+    return ("Configure a hooks directory inside this vault before running "
+            "hooks reinstall, or integrate the schist hooks manually in the shared directory.")
+
+
 def _effective_hooks_dir(vault_path: str) -> tuple[Optional[Path], Optional[str], Optional[str]]:
     """`_hooks_dir` for a spoke vault."""
     return _hooks_dir(["-C", vault_path], Path(vault_path))
@@ -617,6 +637,8 @@ def _hook_fix(vault_path: str, hooks_dir: Optional[Path], name: str,
             f"(`git -C {vault_path} config --unset core.hooksPath`) so git uses "
             f".git/hooks again, then `schist --vault {vault_path} hooks reinstall`."
         )
+    if not _local_hooks_destination(Path(vault_path), hooks_dir):
+        return _external_hooks_fix()
     hook = hooks_dir / name
     if configured:
         return (
@@ -841,6 +863,10 @@ def check_hooks_path(vault_path: Optional[str]) -> CheckResult:
             fix=f"`git -C {vault_path} config --unset core.hooksPath`, then "
                 f"`schist --vault {vault_path} hooks reinstall`.",
         )
+    hooks_dir, _, error = _effective_hooks_dir(vault_path)
+    if error or hooks_dir is None or not _local_hooks_destination(Path(vault_path), hooks_dir):
+        return CheckResult("WARN", "Hooks path", f"core.hooksPath is set to '{configured}'",
+                           fix=_external_hooks_fix())
     return CheckResult(
         "WARN", "Hooks path",
         f"core.hooksPath is set to '{configured}' — Git uses that hooks directory",

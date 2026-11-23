@@ -282,12 +282,16 @@ def hooks_reinstall(args, vault_path: str, db_path: str) -> None:
         print(f"Error: {vault_path} is not a git repository", file=sys.stderr)
         sys.exit(1)
 
-    from .doctor import _effective_hooks_dir
+    from .doctor import _effective_hooks_dir, _external_hooks_fix, _local_hooks_destination
 
     hooks_dir, _, error = _effective_hooks_dir(str(target))
     if error or hooks_dir is None:
         detail = error or "core.hooksPath is empty; Git runs no hooks"
         print(f"Error: cannot locate active hooks directory: {detail}", file=sys.stderr)
+        sys.exit(1)
+    if not _local_hooks_destination(target, hooks_dir):
+        print(f"Error: refusing to install hooks outside the vault in {hooks_dir}. "
+              + _external_hooks_fix(), file=sys.stderr)
         sys.exit(1)
     hooks_dir.mkdir(parents=True, exist_ok=True)
     force = getattr(args, "force", False)

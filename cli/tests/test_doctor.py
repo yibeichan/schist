@@ -654,6 +654,18 @@ def _real_bare_hub(path: Path) -> Path:
     return path
 
 
+@pytest.mark.parametrize("check", [check_pre_commit_hook, check_post_commit_hook])
+def test_missing_hook_fails_doctor_exit(tmp_path, monkeypatch, check):
+    from types import SimpleNamespace
+    from schist import doctor
+
+    vault = str(_real_repo(tmp_path))
+    monkeypatch.setattr(doctor, "run_doctor", lambda *args, **kwargs: [check(vault)])
+    with pytest.raises(SystemExit) as exc:
+        doctor.doctor(SimpleNamespace(vault=vault))
+    assert exc.value.code == 1
+
+
 class TestCheckPostCommitHook:
     def test_no_path(self):
         r = check_post_commit_hook(None)

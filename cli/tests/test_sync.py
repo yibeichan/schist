@@ -1822,6 +1822,19 @@ def test_rebuild_index_restores_backup_on_non_lock_failure(tmp_path, monkeypatch
     assert rows == {"stale"}
 
 
+def test_hooks_reinstall_refuses_external_directory(tmp_path):
+    from schist import sync
+    from schist.doctor import check_hooks_path
+    vault = tmp_path / "vault"
+    subprocess.run(["git", "init", str(vault)], check=True, capture_output=True)
+    external = tmp_path / "shared"
+    subprocess.run(["git", "-C", str(vault), "config", "core.hooksPath", str(external)], check=True)
+    with pytest.raises(SystemExit):
+        sync.hooks_reinstall(types.SimpleNamespace(force=True), str(vault), "")
+    assert not external.exists()
+    assert "manually" in check_hooks_path(str(vault)).fix
+
+
 def test_hooks_reinstall_retrofits_schist_exclude(tmp_path):
     """#354 review (MAJOR): spokes initialized before #309 only pass through
     hooks_reinstall on upgrade — that is their catch-up path for the .schist/
@@ -3293,7 +3306,7 @@ def test_hooks_reinstall_survives_non_utf8_git_output_end_to_end(tmp_path, monke
     valid paths but writes undecodable bytes on stderr drives the real flow."""
     import schist.sync as sync
 
-    hooks = tmp_path / "hooks"
+    hooks = tmp_path / "vault" / ".git" / "hooks"
     exclude = tmp_path / "info" / "exclude"
     bindir = tmp_path / "fakebin"
     bindir.mkdir()
