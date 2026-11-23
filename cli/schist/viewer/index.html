@@ -1609,7 +1609,7 @@ SPDX-License-Identifier: Apache-2.0
         return;
       }
       const grades = el("div", "study-grades");
-      for (const grade of GRADES) {
+      for (const grade of card.state === "retired" ? ["missed"] : GRADES) {
         const button = el("button", `g-${grade}`, GRADE_LABEL[grade]);
         button.type = "button";
         button.title = GRADE_TITLE[grade];

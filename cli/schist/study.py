@@ -254,6 +254,8 @@ def is_due(card: dict, today: dt.date) -> bool:
 def next_review(state: str, interval: int, grade: str,
                 today: dt.date) -> tuple[str, int, dt.date | None]:
     """Return (state, interval, next date or None) for one grade."""
+    if state == "retired" and grade != "missed":
+        raise StudyError("Only Missed can revive a retired card")
     tomorrow = today + dt.timedelta(days=1)
     if grade == "busy":
         return state, interval, tomorrow

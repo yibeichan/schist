@@ -160,6 +160,19 @@ def test_next_review(state, interval, grade, want):
     assert (got[0], got[1], got[2].isoformat() if got[2] else None) == want
 
 
+@pytest.mark.parametrize('grade', [g for g in study.GRADES if g != 'missed'])
+def test_retired_card_accepts_only_missed(vault, grade):
+    path = write_card(vault, state='retired', next_review='none', interval=200)
+    commit(vault)
+    before = path.read_bytes()
+    with pytest.raises(study.StudyError, match='Only Missed'):
+        study.grade_card(vault, 'notes/card.md', grade, today=TODAY)
+    assert path.read_bytes() == before
+    study.grade_card(vault, 'notes/card.md', 'missed', today=TODAY)
+    card = study.load_cards(vault)[0]
+    assert (card['state'], card['interval'], card['next']) == ('learning', 1, TODAY + dt.timedelta(days=1))
+
+
 def test_unknown_grade_is_refused():
     with pytest.raises(study.StudyError):
         study.apply_grade(card_text(), 'bogus', today=TODAY)
