@@ -59,6 +59,14 @@ parseable, with the hub pre-receive hook as the authoritative enforcement point
 for git pushes. Reads are unrestricted: `vault.yaml` read grants are not
 enforced by local MCP read tools.
 
+With `cascade: true`, `delete_note` checks the index for inbound links and
+repairs the linking files in the deletion commit. It removes exact-path
+references and preserves bare concept slugs when another file could claim
+them. If a known linking file cannot be read, the delete reports the path and
+stops. A missing index produces an `indexWarning` and the deletion proceeds
+without repairs. `schist doctor` checks the configured content on disk for
+readability and UTF-8 encoding, including notes missing from the index.
+
 **Why no capability meta-tool.** Earlier versions required agents to call
 `request_capabilities({capability: "write"})` before writes would succeed.
 That gate was unauthenticated (any caller could flip it) and provided no
