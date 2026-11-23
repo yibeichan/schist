@@ -169,6 +169,14 @@ const NON_MARKDOWN_SEPARATOR_GLOBAL_RE = new RegExp(NON_MARKDOWN_SEPARATOR_RE.so
 const RULE_LINE_RE = /^[-=*_+|: \t]+$/;
 const ASCII_ALNUM_RE = /^[A-Za-z0-9]/;
 
+/** True when the connection rule can index an edge of this type: it starts
+ * with an ASCII letter or digit (connectionLineMatch). A vocabulary entry
+ * that does not is ignored. ingest.py is_indexable_connection_type is its
+ * twin. */
+export function isIndexableConnectionType(type: string): boolean {
+  return ASCII_ALNUM_RE.test(type);
+}
+
 /** What the connection rule finds in a list of lines; see ingest.py
  * ConnectionScan. `heading` is -1 when there is none. */
 export interface ConnectionScan {
