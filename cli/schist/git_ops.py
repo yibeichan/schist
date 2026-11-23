@@ -165,12 +165,8 @@ def vault_write_lock(vault_path: str, timeout: "float | None" = None):
       rewrite, so two unserialized `schist link` calls on the same source
       both read the same base content and the loser's edge silently
       vanishes (#412);
-    - the git INDEX: commit() below is `git add <files>` (skipped with
-      stage=False) then a plain `git commit -m`, which commits EVERYTHING staged — an unserialized
-      concurrent stage+commit pair sweeps the other caller's staged file
-      into the wrong commit and leaves the loser's own commit empty
-      (#419). Every stage+commit (add, link, sync push, MCP writes)
-      must run inside this lock.
+    - the shared index: explicit sync may stage all in-scope changes, so
+      ordinary writers hold the lock across mutation, staging and commit.
     Lives here (not commands.py) because sync.py stages+commits too. The
     lock file sits under .schist/ (gitignored runtime state, like
     schist.db) and is never deleted — unlinking a flock'd path is a classic
@@ -515,6 +511,36 @@ def landed_via_concurrent_commit(vault_path: str, head_before: str,
     return all(in_head.get(p) == staged[p] for p in paths)
 
 
+def require_clean_write_path(vault_path: str, rel_path: str) -> None:
+    """Refuse changes to a writer-owned path before touching disk or the index."""
+    def inspect(args):
+        try:
+            return subprocess.run(
+                ['git', '--no-optional-locks', '--literal-pathspecs', *args, '--', rel_path],
+                cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=60,
+                env={**os.environ, 'LC_ALL': 'C'},
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SystemExit(f'Error: could not check changes to {rel_path}: {exc}') from None
+
+    status = inspect(['status', '--porcelain=v1', '--untracked-files=all', '--ignored=matching'])
+    if (status.returncode and 'not a git repository' in status.stderr
+            and not os.path.lexists(os.path.join(vault_path, '.git'))):
+        # Standalone directories have no index. Preserve the file-only write
+        # and the subsequent warning that Git could not commit it.
+        return
+    if status.returncode or status.stdout:
+        detail = status.stderr.strip() or f'commit or set aside edits to {rel_path} before writing'
+        raise SystemExit(f'Error: {detail}')
+    # Status can omit worktree differences for either of these index flags.
+    entries = inspect(['ls-files', '-v', '-z'])
+    if entries.returncode:
+        raise SystemExit(f'Error: could not inspect the index for {rel_path}: {entries.stderr.strip()}')
+    if any(entry[0].islower() or entry[0] == 'S' for entry in entries.stdout.split('\0') if entry):
+        raise SystemExit(f'Error: clear assume-unchanged or skip-worktree on {rel_path} before writing')
+
+
+
 def commit(vault_path: str, message: str, files: list[str] | None = None,
            *, stage: bool = True) -> tuple[bool, str]:
     """Stage and commit in the vault repo.
@@ -535,7 +561,7 @@ def commit(vault_path: str, message: str, files: list[str] | None = None,
                 # option — silently mis-staging or erroring, leaving the edge written
                 # to disk but uncommitted. Mirrors stage_scope_files and both TS
                 # `git add` call sites (#428).
-                ['git', 'add', '--'] + add_args,
+                ['git', '--literal-pathspecs', 'add', '--'] + add_args,
                 cwd=vault_path, check=True, capture_output=True, **_GIT_TEXT,
                 timeout=60,
             )
@@ -555,7 +581,8 @@ def commit(vault_path: str, message: str, files: list[str] | None = None,
         # run_group_killable.
         try:
             result = run_group_killable(
-                ['git', 'commit', '-m', message],
+                (['git', '--literal-pathspecs', 'commit', '--only', '-m', message, '--', *files]
+                 if stage and files else ['git', 'commit', '-m', message]),
                 cwd=vault_path, timeout=COMMIT_TIMEOUT,
             )
         except subprocess.TimeoutExpired:
@@ -1121,6 +1148,67 @@ def has_uncommitted_changes(vault_path: str) -> bool:
         # surfaces from the stage/commit path with git's own message.
         return True
     return bool(result.stdout.strip())
+
+
+def uncommitted_markdown(vault_path: str) -> list[str]:
+    """Paths of markdown files with staged, unstaged or untracked changes.
+
+    The index is ingested from the working tree when a commit's post-commit
+    hook runs. These paths may have changed since that read (#720). The
+    caller narrows them to the files ingest would index. [] when
+    the vault is not a git checkout or git fails: a staleness hint must not
+    turn into an error. --no-optional-locks keeps this read from taking
+    index.lock (see has_uncommitted_changes).
+    """
+    if not _is_repo_root(vault_path):
+        return []
+    try:
+        result = subprocess.run(
+            ['git', '--no-optional-locks', 'status', '--porcelain', '-z',
+             '--untracked-files=all', '--', '*.md', 'schist.yaml'],
+            cwd=vault_path, capture_output=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if result.returncode != 0:
+        return []
+    paths = []
+    fields = result.stdout.split(b'\0')
+    i = 0
+    while i < len(fields):
+        entry = fields[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        # A rename or copy entry is followed by its source path as a field of
+        # its own; the destination is the one that matters.
+        if entry[0:1] in (b'R', b'C') or entry[1:2] in (b'R', b'C'):
+            if i < len(fields):
+                paths.append(os.fsdecode(fields[i]))
+                i += 1
+        paths.append(os.fsdecode(entry[3:]))
+    return paths
+
+
+def _is_repo_root(vault_path: str) -> bool:
+    """The vault is the top of its own git checkout. A vault that is only a
+    subdirectory of another repository must not read that repository's HEAD
+    or status as its own."""
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', '--show-toplevel'],
+            cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return (result.returncode == 0
+            and os.path.realpath(result.stdout.strip()) == os.path.realpath(vault_path))
+
+
+def vault_head(vault_path: str) -> str:
+    """HEAD sha of a vault that is its own git checkout; '' for a non-git
+    vault, a subdirectory of another repo, an unborn branch or a git failure."""
+    return _head_sha(vault_path) if _is_repo_root(vault_path) else ''
 
 
 def has_unpushed_commits(vault_path: str) -> bool:
