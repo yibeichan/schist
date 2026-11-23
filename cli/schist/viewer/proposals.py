@@ -161,7 +161,8 @@ def _directory_of(vault, p: dict) -> str:
     '' when there is none. Filing records it as `standards_dir`, which the
     page shows instead of working it out again."""
     if p['kind'] == 'create':
-        return p['args']['directory']
+        directory = p['args']['directory']
+        return directory if directory in configured_directories(vault) else ''
     return _configured_dir(vault, p['args']['source'])
 
 
@@ -459,6 +460,8 @@ class ProposalStore:
                 raise ProposalError(f'proposal {pid} is already {p["status"]}')
             # vault.yaml may have changed since the proposal was filed.
             self.check_writable(p['args']['source'] if p['kind'] == 'link' else p['target'])
+            if p['kind'] == 'create' and not _directory_of(self.vault, p):
+                raise ProposalError('the vault no longer configures this proposal directory')
             self._refuse_standard_edit(p)
             p['decided_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
             body = p['args']['body'] if p['kind'] == 'create' else ''
@@ -601,5 +604,20 @@ class ProposalStore:
                 f'timed out after {APPROVE_TIMEOUT_S} s; the standard may already be '
                 f'committed in {directory}/. Check before adding it again.')}
         output = ((r.stdout or '') + (r.stderr or ''))[-2000:]
-        return {'status': 'saved' if r.returncode == 0 else 'failed',
-                'directory': directory, 'output': output}
+        if r.returncode:
+            return {'status': 'failed', 'directory': directory, 'output': output}
+        path = (r.stdout or '').removesuffix('\n')
+        # add can write the file even when a commit fails. Never retry an
+        # indeterminate write automatically: a second add allocates a new name.
+        if (Path(path).parent.as_posix() == directory and path.endswith('.md')
+                and not path.startswith('/') and '\n' not in path
+                and 'Warning: git commit failed:' not in (r.stderr or '')):
+            try:
+                landed = subprocess.run(['git', 'cat-file', '-e', f'HEAD:{path}'],
+                                        cwd=self.vault, capture_output=True, timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                landed = None
+            if landed is not None and landed.returncode == 0:
+                return {'status': 'saved', 'directory': directory, 'path': path, 'output': output}
+        return {'status': 'unknown', 'directory': directory,
+                'output': f'could not confirm the standard was committed. Check the vault. {output}'}

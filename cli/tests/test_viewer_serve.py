@@ -1181,6 +1181,31 @@ class TestStandards:
         assert [x['id'] for x in store.list()] == [p['id']]
         assert store.reject(p['id'], reason='Too vague', save_standard=True)['status'] == proposals_mod.REJECTED
 
+    def test_a_rejected_commit_cannot_claim_a_standard_or_duplicate_it(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='No', body='b', rationale='r')
+        hook = vault / '.git/hooks/pre-commit'
+        hook.write_text('#!/bin/sh\nexit 1\n')
+        hook.chmod(0o755)
+        result = store.reject(p['id'], reason='Review this', save_standard=True)
+        assert result['standard']['status'] == 'unknown'
+        assert 'git commit failed' in result['standard']['output']
+        with pytest.raises(proposals_mod.ProposalError, match='already rejected'):
+            store.reject(p['id'], reason='Review this', save_standard=True)
+        assert len(list((vault / 'notes').glob('*standard-review-this*.md'))) == 1
+
+    def test_removed_create_directory_is_refused_at_review(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        cfg = vault / 'schist.yaml'
+        original = cfg.read_text()
+        cfg.write_text('directories: [notes, journal]\n')
+        p = store.propose_note(ro, title='No', body='b', rationale='r', directory='journal')
+        cfg.write_text(original)
+        with pytest.raises(proposals_mod.ProposalError, match='no longer configures'):
+            store.approve(p['id'], runner=_never)
+        with pytest.raises(proposals_mod.ProposalError, match='no longer configures'):
+            store.reject(p['id'], reason='Review this', save_standard=True, runner=_never)
+
     def test_a_timed_out_standard_still_rejects(self, vault, ro):
         store = proposals_mod.ProposalStore(vault)
         p = store.propose_note(ro, title='No', body='b', rationale='r')
