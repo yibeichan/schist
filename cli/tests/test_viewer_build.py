@@ -662,6 +662,46 @@ process.stdout.write(JSON.stringify(out));
         assert 'kind === "cited"' in self.PAGE
 
 
+    def test_the_study_label_filters_learning_cards(self):
+        """The sidebar's study chip is a tag label, not a directory: a card
+        in notes/ or decisions/ matches it, and its type count is the number
+        of cards while `notes` still counts every note."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node not installed")
+        fns = []
+        for name in ("nodeKind", "isStudy", "typeKinds", "nodeProjects", "filtersOn", "matchesFilters", "facetCounts"):
+            m = re.search(rf"function {name}\(.*?\n  \}}\n", self.PAGE, re.S)
+            assert m, f"{name} not found"
+            fns.append(m.group(0))
+        script = "\n".join(fns) + """
+const nodes = [
+  { id: "notes/card.md", type: "note", status: "active", tags: ["learning", "project:alpha"] },
+  { id: "notes/plain.md", type: "note", status: "active", tags: ["project:alpha"] },
+  { id: "decisions/learning.md", type: "note", status: "accepted", tags: ["learning"] },
+  { id: "locking", type: "concept" },
+];
+const F = (type = []) => ({ type: new Set(type), project: new Set(), status: new Set(), tag: new Set() });
+const ids = f => nodes.filter(n => matchesFilters(n, f)).map(n => n.id);
+const counts = (f, facet, fn) => Object.fromEntries(facetCounts(nodes, f, facet, fn));
+process.stdout.write(JSON.stringify({
+  study: ids(F(["study"])),
+  notes: ids(F(["notes"])),
+  both: ids(F(["study", "notes"])),
+  kinds: nodes.map(typeKinds),
+  counts: counts(F(), "type", typeKinds),
+}));
+"""
+        res = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+        assert res.returncode == 0, res.stderr
+        out = json.loads(res.stdout)
+        assert out["study"] == ["notes/card.md", "decisions/learning.md"]
+        # A card still counts as a note; the label is additive.
+        assert out["notes"] == ["notes/card.md", "notes/plain.md"]
+        assert out["both"] == ["notes/card.md", "notes/plain.md", "decisions/learning.md"]
+        assert out["counts"]["study"] == 2 and out["counts"]["notes"] == 2
+        assert out["kinds"][0] == ["notes", "study"]
+
     def test_list_filters_by_type_status_and_tags(self):
         """The list filters by vault directory (a note's type), status and
         tags: values within a facet are alternatives, facets combine, every
@@ -670,7 +710,7 @@ process.stdout.write(JSON.stringify(out));
         if node is None:
             pytest.skip("node not installed")
         fns = []
-        for name in ("nodeKind", "nodeProjects", "filtersOn", "matchesFilters", "facetCounts"):
+        for name in ("nodeKind", "isStudy", "nodeProjects", "filtersOn", "matchesFilters", "facetCounts"):
             m = re.search(rf"function {name}\(.*?\n  \}}\n", self.PAGE, re.S)
             assert m, f"{name} not found"
             fns.append(m.group(0))
@@ -728,6 +768,56 @@ process.stdout.write(JSON.stringify({
         assert out["projectOn"] is True
         # A note in two projects counts for both; the project filter itself is skipped.
         assert out["projectCounts"] == {"alpha": 2, "beta": 1}
+
+    def test_tag_suggestions_leave_out_project_tags(self):
+        """project:<repo> tags have their own chips (alternatives), while a tag
+        filter needs every tag; offering them as tags would give the same
+        selection two meanings."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node not installed")
+        m = re.search(r"function tagCountsOf\(.*?\n  \}\n", self.PAGE, re.S)
+        assert m, "tagCountsOf not found"
+        assert "tagCountsOf(nodes)" in self.PAGE
+        script = m.group(0) + """
+const nodes = [
+  { id: "a", tags: ["security", "project:alpha"] },
+  { id: "b", tags: ["security", "hub", "project:beta"] },
+  { id: "c" },
+];
+process.stdout.write(JSON.stringify([...tagCountsOf(nodes)]));
+"""
+        res = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+        assert res.returncode == 0, res.stderr
+        assert json.loads(res.stdout) == [["security", 2], ["hub", 1]]
+
+    def test_project_tags_filter_by_project_in_the_panel_and_the_hash(self):
+        """A project:<repo> tag is filtered through the project chips: the
+        panel's tag button toggles that project, and an older #tag=project:x
+        link maps to the project filter."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node not installed")
+        fns = []
+        for name in ("projectOfTag", "hashFilter"):
+            m = re.search(rf"function {name}\(.*?\n  \}}\n", self.PAGE, re.S)
+            assert m, f"{name} not found"
+            fns.append(m.group(0))
+        script = "\n".join(fns) + """
+process.stdout.write(JSON.stringify({
+  tag: [projectOfTag("project:alpha"), projectOfTag("security"), projectOfTag("project:")],
+  hash: [hashFilter("tag", "project:alpha"), hashFilter("tag", "hub"),
+         hashFilter("project", "alpha"), hashFilter("type", "ops")],
+}));
+"""
+        res = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+        assert res.returncode == 0, res.stderr
+        out = json.loads(res.stdout)
+        assert out["tag"] == ["alpha", None, ""]
+        assert out["hash"] == [["project", "alpha"], ["tag", "hub"], ["project", "alpha"], ["type", "ops"]]
+        # The panel button and readHash use them.
+        assert "const p = projectOfTag(t);" in self.PAGE and 'toggle("project", p)' in self.PAGE
+        assert "hashFilter(facet, v)" in self.PAGE
 
     def test_filter_controls_are_accessible_and_restored_from_the_url(self):
         assert 'b.setAttribute("aria-pressed"' in self.PAGE
@@ -865,6 +955,45 @@ class TestSchistBuildCommand:
         assert list(search["store"]) == ["notes/2026-04-16-hello.md"]
         assert (out / "index.html").read_text(encoding="utf-8") == build.render_page(
             build.INDEX_HTML.read_text(encoding="utf-8"))
+
+    @pytest.mark.parametrize('change', ['edit', 'delete', 'add', 'commit', 'skipped', 'missing stamp'])
+    def test_strict_freshness_checks_actual_inputs(self, tmp_path, change):
+        vault = _vault(tmp_path / 'vault')
+        fresh = tmp_path / 'fresh'
+        cmd = [sys.executable, '-m', 'schist', '--vault', str(vault), 'build']
+        # A non-indexed README and git history are irrelevant.
+        subprocess.run(['git', 'init', '-q', str(vault)], check=True)
+        subprocess.run(['git', '-C', str(vault), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(vault), '-c', 'user.name=Tester', '-c', 'user.email=test@example.org',
+                        'commit', '-qm', 'seed'], check=True)
+        (vault / 'README.md').write_text('support')
+        subprocess.run(cmd + ['--out', str(fresh), '--require-fresh'], check=True)
+        note = next((vault / 'notes').glob('*.md'))
+        if change == 'edit':
+            note.write_text(note.read_text() + 'different text')
+        elif change == 'delete':
+            note.unlink()
+        elif change == 'add':
+            (vault / 'notes/new.md').write_text('new note')
+        elif change == 'commit':
+            note.write_text(note.read_text() + 'changed and committed')
+            subprocess.run(['git', '-C', str(vault), '-c', 'user.name=Tester', '-c', 'user.email=test@example.org',
+                            'commit', '-qam', 'change without hook'], check=True)
+        elif change == 'skipped':
+            (vault / 'notes/invalid.md').write_bytes(b'\xff')
+        else:
+            (vault / '.schist/schist.db.ingested-head').unlink()
+        strict = tmp_path / 'strict'
+        blocked = subprocess.run(cmd + ['--out', str(strict), '--require-fresh'],
+                                 capture_output=True, text=True)
+        assert blocked.returncode and ('may differ' in blocked.stderr or 'cannot verify' in blocked.stderr)
+        assert not strict.exists()
+        permissive = subprocess.run(cmd + ['--out', str(strict)], capture_output=True, text=True)
+        assert permissive.returncode == 0
+        if change != 'missing stamp':
+            assert 'may differ' in permissive.stderr
+        assert 'Ingested:' not in permissive.stdout  # normal build used only the existing index
+        assert (strict / 'index.html').exists()
 
     def test_schist_build_missing_page_is_one_error_line(self, tmp_path):
         """A broken install prints `Error: ...` and exits 1, not a traceback (#603)."""

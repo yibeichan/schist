@@ -296,6 +296,9 @@ _LOOPBACK_HEX = ('00000000', '00000000000000000000000001000000',
                  '00000000000000000000000000000000', '0000000000000000FFFF00000100007F')
 
 
+UNKNOWN_UID = -1
+
+
 def listener_uids(port: int, tables=PROC_NET) -> set[int] | None:
     """uids owning a listening socket on `port` at a loopback or wildcard
     address, from /proc/net/tcp and tcp6. None when the tables do not exist
@@ -304,19 +307,24 @@ def listener_uids(port: int, tables=PROC_NET) -> set[int] | None:
     found = False
     for table in tables:
         try:
-            lines = Path(table).read_text().splitlines()[1:]
+            lines = Path(table).read_text(encoding='ascii', errors='replace').splitlines()[1:]
         except OSError:
             continue
         found = True
         for line in lines:
             f = line.split()
-            if len(f) < 8 or f[3] != '0A':                  # 0A: LISTEN
+            if len(f) < 4 or f[3] != '0A':                  # 0A: LISTEN
                 continue
             addr, _, port_hex = f[1].partition(':')
-            if int(port_hex, 16) != port:
+            try:
+                row_port = int(port_hex, 16)
+            except ValueError:
+                continue
+            if row_port != port:
                 continue
             if addr in _LOOPBACK_HEX or (len(addr) == 8 and addr.endswith('7F')):
-                uids.add(int(f[7]))
+                uid = f[7] if len(f) > 7 else ''
+                uids.add(int(uid) if uid.isascii() and uid.isdecimal() and len(uid) <= 10 else UNKNOWN_UID)
     return uids if found else None
 
 
@@ -346,6 +354,9 @@ class Agent:
             return None
         uids = listener_uids(port, self.proc_net)
         others = sorted(u for u in (uids or ()) if u != os.getuid())
+        if UNKNOWN_UID in others:
+            return (f'cannot tell which user owns the process listening on {url.hostname}:{port}; '
+                    'start your own Ollama on another port and pass --ollama-url')
         if not others:
             return None
         return (f'the process listening on {url.hostname}:{port} belongs to another user '
