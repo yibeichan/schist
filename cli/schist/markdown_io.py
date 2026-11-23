@@ -14,6 +14,7 @@ import tempfile
 import frontmatter
 
 from .ingest import (
+    _NON_MARKDOWN_SEPARATORS,
     connection_line_edge,
     normalize_newlines,
     parse_connections,
@@ -105,15 +106,18 @@ def sanitize_context(context: str) -> str:
     format delimits context with "..." (CONNECTION_RE: [^"]*). The prefix
     regex and the edge strip use the pinned SLUG_WS_CHARS union class per
     the #338 convention rather than replicating JS's \\s/trim() exactly, so
-    the two implementations CAN disagree on exotic control chars (e.g. TS
-    trim() drops a leading U+FEFF but keeps U+001F; the union strips both,
-    and a U+001F embedded in a prefix word stops Python's non-ws run where
-    TS's \\S continues). With boundaries already flattened every such
+    the two implementations CAN disagree on exotic whitespace in the prefix
+    strip and edge strip. (U+001F, once the example, is now flattened to a
+    space first on both sides.) With boundaries already flattened every such
     divergence is cosmetic — a byte-different context string, never a
     forged edge.
+
+    The separators the connection rule refuses anywhere in a line
+    (_NON_MARKDOWN_SEPARATORS, which adds U+001F to the boundaries) are
+    flattened too, so a context holding one is written, not refused.
     """
     safe = context
-    for ch in LINE_BOUNDARY_CHARS:
+    for ch in LINE_BOUNDARY_CHARS + _NON_MARKDOWN_SEPARATORS:
         if ch in safe:
             safe = safe.replace(ch, ' ')
     safe = _FORGED_PREFIX_RE.sub('', safe)
