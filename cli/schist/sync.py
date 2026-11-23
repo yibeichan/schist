@@ -1224,7 +1224,7 @@ def _is_non_fast_forward(output: str) -> bool:
 # `_is_network_error`. So no case could express "the predicate matches and the
 # verdict is still ACL", and the ordering the correctness depends on had no
 # test on this side at all.
-_PUSH_FAILURE_BRANCHES = ("non-fast-forward", "hub-transient", "acl", "network", "other")
+_PUSH_FAILURE_BRANCHES = ("non-fast-forward", "hub-transient", "hub-inspection", "acl", "network", "other")
 
 # The hub's own ERROR lines (pre_receive.py): it timed out diffing the push,
 # or could not read its vault.yaml or the branch it serves. It refuses the
@@ -1238,9 +1238,14 @@ _HUB_TRANSIENT_RE = re.compile(
 _CONTENT_REFUSAL_HEADER_RE = re.compile(r"^\s*remote:\s*REJECTED: push contains\b", re.MULTILINE)
 
 
-def _is_hub_transient(output: str) -> bool:
+_HUB_DIFF_ERROR_RE = re.compile(r"^remote:[ \t]+ERROR: failed to diff\b", re.MULTILINE)
+
+
+def _hub_reasons(output: str) -> str:
     header = _CONTENT_REFUSAL_HEADER_RE.search(output)
-    return bool(_HUB_TRANSIENT_RE.search(output[:header.start()] if header else output))
+    return output[:header.start()] if header else output
+
+
 PUSH_DIVERGENCE_HEADER = "Push rejected — the hub has commits this clone does not."
 # Printed above git's output for the hub-transient branch;
 # schema/transport-classification-parity.json pins what the MCP server sees.
@@ -1255,7 +1260,7 @@ def classify_push_failure(output: str) -> str:
     Returns one of `_PUSH_FAILURE_BRANCHES`. Mirrors the CLASS taxonomy of
     classifyPushFailure in mcp-server/src/tools.ts (`acl` is its
     `acl-rejected`, `network` its `transport`). The order here is
-    non-fast-forward, hub-transient, acl, network. Both sides test
+    non-fast-forward, hub-transient, hub-inspection, acl, network. Both sides test
     non-fast-forward and hub-transient before acl; the MCP server tests
     hub-transient (its `transport` for the hub's ERROR lines) before
     non-fast-forward, the reverse of this order. That difference cannot
@@ -1267,8 +1272,11 @@ def classify_push_failure(output: str) -> str:
         return "non-fast-forward"
     # Before ACL: git wraps the hub's ERROR in the same "(pre-receive hook
     # declined)" line as a refusal, which _is_acl_rejection matches.
-    if _is_hub_transient(output):
+    reasons = _hub_reasons(output)
+    if _HUB_TRANSIENT_RE.search(reasons):
         return "hub-transient"
+    if _HUB_DIFF_ERROR_RE.search(reasons):
+        return "hub-inspection"
     if _is_acl_rejection(output):
         return "acl"
     if _is_network_error(output):
@@ -1495,6 +1503,8 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
             # classifies this stderr, and reads the hub's `remote: ERROR:`
             # line only at line start.
             print(f"{HUB_TRANSIENT_HEADER}\n{output}", file=sys.stderr)
+        elif branch == "hub-inspection":
+            print(f"The hub could not inspect the changes. Check the hub repository before retrying the push.\n{output}", file=sys.stderr)
         elif branch == "acl":
             print(f"Push rejected by hub:\n{output}", file=sys.stderr)
         elif branch == "network":
