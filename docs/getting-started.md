@@ -276,17 +276,18 @@ schist --vault ~/my-vault hooks reinstall
   `pre-commit`, which is the staged-secret scanner: without the execute bit
   `git commit` stops scanning and says nothing.
 
-`doctor` names the exact path it checked, and that is not always
-`.git/hooks/` — if `core.hooksPath` is set, git looks in the configured
-directory instead and schist's hooks there are the ones that count. Either
-symlink them in, or unset the redirect. `schist init` and `schist init-spoke`
-always write the hooks into the vault's own `.git/hooks/` and print a warning
-when `core.hooksPath` is set, since git then ignores them:
+`doctor` checks the directory where Git runs hooks. If `core.hooksPath`
+redirects Git elsewhere, `schist init` and `schist init-spoke` install the
+hooks in the new vault's own `.git/hooks/` and print a warning. To use those
+hooks in a newly initialized vault, override the redirect in its local config.
 
 ```bash
-git -C ~/my-vault config --unset core.hooksPath
-schist --vault ~/my-vault hooks reinstall
+git -C ~/my-vault config --local core.hooksPath .git/hooks
 ```
+
+For an existing vault, `hooks reinstall` accepts a directory inside the
+vault or the repository's own Git hooks directory. Integrate the schist
+hooks manually if other repositories use the external directory.
 
 ### 6. `MCP server fails to start`
 

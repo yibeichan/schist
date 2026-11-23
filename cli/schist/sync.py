@@ -218,8 +218,8 @@ def _install_local_hooks(vault_path) -> str | None:
         )
     return (
         f"{where} and ignores the post-commit ingest and pre-commit secret scan "
-        f"installed in the vault's .git/hooks/. Unset it for this vault "
-        f"(`git config --unset core.hooksPath`) or install the hooks in that "
+        f"installed in the vault's .git/hooks/. From the new vault, override it locally "
+        f"(`git config --local core.hooksPath .git/hooks`) or integrate the hooks in that "
         f"directory yourself; `schist doctor` reports the state."
     )
 
