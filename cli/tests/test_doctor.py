@@ -5635,3 +5635,49 @@ class TestCheckMcpConnectionsRule:
         src = (Path(__file__).resolve().parents[2] / "mcp-server" / "src" / "markdown-parser.ts").read_text()
         m = _MCP_RULE_VERSION_RE.search(src)
         assert m is not None and int(m.group(1)) == CONNECTIONS_RULE_VERSION
+
+
+class TestHubWildcardWriters:
+    """#529: a wildcard writer is no drift (#512) but must stay visible."""
+
+    def _hub(self, tmp_path):
+        import shutil
+        if shutil.which("git") is None:
+            pytest.skip("git not available")
+        from types import SimpleNamespace
+        from schist.sync import init_hub
+        hub = tmp_path / "hub.git"
+        init_hub(SimpleNamespace(name="v", participant=["alpha", "beta"]), str(hub))
+        return hub
+
+    def test_skip_without_hub_path(self):
+        from schist.doctor import check_hub_wildcard_writers
+        assert check_hub_wildcard_writers(None).status == "SKIP"
+
+    def test_no_wildcard_writer(self, tmp_path):
+        from schist.doctor import check_hub_wildcard_writers
+        r = check_hub_wildcard_writers(str(self._hub(tmp_path)))
+        assert r.status == "PASS"
+        assert "no participant" in r.message
+
+    def test_wildcard_writer_is_named_and_not_a_warn(self, tmp_path):
+        from schist import hub_admin
+        from schist.doctor import check_hub_acl_drift, check_hub_wildcard_writers
+        hub = self._hub(tmp_path)
+
+        def make_beta_wildcard(d):
+            d["access"]["beta"]["write"] = ["*"]
+            return True
+
+        hub_admin.apply_mutation(hub, make_beta_wildcard, "m")
+        r = check_hub_wildcard_writers(str(hub))
+        assert r.status == "PASS"
+        assert "beta" in r.message and "alpha" not in r.message
+        # The drift check stays quiet about it, as #512 intends.
+        assert check_hub_acl_drift(str(hub)).status == "PASS"
+
+    def test_registered_in_run_doctor(self, tmp_path):
+        from schist.doctor import run_doctor
+        hub = self._hub(tmp_path)
+        labels = [r.label for r in run_doctor(None, None, hub_path=str(hub))]
+        assert "Hub wildcard writers" in labels
