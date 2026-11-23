@@ -1123,6 +1123,67 @@ def has_uncommitted_changes(vault_path: str) -> bool:
     return bool(result.stdout.strip())
 
 
+def uncommitted_markdown(vault_path: str) -> list[str]:
+    """Paths of markdown files with staged, unstaged or untracked changes.
+
+    The index is ingested from the working tree when a commit's post-commit
+    hook runs. These paths may have changed since that read (#720). The
+    caller narrows them to the files ingest would index. [] when
+    the vault is not a git checkout or git fails: a staleness hint must not
+    turn into an error. --no-optional-locks keeps this read from taking
+    index.lock (see has_uncommitted_changes).
+    """
+    if not _is_repo_root(vault_path):
+        return []
+    try:
+        result = subprocess.run(
+            ['git', '--no-optional-locks', 'status', '--porcelain', '-z',
+             '--untracked-files=all', '--', '*.md', 'schist.yaml'],
+            cwd=vault_path, capture_output=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if result.returncode != 0:
+        return []
+    paths = []
+    fields = result.stdout.split(b'\0')
+    i = 0
+    while i < len(fields):
+        entry = fields[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        # A rename or copy entry is followed by its source path as a field of
+        # its own; the destination is the one that matters.
+        if entry[0:1] in (b'R', b'C') or entry[1:2] in (b'R', b'C'):
+            if i < len(fields):
+                paths.append(os.fsdecode(fields[i]))
+                i += 1
+        paths.append(os.fsdecode(entry[3:]))
+    return paths
+
+
+def _is_repo_root(vault_path: str) -> bool:
+    """The vault is the top of its own git checkout. A vault that is only a
+    subdirectory of another repository must not read that repository's HEAD
+    or status as its own."""
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', '--show-toplevel'],
+            cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return (result.returncode == 0
+            and os.path.realpath(result.stdout.strip()) == os.path.realpath(vault_path))
+
+
+def vault_head(vault_path: str) -> str:
+    """HEAD sha of a vault that is its own git checkout; '' for a non-git
+    vault, a subdirectory of another repo, an unborn branch or a git failure."""
+    return _head_sha(vault_path) if _is_repo_root(vault_path) else ''
+
+
 def has_unpushed_commits(vault_path: str) -> bool:
     """Check if local branch is ahead of origin.
 

@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sqlite3
+import tempfile
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -16,7 +17,10 @@ from pathlib import Path
 from . import git_ops, markdown_io, sqlite_query
 from .ingest import (
     SchemaConfigError,
-    source_fingerprint,
+    _configured_content_roots,
+    _ingest_into,
+    ingested_head_path,
+    is_indexed_path,
     _normalize_concept_slug,
     _normalize_tag,
     CONNECTION_RE,
@@ -735,23 +739,48 @@ def build(args, vault_path: str, db_path: str):
     sqlite_query.get_db(vault_path, db_path).close()
     out_dir = args.out or os.path.join(vault_path, '.schist', 'data')
     try:
-        def check_source(db):
-            try:
-                row = db.execute('SELECT digest FROM ingest_source').fetchone()
-                if not row:
-                    reason = 'the index has no complete source fingerprint'
-                elif row[0] != source_fingerprint(Path(vault_path)):
-                    reason = 'the indexed source files have changed'
-                else:
-                    return
-            except (OSError, sqlite3.Error, ValueError, RuntimeError) as exc:
-                reason = f'could not verify the source files ({exc})'
-            message = f'The index may differ from the vault: {reason}. Run schist-ingest before building.'
+        try:
+            roots = _configured_content_roots(Path(vault_path))
+        except SchemaConfigError as exc:
             if getattr(args, 'require_fresh', False):
-                raise SchemaConfigError(message)
-            print(f'Warning: {message}', file=sys.stderr)
+                raise
+            print(f'Warning: the index may differ from the vault: {exc}', file=sys.stderr)
+            roots = set()
+        changed = [p for p in git_ops.uncommitted_markdown(vault_path)
+                   if p == 'schist.yaml' or is_indexed_path(Path(p), roots)]
+        head = git_ops.vault_head(vault_path)
+        try:
+            stamp = ingested_head_path(db_path).read_text(encoding='ascii').strip()
+        except (OSError, UnicodeError):
+            stamp = ''
+        reason = None
+        if changed:
+            reason = f'uncommitted source changes ({", ".join(changed[:3])})'
+        elif head and stamp and head != stamp:
+            reason = 'the vault commit differs from the recorded ingest commit'
+        if reason:
+            print(f'Warning: the index may differ from the vault: {reason}.', file=sys.stderr)
 
-        write_site(Path(db_path), Path(out_dir), check_source=check_source)
+        def verify_source(graph, search):
+            from .viewer.build import build_graph, build_search_index
+            if not head or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', stamp):
+                raise SchemaConfigError('cannot verify freshness: missing vault HEAD or ingest commit; re-ingest first')
+            # A HEAD stamp alone cannot distinguish a manual ingest of dirty
+            # files from an ingest of the clean commit. Compare the actual export.
+            with tempfile.TemporaryDirectory() as temp:
+                fresh = sqlite3.connect(Path(temp) / 'verify.db')
+                try:
+                    skipped = _ingest_into(fresh, Path(vault_path).resolve(), Path(__file__).with_name('schema.sql'))
+                    if skipped:
+                        raise SchemaConfigError('cannot verify freshness: verification ingest skipped source files')
+                    if build_graph(fresh) != graph or build_search_index(fresh) != search:
+                        raise SchemaConfigError('the index may differ from the vault; re-ingest before building')
+                except (OSError, sqlite3.Error) as exc:
+                    raise SchemaConfigError(f'cannot verify freshness: {exc}') from exc
+                finally:
+                    fresh.close()
+
+        write_site(Path(db_path), Path(out_dir), check_source=verify_source if getattr(args, 'require_fresh', False) else None)
     except ViewerPageMissing as e:
         # A broken install, like a missing default.yaml: main() prints it as
         # one Error: line rather than a traceback (#603).

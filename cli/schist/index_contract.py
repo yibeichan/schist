@@ -59,9 +59,9 @@ from pathlib import Path
 # Baked-in mirror of <repo>/schema/index-contract.json. Do not edit one
 # without the other — the drift test pins them equal (as parsed JSON).
 INDEX_CONTRACT_FALLBACK: dict = {
-    'schemaVersion': 2,
+    'schemaVersion': 1,
     'tables': [
-        'docs', 'concepts', 'edges', 'docs_fts', 'paper_metadata', 'concept_aliases', 'ingest_source',
+        'docs', 'concepts', 'edges', 'docs_fts', 'paper_metadata', 'concept_aliases',
     ],
     'requiredTables': ['docs', 'paper_metadata', 'concept_aliases'],
     'requiredDocsColumns': [
@@ -69,7 +69,7 @@ INDEX_CONTRACT_FALLBACK: dict = {
         'body', 'scope', 'source', 'confidence', 'file_ref',
     ],
     'rebuildSurvivors': ['concept_aliases'],
-    'schemaSqlDigest': 'b4fbf9efcbb3b21e0f41970322877aa00d564a4cd128a87a46a25bd27cd24949',
+    'schemaSqlDigest': '6cd775da8d6592bdf38b4fa246f6d49400ee7d70b23934843c0232148f56e212',
 }
 
 _CONTRACT_KEYS = ('tables', 'requiredTables', 'requiredDocsColumns', 'rebuildSurvivors')

@@ -257,10 +257,10 @@ def write_site(db_path: Path, out_dir: Path, *, check_source=None) -> dict:
     db = sqlite3.connect(db_path)
     try:
         db.execute("BEGIN")
-        if check_source is not None:
-            check_source(db)
         graph = build_graph(db)
         search = build_search_index(db)
+        if check_source is not None:
+            check_source(graph, search)
     finally:
         db.close()
 

@@ -5,7 +5,6 @@
 -- _ingest_into() BEFORE this script runs, so the DROP/CREATE phase below
 -- executes in the mode the deployment asked for. See #254.
 
-DROP TABLE IF EXISTS ingest_source;
 DROP TABLE IF EXISTS docs_fts;
 DROP TABLE IF EXISTS paper_metadata;
 DROP TABLE IF EXISTS edges;
@@ -15,8 +14,6 @@ DROP TABLE IF EXISTS docs;
 -- fresh installs (table never existed); cleans up the orphan on pre-#146
 -- deployments where the table was created by the older schema.sql.
 DROP TABLE IF EXISTS domains;
-
-CREATE TABLE ingest_source (digest TEXT NOT NULL);
 
 CREATE TABLE docs (
     id          TEXT PRIMARY KEY,       -- relative path: "notes/2026-03-26-attention.md"

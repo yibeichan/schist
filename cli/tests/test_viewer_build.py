@@ -866,12 +866,16 @@ class TestSchistBuildCommand:
         assert (out / "index.html").read_text(encoding="utf-8") == build.render_page(
             build.INDEX_HTML.read_text(encoding="utf-8"))
 
-    @pytest.mark.parametrize('change', ['edit', 'delete', 'add', 'missing fingerprint'])
+    @pytest.mark.parametrize('change', ['edit', 'delete', 'add', 'commit', 'skipped', 'missing stamp'])
     def test_strict_freshness_checks_actual_inputs(self, tmp_path, change):
         vault = _vault(tmp_path / 'vault')
         fresh = tmp_path / 'fresh'
         cmd = [sys.executable, '-m', 'schist', '--vault', str(vault), 'build']
         # A non-indexed README and git history are irrelevant.
+        subprocess.run(['git', 'init', '-q', str(vault)], check=True)
+        subprocess.run(['git', '-C', str(vault), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(vault), '-c', 'user.name=Tester', '-c', 'user.email=test@example.org',
+                        'commit', '-qm', 'seed'], check=True)
         (vault / 'README.md').write_text('support')
         subprocess.run(cmd + ['--out', str(fresh), '--require-fresh'], check=True)
         note = next((vault / 'notes').glob('*.md'))
@@ -881,16 +885,24 @@ class TestSchistBuildCommand:
             note.unlink()
         elif change == 'add':
             (vault / 'notes/new.md').write_text('new note')
+        elif change == 'commit':
+            note.write_text(note.read_text() + 'changed and committed')
+            subprocess.run(['git', '-C', str(vault), '-c', 'user.name=Tester', '-c', 'user.email=test@example.org',
+                            'commit', '-qam', 'change without hook'], check=True)
+        elif change == 'skipped':
+            (vault / 'notes/invalid.md').write_bytes(b'\xff')
         else:
-            with sqlite3.connect(vault / '.schist/schist.db') as db:
-                db.execute('DELETE FROM ingest_source')
+            (vault / '.schist/schist.db.ingested-head').unlink()
         strict = tmp_path / 'strict'
         blocked = subprocess.run(cmd + ['--out', str(strict), '--require-fresh'],
                                  capture_output=True, text=True)
-        assert blocked.returncode and 'may differ' in blocked.stderr
+        assert blocked.returncode and ('may differ' in blocked.stderr or 'cannot verify' in blocked.stderr)
         assert not strict.exists()
         permissive = subprocess.run(cmd + ['--out', str(strict)], capture_output=True, text=True)
-        assert permissive.returncode == 0 and 'may differ' in permissive.stderr
+        assert permissive.returncode == 0
+        if change != 'missing stamp':
+            assert 'may differ' in permissive.stderr
+        assert 'Ingested:' not in permissive.stdout  # normal build used only the existing index
         assert (strict / 'index.html').exists()
 
     def test_schist_build_missing_page_is_one_error_line(self, tmp_path):

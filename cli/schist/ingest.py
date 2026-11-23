@@ -7,12 +7,12 @@
 """schist ingestion — parse markdown vault into SQLite."""
 
 import argparse
-import hashlib
 import json
 import os
 import re
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 import frontmatter
@@ -963,55 +963,76 @@ def paper_metadata_from_frontmatter(meta: dict, rel: Path) -> tuple | None:
     )
 
 
-def _indexed_paths(vault, content_roots):
-    for md_file in sorted(vault.rglob('*.md')):
-        rel = md_file.relative_to(vault)
-        if not rel.parts:
-            continue
-        if rel.name.casefold() == 'readme.md':
-            continue
-        if len(rel.parts) == 1:
-            if rel.name.casefold() in ROOT_SUPPORT_DOCS:
-                continue
-        elif rel.parts[0].casefold() not in content_roots:
-            continue
-        # Skip hidden/excluded dirs
-        if any(part in SKIP_DIRS for part in rel.parts):
-            continue
-
-        yield md_file, rel
+def is_indexed_path(rel: Path, content_roots: set[str]) -> bool:
+    """Whether ingest reads the markdown file at this vault-relative path
+    (before its symlink checks): not a README, not a root support doc, under
+    a configured content root, outside the hidden and excluded dirs."""
+    if not rel.parts:
+        return False
+    if rel.name.casefold() == 'readme.md':
+        return False
+    if len(rel.parts) == 1:
+        if rel.name.casefold() in ROOT_SUPPORT_DOCS:
+            return False
+    elif rel.parts[0].casefold() not in content_roots:
+        return False
+    return not any(part in SKIP_DIRS for part in rel.parts)
 
 
-def _fingerprint_file(digest, rel, text):
-    # Length-independent framing for arbitrary file contents and path characters.
-    digest.update(os.fsencode(rel) + b'\0')
-    digest.update(hashlib.sha256(text.encode('utf-8')).digest())
-
-
-def source_fingerprint(vault: Path) -> str:
-    vault = vault.resolve()
-    digest = hashlib.sha256()
-    for path, rel in _indexed_paths(vault, _configured_content_roots(vault)):
-        resolved = path.resolve()
-        if (not resolved.is_relative_to(vault)
-                or any(part in SKIP_DIRS for part in resolved.relative_to(vault).parts)):
-            raise ValueError(f'cannot verify {rel}')
-        _fingerprint_file(digest, rel, path.read_text(encoding='utf-8'))
-    return digest.hexdigest()
+def ingested_head_path(db_path: str) -> Path:
+    """Where ingest records the HEAD it indexed, beside the index file."""
+    return Path(db_path).with_name(Path(db_path).name + '.ingested-head')
 
 
 def ingest(vault_path: str, db_path: str):
     vault = Path(vault_path).resolve()
     schema_path = Path(__file__).parent / 'schema.sql'
+    # Read before the scan: a commit that lands mid-ingest then leaves the
+    # stamp behind HEAD (a warning), never ahead of the index.
+    try:
+        # A standalone copy of this file (the post-commit hook can run one)
+        # has no package to import from; it records no HEAD, and
+        # _record_ingested_head then removes any earlier stamp, so a stamp
+        # is never older than the index beside it.
+        from .git_ops import vault_head
+        head = vault_head(str(vault))
+    except ImportError:
+        head = ''
 
     conn = sqlite3.connect(db_path)
     try:
         _ingest_into(conn, vault, schema_path)
     finally:
         conn.close()
+    _record_ingested_head(db_path, head)
 
 
-def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> None:
+def _record_ingested_head(db_path: str, head: str) -> None:
+    """Replace the stamp in one step (the viewer's build stamps work the same
+    way); no stamp for a vault with no HEAD to record. Best effort: a stamp
+    that cannot be written only means `schist build` stays silent."""
+    stamp = ingested_head_path(db_path)
+    tmp = None
+    try:
+        if not head:
+            stamp.unlink(missing_ok=True)
+            return
+        with tempfile.NamedTemporaryFile(mode='w', encoding='ascii', dir=stamp.parent,
+                                         prefix='.ingested-head-', delete=False) as stream:
+            tmp = Path(stream.name)
+            stream.write(head + '\n')
+        os.replace(tmp, stamp)
+    except OSError:
+        pass  # Advisory only. Strict builds independently compare the exported content.
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> int:
     """Run the actual ingest against an open connection.
 
     Split out from `ingest()` so the connection close is guaranteed via
@@ -1087,8 +1108,11 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     vault_real = vault.resolve()
     content_roots = _configured_content_roots(vault)
 
-    source_digest = hashlib.sha256()
-    for md_file, rel in _indexed_paths(vault, content_roots):
+    for md_file in sorted(vault.rglob('*.md')):
+        rel = md_file.relative_to(vault)
+        if not is_indexed_path(rel, content_roots):
+            continue
+
         try:
             resolved = md_file.resolve()
         except (OSError, RuntimeError) as e:
@@ -1121,7 +1145,6 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         conn.execute('SAVEPOINT file_sp')
         try:
             raw_text = md_file.read_text(encoding='utf-8')
-            _fingerprint_file(source_digest, rel, raw_text)
             patched_text = patch_frontmatter_flow_hashtags(raw_text)
             post = frontmatter.loads(patched_text)
             meta = post.metadata
@@ -1399,8 +1422,6 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     # different non-zero version force a rebuild, which IS the migration
     # path (#130 D3). PRAGMA takes no bound parameters; the :d format spec
     # guarantees an int lands in the statement.
-    if skipped_count == 0:
-        conn.execute('INSERT INTO ingest_source VALUES (?)', (source_digest.hexdigest(),))
     conn.execute(f'PRAGMA user_version = {INDEX_SCHEMA_VERSION:d}')
     conn.commit()
     # Authoritative concept tally: the concepts table is DROP/CREATEd every run
@@ -1415,6 +1436,7 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     if skipped_count:
         summary += f' ({skipped_count} skipped)'
     print(summary)
+    return skipped_count
 
 
 def main() -> None:
