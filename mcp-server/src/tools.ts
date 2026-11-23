@@ -391,7 +391,13 @@ export async function loadVaultConfig(vaultRoot: string): Promise<VaultConfig> {
   return {
     name: getString("name", path.basename(vaultRoot)),
     path: vaultRoot,
-    directories: getStringList("directories", [...loadCanonicalDirectories()]),
+    // Trailing slashes are stripped and an entry that was only slashes is
+    // dropped, as the CLI's commands._directories does (#469): the two writers
+    // must agree on which directories exist. Pinned by
+    // schema/directories-entry-parity.json.
+    directories: getStringList("directories", [...loadCanonicalDirectories()])
+      .map((d) => d.replace(/\/+$/, ""))
+      .filter(Boolean),
     connectionTypes,
     statuses: getStringList("statuses", [...DEFAULT_STATUSES]),
     writeBranch: getString("write_branch", "drafts"),

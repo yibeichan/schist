@@ -82,6 +82,10 @@ size and protect the agent's context window. Tools that adopted the protocol
 | `get_context` | n/a (tiered: `minimal` / `standard` / `full`) | n/a | no | yes — `depth: "full"` requires `verbose: "<reason ≥12 chars>"`; without it the server downgrades to `standard` + emits a `verboseNote` hint |
 
 `get_note` and `get_agent_state` are single-fetch by ID and don't paginate.
+For a note without a title or date, `get_note` returns an empty string for
+that field. An absent status is returned as `null`. When a note has a
+connection warning, the read result uses `connections_warning`.
+The corresponding field in `create_note` and `update_note` is `connectionsWarning`.
 
 ### Consuming a cursor
 
