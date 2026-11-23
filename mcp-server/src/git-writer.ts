@@ -139,10 +139,8 @@ function isGitTimeout(e: unknown): boolean {
 
 /**
  * How long one write may wait in total for another process's
- * `.git/index.lock` (#719). writeMutex only serializes this process's writes;
- * the `schist sync push` that triggerSpokePush spawns after every write is a
- * separate process, and its `git add`/`git commit` take the index lock while
- * our next write is staging or committing. git holds that lock for one
+ * `.git/index.lock` (#719). Manual Git operations may take the index lock
+ * while this writer stages or commits. Git holds that lock for one
  * command at a time (the commit's window is its pre-commit hook plus the
  * index write), so a short wait clears it. The allowance is per write, shared
  * by all of its git calls, so a write never sleeps more than this while a

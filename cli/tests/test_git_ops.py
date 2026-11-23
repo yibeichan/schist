@@ -1211,8 +1211,11 @@ def test_named_commit_preserves_partially_staged_neighbor(tmp_path):
     (tmp_path / neighbor).write_text("staged")
     subprocess.run(["git", "add", "--", neighbor], cwd=tmp_path, check=True)
     (tmp_path / neighbor).write_text("working")
+    _write_hook(tmp_path, "pre-commit", 'git diff --cached --name-only > .git/hook-paths\n')
     ok, detail = git_ops.commit(str(tmp_path), "owned", [literal])
     assert ok, detail
+    assert (tmp_path / ".git/hook-paths").read_text().splitlines() == [literal]
+
     def git(*args):
         return subprocess.check_output(["git", *args], cwd=tmp_path)
     assert git("diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").splitlines() == [literal.encode()]
@@ -1222,6 +1225,9 @@ def test_named_commit_preserves_partially_staged_neighbor(tmp_path):
 
 @pytest.mark.parametrize("state", ["staged", "unstaged", "partial"])
 def test_owned_path_refuses_hand_edit(tmp_path, state):
+    from argparse import Namespace
+    from schist.commands import link
+
     _init_repo(tmp_path)
     note = tmp_path / "note.md"
     note.write_text("base")
@@ -1231,5 +1237,12 @@ def test_owned_path_refuses_hand_edit(tmp_path, state):
         subprocess.run(["git", "add", "note.md"], cwd=tmp_path, check=True)
     if state == "partial":
         note.write_text("later bytes")
+    head = _head(tmp_path)
+    staged = subprocess.check_output(["git", "show", ":" + note.name], cwd=tmp_path)
+    disk = note.read_bytes()
+    args = Namespace(source=note.name, target="other.md", link_type="extends", context=None)
     with pytest.raises(SystemExit, match="set aside edits"):
-        git_ops.require_clean_write_path(str(tmp_path), note.name)
+        link(args, str(tmp_path), str(tmp_path / ".schist" / "index.db"))
+    assert _head(tmp_path) == head
+    assert subprocess.check_output(["git", "show", ":" + note.name], cwd=tmp_path) == staged
+    assert note.read_bytes() == disk

@@ -522,11 +522,26 @@ describe("git-writer under the vault write lock (#724)", () => {
     await writeNote(vault, "notes/d2.md", "---\ntitle: d2\n---\nx\n", "d2", "t");
     await writeNote(vault, "notes/hit.md", "---\ntitle: hit\n---\nlink\n", "hit", "t");
     await writeNote(vault, "notes/miss.md", "---\ntitle: miss\n---\nbody\n", "miss", "t");
+    const second = "notes/hit[2].md";
+    const hand = "notes/hit2.md";
+    const git = async (...args: string[]) => (await execFile("git", args, { cwd: vault })).stdout.trim();
+    await writeNote(vault, second, "link");
+    await fs.writeFile(path.join(vault, hand), "staged");
+    await git("add", "--", hand);
+    await fs.writeFile(path.join(vault, hand), "working");
+    const before = await git("rev-parse", "HEAD");
     const res = await deleteNote(vault, "notes/d2.md", "d2", "t", [
       { relPath: "notes/miss.md", transform: (c) => c },
       { relPath: "notes/gone.md", transform: () => "x\n" },
       { relPath: "notes/hit.md", transform: (c) => c.replace("link", "unlinked") },
+      { relPath: second, transform: () => "fixed" },
     ]);
-    expect(res.repaired).toEqual(["notes/hit.md"]);
+    expect(res.repaired).toEqual(["notes/hit.md", second]);
+    expect(await git("rev-parse", "HEAD^")).toBe(before);
+    expect((await git("diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")).split("\n")).toEqual([
+      "notes/d2.md", "notes/hit.md", second,
+    ]);
+    expect(await git("show", ":" + hand)).toBe("staged");
+    expect(await fs.readFile(path.join(vault, hand), "utf8")).toBe("working");
   }, 60000);
 });

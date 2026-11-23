@@ -5251,6 +5251,7 @@ describe("delete_note", () => {
     const linkerPath = path.join(vault, linker.id);
     const orig = await fs.readFile(linkerPath, "utf-8");
     await fs.writeFile(linkerPath, orig + "\n## Notes\n\ntrailing text\n");
+    await commitFixture(vault, linker.id);
     await seedEdgesDb(vault, [{ source: linker.id, target: target.id, type: "extends" }]);
 
     const res = await delete_note(vault, { owner: TEST_AGENT, id: target.id, cascade: true }, config) as {
