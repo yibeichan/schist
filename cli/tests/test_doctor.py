@@ -5680,7 +5680,7 @@ class TestCheckStaleAtomicTemps:
         assert r.status == "WARN"
         assert "8 stale" in r.message and "and 3 more" in r.message
         assert str(tmp_path / ".schist" / "tmp") in r.message
-        assert "8 match" in r.fix and "[a-z0-9_]" in r.fix
+        assert "cleanup-temps --writers-stopped" in r.fix
 
     def test_unreadable_staging_dir_warns_not_passes(self, tmp_path):
         (tmp_path / ".schist").mkdir()
