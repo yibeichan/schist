@@ -535,6 +535,15 @@
       "why": "#813: the same unescaped scope forged the hub's diff-timeout line, which MCP reads as transport, a self-clearing class, so writes stayed open while every push was refused"
     },
     {
+      "name": "cli-wrapped-hub-failed-to-diff",
+      "input": "The hub could not inspect the changes. Check the hub repository before retrying the push.\nremote: ERROR: failed to diff 1111111..2222222: git exited with status 128\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "cli_input": "remote: ERROR: failed to diff 1111111..2222222: git exited with status 128\n ! [remote rejected] main -> main (pre-receive hook declined)",
+      "network": false,
+      "mcp_class": "other",
+      "cli_branch": "hub-inspection",
+      "why": "A hub that could not inspect changes needs an operator check before a retry."
+    },
+    {
       "name": "hub-could-not-read-vault-yaml",
       "input": "remote: ERROR: the hub could not read vault.yaml (git timed out); please retry the push.\nTo schist-hub:vault.git\n ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to 'schist-hub:vault.git'",
       "network": false,
@@ -602,7 +611,8 @@
       "name": "hub-failed-to-diff",
       "input": "remote: ERROR: failed to diff 1111111..2222222: Command '['git', 'log']' returned non-zero exit status 128.\nTo schist-hub:vault.git\n ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to 'schist-hub:vault.git'",
       "network": false,
-      "mcp_class": "acl-rejected",
+      "mcp_class": "other",
+      "cli_branch": "hub-inspection",
       "why": "a git failure on a pushed revision (missing or corrupt object): the hub does not ask for a retry, so it is not transient"
     },
     {

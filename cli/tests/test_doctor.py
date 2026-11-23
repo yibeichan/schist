@@ -1665,6 +1665,134 @@ class TestCheckMcpConfig:
             r = check_mcp_config(None)
         assert r.status == "PASS"
 
+    # --- OpenCode V2 global config (#851) ----------------------------------
+    # `mcp.servers` is the V2 shape (per-entry `command` list, `environment`
+    # block); the normalization makes every downstream argument- and
+    # env-based sub-check read the entry unmodified.
+
+    @staticmethod
+    def _write_opencode_config(home, servers, xdg=None):
+        """Write a V2-shaped OpenCode config; XDG_CONFIG_HOME must be
+        unset (or pointing at xdg) when the test runs."""
+        base = (home / xdg) if xdg else home / ".config"
+        path = base / "opencode" / "opencode.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"mcp": {"servers": servers}}))
+        return path
+
+    def test_found_in_opencode_global_config(self, tmp_path, monkeypatch):
+        fake_mcp = tmp_path / "fake-mcp" / "dist" / "index.js"
+        fake_mcp.parent.mkdir(parents=True)
+        fake_mcp.write_text("// stub\n")
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        self._write_opencode_config(tmp_path, {"schist": {
+            "type": "local",
+            "command": ["node", str(fake_mcp)],
+            "environment": {"SCHIST_VAULT_PATH": "/srv/vault"},
+        }})
+        with patch("schist.doctor._auto_detect_mcp_path", return_value=None):
+            r = check_mcp_config(None)
+        assert r.status == "PASS", r
+        assert "opencode.json" in r.message
+
+    def test_opencode_config_found_under_xdg_config_home(
+        self, tmp_path, monkeypatch
+    ):
+        fake_mcp = tmp_path / "fake-mcp" / "dist" / "index.js"
+        fake_mcp.parent.mkdir(parents=True)
+        fake_mcp.write_text("// stub\n")
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        self._write_opencode_config(tmp_path, {"schist": {
+            "type": "local",
+            "command": ["node", str(fake_mcp)],
+            "environment": {},
+        }}, xdg="xdg")
+        with patch("schist.doctor._auto_detect_mcp_path", return_value=None):
+            r = check_mcp_config(None)
+        assert r.status == "PASS", r
+
+    def test_opencode_v1_shaped_mcp_block_still_found(
+        self, tmp_path, monkeypatch
+    ):
+        """The deprecated compat spelling (names directly under `mcp`) is
+        still read, so a machine migrated from V1 does not report green with
+        an unvalidated config."""
+        fake_mcp = tmp_path / "fake-mcp" / "dist" / "index.js"
+        fake_mcp.parent.mkdir(parents=True)
+        fake_mcp.write_text("// stub\n")
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        path = tmp_path / ".config" / "opencode" / "opencode.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"mcp": {"schist": {
+            "type": "local",
+            "command": ["node", str(fake_mcp)],
+            "environment": {},
+        }}}))
+        with patch("schist.doctor._auto_detect_mcp_path", return_value=None):
+            r = check_mcp_config(None)
+        assert r.status == "PASS", r
+
+    def test_opencode_disabled_schist_entry_warns_as_absent(
+        self, tmp_path, monkeypatch
+    ):
+        """A disabled entry is never started by the client, so it must not
+        satisfy the MCP check (mirrors the V1 `enabled: false` rule)."""
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        self._write_opencode_config(tmp_path, {"schist": {
+            "type": "local",
+            "command": ["node", str(tmp_path / "missing.js")],
+            "environment": {},
+            "disabled": True,
+        }})
+        r = check_mcp_config(None)
+        assert r.status == "WARN", r
+        assert "no schist entry found" in r.message
+
+    def test_opencode_enabled_false_schist_entry_warns_as_absent(
+        self, tmp_path, monkeypatch
+    ):
+        """The older `enabled: false` spelling leaves an entry unstarted too:
+        the MCP check must not validate it (the Vault access audit already
+        skips it)."""
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        path = tmp_path / ".config" / "opencode" / "opencode.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"mcp": {"schist": {
+            "type": "local",
+            "command": ["node", str(tmp_path / "missing.js")],
+            "enabled": False,
+        }}}))
+        r = check_mcp_config(None)
+        assert r.status == "WARN", r
+        assert "no schist entry found" in r.message
+
+    def test_opencode_entry_reaches_the_alignment_checks(
+        self, tmp_path, monkeypatch
+    ):
+        """check_mcp_schema_alignment, check_mcp_vocab_alignment and
+        check_mcp_connections_rule read their entry through
+        `_mcp_config_entry`: an OpenCode-only machine must be seen there,
+        in the shape the checks read (`command` a program, `args` the rest)."""
+        from schist.doctor import _mcp_config_entry
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        self._write_opencode_config(tmp_path, {
+            "off": {"type": "local", "disabled": True,
+                    "command": ["node", "/x/schist/mcp-server/dist/index.js"]},
+            "schist": {"type": "local",
+                       "command": ["node", "/y/mcp-server/dist/index.js"],
+                       "environment": {"SCHIST_VAULT_PATH": "/srv/vault"}},
+        })
+        entry = _mcp_config_entry(None)
+        assert entry is not None
+        assert entry["command"] == "node"
+        assert entry["args"] == ["/y/mcp-server/dist/index.js"]
+
     def test_not_found(self, tmp_path, monkeypatch):
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         r = check_mcp_config(None)
@@ -4304,6 +4432,391 @@ class TestCheckVaultAccess:
         assert r.status == "PASS", r
         assert "config file(s) read" in r.message
 
+    # --- OpenCode V2 global config (#851) ----------------------------------
+    # Same verdicts as the Claude shapes, through the `mcp.servers` wrapper
+    # and the per-entry field names (`command` list, `environment` block).
+    # XDG_CONFIG_HOME is unset so the config sits under $HOME/.config.
+
+    def _opencode_config(self, home, servers, xdg=None):
+        base = (home / xdg) if xdg else home / ".config"
+        path = base / "opencode" / "opencode.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"mcp": {"servers": servers}}))
+        return path
+
+    def opencode_home(self, monkeypatch, xdg=None):
+        if xdg:
+            monkeypatch.setenv("XDG_CONFIG_HOME", xdg)
+        else:
+            monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+    def test_opencode_schist_entry_passes(
+        self, home, monkeypatch, vault, schist_js
+    ):
+        self.opencode_home(monkeypatch)
+        self._opencode_config(home, {"schist": {
+            "type": "local",
+            "command": ["node", str(schist_js)],
+            "environment": {"SCHIST_VAULT_PATH": str(vault)},
+        }})
+        r = check_vault_access(str(vault))
+        assert r.status == "PASS", r
+
+    def test_opencode_jsonc_overlays_matching_entries_and_keeps_others(
+        self, home, monkeypatch, vault
+    ):
+        self.opencode_home(monkeypatch)
+        base = self._opencode_config(home, {
+            "retained": {"command": ["reader", str(vault)]},
+            "disabled": {"command": ["reader", str(vault)]},
+        })
+        base.write_text("// Base config\n" + base.read_text())
+        overlay = base.with_suffix(".jsonc")
+        overlay.write_text(
+            '{/* global overrides */ "mcp": {"servers": {'
+            '"disabled": {"disabled": true, "url": "https://example.org/a/*b*/",},'
+            '// end of entries\n},},}')
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL" and ": retained (args)" in r.message
+        assert ": disabled (args)" not in r.message
+
+    def test_opencode_malformed_jsonc_warns(self, home, monkeypatch, vault):
+        self.opencode_home(monkeypatch)
+        base = self._opencode_config(home, {})
+        base.with_suffix(".jsonc").write_text('{"mcp": /* unfinished comment')
+        r = check_vault_access(str(vault))
+        assert r.status == "WARN" and "cannot be parsed" in r.message
+
+    @pytest.mark.parametrize("variable,exit_fails", [
+        ("{env:HOME}", True), ("${HOME}", False)
+    ])
+    def test_opencode_path_severity_controls_doctor_exit(
+        self, home, monkeypatch, vault, variable, exit_fails
+    ):
+        from types import SimpleNamespace
+        from schist import doctor
+        self.opencode_home(monkeypatch)
+        base = self._opencode_config(home, {"reader": {"command": ["reader", variable]}})
+        base.rename(base.with_suffix(".jsonc"))
+        monkeypatch.setattr(doctor, "run_doctor", lambda *args, **kw: [check_vault_access(str(vault))])
+        if exit_fails:
+            with pytest.raises(SystemExit) as exc:
+                doctor.doctor(SimpleNamespace(vault=str(vault)))
+            assert exc.value.code == 1
+        else:
+            doctor.doctor(SimpleNamespace(vault=str(vault)))
+
+    def test_opencode_fs_server_naming_vault_fails(self, home, monkeypatch, vault):
+        self.opencode_home(monkeypatch)
+        path = self._opencode_config(home, {"fs": self._fs(str(vault))})
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+        assert "fs (args)" in r.message
+        assert str(path) in r.message
+
+    def test_opencode_environment_block_naming_vault_fails(
+        self, home, monkeypatch, vault
+    ):
+        self.opencode_home(monkeypatch)
+        p = self._opencode_config(home, {"idx": {
+            "type": "local",
+            "command": ["node", "/srv/other/indexer.js"],
+            "environment": {"ROOT": str(vault)},
+        }})
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+        assert "idx (env)" in r.message
+        assert str(p) in r.message
+
+    def test_opencode_disabled_server_is_skipped(
+        self, home, monkeypatch, vault, schist_js
+    ):
+        self.opencode_home(monkeypatch)
+        self._opencode_config(home, {
+            "fs": {
+                "type": "local", "command": ["npx", "-y", "server-filesystem",
+                                             str(vault)],
+                "disabled": True,
+            },
+            "schist": {
+                "type": "local", "command": ["node", str(schist_js)],
+                "environment": {"SCHIST_VAULT_PATH": str(vault)},
+            },
+        })
+        r = check_vault_access(str(vault))
+        assert r.status == "PASS", r
+
+    def test_opencode_config_found_under_xdg_config_home(
+        self, home, monkeypatch, vault
+    ):
+        self.opencode_home(monkeypatch, xdg=str(home / "xdg"))
+        self._opencode_config(home, {"fs": self._fs(str(vault))}, xdg="xdg")
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+
+    def test_opencode_mcp_timeout_object_is_not_a_server(
+        self, home, monkeypatch, vault, schist_js
+    ):
+        """In the compat shape (no `servers` wrapper) `mcp.timeout` sits
+        next to the server names. It has neither `type` nor `command`, so
+        it is not a server, even when it carries fields a server has: read
+        as one, this block would name the vault in its environment and
+        FAIL."""
+        self.opencode_home(monkeypatch)
+        path = home / ".config" / "opencode" / "opencode.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"mcp": {
+            "schist": {
+                "type": "local", "command": ["node", str(schist_js)],
+                "environment": {"SCHIST_VAULT_PATH": str(vault)},
+            },
+            "timeout": {"environment": {"ROOT": str(vault)}},
+        }}))
+        r = check_vault_access(str(vault))
+        assert r.status == "PASS", r
+
+    def test_opencode_env_reference_in_args_is_expanded(
+        self, home, monkeypatch, vault
+    ):
+        """OpenCode writes variables as `{env:NAME}`; one that names a folder
+        containing the vault is seen like the literal path."""
+        self.opencode_home(monkeypatch)
+        self._opencode_config(home, {"fs": {
+            "type": "local",
+            "command": ["npx", "-y", "server-filesystem", "{env:HOME}"],
+        }})
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+        assert "fs (args)" in r.message
+
+    def test_opencode_env_reference_in_environment_is_expanded(
+        self, home, monkeypatch, vault
+    ):
+        self.opencode_home(monkeypatch)
+        self._opencode_config(home, {"idx": {
+            "type": "local",
+            "command": ["node", "/srv/other/indexer.js"],
+            "environment": {"ROOT": "{env:HOME}/schist-vault"},
+        }})
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+        assert "idx (env)" in r.message
+
+    def test_opencode_unset_env_reference_warns(
+        self, home, monkeypatch, vault
+    ):
+        """OpenCode turns an unset variable into an empty string, but its
+        environment may differ from doctor's: neither PASS nor FAIL."""
+        self.opencode_home(monkeypatch)
+        monkeypatch.delenv("SCHIST_TEST_UNSET_ROOT", raising=False)
+        self._opencode_config(home, {
+            "fs": {"type": "local", "command": [
+                "npx", "-y", "server-filesystem", "{env:SCHIST_TEST_UNSET_ROOT}"]},
+            "idx": {"type": "local", "command": ["node", "/srv/i.js"],
+                    "environment": {"ROOT": "{env:SCHIST_TEST_UNSET_ROOT}"}},
+        })
+        r = check_vault_access(str(vault))
+        assert r.status == "WARN", r
+        assert "fs (args: cannot expand" in r.message
+        assert "idx (env: cannot expand" in r.message
+
+    def test_opencode_file_reference_warns(self, home, monkeypatch, vault):
+        """`{file:path}` is replaced by the file's content, which doctor does
+        not read."""
+        self.opencode_home(monkeypatch)
+        self._opencode_config(home, {"fs": {
+            "type": "local",
+            "command": ["npx", "-y", "server-filesystem", "{file:~/root.txt}"],
+        }})
+        r = check_vault_access(str(vault))
+        assert r.status == "WARN", r
+
+    def test_opencode_dollar_variables_for_a_program_warn(self, home, monkeypatch, vault):
+        self.opencode_home(monkeypatch)
+        for name, arg in (("a", "${HOME}/schist-vault"), ("b", "${HOME}"),
+                          ("c", "--root=${HOME}"), ("d", "${userHome}")):
+            self._opencode_config(home, {name: {"type": "local", "command": [
+                "npx", "-y", "server-filesystem", arg]}})
+            r = check_vault_access(str(vault))
+            assert r.status == "WARN", (arg, r)
+
+    def test_opencode_file_reference_warns_in_any_field(
+        self, home, monkeypatch, vault
+    ):
+        """OpenCode replaces `{file:...}` with the file's content in a second
+        pass over the result of the `{env:}` pass; doctor does not read it."""
+        self.opencode_home(monkeypatch)
+        for entry in (
+            {"command": ["srv", "{file:{env:HOME}/p.txt}"]},
+            {"command": ["srv"], "environment": {
+                "ROOT": "{file:{env:HOME}/p.txt}"}},
+            {"command": ["srv"], "environment": {"CONFIG": "{file:~/p.txt}"}},
+            {"command": ["srv", "{env:SCHIST_TEST_FILEREF}"]},
+        ):
+            monkeypatch.setenv("SCHIST_TEST_FILEREF", "{file:~/p.txt}")
+            self._opencode_config(home, {"x": {"type": "local", **entry}})
+            r = check_vault_access(str(vault))
+            assert r.status == "WARN", (entry, r)
+            assert "{file:...}" in r.message
+
+    def test_opencode_env_name_runs_to_the_next_closing_brace(
+        self, home, monkeypatch, vault
+    ):
+        """`{env:A{B}<path>` names the variable `A{B` (unset: empty), as
+        OpenCode reads it; the vault path after it is not a path doctor can
+        be sure of."""
+        self.opencode_home(monkeypatch)
+        self._opencode_config(home, {"x": {"type": "local", "command": [
+            "srv", "{env:A{B}" + str(vault)]}})
+        r = check_vault_access(str(vault))
+        assert r.status in ("WARN", "FAIL"), r
+
+    def test_opencode_expansion_applies_to_opencode_files_only(
+        self, home, monkeypatch, vault
+    ):
+        """An `mcp` block in another client's file keeps that client's
+        variable rules: `{env:HOME}` means nothing there."""
+        self.opencode_home(monkeypatch)
+        (home / ".claude.json").write_text(json.dumps({"mcp": {"servers": {
+            "x": {"type": "local", "command": ["srv", "{env:HOME}"]}}}}))
+        r = check_vault_access(str(vault))
+        assert r.status == "PASS", r
+
+    @pytest.mark.parametrize("name,entry,env,expected", [
+        ("literal vault arg", {"command": ["srv", "H/schist-vault"]}, {}, "FAIL"),
+        ("{env:HOME} arg", {"command": ["srv", "{env:HOME}"]}, {}, "FAIL"),
+        ("{env:HOME}/schist-vault arg",
+         {"command": ["srv", "{env:HOME}/schist-vault"]}, {}, "FAIL"),
+        ("${HOME}/schist-vault arg",
+         {"command": ["srv", "${HOME}/schist-vault"]}, {}, "WARN"),
+        ("$HOME/schist-vault arg",
+         {"command": ["srv", "$HOME/schist-vault"]}, {}, "WARN"),
+        ("${HOME} arg", {"command": ["srv", "${HOME}"]}, {}, "WARN"),
+        ("${env:HOME} arg", {"command": ["srv", "${env:HOME}"]}, {}, "PASS"),
+        ("${userHome} arg", {"command": ["srv", "${userHome}"]}, {}, "WARN"),
+        ("${NOPE:-default} arg",
+         {"command": ["srv", "${NOPE:-H/schist-vault}"]}, {}, "WARN"),
+        ("--root=${HOME} arg", {"command": ["srv", "--root=${HOME}"]}, {}, "WARN"),
+        ("${VAULTX} arg set", {"command": ["srv", "${VAULTX}"]},
+         {"VAULTX": "H/schist-vault"}, "WARN"),
+        ("$VAULTX arg set", {"command": ["srv", "$VAULTX"]},
+         {"VAULTX": "H/schist-vault"}, "WARN"),
+        ("${VD} arg, VD in own environment",
+         {"command": ["srv", "${VD}"], "environment": {"VD": "H/schist-vault"}},
+         {}, "FAIL"),
+        ("{env:VD} arg, VD in own environment",
+         {"command": ["srv", "{env:VD}"], "environment": {"VD": "H/schist-vault"}},
+         {}, "FAIL"),
+        ("env ROOT=${HOME}/schist-vault",
+         {"command": ["srv"], "environment": {"ROOT": "${HOME}/schist-vault"}},
+         {}, "WARN"),
+        ("env CONFIG=${HOME}/schist-vault",
+         {"command": ["srv"], "environment": {"CONFIG": "${HOME}/schist-vault"}},
+         {}, "WARN"),
+        ("env ROOT={env:HOME}/schist-vault",
+         {"command": ["srv"], "environment": {"ROOT": "{env:HOME}/schist-vault"}},
+         {}, "FAIL"),
+        ("env CONFIG={env:UNSET1}/x",
+         {"command": ["srv"], "environment": {"CONFIG": "{env:UNSET1}/x"}},
+         {}, "WARN"),
+        ("env CONFIG={file:~/p.txt}",
+         {"command": ["srv"], "environment": {"CONFIG": "{file:~/p.txt}"}},
+         {}, "WARN"),
+        ("env ROOT={file:~/p.txt}",
+         {"command": ["srv"], "environment": {"ROOT": "{file:~/p.txt}"}},
+         {}, "WARN"),
+        ("{file:~/p.txt} arg", {"command": ["srv", "{file:~/p.txt}"]}, {}, "WARN"),
+        ("{env:UNSET1} arg", {"command": ["srv", "{env:UNSET1}"]}, {}, "WARN"),
+        ("{env:UNSET1}H/schist-vault arg",
+         {"command": ["srv", "{env:UNSET1}H/schist-vault"]}, {}, "WARN"),
+        ("{env:A{B}H/schist-vault arg",
+         {"command": ["srv", "{env:A{B}H/schist-vault"]}, {}, "WARN"),
+        ("{env:} arg", {"command": ["srv", "{env:}H/schist-vault"]}, {}, "PASS"),
+        ("nested {env:{env:N}}", {"command": ["srv", "{env:{env:N}}"]},
+         {"N": "HOME"}, "WARN"),
+        ("~ arg", {"command": ["srv", "~"]}, {}, "FAIL"),
+        ("~/schist-vault arg", {"command": ["srv", "~/schist-vault"]}, {}, "FAIL"),
+        ("relative ./schist-vault, no cwd",
+         {"command": ["srv", "./schist-vault"]}, {}, "WARN"),
+        ("relative, cwd={env:HOME}",
+         {"command": ["srv", "schist-vault"], "cwd": "{env:HOME}"}, {}, "FAIL"),
+        ("relative, cwd=${HOME}",
+         {"command": ["srv", "schist-vault"], "cwd": "${HOME}"}, {}, "WARN"),
+        ("relative, cwd=~",
+         {"command": ["srv", "schist-vault"], "cwd": "~"}, {}, "FAIL"),
+        ("relative ./, cwd=${HOME}",
+         {"command": ["srv", "./schist-vault"], "cwd": "${HOME}"}, {}, "WARN"),
+        ("sh -c $HOME", {"command": ["sh", "-c", "cat $HOME/schist-vault"]},
+         {}, "FAIL"),
+        ("sh -c {env:HOME}",
+         {"command": ["sh", "-c", "cat {env:HOME}/schist-vault"]}, {}, "FAIL"),
+        ("sh -c $VD",
+         {"command": ["sh", "-c", "cat $VD"],
+          "environment": {"VD": "H/schist-vault"}}, {}, "FAIL"),
+        ("bash -lc cd ~", {"command": ["bash", "-lc", "cd ~ && srv"]}, {}, "FAIL"),
+        ("docker -v ${HOME}",
+         {"command": ["docker", "run", "-v", "${HOME}:/data", "img"]}, {}, "WARN"),
+        ("command[0] {env:HOME}", {"command": ["{env:HOME}/schist-vault/bin"]},
+         {}, "FAIL"),
+        ("disabled true", {"command": ["srv", "H/schist-vault"], "disabled": True},
+         {}, "PASS"),
+        ("enabled false", {"command": ["srv", "H/schist-vault"], "enabled": False},
+         {}, "PASS"),
+        ("disabled false", {"command": ["srv", "H/schist-vault"], "disabled": False},
+         {}, "FAIL"),
+        ("env HOME={env:HOME}/schist-vault",
+         {"command": ["srv"], "environment": {"HOME": "{env:HOME}/schist-vault"}},
+         {}, "FAIL"),
+        ("{env:SUB} whose value is ${HOME}/schist-vault",
+         {"command": ["srv", "{env:SUB}"]},
+         {"SUB": "${HOME}/schist-vault"}, "WARN"),
+        ("env ROOT={env:SUB} whose value is ${HOME}/schist-vault",
+         {"command": ["srv"], "environment": {"ROOT": "{env:SUB}"}},
+         {"SUB": "${HOME}/schist-vault"}, "WARN"),
+        ("{file:{env:HOME}/p.txt} arg",
+         {"command": ["srv", "{file:{env:HOME}/p.txt}"]}, {}, "WARN"),
+        ("{env:X} arg, X is a file reference",
+         {"command": ["srv", "{env:X}"]}, {"X": "{file:~/p.txt}"}, "WARN"),
+    ])
+    def test_opencode_entry_audit(self, home, monkeypatch, vault, name, entry, env, expected):
+        self.opencode_home(monkeypatch)
+        for k in ("VAULTX", "N", "UNSET1", "VD", "X", "NOPE", "SUB"):
+            monkeypatch.delenv(k, raising=False)
+        prefix = str(home) + "/"
+        for k, v in env.items():
+            monkeypatch.setenv(k, v.replace("H/", prefix))
+        text = json.dumps({"type": "local", **entry}).replace("H/", prefix)
+        path = home / ".config" / "opencode" / "opencode.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"mcp": {"servers": {"x": json.loads(text)}}}))
+        r = check_vault_access(str(vault))
+        assert r.status == expected, (name, r)
+
+    def test_opencode_shell_command_still_expands_shell_variables(
+        self, home, monkeypatch, vault
+    ):
+        """A shell started by OpenCode expands `$HOME` itself, and sees what
+        `{env:HOME}` was replaced with."""
+        self.opencode_home(monkeypatch)
+        self._opencode_config(home, {
+            "a": {"type": "local", "command": [
+                "sh", "-c", "cat $HOME/schist-vault/x"]},
+            "b": {"type": "local", "command": [
+                "sh", "-c", "cat {env:HOME}/schist-vault/x"]},
+        })
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+        assert "a (args)" in r.message and "b (args)" in r.message
+
+    def test_opencode_fix_text_names_the_disabled_flag(
+        self, home, monkeypatch, vault
+    ):
+        self.opencode_home(monkeypatch)
+        self._opencode_config(home, {"fs": self._fs(str(vault))})
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL", r
+        assert '"disabled": true' in r.fix
+
     def test_unrelated_server_passes(self, home, vault):
         self._claude_json(home, {
             "github": {"command": "npx", "args": ["-y", "server-github"],
@@ -5635,3 +6148,49 @@ class TestCheckMcpConnectionsRule:
         src = (Path(__file__).resolve().parents[2] / "mcp-server" / "src" / "markdown-parser.ts").read_text()
         m = _MCP_RULE_VERSION_RE.search(src)
         assert m is not None and int(m.group(1)) == CONNECTIONS_RULE_VERSION
+
+
+class TestHubWildcardWriters:
+    """#529: a wildcard writer is no drift (#512) but must stay visible."""
+
+    def _hub(self, tmp_path):
+        import shutil
+        if shutil.which("git") is None:
+            pytest.skip("git not available")
+        from types import SimpleNamespace
+        from schist.sync import init_hub
+        hub = tmp_path / "hub.git"
+        init_hub(SimpleNamespace(name="v", participant=["alpha", "beta"]), str(hub))
+        return hub
+
+    def test_skip_without_hub_path(self):
+        from schist.doctor import check_hub_wildcard_writers
+        assert check_hub_wildcard_writers(None).status == "SKIP"
+
+    def test_no_wildcard_writer(self, tmp_path):
+        from schist.doctor import check_hub_wildcard_writers
+        r = check_hub_wildcard_writers(str(self._hub(tmp_path)))
+        assert r.status == "PASS"
+        assert "no participant" in r.message
+
+    def test_wildcard_writer_is_named_and_not_a_warn(self, tmp_path):
+        from schist import hub_admin
+        from schist.doctor import check_hub_acl_drift, check_hub_wildcard_writers
+        hub = self._hub(tmp_path)
+
+        def make_beta_wildcard(d):
+            d["access"]["beta"]["write"] = ["*"]
+            return True
+
+        hub_admin.apply_mutation(hub, make_beta_wildcard, "m")
+        r = check_hub_wildcard_writers(str(hub))
+        assert r.status == "PASS"
+        assert "beta" in r.message and "alpha" not in r.message
+        # The drift check stays quiet about it, as #512 intends.
+        assert check_hub_acl_drift(str(hub)).status == "PASS"
+
+    def test_registered_in_run_doctor(self, tmp_path):
+        from schist.doctor import run_doctor
+        hub = self._hub(tmp_path)
+        labels = [r.label for r in run_doctor(None, None, hub_path=str(hub))]
+        assert "Hub wildcard writers" in labels
