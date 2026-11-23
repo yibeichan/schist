@@ -424,13 +424,13 @@ def _unstage(vault_path: Path, rel: str) -> str | None:
     """
     try:
         reset = subprocess.run(
-            ['git', 'reset', '-q', '--', rel], cwd=vault_path,
+            ['git', '--literal-pathspecs', 'reset', '-q', '--', rel], cwd=vault_path,
             capture_output=True, text=True, timeout=60,
         )
         if reset.returncode != 0:
             return (reset.stdout + reset.stderr).strip()[:200] or "git reset failed"
         staged = subprocess.run(
-            ['git', 'diff', '--cached', '--quiet', '--', rel], cwd=vault_path,
+            ['git', '--literal-pathspecs', 'diff', '--cached', '--quiet', '--', rel], cwd=vault_path,
             capture_output=True, text=True, timeout=60,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -446,33 +446,6 @@ def _check_path(vault_path: Path, path: Path, rel: str) -> None:
         path.resolve().relative_to(vault_path.resolve())
     except ValueError:
         raise StudyError(f"{rel} resolves outside the vault") from None
-
-
-def _staged_problem(vault_path: Path, rel: str) -> str | None:
-    """A refusal message when `rel` has staged changes, else None.
-
-    The card's own staged changes: the grade commits the card with whatever
-    the index holds for it, and a failed commit resets that entry to HEAD;
-    with a staged edit of the user's in the index, either would commit it
-    under a "study:" message or lose it. Other files the user staged are not
-    looked at (every writer commits what is staged).
-    """
-    try:
-        status = subprocess.run(
-            ['git', 'status', '--porcelain', '--', rel], cwd=vault_path,
-            capture_output=True, text=True, timeout=60,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return f"could not check whether {rel} has staged changes"
-    if status.returncode != 0:
-        return f"could not check whether {rel} has staged changes"
-    for line in status.stdout.splitlines():
-        index, worktree = line[0:1], line[1:2]
-        # Column 1 is the index; " A" is an intent-to-add entry (git add -N),
-        # which git diff --cached does not list and a rollback would drop.
-        if index not in (" ", "?") or (index == " " and worktree == "A"):
-            return f"{rel} has staged changes; commit or unstage them before grading it"
-    return None
 
 
 def _restore(vault_path: Path, rel: str, path: Path, text: str) -> str | None:
@@ -542,9 +515,10 @@ def grade_card(vault: str | Path, card_id: str, grade: str, *,
                 raise StudyConflict(
                     f"{rel} changed since it was read (now {body_sha(text)[:12]})"
                 )
-            staged = _staged_problem(vault_path, rel)
-            if staged:
-                raise StudyError(staged)
+            try:
+                git_ops.require_clean_write_path(str(vault_path), rel)
+            except SystemExit as exc:
+                raise StudyError(str(exc)) from None
             new_text, _ = apply_grade(text, grade, today=day, source=source, note=note)
             try:
                 pre_head = git_ops._head_sha(str(vault_path))

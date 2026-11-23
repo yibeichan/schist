@@ -566,7 +566,7 @@ def test_grade_card_refuses_an_intent_to_add_card(vault):
     path.write_text(card_text(), encoding='utf-8')
     _git(vault, 'add', '-N', '--', 'notes/card.md')
     before = path.read_bytes()
-    with pytest.raises(study.StudyError, match='staged changes'):
+    with pytest.raises(study.StudyError, match='commit or set aside edits'):
         study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
     assert path.read_bytes() == before
     assert _git(vault, 'status', '--porcelain', '--', 'notes/card.md') == 'A notes/card.md'
@@ -587,12 +587,41 @@ def test_grade_card_refuses_a_card_with_staged_changes(vault, worktree_edit):
     before_index = _git(vault, 'ls-files', '-s', '--', 'notes/card.md')
     before_cached = _git(vault, 'diff', '--cached')
     head = _git(vault, 'rev-parse', 'HEAD')
-    with pytest.raises(study.StudyError, match='staged changes'):
+    with pytest.raises(study.StudyError, match='commit or set aside edits'):
         study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
     assert path.read_bytes() == before_file
     assert _git(vault, 'ls-files', '-s', '--', 'notes/card.md') == before_index
     assert _git(vault, 'diff', '--cached') == before_cached
     assert _git(vault, 'rev-parse', 'HEAD') == head
+
+
+@pytest.mark.parametrize('tracked', [True, False])
+def test_grade_preserves_a_hand_edited_or_untracked_card(vault, tracked):
+    path = write_card(vault)
+    if tracked:
+        commit(vault)
+        path.write_text(path.read_text() + 'hand edit\n')
+    before = path.read_bytes()
+    with pytest.raises(study.StudyError, match='commit or set aside edits'):
+        study.grade_card(vault, 'notes/card.md', 'good', today=TODAY)
+    assert path.read_bytes() == before
+
+
+def test_failed_grade_with_brackets_preserves_neighbor_index(vault):
+    path = write_card(vault, 'a[b].md')
+    neighbor = write_card(vault, 'ab.md')
+    commit(vault)
+    before = path.read_bytes()
+    neighbor.write_text(neighbor.read_text() + 'staged edit\n')
+    _git(vault, 'add', '--', 'notes/ab.md')
+    index = _git(vault, 'diff', '--cached')
+    hook = vault / '.git/hooks/pre-commit'
+    hook.write_text('#!/bin/sh\nexit 1\n')
+    hook.chmod(0o755)
+    with pytest.raises(study.StudyError, match='commit failed'):
+        study.grade_card(vault, 'notes/a[b].md', 'good', today=TODAY)
+    assert path.read_bytes() == before
+    assert _git(vault, 'diff', '--cached') == index
 
 
 def test_apply_grade_records_the_answer_in_the_log():
