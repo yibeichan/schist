@@ -108,14 +108,18 @@ A mechanism where each element in a sequence attends to all other elements to co
 Older writers could create date-prefixed, document-shaped files under
 `concepts/`. Ingest continues to read those files and mutation/delete tools
 continue to address them, so upgrading never rewrites or strands existing
-vault history. Explicit outgoing connections in those files remain queryable until\nthe files are migrated. `schist schema --validate` reports their document-only fields
+vault history. Explicit outgoing connections in those files remain queryable until
+the files are migrated. `schist schema --validate` reports their document-only fields
 and outgoing connection sections. To migrate one, remove `date`, `status`,
 `concepts`, `confidence`, and `file_ref`, remove any outgoing Connections
 section, then rename the file to its intended stable slug with git.
 
 ## Citation-Grade Frontmatter (`papers/`)
 
-Ingest recognizes the case-sensitive `papers/` directory for paper metadata.\nOther spellings, including `Papers/`, remain ordinary document directories.\n\nPaper notes can use extra frontmatter to act as citation records. These fields
+Ingest recognizes the case-sensitive `papers/` directory for paper metadata.
+Other spellings, including `Papers/`, remain ordinary document directories.
+
+Paper notes can use extra frontmatter to act as citation records. These fields
 are optional on generic documents, but recommended for `papers/` notes that
 future agents should trust for citation reuse.
 
