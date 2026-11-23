@@ -183,6 +183,14 @@ _ASCII_ALNUM = frozenset(
 )
 
 
+def is_indexable_connection_type(conn_type: str) -> bool:
+    """True when the connection rule can index an edge of this type: it
+    starts with an ASCII letter or digit (connection_line_edge). A vocabulary
+    entry that does not is ignored. markdown-parser.ts
+    isIndexableConnectionType is its twin."""
+    return conn_type != '' and conn_type[0] in _ASCII_ALNUM
+
+
 class ConnectionScan:
     """What the connection rule finds in a list of lines.
 

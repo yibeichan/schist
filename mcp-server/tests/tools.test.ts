@@ -5405,6 +5405,81 @@ describe("delete_note", () => {
     expect((await execFile("git", ["rev-parse", "HEAD"], { cwd: vault })).stdout.trim()).toBe(head);
   }, 30000);
 
+  // `-----`: ingest closes the block there and gray-matter does not.
+  // `---foo` then `---`: gray-matter closes at `---foo`, ingest at `---`.
+  it.each([["-----", "-----"], ["---foo, then ---", "---foo\nmid\n---"]])(
+    "cascade refuses a linker whose frontmatter closes on %s, which gray-matter and ingest split differently (#846, #863)",
+    async (_label, closer) => {
+      // The YAML parses, so "cannot read the frontmatter" and "update_note
+      // cannot read it" would be wrong: the cascade refuses to rewrite it.
+      const vault = await makeTempVault();
+      const config = await loadVaultConfig(vault);
+      const target = await create_note(
+        vault, { owner: TEST_AGENT, title: "TargetSplit", body: "t", directory: "notes" }, config,
+      ) as { id: string };
+      const linkerId = "notes/split-linker.md";
+      const linkerText = `---\ntitle: old\n${closer}\nbody\n\n## Connections\n\n- extends: ${target.id}\n`;
+      const head = await commitOldLinker(vault, linkerId, linkerText, target.id);
+
+      const res = await delete_note(vault, { owner: TEST_AGENT, id: target.id, cascade: true }, config) as {
+        error?: string; message?: string;
+      };
+      expect(res.error).toBe("VALIDATION_ERROR");
+      expect(res.message).toContain(linkerId);
+      expect(res.message).toMatch(/different lines/);
+      expect(res.message).toContain("Cascade cannot rewrite the frontmatter of");
+      expect(res.message).toContain("rewrite its frontmatter as YAML between plain `---` lines");
+      expect(res.message).not.toContain("cannot read");
+      expect(res.message).not.toContain("not YAML");
+      await fs.access(path.join(vault, target.id));
+      expect(await fs.readFile(path.join(vault, linkerId), "utf-8")).toBe(linkerText);
+      expect((await execFile("git", ["rev-parse", "HEAD"], { cwd: vault })).stdout.trim()).toBe(head);
+    },
+    30000,
+  );
+
+  it("cascade deletes when a linker opens with a BOM, from which ingest reads no frontmatter (#846)", async () => {
+    // Ingest reads no frontmatter from this note, so its index row holds no
+    // concept reference; stripConceptRefs must not refuse it as a split.
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const target = await create_note(
+      vault, { owner: TEST_AGENT, title: "TargetBom", body: "t", directory: "notes" }, config,
+    ) as { id: string };
+    const linkerId = "notes/bom-linker.md";
+    const linkerText = `\ufeff---\ntitle: old\n---\nbody\n`;
+    await commitOldLinker(vault, linkerId, linkerText, target.id);
+
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: target.id, cascade: true }, config) as {
+      deleted?: boolean; error?: string; message?: string;
+    };
+    expect(res.error).toBeUndefined();
+    expect(res.deleted).toBe(true);
+    await expect(fs.access(path.join(vault, target.id))).rejects.toThrow();
+    expect(await fs.readFile(path.join(vault, linkerId), "utf-8")).toBe(linkerText);
+  }, 30000);
+
+  it("cascade repairs the body of a linker that opens with a BOM (#846)", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const target = await create_note(
+      vault, { owner: TEST_AGENT, title: "TargetBomBody", body: "t", directory: "notes" }, config,
+    ) as { id: string };
+    const linkerId = "notes/bom-body-linker.md";
+    const linkerText = `\ufeff---\ntitle: old\n---\nbody\n\n## Connections\n\n- extends: ${target.id}\n`;
+    await commitOldLinker(vault, linkerId, linkerText, target.id);
+
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: target.id, cascade: true }, config) as {
+      deleted?: boolean; repaired?: string[]; error?: string; message?: string;
+    };
+    expect(res.error).toBeUndefined();
+    expect(res.deleted).toBe(true);
+    expect(res.repaired).toContain(linkerId);
+    const after = await fs.readFile(path.join(vault, linkerId), "utf-8");
+    expect(after).not.toContain(target.id);
+    expect(after).toContain("title: old");
+  }, 30000);
+
   it("cascade deletes when a non-YAML linker's index row is stale and the cascade would not rewrite it", async () => {
     const vault = await makeTempVault();
     const config = await loadVaultConfig(vault);
@@ -5426,7 +5501,10 @@ describe("delete_note", () => {
     expect(await fs.readFile(path.join(vault, linkerId), "utf-8")).toBe(linkerText);
   }, 30000);
 
-  it("cascade checks the write ACL before refusing a non-YAML linker", async () => {
+  it.each([
+    ["non-YAML", (t: string) => `---js\n{ title: "old" }\n---\nbody\n\n## Connections\n\n- extends: ${t}\n`],
+    ["split-frontmatter", (t: string) => `---\ntitle: old\n-----\nbody\n\n## Connections\n\n- extends: ${t}\n`],
+  ])("cascade checks the write ACL before refusing a %s linker", async (_kind, makeLinker) => {
     // A caller who may not write the linker is told so, not asked to fix it.
     // The ACL identity falls back to the owner only with SCHIST_IDENTITY unset.
     const savedIdentity = process.env.SCHIST_IDENTITY;
@@ -5438,7 +5516,7 @@ describe("delete_note", () => {
         vault, { owner: TEST_AGENT, title: "TargetAcl", body: "t", directory: "notes" }, config,
       ) as { id: string };
       const linkerId = "papers/old-js-linker.md";
-      const linkerText = `---js\n{ title: "old" }\n---\nbody\n\n## Connections\n\n- extends: ${target.id}\n`;
+      const linkerText = makeLinker(target.id);
       const head = await commitOldLinker(vault, linkerId, linkerText, target.id);
 
       const res = await delete_note(vault, { owner: TEST_AGENT, id: target.id, cascade: true }, config) as {
