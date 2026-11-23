@@ -1763,6 +1763,26 @@ def test_ingest_indexes_paper_metadata(tmp_path: Path) -> None:
     assert query == {"columns": ["title", "year"], "rows": [["Example Paper", 2024]]}
 
 
+def test_legacy_concept_body_edges_remain_queryable(tmp_path: Path) -> None:
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    _write_vault(vault)
+    legacy = vault / "concepts" / "2026-04-16-legacy.md"
+    legacy.write_text(
+        "---\ntitle: Legacy\ndate: 2026-04-16\n---\n\n"
+        "## Connections\n- extends: concepts/ingestion.md\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "index.db"
+    ingest(str(vault), str(db))
+    with sqlite3.connect(db) as conn:
+        assert conn.execute(
+            "SELECT target FROM edges WHERE source = ? AND type = 'extends'",
+            (legacy.relative_to(vault).as_posix(),),
+        ).fetchall() == [("concepts/ingestion.md",)]
+
+
 def test_papers_without_metadata_get_unverified_paper_row(tmp_path: Path) -> None:
     """Every papers/ note gets a row, enabling 'show unverified papers' queries."""
     from schist.ingest import ingest
@@ -1774,6 +1794,9 @@ def test_papers_without_metadata_get_unverified_paper_row(tmp_path: Path) -> Non
         "---\ntitle: Unverified\ndate: 2026-06-08\n---\n\nBody.\n",
         encoding="utf-8",
     )
+    other = vault / "Papers"
+    other.mkdir()
+    (other / "ordinary.md").write_text("---\ntitle: Ordinary\n---\n", encoding="utf-8")
     db = vault / ".schist" / "schist.db"
     db.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1781,6 +1804,8 @@ def test_papers_without_metadata_get_unverified_paper_row(tmp_path: Path) -> Non
 
     conn = sqlite3.connect(db)
     try:
+        assert conn.execute("SELECT 1 FROM docs WHERE id = 'Papers/ordinary.md'").fetchone()
+        assert conn.execute("SELECT 1 FROM paper_metadata WHERE doc_id = 'Papers/ordinary.md'").fetchone() is None
         row = conn.execute(
             "SELECT verified, doi FROM paper_metadata WHERE doc_id = ?",
             ("papers/2026-06-08-unverified.md",),
