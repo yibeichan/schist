@@ -32,6 +32,7 @@ from schist.doctor import (
     check_hub_pre_receive_hook,
     check_python,
     check_root_gitignore,
+    check_stale_atomic_temps,
     check_schist_yaml,
     check_spoke_identity_env,
     check_skill_tool_references,
@@ -6148,6 +6149,62 @@ class TestCheckMcpConnectionsRule:
         src = (Path(__file__).resolve().parents[2] / "mcp-server" / "src" / "markdown-parser.ts").read_text()
         m = _MCP_RULE_VERSION_RE.search(src)
         assert m is not None and int(m.group(1)) == CONNECTIONS_RULE_VERSION
+
+
+class TestCheckStaleAtomicTemps:
+    """#448: WARN, never delete, on atomic-write temps orphaned in .schist/tmp."""
+
+    def _old(self, path: Path, age: float = 7200):
+        import time
+        path.write_text("x")
+        t = time.time() - age
+        os.utime(path, (t, t))
+
+    def test_no_path_skips(self):
+        assert check_stale_atomic_temps(None).status == "SKIP"
+
+    def test_no_staging_dir_passes(self, tmp_path):
+        assert check_stale_atomic_temps(str(tmp_path)).status == "PASS"
+
+    def test_fresh_temp_passes(self, tmp_path):
+        d = tmp_path / ".schist" / "tmp"
+        d.mkdir(parents=True)
+        (d / "tmpabcdefgh.tmp").write_text("x")
+        assert check_stale_atomic_temps(str(tmp_path)).status == "PASS"
+
+    def test_stale_temp_warns_and_is_kept(self, tmp_path):
+        d = tmp_path / ".schist" / "tmp"
+        d.mkdir(parents=True)
+        stale = d / "tmpabcdefgh.tmp"
+        self._old(stale)
+        r = check_stale_atomic_temps(str(tmp_path))
+        assert r.status == "WARN"
+        assert r.label == "Stale write temps"
+        assert "tmpabcdefgh.tmp" in r.message
+        assert r.fix
+        assert stale.exists(), "doctor must not delete"
+
+    def test_many_stale_temps_are_summarised(self, tmp_path):
+        d = tmp_path / ".schist" / "tmp"
+        d.mkdir(parents=True)
+        for i in range(8):
+            self._old(d / f"tmpabcdefg{i}.tmp")
+        r = check_stale_atomic_temps(str(tmp_path))
+        assert r.status == "WARN"
+        assert "8 stale" in r.message and "and 3 more" in r.message
+        assert str(tmp_path / ".schist" / "tmp") in r.message
+        assert "cleanup-temps --writers-stopped" in r.fix
+
+    def test_unreadable_staging_dir_warns_not_passes(self, tmp_path):
+        (tmp_path / ".schist").mkdir()
+        (tmp_path / ".schist" / "tmp").write_text("x")  # not a directory
+        r = check_stale_atomic_temps(str(tmp_path))
+        assert r.status == "WARN"
+        assert "cannot read" in r.message and "Not a directory" in r.message
+
+    def test_run_doctor_includes_the_check(self, tmp_path):
+        labels = {r.label for r in run_doctor(str(tmp_path), None)}
+        assert "Stale write temps" in labels
 
 
 class TestHubWildcardWriters:

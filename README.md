@@ -60,6 +60,13 @@ schist --vault ~/vaults/my-project init --print-mcp-config --identity local
 Your agent now has `search_notes`, `create_note`, `get_context`, and more — persistent knowledge across every session.
 The MCP server also advertises usage instructions to compatible clients, telling agents to prefer the indexed schist tools (`search_notes`, `search_memory`, `query_graph`, `get_context`) over filesystem grep/find for vault content and to persist new knowledge through `create_note` or `add_memory`.
 
+`schist doctor` reports atomic-write temporary files at least one hour old in
+`.schist/tmp/`. Age alone cannot establish whether another machine still uses
+a file. To remove the reported files, stop every vault writer on every host,
+keep them stopped, and run `schist --vault <vault> cleanup-temps --writers-stopped`.
+The command checks file type, name and age again before removal.
+
+
 ## What It Looks Like
 
 Notes are markdown + YAML frontmatter:
