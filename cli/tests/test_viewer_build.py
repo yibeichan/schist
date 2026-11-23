@@ -769,6 +769,56 @@ process.stdout.write(JSON.stringify({
         # A note in two projects counts for both; the project filter itself is skipped.
         assert out["projectCounts"] == {"alpha": 2, "beta": 1}
 
+    def test_tag_suggestions_leave_out_project_tags(self):
+        """project:<repo> tags have their own chips (alternatives), while a tag
+        filter needs every tag; offering them as tags would give the same
+        selection two meanings."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node not installed")
+        m = re.search(r"function tagCountsOf\(.*?\n  \}\n", self.PAGE, re.S)
+        assert m, "tagCountsOf not found"
+        assert "tagCountsOf(nodes)" in self.PAGE
+        script = m.group(0) + """
+const nodes = [
+  { id: "a", tags: ["security", "project:alpha"] },
+  { id: "b", tags: ["security", "hub", "project:beta"] },
+  { id: "c" },
+];
+process.stdout.write(JSON.stringify([...tagCountsOf(nodes)]));
+"""
+        res = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+        assert res.returncode == 0, res.stderr
+        assert json.loads(res.stdout) == [["security", 2], ["hub", 1]]
+
+    def test_project_tags_filter_by_project_in_the_panel_and_the_hash(self):
+        """A project:<repo> tag is filtered through the project chips: the
+        panel's tag button toggles that project, and an older #tag=project:x
+        link maps to the project filter."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node not installed")
+        fns = []
+        for name in ("projectOfTag", "hashFilter"):
+            m = re.search(rf"function {name}\(.*?\n  \}}\n", self.PAGE, re.S)
+            assert m, f"{name} not found"
+            fns.append(m.group(0))
+        script = "\n".join(fns) + """
+process.stdout.write(JSON.stringify({
+  tag: [projectOfTag("project:alpha"), projectOfTag("security"), projectOfTag("project:")],
+  hash: [hashFilter("tag", "project:alpha"), hashFilter("tag", "hub"),
+         hashFilter("project", "alpha"), hashFilter("type", "ops")],
+}));
+"""
+        res = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+        assert res.returncode == 0, res.stderr
+        out = json.loads(res.stdout)
+        assert out["tag"] == ["alpha", None, ""]
+        assert out["hash"] == [["project", "alpha"], ["tag", "hub"], ["project", "alpha"], ["type", "ops"]]
+        # The panel button and readHash use them.
+        assert "const p = projectOfTag(t);" in self.PAGE and 'toggle("project", p)' in self.PAGE
+        assert "hashFilter(facet, v)" in self.PAGE
+
     def test_filter_controls_are_accessible_and_restored_from_the_url(self):
         assert 'b.setAttribute("aria-pressed"' in self.PAGE
         assert 'role="group" aria-labelledby="type-label"' in self.PAGE
