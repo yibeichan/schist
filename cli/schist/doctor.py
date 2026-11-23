@@ -436,6 +436,51 @@ def check_schist_yaml(vault_path: Optional[str]) -> CheckResult:
                            f"Fix {yml} or re-run `schist init`.")
 
 
+def check_note_readability(vault_path: Optional[str]) -> CheckResult:
+    """Read the indexed content on disk, including files ingest already skipped."""
+    from .ingest import SKIP_DIRS, _configured_content_roots, is_indexed_path
+
+    label = "Note readability"
+    if not vault_path or not Path(vault_path).is_dir():
+        return CheckResult("SKIP", label, "skipped (no vault)")
+    failures = []
+    try:
+        vault = Path(vault_path).resolve()
+        roots = _configured_content_roots(vault)
+        def record_error(exc):
+            failures.append(f"{exc.filename}: {exc.strerror}")
+
+        for directory, dirs, names in os.walk(vault, onerror=record_error):
+            base = Path(directory)
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS and
+                       (base != vault or d.casefold() in roots)]
+            for name in sorted(names):
+                file = base / name
+                rel = file.relative_to(vault)
+                if not name.endswith(".md") or not is_indexed_path(rel, roots):
+                    continue
+                try:
+                    resolved = file.resolve()
+                    if not resolved.is_relative_to(vault) or any(
+                        part in SKIP_DIRS for part in resolved.relative_to(vault).parts
+                    ):
+                        continue
+                    if not _stat.S_ISREG(resolved.stat().st_mode):
+                        failures.append(f"{rel}: not a regular file")
+                        continue
+                    with resolved.open(encoding="utf-8") as note:
+                        while note.read(65536):
+                            pass
+                except (OSError, UnicodeError, RuntimeError) as exc:
+                    failures.append(f"{rel}: {exc}")
+    except (OSError, RuntimeError, ValueError) as exc:
+        return CheckResult("FAIL", label, _printable(str(exc)))
+    if failures:
+        return CheckResult("WARN", label, f"{len(failures)} unreadable: " + "; ".join(_printable(f) for f in failures[:10]),
+                           "Repair file access or encoding, then rebuild the index.")
+    return CheckResult("PASS", label, "content notes readable as UTF-8")
+
+
 def check_sqlite(vault_path: Optional[str], db_path: Optional[str]) -> CheckResult:
     if not vault_path:
         return CheckResult("SKIP", "SQLite", "skipped (no vault)")
@@ -4443,6 +4488,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_vault_location(vault_path),
         check_schist_yaml(vault_path),
         check_sqlite(vault_path, db_path),
+        check_note_readability(vault_path),
         check_post_commit_hook(vault_path),
         check_pre_commit_hook(vault_path),
         check_hooks_freshness(vault_path),
