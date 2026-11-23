@@ -388,6 +388,10 @@ def test_parse_connections_matches_shared_body_parity_cases(case: dict) -> None:
     assert got == case["edges"]
     scan = scan_connections(split_connection_lines(normalize_newlines(case["body"])))
     assert (None if scan.problem is None else scan.problem[0]) == case["problem"]
+    # has_connections_heading (the concept-body refusal) and the near-miss
+    # warnings read `heading`, so both languages must agree on it and `end`.
+    assert scan.heading == case["heading"]
+    assert scan.end == case["end"]
 
 
 def test_ingest_deduplicates_implicit_concept_edges(tmp_path: Path) -> None:
@@ -2791,3 +2795,25 @@ def test_ingest_reads_note_bytes_as_shared_cases(tmp_path: Path, case: dict) -> 
         conn.close()
     assert docs == (1 if case["decodes"] else 0)
     assert rows == [(e["type"], e["target"]) for e in case["edges"]]
+
+
+def test_near_misses_after_a_problem_report_no_later_heading_as_ignored() -> None:
+    """When a problem means no section is read, a later heading is not
+    reported as ignored for being later ("only the first section is read"):
+    the note's warning already says no connections are indexed."""
+    from schist.ingest import (
+        connections_heading_near_misses,
+        normalize_newlines,
+        scan_connections,
+        split_connection_lines,
+    )
+
+    body = "```\n\u0085\n## Connections\n```\n## Connections\n- a: b\n"
+    lines = split_connection_lines(normalize_newlines(body))
+    scan = scan_connections(lines)
+    assert scan.problem is not None and scan.problem[0] == 1
+    later = 'a later ## Connections heading; only the first section is read'
+    assert (4, later) not in connections_heading_near_misses(lines, scan.heading, problem=True)
+    # Without a problem the later heading is still reported.
+    clean = split_connection_lines("## Connections\n- a: b\n## Connections\n")
+    assert (2, later) in connections_heading_near_misses(clean, scan_connections(clean).heading)
