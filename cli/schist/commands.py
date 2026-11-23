@@ -20,6 +20,7 @@ from .ingest import (
     CONNECTION_RE,
     connections_heading_near_misses,
     has_connections_heading,
+    is_indexable_connection_type,
     normalize_newlines,
     note_body_offset,
     note_body_start_line,
@@ -180,6 +181,14 @@ def _connection_types(vault_path: str) -> list:
                 f'Warning: ignoring connection_types entry {s!r}: not a '
                 f'single whitespace-free token — a connection line using it '
                 f'could never round-trip through the parser',
+                file=sys.stderr,
+            )
+            continue
+        if not is_indexable_connection_type(s):
+            print(
+                f'Warning: ignoring connection_types entry {s!r}: it does not '
+                f'start with an ASCII letter or digit, so the connection rule '
+                f'indexes no edge of this type',
                 file=sys.stderr,
             )
             continue
@@ -444,8 +453,33 @@ def add(args, vault_path: str, db_path: str):
         # The commit landed (#364) — succeed, but tell the user the index
         # may lag the write.
         print(f'Warning: {output}', file=sys.stderr)
+    _warn_unindexed_connections(filepath)
 
     print(rel_path)
+
+
+def _warn_unindexed_connections(filepath: str) -> None:
+    """Warn on stderr when a problem line (Markdown the connection rule does
+    not follow) stops the `## Connections` section of the note just written
+    from being indexed. write_note
+    checks that the file reads the body's own edges, and both sides are empty
+    for such a note, so the write succeeds. MCP create_note returns the same
+    text as `connectionsWarning`."""
+    try:
+        with open(filepath, encoding='utf-8') as f:
+            text = patch_frontmatter_flow_hashtags(f.read())
+    except (OSError, UnicodeDecodeError):
+        return
+    _lines, scan = scan_note_connections(text)
+    if scan.problem is None or scan.heading is None:
+        return
+    line, reason = scan.problem
+    print(
+        f'Warning: no connections are indexed from this note: line {line + 1}: '
+        f'{reason}. The connection rule reads a ## Connections section only '
+        'when the note holds Markdown it follows exactly; see schema/SCHEMA.md.',
+        file=sys.stderr,
+    )
 
 
 def add_concept(args, vault_path: str, db_path: str):
