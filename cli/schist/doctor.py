@@ -25,6 +25,7 @@ import yaml
 from . import git_ops
 from .index_contract import INDEX_SCHEMA_VERSION
 from .spoke_config import is_spoke, load_spoke_config
+from .stale_temps import find_stale_temps
 
 MIN_PYTHON = (3, 12)
 MIN_NODE = (22, 0, 0)
@@ -437,7 +438,7 @@ def check_schist_yaml(vault_path: Optional[str]) -> CheckResult:
 
 def check_note_readability(vault_path: Optional[str]) -> CheckResult:
     """Read the indexed content on disk, including files ingest already skipped."""
-    from .ingest import SKIP_DIRS, _configured_content_roots, is_content_note_path
+    from .ingest import SKIP_DIRS, _configured_content_roots, is_indexed_path
 
     label = "Note readability"
     if not vault_path or not Path(vault_path).is_dir():
@@ -456,7 +457,7 @@ def check_note_readability(vault_path: Optional[str]) -> CheckResult:
             for name in sorted(names):
                 file = base / name
                 rel = file.relative_to(vault)
-                if not is_content_note_path(rel, roots):
+                if not name.endswith(".md") or not is_indexed_path(rel, roots):
                     continue
                 try:
                     resolved = file.resolve()
@@ -901,6 +902,37 @@ def check_hooks_path(vault_path: Optional[str]) -> CheckResult:
 # semantics. An exotic pattern that happens to cover .schist/ still warns:
 # false-warn is preferred over false-pass here.
 _SCHIST_IGNORE_LINES = {".schist", ".schist/", "/.schist", "/.schist/"}
+
+
+def check_stale_atomic_temps(vault_path: Optional[str]) -> CheckResult:
+    """Warn when `.schist/tmp/` holds atomic-write temps orphaned by a hard kill.
+
+    A kill between a note write and its rename leaves the temp behind (#448).
+    The directory is gitignored and never synced, so they are inert and only
+    use disk and inodes. Read-only: lists, never deletes.
+    """
+    label = "Stale write temps"
+    if not vault_path:
+        return CheckResult("SKIP", label, "skipped (no vault)")
+    staging = _printable(str(Path(vault_path) / ".schist" / "tmp"))
+    try:
+        stale = find_stale_temps(vault_path)
+    except OSError as e:
+        return CheckResult(
+            "WARN", label, f"cannot read {staging}: {_printable(str(e))}",
+            "Fix the directory's permissions or type so stale temps can be checked.",
+        )
+    if not stale:
+        return CheckResult("PASS", label, "no stale temp files in .schist/tmp/")
+    shown = ", ".join(_printable(s.name) for s in stale[:5])
+    more = f" and {len(stale) - 5} more" if len(stale) > 5 else ""
+    return CheckResult(
+        "WARN", label,
+        f"{len(stale)} stale atomic-write temp file(s) in {staging}: "
+        f"{shown}{more}",
+        "Stop every vault writer on every host. With the writers stopped, run "
+        "schist --vault <vault> cleanup-temps --writers-stopped.",
+    )
 
 
 def check_root_gitignore(vault_path: Optional[str]) -> CheckResult:
@@ -4260,6 +4292,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
         check_hooks_freshness(vault_path),
         check_hooks_path(vault_path),
         check_root_gitignore(vault_path),
+        check_stale_atomic_temps(vault_path),
         check_ingest_available(vault_path),
         check_spoke(vault_path),
         check_spoke_identity_env(vault_path),

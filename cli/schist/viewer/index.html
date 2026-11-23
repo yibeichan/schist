@@ -659,6 +659,28 @@ SPDX-License-Identifier: Apache-2.0
     return (n.tags || []).filter(t => t.startsWith("project:")).map(t => t.slice(8));
   }
 
+  // The tags offered to the tag filter. `project:<repo>` tags are left out: the project chips
+  // cover them with "any of" semantics, while the tag filter requires every tag.
+  function tagCountsOf(nodes) {
+    const counts = new Map();
+    for (const n of nodes) for (const t of (n.tags || [])) {
+      if (!t.startsWith("project:")) counts.set(t, (counts.get(t) || 0) + 1);
+    }
+    return counts;
+  }
+
+  // The repo named by a `project:<repo>` tag, or null for any other tag.
+  function projectOfTag(t) {
+    return t.startsWith("project:") ? t.slice(8) : null;
+  }
+
+  // A hash entry as the filter it selects: links made when project tags were offered as tags
+  // (#tag=project:x) now select the project filter.
+  function hashFilter(facet, v) {
+    const p = facet === "tag" ? projectOfTag(v) : null;
+    return p === null ? [facet, v] : ["project", p];
+  }
+
   function filtersOn(f) {
     return f.type.size > 0 || f.project.size > 0 || f.status.size > 0 || f.tag.size > 0;
   }
@@ -699,8 +721,7 @@ SPDX-License-Identifier: Apache-2.0
     .sort((a, b) => b[1] - a[1]).map(e => e[0]);
   const projectOrder = [...facetCounts(nodes, filters, "project", nodeProjects)]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(e => e[0]);
-  const tagCounts = new Map();
-  for (const n of nodes) for (const t of (n.tags || [])) tagCounts.set(t, (tagCounts.get(t) || 0) + 1);
+  const tagCounts = tagCountsOf(nodes);
   const tagByLower = new Map([...tagCounts.keys()].map(t => [t.toLowerCase(), t]));
   {
     const opts = document.createDocumentFragment();
@@ -816,11 +837,12 @@ SPDX-License-Identifier: Apache-2.0
     let params;
     try { params = new URLSearchParams(location.hash.slice(1)); } catch { return; }
     for (const facet of Object.keys(filters)) {
-      for (const v of params.getAll(facet)) {
+      for (const raw of params.getAll(facet)) {
+        const [fa, v] = hashFilter(facet, raw);
         const known = { tag: tagCounts.has(v), type: typeOrder.includes(v),
                         project: projectOrder.includes(v), status: statusOrder.includes(v) };
-        if (known[facet]) {
-          filters[facet].add(v);
+        if (known[fa]) {
+          filters[fa].add(v);
         }
       }
     }
@@ -868,8 +890,15 @@ SPDX-License-Identifier: Apache-2.0
     for (const t of (meta.tags || [])) {
       const b = txt("button", t, "tag tag-btn");
       b.type = "button";
-      b.title = filters.tag.has(t) ? "Already filtering by this tag" : "Show only notes with this tag";
-      b.addEventListener("click", () => addTag(t));
+      const p = projectOfTag(t);
+      if (p !== null) {
+        // Project tags are filtered with the project chips, not the tag filter.
+        b.title = filters.project.has(p) ? "Stop filtering by this project" : "Show only notes in this project";
+        b.addEventListener("click", () => { document.getElementById("more-filters").open = true; toggle("project", p); });
+      } else {
+        b.title = filters.tag.has(t) ? "Already filtering by this tag" : "Show only notes with this tag";
+        b.addEventListener("click", () => addTag(t));
+      }
       metaFrag.appendChild(b);
     }
     metaEl.replaceChildren(metaFrag);
@@ -1274,8 +1303,10 @@ SPDX-License-Identifier: Apache-2.0
   function proposalCard(p) {
     const card = el("div", "proposal");
     card.appendChild(el("h3", null, p.title));
+    const destination = p.kind === "link" ? `new connection in ${p.target}`
+      : p.written_path ? `written to ${p.written_path}` : `estimated note path: ${p.target}`;
     card.appendChild(el("div", "p-meta",
-      `${p.kind === "link" ? "new connection in" : "new note"} ${p.target} · ${new Date(p.created_at).toLocaleString()}`));
+      `${destination} · ${new Date(p.created_at).toLocaleString()}`));
     if (p.rationale) card.appendChild(el("div", "p-why", p.rationale));
     if (p.question) card.appendChild(el("div", "p-meta", `asked: “${p.question}”`));
     card.appendChild(el("pre", null, p.diff || ""));
@@ -1295,8 +1326,9 @@ SPDX-License-Identifier: Apache-2.0
         const body = await r.json().catch(() => ({}));
         if (r.ok && body.ok) {
           result.textContent = action !== "approve" ? "rejected"
-            : body.rebuilding ? "approved and committed; rebuilding the site"
-            : "approved and committed; rebuild the site to see it";
+            : [body.written_path ? `written to ${body.written_path}` : "approved",
+               body.rebuilding ? "rebuilding the site" : "rebuild the site to see it"].join("; ");
+          if (body.output) result.title = body.output;
           setTimeout(loadProposals, 1500);
           return;
         }
