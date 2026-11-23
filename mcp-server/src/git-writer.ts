@@ -139,10 +139,8 @@ function isGitTimeout(e: unknown): boolean {
 
 /**
  * How long one write may wait in total for another process's
- * `.git/index.lock` (#719). writeMutex only serializes this process's writes;
- * the `schist sync push` that triggerSpokePush spawns after every write is a
- * separate process, and its `git add`/`git commit` take the index lock while
- * our next write is staging or committing. git holds that lock for one
+ * `.git/index.lock` (#719). Manual Git operations may take the index lock
+ * while this writer stages or commits. Git holds that lock for one
  * command at a time (the commit's window is its pre-commit hook plus the
  * index write), so a short wait clears it. The allowance is per write, shared
  * by all of its git calls, so a write never sleeps more than this while a
@@ -576,6 +574,19 @@ function sanitizeCommitTitle(title: string): string {
   return collapsed.length > 200 ? collapsed.slice(0, 197) + "..." : collapsed;
 }
 
+async function assertCleanWritePaths(vaultRoot: string, paths: string[]): Promise<void> {
+  const status = await git(vaultRoot, ["--no-optional-locks", "--literal-pathspecs", "status", "--porcelain=v1",
+    "--untracked-files=all", "--ignored=matching", "--", ...paths]);
+  if (status) throw { error: "DIRTY_WRITE_PATH", message: "Commit or set aside edits to the requested path before writing: " + status };
+  // Git status intentionally omits worktree differences for flagged entries.
+  const entries = await git(vaultRoot, ["--literal-pathspecs", "ls-files", "-v", "-z", "--", ...paths]);
+  for (const entry of entries.split("\0")) {
+    if (/^[a-zS] /.test(entry)) {
+      throw { error: "DIRTY_WRITE_PATH", message: "Clear assume-unchanged or skip-worktree before writing " + entry.slice(2) };
+    }
+  }
+}
+
 /**
  * Acquires the write mutex, checks out the write branch, runs fn(absPath),
  * then stages + commits relPath. Shared by writeNote and appendToNote to
@@ -629,12 +640,13 @@ async function withWriteLock(
       await assertResolvesInside(vaultRoot, relPath);
       // Nothing is written yet, so a lost lock propagates as is.
       vlock.assertStillHeld();
+      await assertCleanWritePaths(vaultRoot, [relPath]);
       await fn(absPath);
 
       // Before staging, for landedViaConcurrentCommit below.
       const headBeforeStage = await headOrNull(vaultRoot);
       try {
-        await gitWaitingForIndexLock(vaultRoot, ["add", "--", relPath], lockWait);
+        await gitWaitingForIndexLock(vaultRoot, ["--literal-pathspecs", "add", "--", relPath], lockWait);
       } catch (e) {
         throw writtenButUncommitted(relPath, e);
       }
@@ -644,7 +656,7 @@ async function withWriteLock(
       // throws on non-zero exit, so we catch the "has diff" branch.
       let hasChanges = false;
       try {
-        await execFile("git", ["diff", "--cached", "--quiet", "--", relPath], { cwd: vaultRoot, timeout: GIT_OP_TIMEOUT_MS });
+        await execFile("git", ["--literal-pathspecs", "diff", "--cached", "--quiet", "--", relPath], { cwd: vaultRoot, timeout: GIT_OP_TIMEOUT_MS });
       } catch (e: unknown) {
         // `git diff --cached --quiet` exits 1 when there IS a staged diff, which
         // execFile reports as a throw — that's the normal "has changes" path. A
@@ -682,7 +694,7 @@ async function withWriteLock(
       }
       let commitWarning: string | undefined;
       try {
-        const outcome = await commitWaitingForIndexLock(vaultRoot, msg, headBeforeStage, staged, lockWait);
+        const outcome = await commitWaitingForIndexLock(vaultRoot, msg, [relPath], headBeforeStage, staged, lockWait);
         if (outcome === "landed") {
           const sha = await git(vaultRoot, ["rev-parse", "HEAD"]);
           return { path: relPath, commitSha: sha, committed: true, commitWarning: CONCURRENT_COMMIT_WARNING };
@@ -810,6 +822,7 @@ const CONCURRENT_COMMIT_WARNING =
 async function commitWaitingForIndexLock(
   vaultRoot: string,
   message: string,
+  paths: string[],
   headBeforeStage: string | null,
   staged: Map<string, string | null> | null,
   wait: IndexLockWait,
@@ -817,7 +830,7 @@ async function commitWaitingForIndexLock(
   for (let attempt = 0; ; attempt++) {
     const headBeforeAttempt = await headOrNull(vaultRoot);
     try {
-      await git(vaultRoot, ["commit", "-m", message], GIT_COMMIT_TIMEOUT_MS);
+      await git(vaultRoot, ["--literal-pathspecs", "commit", "--only", "-m", message, "--", ...paths], GIT_COMMIT_TIMEOUT_MS);
       return "committed";
     } catch (e) {
       if (isGitTimeout(e)) throw Object.assign(e as object, { headBeforeAttempt });
@@ -1178,12 +1191,14 @@ export async function deleteNote(
       vlock.assertStillHeld();
       // Only the paths this call staged or wrote: rolling back a skipped repair
       // would restore a linker someone deleted, or fail on one HEAD never had.
+      await assertCleanWritePaths(vaultRoot, [relPath, ...repairs.map(r => r.relPath)]);
       if (prepareRepairs) await prepareRepairs();
+      vlock.assertStillHeld();
       const touched = [relPath];
       try {
         // Before staging, for landedViaConcurrentCommit below.
         const headBeforeStage = await headOrNull(vaultRoot);
-        await gitWaitingForIndexLock(vaultRoot, ["rm", "--quiet", "--", relPath], lockWait);
+        await gitWaitingForIndexLock(vaultRoot, ["--literal-pathspecs", "rm", "--quiet", "--", relPath], lockWait);
 
         for (const r of repairs) {
           // Post-checkout symlink/containment guard before writing through the
@@ -1204,7 +1219,7 @@ export async function deleteNote(
           if (next === current) continue;
           touched.push(r.relPath);
           await atomicWriteFile(absPath, next, vaultRoot);
-          await gitWaitingForIndexLock(vaultRoot, ["add", "--", r.relPath], lockWait);
+          await gitWaitingForIndexLock(vaultRoot, ["--literal-pathspecs", "add", "--", r.relPath], lockWait);
         }
 
         // NEVER --no-verify — hard coded out (mirrors withWriteLock). Commit
@@ -1227,6 +1242,7 @@ export async function deleteNote(
           const outcome = await commitWaitingForIndexLock(
             vaultRoot,
             `feat(schist): delete ${title} — ${attribution(owner)}`,
+            touched,
             headBeforeStage,
             staged,
             lockWait,
@@ -1278,7 +1294,7 @@ export async function deleteNote(
         try {
           await gitWaitingForIndexLock(
             vaultRoot,
-            ["restore", "--staged", "--worktree", "--source=HEAD", "--", ...touched],
+            ["--literal-pathspecs", "restore", "--staged", "--worktree", "--source=HEAD", "--", ...touched],
             new IndexLockWait(),
           );
         } catch (restoreErr) {

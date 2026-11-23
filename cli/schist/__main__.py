@@ -256,8 +256,7 @@ def main():
     push_mode.add_argument(
         '--commit-only', dest='commit_only', action='store_true', default=argparse.SUPPRESS,
         help='Stage and commit uncommitted in-scope files, then stop without '
-             'pushing. The MCP server runs this under its own write lock '
-             'before a --no-commit push.',
+             'pushing.',
     )
 
     # hooks

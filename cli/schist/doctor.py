@@ -473,9 +473,9 @@ def check_note_readability(vault_path: Optional[str]) -> CheckResult:
                 except (OSError, UnicodeError, RuntimeError) as exc:
                     failures.append(f"{rel}: {exc}")
     except (OSError, RuntimeError, ValueError) as exc:
-        return CheckResult("FAIL", label, str(exc))
+        return CheckResult("FAIL", label, _printable(str(exc)))
     if failures:
-        return CheckResult("WARN", label, f"{len(failures)} unreadable: " + "; ".join(failures[:10]),
+        return CheckResult("WARN", label, f"{len(failures)} unreadable: " + "; ".join(_printable(f) for f in failures[:10]),
                            "Repair file access or encoding, then rebuild the index.")
     return CheckResult("PASS", label, "content notes readable as UTF-8")
 

@@ -478,22 +478,29 @@ describe("git-writer under the vault write lock (#724)", () => {
     }
   }, 60000);
 
-  test("deleteNote repairs read inside the lock (a concurrent edit is not overwritten)", async () => {
+  test.each(["staged", "unstaged", "partial", "assume-unchanged", "skip-worktree"])("delete refuses a %s repair before touching any file", async state => {
     const vault = await makeTempVault();
-    const linker = "notes/l.md";
-    await writeNote(vault, "notes/d.md", "---\ntitle: d\n---\nx\n", "d", "t");
-    await writeNote(vault, linker, "---\ntitle: l\n---\n## Connections\n- extends: [[notes/d]]\n", "l", "t");
-    const stripLink = (c: string) => c.split("\n").filter((l) => !l.includes("[[notes/d]]")).join("\n");
-    // The repair is decided before this edit lands; it must be applied to the
-    // file as it is inside the lock.
-    await fs.appendFile(path.join(vault, linker), "EDIT\n");
-    await deleteNote(vault, "notes/d.md", "d", "t", [{ relPath: linker, transform: stripLink }]);
-    const after = await fs.readFile(path.join(vault, linker), "utf-8");
-    expect(after).toContain("EDIT");
-    expect(after).not.toContain("[[notes/d]]");
-    const committed = (await execFile("git", ["show", `HEAD:${linker}`], { cwd: vault })).stdout;
-    expect(committed).toContain("EDIT");
-  }, 60000);
+    const git = async (...args: string[]) => (await execFile("git", args, { cwd: vault })).stdout;
+    const target = "notes/target.md";
+    const linker = "notes/linker.md";
+    await writeNote(vault, target, "target");
+    await writeNote(vault, linker, "link");
+    const head = await git("rev-parse", "HEAD");
+    if (["assume-unchanged", "skip-worktree"].includes(state)) await git("update-index", "--" + state, linker);
+    await fs.writeFile(path.join(vault, linker), "hand edit");
+    if (["staged", "partial"].includes(state)) await git("add", "--", linker);
+    if (state === "partial") await fs.appendFile(path.join(vault, linker), " later");
+    const staged = await git("show", ":" + linker);
+    const disk = await fs.readFile(path.join(vault, linker));
+    await expect(deleteNote(vault, target, "target", "t", [
+      { relPath: linker, transform: () => "repaired" },
+    ])).rejects.toMatchObject({ error: "DIRTY_WRITE_PATH" });
+    expect(await git("rev-parse", "HEAD")).toBe(head);
+    expect(await git("show", ":" + target)).toBe("target");
+    expect(await fs.readFile(path.join(vault, target), "utf8")).toBe("target");
+    expect(await git("show", ":" + linker)).toBe(staged);
+    expect(await fs.readFile(path.join(vault, linker))).toEqual(disk);
+  });
 
   test("an unreadable repair under the lock rolls back the deletion", async () => {
     const vault = await makeTempVault();
@@ -532,11 +539,26 @@ describe("git-writer under the vault write lock (#724)", () => {
     await writeNote(vault, "notes/d2.md", "---\ntitle: d2\n---\nx\n", "d2", "t");
     await writeNote(vault, "notes/hit.md", "---\ntitle: hit\n---\nlink\n", "hit", "t");
     await writeNote(vault, "notes/miss.md", "---\ntitle: miss\n---\nbody\n", "miss", "t");
+    const second = "notes/hit[2].md";
+    const hand = "notes/hit2.md";
+    const git = async (...args: string[]) => (await execFile("git", args, { cwd: vault })).stdout.trim();
+    await writeNote(vault, second, "link");
+    await fs.writeFile(path.join(vault, hand), "staged");
+    await git("add", "--", hand);
+    await fs.writeFile(path.join(vault, hand), "working");
+    const before = await git("rev-parse", "HEAD");
     const res = await deleteNote(vault, "notes/d2.md", "d2", "t", [
       { relPath: "notes/miss.md", transform: (c) => c },
       { relPath: "notes/gone.md", transform: () => "x\n" },
       { relPath: "notes/hit.md", transform: (c) => c.replace("link", "unlinked") },
+      { relPath: second, transform: () => "fixed" },
     ]);
-    expect(res.repaired).toEqual(["notes/hit.md"]);
+    expect(res.repaired).toEqual(["notes/hit.md", second]);
+    expect(await git("rev-parse", "HEAD^")).toBe(before);
+    expect((await git("diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")).split("\n")).toEqual([
+      "notes/d2.md", "notes/hit.md", second,
+    ]);
+    expect(await git("show", ":" + hand)).toBe("staged");
+    expect(await fs.readFile(path.join(vault, hand), "utf8")).toBe("working");
   }, 60000);
 });
