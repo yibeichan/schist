@@ -478,22 +478,28 @@ describe("git-writer under the vault write lock (#724)", () => {
     }
   }, 60000);
 
-  test("deleteNote repairs read inside the lock (a concurrent edit is not overwritten)", async () => {
+  test.each(["staged", "unstaged", "partial"])("delete refuses a %s repair before touching any file", async state => {
     const vault = await makeTempVault();
-    const linker = "notes/l.md";
-    await writeNote(vault, "notes/d.md", "---\ntitle: d\n---\nx\n", "d", "t");
-    await writeNote(vault, linker, "---\ntitle: l\n---\n## Connections\n- extends: [[notes/d]]\n", "l", "t");
-    const stripLink = (c: string) => c.split("\n").filter((l) => !l.includes("[[notes/d]]")).join("\n");
-    // The repair is decided before this edit lands; it must be applied to the
-    // file as it is inside the lock.
-    await fs.appendFile(path.join(vault, linker), "EDIT\n");
-    await deleteNote(vault, "notes/d.md", "d", "t", [{ relPath: linker, transform: stripLink }]);
-    const after = await fs.readFile(path.join(vault, linker), "utf-8");
-    expect(after).toContain("EDIT");
-    expect(after).not.toContain("[[notes/d]]");
-    const committed = (await execFile("git", ["show", `HEAD:${linker}`], { cwd: vault })).stdout;
-    expect(committed).toContain("EDIT");
-  }, 60000);
+    const git = async (...args: string[]) => (await execFile("git", args, { cwd: vault })).stdout;
+    const target = "notes/target.md";
+    const linker = "notes/linker.md";
+    await writeNote(vault, target, "target");
+    await writeNote(vault, linker, "link");
+    const head = await git("rev-parse", "HEAD");
+    await fs.writeFile(path.join(vault, linker), "hand edit");
+    if (state !== "unstaged") await git("add", "--", linker);
+    if (state === "partial") await fs.appendFile(path.join(vault, linker), " later");
+    const staged = await git("show", ":" + linker);
+    const disk = await fs.readFile(path.join(vault, linker));
+    await expect(deleteNote(vault, target, "target", "t", [
+      { relPath: linker, transform: () => "repaired" },
+    ])).rejects.toMatchObject({ error: "DIRTY_WRITE_PATH" });
+    expect(await git("rev-parse", "HEAD")).toBe(head);
+    expect(await git("show", ":" + target)).toBe("target");
+    expect(await fs.readFile(path.join(vault, target), "utf8")).toBe("target");
+    expect(await git("show", ":" + linker)).toBe(staged);
+    expect(await fs.readFile(path.join(vault, linker))).toEqual(disk);
+  });
 
   test("deleteNote skips a repair whose file vanished or whose transform changes nothing", async () => {
     const vault = await makeTempVault();

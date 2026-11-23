@@ -165,12 +165,8 @@ def vault_write_lock(vault_path: str, timeout: "float | None" = None):
       rewrite, so two unserialized `schist link` calls on the same source
       both read the same base content and the loser's edge silently
       vanishes (#412);
-    - the git INDEX: commit() below is `git add <files>` (skipped with
-      stage=False) then a plain `git commit -m`, which commits EVERYTHING staged — an unserialized
-      concurrent stage+commit pair sweeps the other caller's staged file
-      into the wrong commit and leaves the loser's own commit empty
-      (#419). Every stage+commit (add, link, sync push, MCP writes)
-      must run inside this lock.
+    - the shared index: explicit sync may stage all in-scope changes, so
+      ordinary writers hold the lock across mutation, staging and commit.
     Lives here (not commands.py) because sync.py stages+commits too. The
     lock file sits under .schist/ (gitignored runtime state, like
     schist.db) and is never deleted — unlinking a flock'd path is a classic
@@ -515,6 +511,23 @@ def landed_via_concurrent_commit(vault_path: str, head_before: str,
     return all(in_head.get(p) == staged[p] for p in paths)
 
 
+def require_clean_write_path(vault_path: str, rel_path: str) -> None:
+    """Refuse changes to a writer-owned path before touching disk or the index."""
+    result = subprocess.run(
+        ['git', '--literal-pathspecs', 'status', '--porcelain=v1', '--untracked-files=all',
+         '--ignored=matching', '--', rel_path], cwd=vault_path, capture_output=True, **_GIT_TEXT,
+        timeout=60, env={**os.environ, 'LC_ALL': 'C'},
+    )
+    if (result.returncode and 'not a git repository' in result.stderr
+            and not os.path.lexists(os.path.join(vault_path, '.git'))):
+        # Standalone directories have no index. Preserve the file-only write
+        # and the subsequent warning that Git could not commit it.
+        return
+    if result.returncode or result.stdout:
+        detail = result.stderr.strip() or f'commit or set aside edits to {rel_path} before writing'
+        raise SystemExit(f'Error: {detail}')
+
+
 def commit(vault_path: str, message: str, files: list[str] | None = None,
            *, stage: bool = True) -> tuple[bool, str]:
     """Stage and commit in the vault repo.
@@ -535,7 +548,7 @@ def commit(vault_path: str, message: str, files: list[str] | None = None,
                 # option — silently mis-staging or erroring, leaving the edge written
                 # to disk but uncommitted. Mirrors stage_scope_files and both TS
                 # `git add` call sites (#428).
-                ['git', 'add', '--'] + add_args,
+                ['git', '--literal-pathspecs', 'add', '--'] + add_args,
                 cwd=vault_path, check=True, capture_output=True, **_GIT_TEXT,
                 timeout=60,
             )
@@ -555,7 +568,8 @@ def commit(vault_path: str, message: str, files: list[str] | None = None,
         # run_group_killable.
         try:
             result = run_group_killable(
-                ['git', 'commit', '-m', message],
+                (['git', '--literal-pathspecs', 'commit', '--only', '-m', message, '--', *files]
+                 if stage and files else ['git', 'commit', '-m', message]),
                 cwd=vault_path, timeout=COMMIT_TIMEOUT,
             )
         except subprocess.TimeoutExpired:

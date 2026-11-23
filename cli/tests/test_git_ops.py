@@ -1201,3 +1201,35 @@ class TestGlobalScopeReadsVaultConfig:
             ["git", "diff", "--cached", "--name-only"], cwd=vault,
             capture_output=True, text=True, check=True).stdout.split()
         assert staged == ["tools/x.md"]
+
+
+def test_named_commit_preserves_partially_staged_neighbor(tmp_path):
+    _init_repo(tmp_path)
+    literal = "note[1].md"
+    neighbor = "note1.md"
+    (tmp_path / literal).write_text("owned")
+    (tmp_path / neighbor).write_text("staged")
+    subprocess.run(["git", "add", "--", neighbor], cwd=tmp_path, check=True)
+    (tmp_path / neighbor).write_text("working")
+    ok, detail = git_ops.commit(str(tmp_path), "owned", [literal])
+    assert ok, detail
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=tmp_path)
+    assert git("diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").splitlines() == [literal.encode()]
+    assert git("show", ":" + neighbor) == b"staged"
+    assert (tmp_path / neighbor).read_bytes() == b"working"
+
+
+@pytest.mark.parametrize("state", ["staged", "unstaged", "partial"])
+def test_owned_path_refuses_hand_edit(tmp_path, state):
+    _init_repo(tmp_path)
+    note = tmp_path / "note.md"
+    note.write_text("base")
+    _commit_all(tmp_path, "seed note")
+    note.write_text("hand edit")
+    if state != "unstaged":
+        subprocess.run(["git", "add", "note.md"], cwd=tmp_path, check=True)
+    if state == "partial":
+        note.write_text("later bytes")
+    with pytest.raises(SystemExit, match="set aside edits"):
+        git_ops.require_clean_write_path(str(tmp_path), note.name)
