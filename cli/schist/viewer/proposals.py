@@ -32,12 +32,7 @@ import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-import yaml
-
-from .. import commands, markdown_io
-from ..acl import ACLError, parse_vault_yaml
-from ..pre_receive import derive_scope
-from ..spoke_config import is_spoke, load_spoke_config
+from .. import commands, markdown_io, writable
 
 MAX_TITLE = 200
 MAX_BODY = 50_000
@@ -80,23 +75,10 @@ class ProposalStore:
         spoke. The identity is spoke.yaml's, the one `schist sync push` pushes
         as (and `schist doctor` checks). Falls open when there is no spoke
         identity or vault.yaml cannot be read, as the MCP server's check does."""
-        acl_path = self.vault / 'vault.yaml'
-        if not is_spoke(str(self.vault)) or not acl_path.is_file():
-            return
         try:
-            identity = load_spoke_config(str(self.vault)).identity
-            acl = parse_vault_yaml(acl_path)
-        except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError, ACLError):
-            return
-        scope = derive_scope(relpath)
-        if scope == '':   # a root-level file: only wildcard writers (pre_receive)
-            entry = acl.access.get(identity)
-            ok = entry is not None and '*' in entry.write
-        else:
-            ok = acl.can_write(identity, scope)
-        if not ok:
-            raise ProposalError(f'spoke {identity!r} may not write {scope or "the vault root"!r} '
-                                'under vault.yaml, so the hub would refuse this commit')
+            writable.check_writable(self.vault, relpath)
+        except writable.WritableError as exc:
+            raise ProposalError(str(exc)) from None
 
     def _writable_dir(self, directory: str) -> bool:
         try:
