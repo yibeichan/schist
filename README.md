@@ -60,6 +60,13 @@ schist --vault ~/vaults/my-project init --print-mcp-config --identity local
 Your agent now has `search_notes`, `create_note`, `get_context`, and more — persistent knowledge across every session.
 The MCP server also advertises usage instructions to compatible clients, telling agents to prefer the indexed schist tools (`search_notes`, `search_memory`, `query_graph`, `get_context`) over filesystem grep/find for vault content and to persist new knowledge through `create_note` or `add_memory`.
 
+`schist doctor` reports atomic-write temporary files at least one hour old in
+`.schist/tmp/`. Age alone cannot establish whether another machine still uses
+a file. To remove the reported files, stop every vault writer on every host,
+keep them stopped, and run `schist --vault <vault> cleanup-temps --writers-stopped`.
+The command checks file type, name and age again before removal.
+
+
 ## What It Looks Like
 
 Notes are markdown + YAML frontmatter:
@@ -215,7 +222,7 @@ This gives the agent a snapshot of graph stats, recent notes, and hot concepts. 
 | `schist link` | Add a connection from a document to another document or concept |
 | `schist search` | Full-text search |
 | `schist query` | Raw SQL query |
-| `schist build` | Build the static viewer site (`graph.json`, `search-index.json`, `index.html`) |
+| `schist build` | Build the static viewer site from the SQLite index. Warn if indexed sources may differ. Pass `--require-fresh` to stop before writing output when verification fails. |
 | `schist serve` | Serve the viewer on 127.0.0.1 with a rebuild button, a local read-only agent (Ollama) and its proposal queue |
 | `schist context` | Dump session context |
 | `schist schema` | Print or validate schema |
