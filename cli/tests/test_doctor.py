@@ -5747,11 +5747,15 @@ class TestHubAxisGrants:
             self._vault_yaml(["notes"], ["notes", "figures"]))
         assert check_hub_axis_grants(str(hub)).status == "PASS"
 
-    def test_wildcard_writer_covers_every_axis(self, tmp_path):
+    def test_wildcard_only_distinct_from_narrowed_explicit_grant(self, tmp_path):
         from schist.doctor import check_hub_axis_grants
         hub = self._hub(
-            tmp_path, "directories: [notes, figures]\n", self._vault_yaml(["*"]))
-        assert check_hub_axis_grants(str(hub)).status == "PASS"
+            tmp_path, "directories: [notes, figures]\n", self._vault_yaml(["*"], ["notes/project"]))
+        r = check_hub_axis_grants(str(hub))
+        assert r.status == "WARN"
+        assert "axis 'figures' has only wildcard writers" in r.message
+        assert "no participant" not in r.message
+        assert "notes" not in r.message
 
     def test_mapping_form_directories_are_read(self, tmp_path):
         from schist.doctor import check_hub_axis_grants

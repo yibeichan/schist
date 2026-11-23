@@ -1417,13 +1417,13 @@ def check_hub_axis_grants(hub_path: Optional[str]) -> CheckResult:
     names = sorted(acl.access.keys())
     if not names:
         return CheckResult("SKIP", label, "vault.yaml has no access entries")
-    # A grant inside an axis (research/mario under the subdirectory convention)
-    # lets its holder write into the axis, so the axis is not dead.
-    dead = [a for a in axes
-            if a not in _INFRA_DIRS
-            and not any(_scope_matches(acl.access[n].write, a)
-                        or any(g.startswith(a + "/") for g in acl.access[n].write)
-                        for n in names)]
+    grants = {g for n in names for g in acl.access[n].write}
+    named = grants - {"*"}
+    uncovered = [axis for axis in axes if axis not in _INFRA_DIRS
+                 and not _scope_matches(named, axis)
+                 and not any(g.startswith(axis + "/") for g in named)]
+    wildcard_only = uncovered if "*" in grants else []
+    dead = [] if wildcard_only else uncovered
 
     typos: dict[str, list[str]] = {}
     for n in names:
@@ -1431,13 +1431,17 @@ def check_hub_axis_grants(hub_path: Optional[str]) -> CheckResult:
             if s != "*" and not _scope_names_axis(s, axes):
                 typos.setdefault(s, []).append(n)
 
-    if not dead and not typos:
+    if not uncovered and not typos:
         return CheckResult(
             "PASS", label,
             f"every content axis has a writer and every write grant names an axis ({len(names)} participants)")
 
     parts: list[str] = []
     fixes: list[str] = []
+    for a in wildcard_only:
+        parts.append(f"axis '{_printable(a)}' has only wildcard writers")
+    if wildcard_only:
+        fixes.append("review whether a participant needs a named write grant inside these axes")
     for a in dead:
         parts.append(f"axis '{_printable(a)}' has no participant who can write it")
     if dead:

@@ -610,11 +610,11 @@ schema against the spoke's hub write grant).
 changes that nothing else ties together: the schema entry, a `write` grant on
 the hub, and `git sparse-checkout add <axis>` on each cone-mode sparse spoke.
 Two doctor checks report a mismatch. `schist doctor --hub-path <hub>` WARNs
-("Hub axis grants") for an axis that no participant can write (a wildcard, parent or
-in-axis grant such as `research/mario` counts as a writer; the warning names no
-grant command, so choose the narrowest scope that fits; `logs` and `projects` are never expected to be
-granted) and for a write grant that is neither a content axis, a path inside
-one, nor `shared` or `shared/...`. `schist doctor` on a spoke with scope
+("Hub axis grants") for axes without writers and separately for axes writable
+only through a wildcard. A named parent or child grant, such as
+`research/mario` for `research`, counts as explicit coverage. The check
+excludes `logs` and `projects` from coverage requirements. It also warns
+when a write grant falls outside the content axes and `shared`. `schist doctor` on a spoke with scope
 `global` and a cone-mode sparse checkout WARNs ("Spoke sparse checkout") for each
 `schist.yaml` axis missing from `git sparse-checkout list` and prints the
 `git sparse-checkout add` command that fixes it. A spoke with a narrower scope,
