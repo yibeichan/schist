@@ -605,3 +605,9 @@ flag directories in the schema that no participant can write, or directories
 some participants can write but others cannot. Spokes get the matching
 spoke-side warning automatically from `schist doctor` (it checks the local
 schema against the spoke's hub write grant).
+
+The same run names every participant that holds `write: ['*']` in its
+"Hub wildcard writers" line. That line is a PASS, since an admin identity
+holding `'*'` is the expected setup, but a wildcard writer can only come from
+editing `vault.yaml` by hand (`schist hub grant` and `participant add` refuse
+to create one), so check that the names it lists are the ones you intend.
