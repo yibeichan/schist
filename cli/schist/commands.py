@@ -975,19 +975,21 @@ def schema(args, vault_path: str, db_path: str):
             # it as "no key" on-axis, which is recoverable but not intended
             # (#482), and staying silent would leave the two tools disagreeing
             # about whether the file is well-formed.
+            # Compare against the normalized stem, as ingest's stem_rank does.
+            stem_slug = _normalize_concept_slug(rel.stem)
             if 'concept' in fm:
                 raw_key = fm['concept']
                 if not isinstance(raw_key, str) or not _normalize_concept_slug(raw_key):
                     violations.append(
                         f'{rel}: concept: key is empty or not a string — '
-                        f'remove it or set it to {rel.stem!r}',
+                        f'remove it or set it to {stem_slug!r}',
                     )
                 else:
                     key_slug = _normalize_concept_slug(raw_key)
-                    if key_slug != rel.stem:
+                    if key_slug != stem_slug:
                         violations.append(
                             f'{rel}: concept: key {key_slug!r} does not match '
-                            f'filename stem {rel.stem!r} — ingest would index '
+                            f'filename stem {stem_slug!r} — ingest would index '
                             f'this file under {key_slug!r}',
                         )
             forbidden = sorted({
@@ -1080,7 +1082,18 @@ def _connections_rule_warnings(rel: Path, raw_text: str, lines: list[str], scan)
             f'no connections are indexed from this note: {scan.problem[1]}',
         ))
     heading = None if scan.heading is None else scan.heading - body_start
-    for i, reason in connections_heading_near_misses(lines[body_start:], heading):
+    # The heading is "later" for a reader only when the scan found it by
+    # searching past the problem; a heading before the problem is the real
+    # first section, and a second heading after it is not read.
+    heading_follows_problem = (
+        scan.problem is not None
+        and scan.heading is not None
+        and scan.heading > scan.problem[0]
+    )
+    for i, reason in connections_heading_near_misses(
+        lines[body_start:], heading, problem=heading_follows_problem,
+        section_failed=scan.problem is not None,
+    ):
         out.append((
             body_start + i,
             f'line starting with "## Connections" is not a connections '

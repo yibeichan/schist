@@ -438,12 +438,19 @@ def _fenced_lines(lines: list[str]) -> set[int]:
 
 
 def connections_heading_near_misses(
-    lines: list[str], heading: int | None = None,
+    lines: list[str], heading: int | None = None, problem: bool = False,
+    section_failed: bool = False,
 ) -> list[tuple[int, str]]:
     """Lines whose stripped text starts with `## Connections` (the earlier,
     looser heading rule) that the current rule does not take as the heading,
     each with the reason. `heading` is the heading scan_connections found on
-    the same lines (or None). `schist schema --validate` warns on these."""
+    the same lines (or None), and `problem` whether that heading was found by
+    searching past a problem: then no section is read, so a later heading is
+    not reported as ignored for being later (the caller already says no
+    connections are indexed). `section_failed` is set when the first section
+    holds the problem: a later heading is then reported without saying the
+    first section is read, since nothing is indexed from it.
+    `schist schema --validate` warns on these."""
     out: list[tuple[int, str]] = []
     fenced: set[int] | None = None
     for i, ln in enumerate(lines):
@@ -454,9 +461,12 @@ def connections_heading_near_misses(
                 fenced = _fenced_lines(lines)
             if heading is None or i < heading or i in fenced:
                 out.append((i, 'inside a fenced code block, so it is not a heading'))
-            elif i > heading:
+            elif i > heading and not problem:
                 out.append((
-                    i, 'a later ## Connections heading; only the first section is read',
+                    i,
+                    'a later ## Connections heading, which is not read either'
+                    if section_failed else
+                    'a later ## Connections heading; only the first section is read',
                 ))
             continue
         indent = ln[:len(ln) - len(ln.lstrip())]
@@ -685,16 +695,19 @@ def _configured_content_roots(vault: Path) -> set[str]:
     return roots
 
 
-# Authority tiers for a concept definition, LOWER wins. Three tiers and not
-# two, because `concepts/` and `Concepts/` are the SAME directory on a
-# case-insensitive filesystem (APFS/HFS+) but DIFFERENT ones on a
+# Authority tiers for a concept definition, LOWER wins. Four tiers: a direct
+# child of `concepts/`, a file in one of its subdirectories, the case-folded
+# `Concepts/` axis, and everything else. The case-folded tier is separate
+# from the literal axis because `concepts/` and `Concepts/` are the SAME
+# directory on a case-insensitive filesystem (APFS/HFS+) but DIFFERENT ones on a
 # case-sensitive filesystem (ext4 — the hub). Collapsing the two axis tiers
 # into one would let `Concepts/x.md`, which sorts BEFORE `concepts/x.md`, take
 # the slug from the literal axis on ext4 — the very hijack this ranking exists
 # to prevent.
-CONCEPT_AXIS_EXACT = 1      # `concepts/` — the reserved axis, always wins
-CONCEPT_AXIS_CASEFOLD = 2   # `Concepts/` — the reserved axis on APFS/HFS+ only
-CONCEPT_AXIS_NONE = 3       # a `concept:`-keyed file anywhere else
+CONCEPT_AXIS_EXACT = 1      # `concepts/<file>.md` — the reserved axis, always wins
+CONCEPT_AXIS_SUBDIR = 2     # `concepts/<dir>/…/<file>.md` — on the axis, below a direct child
+CONCEPT_AXIS_CASEFOLD = 3   # `Concepts/` — the reserved axis on APFS/HFS+ only
+CONCEPT_AXIS_NONE = 4       # a `concept:`-keyed file anywhere else
 
 
 def _concept_axis_rank(rel: Path) -> int:
@@ -709,7 +722,11 @@ def _concept_axis_rank(rel: Path) -> int:
     if len(rel.parts) > 1:
         top = rel.parts[0]
         if top == 'concepts':
-            return CONCEPT_AXIS_EXACT
+            # A file in a subdirectory is still a concept, but must not
+            # outrank `concepts/<slug>.md`: `sorted()` visits
+            # `concepts/algorithms/x.md` before `concepts/x.md`, so equal
+            # rank let the nested file take the slug (#505).
+            return CONCEPT_AXIS_EXACT if len(rel.parts) == 2 else CONCEPT_AXIS_SUBDIR
         if top.casefold() == 'concepts':
             return CONCEPT_AXIS_CASEFOLD
     return CONCEPT_AXIS_NONE

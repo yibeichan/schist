@@ -43,7 +43,9 @@ type LineCase = {
   expected: { type: string; target: string; context: string | null } | null;
 };
 type BodyEdge = { type: string; target: string; context: string | null };
-type BodyCase = { name: string; body: string; edges: BodyEdge[]; problem: number | null };
+type BodyCase = {
+  name: string; body: string; edges: BodyEdge[]; problem: number | null; heading: number | null; end: number;
+};
 type FileCase = { name: string; text: string; body: string; edges: BodyEdge[] };
 type ByteCase = { name: string; hex: string; decodes: boolean; edges: BodyEdge[] };
 type ParityFixture = { lines: LineCase[]; bodies: BodyCase[]; files: FileCase[]; byte_files: ByteCase[] };
@@ -92,6 +94,10 @@ describe("connection-body splitter parity (#359)", () => {
       expect(got).toEqual(c.edges);
       const scan = scanConnections(splitConnectionLines(normalizeNewlines(c.body)));
       expect(scan.problem === null ? null : scan.problem.index).toBe(c.problem);
+      // hasConnectionsHeading (the concept-body refusal) and the near-miss
+      // warnings read `heading`, so both languages must agree on it and `end`.
+      expect(scan.heading === -1 ? null : scan.heading).toBe(c.heading);
+      expect(scan.end).toBe(c.end);
     });
   }
 
