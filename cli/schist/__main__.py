@@ -189,6 +189,8 @@ def main():
 
     # build
     p_build = sub.add_parser('build', help='Build the static viewer site (graph, search index, page); it holds the full text of every note')
+    p_build.add_argument('--require-fresh', action='store_true',
+                         help='stop before writing the site if the index cannot be verified against the vault')
     p_build.add_argument('--out', default=None, help='Output directory (default: <vault>/.schist/data/)')
 
     # serve
