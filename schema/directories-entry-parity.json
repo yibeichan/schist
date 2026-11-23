@@ -1,0 +1,12 @@
+[
+  {"name": "plain entry", "entries": ["notes"], "dirs": ["notes"]},
+  {"name": "one trailing slash", "entries": ["notes/", "concepts/"], "dirs": ["notes", "concepts"]},
+  {"name": "several trailing slashes", "entries": ["notes//"], "dirs": ["notes"]},
+  {"name": "leading slash kept, trailing slash stripped", "entries": ["/notes/"], "dirs": ["/notes"]},
+  {"name": "leading ./ kept, trailing slash stripped", "entries": ["./notes/"], "dirs": ["./notes"]},
+  {"name": "slash followed by a space is not trailing", "entries": [" notes/ "], "dirs": [" notes/ "]},
+  {"name": "only slashes is dropped", "entries": ["/", "//", "notes"], "dirs": ["notes"]},
+  {"name": "empty entry is dropped", "entries": ["", "notes/"], "dirs": ["notes"]},
+  {"name": "duplicates are kept", "entries": ["notes", "notes/"], "dirs": ["notes", "notes"]},
+  {"name": "nested entry keeps its inner slash", "entries": ["research/ai/"], "dirs": ["research/ai"]}
+]
