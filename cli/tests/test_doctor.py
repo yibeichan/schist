@@ -4470,6 +4470,7 @@ class TestCheckVaultAccess:
             "retained": {"command": ["reader", str(vault)]},
             "disabled": {"command": ["reader", str(vault)]},
         })
+        base.write_text("// Base config\n" + base.read_text())
         overlay = base.with_suffix(".jsonc")
         overlay.write_text(
             '{/* global overrides */ "mcp": {"servers": {'

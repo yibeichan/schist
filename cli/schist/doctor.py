@@ -1891,9 +1891,11 @@ def _opencode_config_path() -> Path:
     else ~/.config/opencode/opencode.json."""
     xdg = os.environ.get("XDG_CONFIG_HOME") or None
     base = Path(os.path.expanduser(xdg)) if xdg else Path.home() / ".config"
-    config = base / "opencode" / "opencode.json"
-    overlay = config.with_suffix(".jsonc")
-    return overlay if overlay.exists() else config
+    files = [base / "opencode" / name for name in _OPENCODE_FILENAMES]
+    return next((path for path in reversed(files) if path.is_file()), files[1])
+
+
+_OPENCODE_FILENAMES = ("config.json", "opencode.json", "opencode.jsonc")
 
 
 _JSON_STRING = r'"(?:[^"\\]|\\.)*"'
@@ -1902,15 +1904,18 @@ _JSONC_TRAILING = re.compile(_JSON_STRING + r"|,(?=\s*[}\]])")
 
 
 def _parse_client_json(path: Path, text: str) -> Any:
-    if path.suffix == ".jsonc":
-        # Keep quoted URLs, escaped quotes, and comment-looking string data intact.
+    selected = _opencode_config_path()
+    opencode = path.parent == selected.parent and path.name in _OPENCODE_FILENAMES
+    if opencode:
+        # Both OpenCode filenames accept JSONC. Keep URLs and quoted strings intact.
         text = _JSONC_COMMENTS.sub(lambda m: " " if m[0][0] == "/" else m[0], text)
         text = _JSONC_TRAILING.sub(lambda m: "" if m[0] == "," else m[0], text)
     data = json.loads(text)
-    if path.suffix != ".jsonc" or path != _opencode_config_path():
+    if not opencode:
         return data
-    base = path.with_suffix(".json")
-    if not base.exists():
+    lower = _OPENCODE_FILENAMES[:_OPENCODE_FILENAMES.index(path.name)]
+    base = next((path.with_name(name) for name in reversed(lower) if path.with_name(name).is_file()), None)
+    if base is None:
         return data
 
     def merge(old: Any, new: Any) -> Any:
