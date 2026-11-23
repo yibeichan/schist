@@ -889,6 +889,30 @@ class TestLinkConcurrentAppend:
         assert sorted(e["target"] for e in edges) == ["notes/b.md", "notes/c.md"]
 
 
+class TestDirectoriesEntryParity:
+    """#469 — a list-form `directories:` resolves to the same names in
+    `_directories` as in MCP loadVaultConfig; pinned by
+    schema/directories-entry-parity.json."""
+
+    @staticmethod
+    def _cases():
+        import json
+        fixture_path = Path(__file__).resolve().parents[2] / "schema" / "directories-entry-parity.json"
+        return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def test_fixture_is_present(self):
+        assert len(self._cases()) >= 8
+
+    @pytest.mark.parametrize("case", _cases.__func__(), ids=lambda c: c["name"])
+    def test_fixture_parity(self, tmp_path, case):
+        import json
+        # JSON is valid YAML flow syntax.
+        (tmp_path / "schist.yaml").write_text(
+            f"directories: {json.dumps(case['entries'])}\n", encoding="utf-8",
+        )
+        assert commands._directories(str(tmp_path)) == case["dirs"]
+
+
 class TestConnectionTypeVocabTokens:
     """#413 — connection-type vocabulary entries are validated as
     round-trippable tokens at config load (an entry serializes into
