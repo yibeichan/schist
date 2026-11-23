@@ -222,3 +222,15 @@ Order matters: A and B are prerequisites for shape-ossifying features
   is a retrieval-quality experiment, not a data-model contract, and can be
   revisited after slice C ships.
 - No change to `vault.yaml` `vault_version` (separate config contract).
+
+
+### Viewer source freshness
+
+The optional `.ingested-head` file beside an index records the vault commit at
+the start of ingest. Normal builds check this stamp and Git status for signs that
+the indexed Markdown may differ. Existing indexes remain readable.
+
+With `schist build --require-fresh`, a missing stamp or unknown vault HEAD stops
+the build. A separate temporary index is ingested from the current sources and
+its graph and search data are compared with the export's SQLite snapshot.
+Skipped sources or differing exports stop the build before site files are written.
