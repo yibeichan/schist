@@ -578,6 +578,13 @@ async function assertCleanWritePaths(vaultRoot: string, paths: string[]): Promis
   const status = await git(vaultRoot, ["--no-optional-locks", "--literal-pathspecs", "status", "--porcelain=v1",
     "--untracked-files=all", "--ignored=matching", "--", ...paths]);
   if (status) throw { error: "DIRTY_WRITE_PATH", message: "Commit or set aside edits to the requested path before writing: " + status };
+  // Git status intentionally omits worktree differences for flagged entries.
+  const entries = await git(vaultRoot, ["--literal-pathspecs", "ls-files", "-v", "-z", "--", ...paths]);
+  for (const entry of entries.split("\0")) {
+    if (/^[a-zS] /.test(entry)) {
+      throw { error: "DIRTY_WRITE_PATH", message: "Clear assume-unchanged or skip-worktree before writing " + entry.slice(2) };
+    }
+  }
 }
 
 /**

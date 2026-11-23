@@ -478,7 +478,7 @@ describe("git-writer under the vault write lock (#724)", () => {
     }
   }, 60000);
 
-  test.each(["staged", "unstaged", "partial"])("delete refuses a %s repair before touching any file", async state => {
+  test.each(["staged", "unstaged", "partial", "assume-unchanged", "skip-worktree"])("delete refuses a %s repair before touching any file", async state => {
     const vault = await makeTempVault();
     const git = async (...args: string[]) => (await execFile("git", args, { cwd: vault })).stdout;
     const target = "notes/target.md";
@@ -486,8 +486,9 @@ describe("git-writer under the vault write lock (#724)", () => {
     await writeNote(vault, target, "target");
     await writeNote(vault, linker, "link");
     const head = await git("rev-parse", "HEAD");
+    if (["assume-unchanged", "skip-worktree"].includes(state)) await git("update-index", "--" + state, linker);
     await fs.writeFile(path.join(vault, linker), "hand edit");
-    if (state !== "unstaged") await git("add", "--", linker);
+    if (["staged", "partial"].includes(state)) await git("add", "--", linker);
     if (state === "partial") await fs.appendFile(path.join(vault, linker), " later");
     const staged = await git("show", ":" + linker);
     const disk = await fs.readFile(path.join(vault, linker));

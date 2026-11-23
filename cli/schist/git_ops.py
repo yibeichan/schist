@@ -513,19 +513,32 @@ def landed_via_concurrent_commit(vault_path: str, head_before: str,
 
 def require_clean_write_path(vault_path: str, rel_path: str) -> None:
     """Refuse changes to a writer-owned path before touching disk or the index."""
-    result = subprocess.run(
-        ['git', '--literal-pathspecs', 'status', '--porcelain=v1', '--untracked-files=all',
-         '--ignored=matching', '--', rel_path], cwd=vault_path, capture_output=True, **_GIT_TEXT,
-        timeout=60, env={**os.environ, 'LC_ALL': 'C'},
-    )
-    if (result.returncode and 'not a git repository' in result.stderr
+    def inspect(args):
+        try:
+            return subprocess.run(
+                ['git', '--no-optional-locks', '--literal-pathspecs', *args, '--', rel_path],
+                cwd=vault_path, capture_output=True, **_GIT_TEXT, timeout=60,
+                env={**os.environ, 'LC_ALL': 'C'},
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SystemExit(f'Error: could not check changes to {rel_path}: {exc}') from None
+
+    status = inspect(['status', '--porcelain=v1', '--untracked-files=all', '--ignored=matching'])
+    if (status.returncode and 'not a git repository' in status.stderr
             and not os.path.lexists(os.path.join(vault_path, '.git'))):
         # Standalone directories have no index. Preserve the file-only write
         # and the subsequent warning that Git could not commit it.
         return
-    if result.returncode or result.stdout:
-        detail = result.stderr.strip() or f'commit or set aside edits to {rel_path} before writing'
+    if status.returncode or status.stdout:
+        detail = status.stderr.strip() or f'commit or set aside edits to {rel_path} before writing'
         raise SystemExit(f'Error: {detail}')
+    # Status can omit worktree differences for either of these index flags.
+    entries = inspect(['ls-files', '-v', '-z'])
+    if entries.returncode:
+        raise SystemExit(f'Error: could not inspect the index for {rel_path}: {entries.stderr.strip()}')
+    if any(entry[0].islower() or entry[0] == 'S' for entry in entries.stdout.split('\0') if entry):
+        raise SystemExit(f'Error: clear assume-unchanged or skip-worktree on {rel_path} before writing')
+
 
 
 def commit(vault_path: str, message: str, files: list[str] | None = None,
