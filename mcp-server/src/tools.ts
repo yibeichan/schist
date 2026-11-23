@@ -3444,9 +3444,22 @@ async function readConceptKey(vaultRoot: string, rel: string): Promise<string | 
       ? normalizeNewlines(new TextDecoder("utf-8").decode(bytes))
       : decodeNoteBytes(bytes, path.basename(rel));
     if (truncated && frontmatterLength(text) === 0) throw new Error("frontmatter not within the head");
-    const { metadata } = parseNoteForRewrite(text, "checking the concept slug");
-    return typeof metadata.concept === "string" ? normalizeConceptSlug(metadata.concept) :
-      Object.hasOwn(metadata, "concept") ? normalizeConceptSlug(path.posix.basename(rel, ".md")) : null;
+    // Read ingest's frontmatter slice: five-dash and indented starts may
+    // place a concept key in metadata even when the writer sees body text.
+    const length = frontmatterLength(text);
+    if (!length) {
+      if (hasNonYamlOpener(text)) throw new Error("unrecognized frontmatter");
+      return null;
+    }
+    const header = text.slice(0, length).trim();
+    const lines = header.split("\n");
+    let metadata: unknown;
+    if (/^-{3,}$/.test(lines[0].trim())) metadata = yamlLoad(lines.slice(1, -1).join("\n"));
+    else if (lines[0].trim() === "{") metadata = JSON.parse(header);
+    else throw new Error("unrecognized frontmatter");
+    if (!metadata || typeof metadata !== "object" || !("concept" in metadata)) return null;
+    return typeof metadata.concept === "string" ? normalizeConceptSlug(metadata.concept)
+      : normalizeConceptSlug(path.posix.basename(rel, ".md"));
   } finally {
     await handle.close();
   }

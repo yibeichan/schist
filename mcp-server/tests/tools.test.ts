@@ -5608,6 +5608,21 @@ describe("delete_note", () => {
     30000,
   );
 
+  it("cascade reports a known linker that cannot be opened as a file", async () => {
+    const vault = await makeTempVault();
+    const config = await loadVaultConfig(vault);
+    const target = await create_note(vault, { owner: TEST_AGENT, title: "Target", body: "target" }, config) as { id: string };
+    const linker = "notes/unreadable.md";
+    await fs.mkdir(path.join(vault, linker));
+    await seedEdgesDb(vault, [{ source: linker, target: target.id, type: "extends" }]);
+    const head = (await execFile("git", ["rev-parse", "HEAD"], { cwd: vault })).stdout;
+    const result = await delete_note(vault, { owner: TEST_AGENT, id: target.id, cascade: true }, config) as { error: string; message: string };
+    expect(result.error).toBe("VALIDATION_ERROR");
+    expect(result.message).toContain(linker);
+    await fs.access(path.join(vault, target.id));
+    expect((await execFile("git", ["rev-parse", "HEAD"], { cwd: vault })).stdout).toBe(head);
+  });
+
   it("cascade refuses, naming the file, when a linker is not valid UTF-8 (#871)", async () => {
     // readNoteText throws NoteDecodeError for a file that exists but cannot be
     // read. That is not "the linker vanished": the cascade cannot repair it, so
@@ -5628,7 +5643,6 @@ describe("delete_note", () => {
     expect(res.message).toContain("Cascade cannot read");
     expect(res.message).toContain(linkerId);
     expect(res.message).toContain("not valid UTF-8");
-    expect(res.message).toContain("UTF-8");
     await fs.access(path.join(vault, target.id));
     expect(await fs.readFile(path.join(vault, linkerId))).toEqual(linkerBytes);
     expect((await execFile("git", ["rev-parse", "HEAD"], { cwd: vault })).stdout.trim()).toBe(head);
