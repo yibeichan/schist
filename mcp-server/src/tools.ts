@@ -1052,17 +1052,8 @@ function isTransportFailure(text: string): boolean {
   return transportEvidenceLine(text) !== undefined;
 }
 
-// The hub telling us IT is having trouble, not that our push is wrong: the
-// `ERROR:`-prefixed paths in cli/schist/pre_receive.py:458-464, as opposed to
-// its `REJECTED:` ones. Anchored on that prefix, and NOT on the bare phrases.
-// "failed to diff" is two common words, and this pattern is the first text
-// test in classifyPushFailure, matched against combined output that embeds
-// vault note paths verbatim (the ignore guard lists up to 10) and commit
-// subjects — so unanchored it would let a note named "failed to diff.md" turn
-// any push failure into "transport". Today's gate is class-blind (it blocks on
-// any sentinel), but #531 proposes treating transport as self-clearing, so a
-// steerable substring here would open a gate rather than close one — worse.
-// Stated as a forward constraint, not as current behavior.
+// Match the hub's own error line. Local diagnostics and commit subjects can
+// also contain these phrases. Only a transient error gets a grace period.
 // The hub also says ERROR (not REJECTED) when it could not read its own
 // vault.yaml or the branch it serves (a git timeout or failure there): the
 // push may land on a retry, and the fix is on the hub, not in the push.
@@ -1194,6 +1185,7 @@ export function classifyPushFailure(outcome: SyncCommandOutcome): PushFailureCla
   // ACL violation and mark it non-retriable. Tested before isAclRejection.
   const hubReasons = hubReasonText(text);
   if (HUB_TRANSIENT_RE.test(hubReasons)) return "transport";
+  if (/^remote:[ \t]+error: failed to diff\b/m.test(hubReasons)) return "other";
   // Anchored on the hub's own rejection line (rate_limit.py:211), NOT a bare
   // "rate limit" substring. This text is matched against combined stdout and
   // stderr, and two purely LOCAL failures echo vault paths into it verbatim —

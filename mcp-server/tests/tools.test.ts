@@ -2034,15 +2034,12 @@ describe("push failure classification (#501)", () => {
       "please retry the push.\n" +
       " ! [remote rejected] main -> main (pre-receive hook declined)\n",
     ))).toBe("transport");
-    // But only the TIMEOUT path. "failed to diff" comes from a
-    // CalledProcessError on `git log <old>..<new>` (pre_receive.py:464) — a
-    // missing or unreachable rev, or a corrupt object. No retry clears that,
-    // and note that the hub does NOT ask for one there, unlike the timeout
-    // path directly above it. It must stay non-retriable.
+    // A failed inspection needs hub diagnostics. Keep writes blocked until
+    // a successful explicit retry, which can succeed after a hub repair.
     expect(classifyPushFailure(failed(
       "remote: ERROR: failed to diff abc123..def456: Command returned non-zero exit status 128\n" +
       " ! [remote rejected] main -> main (pre-receive hook declined)\n",
-    ))).not.toBe("transport");
+    ))).toBe("other");
     // ...but a hub-side problem the hub blames on YOUR file is still yours.
     expect(classifyPushFailure(failed(
       "remote: REJECTED: failed to load vault.yaml: mapping values are not allowed\n" +
