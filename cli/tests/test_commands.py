@@ -31,6 +31,7 @@ import pytest
 import yaml
 
 from schist import commands, git_ops, markdown_io
+from schist.ingest import scan_note_connections
 
 
 def _add_args(title, *, body="body", tags=None, concepts=None, file_ref=None,
@@ -408,6 +409,43 @@ class TestAddCollision:
         suffixed = [f.name for f in files if re.fullmatch(
             r"\d{4}-\d{2}-\d{2}-daily-note-\d{2}-\d{2}-\d{2}\.md", f.name)]
         assert len(suffixed) == 1
+
+
+class TestAddWarnsWhenNoConnectionsAreIndexed:
+    """`add` warns, like MCP create_note's connectionsWarning, when the note
+    has a ## Connections heading but the rule indexes nothing from it."""
+
+    def test_warns_with_the_line_and_reason(self, tmp_path, capsys):
+        body = "<details>\nhidden\n</details>\n\n## Connections\n\n- extends: notes/b.md\n"
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.add(_add_args("Note", body=body),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        out, err = capsys.readouterr()
+        rel = out.strip()
+        text = (tmp_path / rel).read_text(encoding="utf-8")
+        _lines, scan = scan_note_connections(text)
+        assert scan.problem is not None and scan.heading is not None
+        assert scan.edges == []
+        line = scan.problem[0] + 1
+        assert text.splitlines()[line - 1] == "<details>"
+        assert f"Warning: no connections are indexed from this note: line {line}: " in err
+        assert "see schema/SCHEMA.md" in err
+
+    def test_no_warning_when_the_section_is_indexed(self, tmp_path, capsys):
+        body = "text\n\n## Connections\n\n- extends: notes/b.md\n"
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.add(_add_args("Note", body=body),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        _out, err = capsys.readouterr()
+        assert "no connections are indexed" not in err
+
+    def test_no_warning_without_a_connections_heading(self, tmp_path, capsys):
+        body = "<details>\nhidden\n</details>\n"
+        with patch("schist.commands.git_ops.commit", return_value=(True, "")):
+            commands.add(_add_args("Note", body=body),
+                         str(tmp_path), str(tmp_path / ".schist" / "schist.db"))
+        _out, err = capsys.readouterr()
+        assert "no connections are indexed" not in err
 
 
 class TestAddStatusVocabulary:
@@ -880,6 +918,25 @@ class TestConnectionTypeVocabTokens:
         # silently (getStringList .filter(Boolean) parity).
         dropped_warned = [e for e in fixture["entries"] if not e["kept"] and e["entry"]]
         assert err.count("ignoring connection_types entry") == len(dropped_warned)
+
+    def test_type_the_rule_cannot_index_is_rejected_at_link_with_the_reason(self, tmp_path, capsys):
+        import json
+        (tmp_path / "schist.yaml").write_text(
+            f"connection_types: {json.dumps(['extends', 'élargit'])}\n"
+            "directories:\n  notes: notes/\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "notes").mkdir()
+        (tmp_path / "notes" / "a.md").write_text("---\ntitle: A\n---\nbody\n", encoding="utf-8")
+        with pytest.raises(SystemExit):
+            commands.link(
+                _link_args("notes/a.md", "notes/b.md", "élargit"),
+                str(tmp_path), str(tmp_path / ".schist" / "schist.db"),
+            )
+        err = capsys.readouterr().err
+        assert "ignoring connection_types entry 'élargit': it does not start with an ASCII letter or digit" in err
+        assert "connection type 'élargit' is not in the configured connection_types: extends" in err
+        assert "## Connections" not in (tmp_path / "notes" / "a.md").read_text(encoding="utf-8")
 
     def test_dropped_junk_type_is_rejected_at_link(self, tmp_path, capsys):
         import json
