@@ -250,6 +250,24 @@ class TestProposals:
         with pytest.raises(proposals_mod.ProposalError, match='already approved'):
             store.approve(p['id'])
 
+    def test_collision_records_path_reported_by_add(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='Collision', body='new body', rationale='r')
+        (vault / p['target']).write_text('existing note')
+        done = store.approve(p['id'])
+        assert done['written_path'] != p['target']
+        assert 'new body' in (vault / done['written_path']).read_text()
+        assert store.get(p['id'])['written_path'] == done['written_path']
+
+    def test_success_with_warning_keeps_path_and_output(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='Warn', body='b', rationale='r')
+        def warned(*args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, p['target'] + '\n', 'Warning: git commit failed')
+        done = store.approve(p['id'], runner=warned)
+        assert done['written_path'] == p['target']
+        assert 'git commit failed' in done['output']
+
     def test_approve_link_commits_through_schist_link(self, vault, ro):
         store = proposals_mod.ProposalStore(vault)
         p = store.propose_link(ro, source='notes/sync.md', target='locking', type='supports',
@@ -292,6 +310,7 @@ class TestProposals:
         done = store.approve(p['id'], runner=hang)
         assert done['status'] == proposals_mod.FAILED
         assert 'check the vault before approving again' in done['output']
+        assert 'written_path' not in done
 
     def test_bad_ids_cannot_escape_the_queue(self, vault):
         store = proposals_mod.ProposalStore(vault)
