@@ -250,6 +250,24 @@ class TestProposals:
         with pytest.raises(proposals_mod.ProposalError, match='already approved'):
             store.approve(p['id'])
 
+    def test_collision_records_path_reported_by_add(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='Collision', body='new body', rationale='r')
+        (vault / p['target']).write_text('existing note')
+        done = store.approve(p['id'])
+        assert done['written_path'] != p['target']
+        assert 'new body' in (vault / done['written_path']).read_text()
+        assert store.get(p['id'])['written_path'] == done['written_path']
+
+    def test_success_with_warning_keeps_path_and_output(self, vault, ro):
+        store = proposals_mod.ProposalStore(vault)
+        p = store.propose_note(ro, title='Warn', body='b', rationale='r')
+        def warned(*args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, p['target'] + '\n', 'Warning: git commit failed')
+        done = store.approve(p['id'], runner=warned)
+        assert done['written_path'] == p['target']
+        assert 'git commit failed' in done['output']
+
     def test_approve_link_commits_through_schist_link(self, vault, ro):
         store = proposals_mod.ProposalStore(vault)
         p = store.propose_link(ro, source='notes/sync.md', target='locking', type='supports',
@@ -292,6 +310,7 @@ class TestProposals:
         done = store.approve(p['id'], runner=hang)
         assert done['status'] == proposals_mod.FAILED
         assert 'check the vault before approving again' in done['output']
+        assert 'written_path' not in done
 
     def test_bad_ids_cannot_escape_the_queue(self, vault):
         store = proposals_mod.ProposalStore(vault)
@@ -1179,6 +1198,15 @@ class TestOllamaPortOwner:
         agent = agent_mod.Agent(db_path, proposals_mod.ProposalStore(vault), opener=FakeOllama([]), **kw)
         agent.proc_net = (_proc_table(tmp_path / 'tcp', v4_rows), _proc_table(tmp_path / 'tcp6', v6_rows))
         return agent
+
+    @pytest.mark.parametrize('uid_fields', ['', '00000000:00000000 00:00000000 00000000 unknown'])
+    def test_matching_listener_without_owner_is_refused(self, vault, db_path, tmp_path, uid_fields):
+        agent = self._agent(vault, db_path, tmp_path)
+        with Path(agent.proc_net[0]).open('a') as table:
+            table.write('1: 0100007F:not-hex 00000000:0000 0A\n')
+            table.write(f'2: 0100007F:2CAA 00000000:0000 0A {uid_fields}\n')
+        status = agent.status()
+        assert not status['available'] and 'cannot tell which user' in status['reason']
 
     def test_another_users_listener_is_refused(self, vault, db_path, tmp_path):
         other = os.getuid() + 1
