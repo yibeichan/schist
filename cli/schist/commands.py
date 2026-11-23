@@ -420,6 +420,8 @@ def add(args, vault_path: str, db_path: str):
     with git_ops.vault_write_lock(vault_path):
         for attempt in range(max_collision_retries + 1):
             filepath = os.path.join(dest_dir, filename)
+            if not os.path.lexists(filepath):
+                git_ops.require_clean_write_path(vault_path, os.path.relpath(filepath, vault_path))
             try:
                 markdown_io.write_note(filepath, fm, body, exclusive=True)
                 break
@@ -448,10 +450,6 @@ def add(args, vault_path: str, db_path: str):
                 sys.exit(1)
 
         rel_path = os.path.relpath(filepath, vault_path)
-        # #419: commit under the SAME lock hold — commit() ends in a plain
-        # `git commit -m` that sweeps EVERYTHING staged, so an unserialized
-        # add racing a link's (locked) stage+commit lands this note in the
-        # link's commit and leaves this one empty.
         ok, output = git_ops.commit(vault_path, f'add: {rel_path}', [rel_path])
     if not ok:
         print(f'Warning: git commit failed: {output}', file=sys.stderr)
@@ -558,6 +556,8 @@ def add_concept(args, vault_path: str, db_path: str):
     rel_path = f'concepts/{slug}.md'
     filepath = os.path.join(vault_path, rel_path)
     with git_ops.vault_write_lock(vault_path):
+        if not os.path.lexists(filepath):
+            git_ops.require_clean_write_path(vault_path, rel_path)
         try:
             markdown_io.write_note(filepath, fm, body, exclusive=True)
         except markdown_io.ConnectionWriteError as e:
@@ -668,6 +668,7 @@ def link(args, vault_path: str, db_path: str):
     # across the RMW AND the commit so each commit stages exactly its own
     # append (mirrors MCP holding its write mutex across the git commit).
     with _vault_write_lock(vault_path):
+        git_ops.require_clean_write_path(vault_path, source_rel)
         try:
             markdown_io.append_connection(source_path, args.link_type, args.target, args.context,
                                            vault_root=vault_path)

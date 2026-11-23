@@ -2860,7 +2860,7 @@ CLI_BRANCH_FOR_MCP_CLASS = {
 
 
 @pytest.mark.parametrize("case", [c for c in _transport_parity_cases()
-                                  if c.get("cli_branch") == "hub-transient" and "cli_input" in c],
+                                  if c.get("cli_branch") in {"hub-transient", "hub-inspection"} and "cli_input" in c],
                          ids=lambda c: c["name"])
 def test_sync_push_prints_what_the_mcp_server_classifies(case, tmp_path, capsys) -> None:
     """The MCP server classifies sync_push's stderr, so the corpus `input` for
@@ -2880,7 +2880,7 @@ def test_sync_push_prints_what_the_mcp_server_classifies(case, tmp_path, capsys)
 # The CLI branches that differ from CLI_BRANCH_FOR_MCP_CLASS for an asserted
 # MCP class: the hub's own ERROR lines are transport to MCP, and the CLI says
 # so in its own words.
-CLI_BRANCH_OVERRIDES = {("transport", "hub-transient")}
+CLI_BRANCH_OVERRIDES = {("transport", "hub-transient"), ("other", "hub-inspection")}
 
 
 def test_cli_wrapped_cases_are_what_the_cli_prints() -> None:

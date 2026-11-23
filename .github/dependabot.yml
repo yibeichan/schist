@@ -17,6 +17,10 @@ updates:
 
   - package-ecosystem: npm
     directory: /mcp-server
+    # The browser renderer, integrity hashes, and npm test version move together.
+    ignore:
+      - dependency-name: marked
+        update-types: ["version-update:semver-major"]
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
