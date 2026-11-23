@@ -236,7 +236,7 @@ def render_page(html: str) -> str:
     return html[:csp.start()] + filled + html[csp.end():]
 
 
-def write_site(db_path: Path, out_dir: Path) -> dict:
+def write_site(db_path: Path, out_dir: Path, *, check_source=None) -> dict:
     """Write graph.json, search-index.json and index.html into ``out_dir``.
 
     Returns the node, link and document counts. ``index.html`` is package
@@ -253,15 +253,18 @@ def write_site(db_path: Path, out_dir: Path) -> dict:
         )
 
     page = render_page(INDEX_HTML.read_text(encoding="utf-8"))
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     db = sqlite3.connect(db_path)
     try:
+        db.execute("BEGIN")
+        if check_source is not None:
+            check_source(db)
         graph = build_graph(db)
         search = build_search_index(db)
     finally:
         db.close()
 
+    out_dir.mkdir(parents=True, exist_ok=True)
     graph_out = out_dir / "graph.json"
     search_out = out_dir / "search-index.json"
     graph_out.write_text(json.dumps(graph, indent=2, ensure_ascii=False), encoding="utf-8")

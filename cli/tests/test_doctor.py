@@ -1349,9 +1349,9 @@ class TestCheckIngestAvailableStaleHandCopy:
         vault = self._vault_with_copy(tmp_path, with_sibling=True)
         sibling = tmp_path / ".schist" / "index_contract.py"
         current = sibling.read_text()
-        assert "'schemaVersion': 1," in current  # fixture guard: bump me on v2
+        assert "'schemaVersion': 2," in current
         sibling.write_text(
-            current.replace("'schemaVersion': 1,", "'schemaVersion': 999,")
+            current.replace("'schemaVersion': 2,", "'schemaVersion': 999,")
         )
         with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
             r = check_ingest_available(str(vault))
@@ -1366,9 +1366,9 @@ class TestCheckIngestAvailableStaleHandCopy:
         vault = self._vault_with_copy(tmp_path, with_sibling=True)
         sibling = tmp_path / ".schist" / "index_contract.py"
         current = sibling.read_text()
-        assert "'schemaVersion': 1," in current  # fixture guard: bump me on v2
+        assert "'schemaVersion': 2," in current
         sibling.write_text(
-            current.replace("'schemaVersion': 1,", '"schemaVersion": 999,')
+            current.replace("'schemaVersion': 2,", '"schemaVersion": 999,')
         )
         with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
             r = check_ingest_available(str(vault))
@@ -1383,7 +1383,7 @@ class TestCheckIngestAvailableStaleHandCopy:
         sibling = tmp_path / ".schist" / "index_contract.py"
         current = sibling.read_text()
         sibling.write_text(
-            current.replace("'schemaVersion': 1,", "'somethingElse': 1,")
+            current.replace("'schemaVersion': 2,", "'somethingElse': 1,")
         )
         with patch.dict(os.environ, {"SCHIST_INGEST_SCRIPT": ""}, clear=False):
             r = check_ingest_available(str(vault))

@@ -222,3 +222,14 @@ Order matters: A and B are prerequisites for shape-ossifying features
   is a retrieval-quality experiment, not a data-model contract, and can be
   revisited after slice C ships.
 - No change to `vault.yaml` `vault_version` (separate config contract).
+
+
+### Viewer source freshness
+
+Ingest stores a SHA-256 fingerprint of the ordered vault-relative paths and
+Markdown text it read in `ingest_source`. The fingerprint and indexed records
+commit in the same transaction. An ingest that skips a file records no
+fingerprint. `schist build` reads the eligible Markdown again and compares its
+fingerprint to that of the SQLite snapshot used for both site exports. It warns
+on a difference or an unavailable fingerprint. With `--require-fresh`, either
+condition stops the export before any site files are written.

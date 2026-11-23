@@ -8,6 +8,7 @@ import bisect
 import json
 import os
 import re
+import sqlite3
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -15,6 +16,7 @@ from pathlib import Path
 from . import git_ops, markdown_io, sqlite_query
 from .ingest import (
     SchemaConfigError,
+    source_fingerprint,
     _normalize_concept_slug,
     _normalize_tag,
     CONNECTION_RE,
@@ -733,7 +735,23 @@ def build(args, vault_path: str, db_path: str):
     sqlite_query.get_db(vault_path, db_path).close()
     out_dir = args.out or os.path.join(vault_path, '.schist', 'data')
     try:
-        write_site(Path(db_path), Path(out_dir))
+        def check_source(db):
+            try:
+                row = db.execute('SELECT digest FROM ingest_source').fetchone()
+                if not row:
+                    reason = 'the index has no complete source fingerprint'
+                elif row[0] != source_fingerprint(Path(vault_path)):
+                    reason = 'the indexed source files have changed'
+                else:
+                    return
+            except (OSError, sqlite3.Error, ValueError, RuntimeError) as exc:
+                reason = f'could not verify the source files ({exc})'
+            message = f'The index may differ from the vault: {reason}. Run schist-ingest before building.'
+            if getattr(args, 'require_fresh', False):
+                raise SchemaConfigError(message)
+            print(f'Warning: {message}', file=sys.stderr)
+
+        write_site(Path(db_path), Path(out_dir), check_source=check_source)
     except ViewerPageMissing as e:
         # A broken install, like a missing default.yaml: main() prints it as
         # one Error: line rather than a traceback (#603).

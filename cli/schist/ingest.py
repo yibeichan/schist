@@ -7,6 +7,7 @@
 """schist ingestion — parse markdown vault into SQLite."""
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -962,6 +963,43 @@ def paper_metadata_from_frontmatter(meta: dict, rel: Path) -> tuple | None:
     )
 
 
+def _indexed_paths(vault, content_roots):
+    for md_file in sorted(vault.rglob('*.md')):
+        rel = md_file.relative_to(vault)
+        if not rel.parts:
+            continue
+        if rel.name.casefold() == 'readme.md':
+            continue
+        if len(rel.parts) == 1:
+            if rel.name.casefold() in ROOT_SUPPORT_DOCS:
+                continue
+        elif rel.parts[0].casefold() not in content_roots:
+            continue
+        # Skip hidden/excluded dirs
+        if any(part in SKIP_DIRS for part in rel.parts):
+            continue
+
+        yield md_file, rel
+
+
+def _fingerprint_file(digest, rel, text):
+    # Length-independent framing for arbitrary file contents and path characters.
+    digest.update(os.fsencode(rel) + b'\0')
+    digest.update(hashlib.sha256(text.encode('utf-8')).digest())
+
+
+def source_fingerprint(vault: Path) -> str:
+    vault = vault.resolve()
+    digest = hashlib.sha256()
+    for path, rel in _indexed_paths(vault, _configured_content_roots(vault)):
+        resolved = path.resolve()
+        if (not resolved.is_relative_to(vault)
+                or any(part in SKIP_DIRS for part in resolved.relative_to(vault).parts)):
+            raise ValueError(f'cannot verify {rel}')
+        _fingerprint_file(digest, rel, path.read_text(encoding='utf-8'))
+    return digest.hexdigest()
+
+
 def ingest(vault_path: str, db_path: str):
     vault = Path(vault_path).resolve()
     schema_path = Path(__file__).parent / 'schema.sql'
@@ -1049,21 +1087,8 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     vault_real = vault.resolve()
     content_roots = _configured_content_roots(vault)
 
-    for md_file in sorted(vault.rglob('*.md')):
-        rel = md_file.relative_to(vault)
-        if not rel.parts:
-            continue
-        if rel.name.casefold() == 'readme.md':
-            continue
-        if len(rel.parts) == 1:
-            if rel.name.casefold() in ROOT_SUPPORT_DOCS:
-                continue
-        elif rel.parts[0].casefold() not in content_roots:
-            continue
-        # Skip hidden/excluded dirs
-        if any(part in SKIP_DIRS for part in rel.parts):
-            continue
-
+    source_digest = hashlib.sha256()
+    for md_file, rel in _indexed_paths(vault, content_roots):
         try:
             resolved = md_file.resolve()
         except (OSError, RuntimeError) as e:
@@ -1096,6 +1121,7 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
         conn.execute('SAVEPOINT file_sp')
         try:
             raw_text = md_file.read_text(encoding='utf-8')
+            _fingerprint_file(source_digest, rel, raw_text)
             patched_text = patch_frontmatter_flow_hashtags(raw_text)
             post = frontmatter.loads(patched_text)
             meta = post.metadata
@@ -1373,6 +1399,8 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
     # different non-zero version force a rebuild, which IS the migration
     # path (#130 D3). PRAGMA takes no bound parameters; the :d format spec
     # guarantees an int lands in the statement.
+    if skipped_count == 0:
+        conn.execute('INSERT INTO ingest_source VALUES (?)', (source_digest.hexdigest(),))
     conn.execute(f'PRAGMA user_version = {INDEX_SCHEMA_VERSION:d}')
     conn.commit()
     # Authoritative concept tally: the concepts table is DROP/CREATEd every run

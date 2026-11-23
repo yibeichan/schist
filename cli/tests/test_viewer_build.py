@@ -866,6 +866,33 @@ class TestSchistBuildCommand:
         assert (out / "index.html").read_text(encoding="utf-8") == build.render_page(
             build.INDEX_HTML.read_text(encoding="utf-8"))
 
+    @pytest.mark.parametrize('change', ['edit', 'delete', 'add', 'missing fingerprint'])
+    def test_strict_freshness_checks_actual_inputs(self, tmp_path, change):
+        vault = _vault(tmp_path / 'vault')
+        fresh = tmp_path / 'fresh'
+        cmd = [sys.executable, '-m', 'schist', '--vault', str(vault), 'build']
+        # A non-indexed README and git history are irrelevant.
+        (vault / 'README.md').write_text('support')
+        subprocess.run(cmd + ['--out', str(fresh), '--require-fresh'], check=True)
+        note = next((vault / 'notes').glob('*.md'))
+        if change == 'edit':
+            note.write_text(note.read_text() + 'different text')
+        elif change == 'delete':
+            note.unlink()
+        elif change == 'add':
+            (vault / 'notes/new.md').write_text('new note')
+        else:
+            with sqlite3.connect(vault / '.schist/schist.db') as db:
+                db.execute('DELETE FROM ingest_source')
+        strict = tmp_path / 'strict'
+        blocked = subprocess.run(cmd + ['--out', str(strict), '--require-fresh'],
+                                 capture_output=True, text=True)
+        assert blocked.returncode and 'may differ' in blocked.stderr
+        assert not strict.exists()
+        permissive = subprocess.run(cmd + ['--out', str(strict)], capture_output=True, text=True)
+        assert permissive.returncode == 0 and 'may differ' in permissive.stderr
+        assert (strict / 'index.html').exists()
+
     def test_schist_build_missing_page_is_one_error_line(self, tmp_path):
         """A broken install prints `Error: ...` and exits 1, not a traceback (#603)."""
         vault = _vault(tmp_path / "vault")

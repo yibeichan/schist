@@ -154,12 +154,12 @@ const REQUIRED_DOCS_COLUMNS: ReadonlySet<string> = new Set([
 // migration, because a version bump alone silently keeps the survivor's
 // old shape (its CREATE is IF NOT EXISTS) while stamping the new version.
 export const INDEX_CONTRACT_FALLBACK: IndexContract = {
-  schemaVersion: 1,
-  tables: ["docs", "concepts", "edges", "docs_fts", "paper_metadata", "concept_aliases"],
+  schemaVersion: 2,
+  tables: ["docs", "concepts", "edges", "docs_fts", "paper_metadata", "concept_aliases", "ingest_source"],
   requiredTables: ["docs", "paper_metadata", "concept_aliases"],
   requiredDocsColumns: [...REQUIRED_DOCS_COLUMNS],
   rebuildSurvivors: ["concept_aliases"],
-  schemaSqlDigest: "6cd775da8d6592bdf38b4fa246f6d49400ee7d70b23934843c0232148f56e212",
+  schemaSqlDigest: "b4fbf9efcbb3b21e0f41970322877aa00d564a4cd128a87a46a25bd27cd24949",
 };
 
 function isNonEmptyStringArray(value: unknown): value is string[] {
