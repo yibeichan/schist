@@ -604,6 +604,23 @@ some participants can write but others cannot. Spokes get the matching
 spoke-side warning automatically from `schist doctor` (it checks the local
 schema against the spoke's hub write grant).
 
+**Adding a content axis.** A new directory in `schist.yaml` needs three
+changes that nothing else ties together: the schema entry, a `write` grant on
+the hub, and `git sparse-checkout add <axis>` on each cone-mode sparse spoke.
+Two doctor checks report a mismatch. `schist doctor --hub-path <hub>` WARNs
+("Hub axis grants") for axes without writers and separately for axes writable
+only through a wildcard. A named parent or child grant, such as
+`research/mario` for `research`, counts as explicit coverage. The check
+excludes `logs` and `projects` from coverage requirements. It also warns
+when a write grant falls outside the content axes and `shared`. `schist doctor` on a spoke with scope
+`global` and a cone-mode sparse checkout WARNs ("Spoke sparse checkout") for each
+`schist.yaml` axis missing from `git sparse-checkout list` and prints the
+`git sparse-checkout add` command that fixes it. A spoke with a narrower scope,
+a non-sparse clone and a non-cone sparse clone are skipped. Both checks read
+`directories` as a list or a mapping, drop null entries, and SKIP naming
+`schist.yaml` when it holds no usable directory.
+
+
 The same run names every participant that holds `write: ['*']` in its
 "Hub wildcard writers" line. That line is a PASS, since an admin identity
 holding `'*'` is the expected setup, but a wildcard writer can only come from
