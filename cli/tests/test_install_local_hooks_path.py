@@ -23,7 +23,8 @@ def _repo(tmp_path: Path, monkeypatch, global_cfg: str | None) -> Path:
 
 def test_no_warning_without_hooks_path(tmp_path, monkeypatch):
     repo = _repo(tmp_path, monkeypatch, None)
-    assert sync._install_local_hooks(str(repo)) is None
+    sync._install_local_hooks(str(repo))
+    assert sync._inactive_hooks_warning(repo) is None
     assert (repo / ".git" / "hooks" / "pre-commit").exists()
 
 
@@ -31,7 +32,8 @@ def test_global_hooks_path_warns_and_leaves_shared_dir_alone(tmp_path, monkeypat
     shared = tmp_path / "shared-hooks"
     shared.mkdir()
     repo = _repo(tmp_path, monkeypatch, f"[core]\n\thooksPath = {shared}\n")
-    warning = sync._install_local_hooks(str(repo))
+    sync._install_local_hooks(str(repo))
+    warning = sync._inactive_hooks_warning(repo)
     assert warning is not None
     assert "core.hooksPath" in warning and str(shared) in warning
     assert list(shared.iterdir()) == []
@@ -40,7 +42,8 @@ def test_global_hooks_path_warns_and_leaves_shared_dir_alone(tmp_path, monkeypat
 
 def test_empty_hooks_path_warns(tmp_path, monkeypatch):
     repo = _repo(tmp_path, monkeypatch, "[core]\n\thooksPath = \n")
-    warning = sync._install_local_hooks(str(repo))
+    sync._install_local_hooks(str(repo))
+    warning = sync._inactive_hooks_warning(repo)
     assert warning is not None and "empty" in warning
 
 
@@ -58,7 +61,7 @@ def test_hooks_path_naming_own_hooks_dir_does_not_warn(tmp_path, monkeypatch):
         subprocess.run(
             ["git", "-C", str(repo), "config", "core.hooksPath", value], check=True
         )
-        assert sync._install_local_hooks(str(repo)) is None, value
+        assert sync._inactive_hooks_warning(repo) is None, value
 
 
 def test_standalone_init_prints_warning_and_succeeds(tmp_path, monkeypatch, capsys):
@@ -67,7 +70,9 @@ def test_standalone_init_prints_warning_and_succeeds(tmp_path, monkeypatch, caps
     shared = tmp_path / "shared-hooks"
     shared.mkdir()
     cfg = tmp_path / "gitconfig"
-    cfg.write_text(f"[core]\n\thooksPath = {shared}\n")
+    override = tmp_path / "included"
+    override.write_text(f"[core]\n\thooksPath = {shared}\n")
+    cfg.write_text(f'[includeIf "gitdir:{tmp_path}/v/.git"]\n\tpath = {override}\n')
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(cfg))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     target = tmp_path / "v"
@@ -91,7 +96,7 @@ def test_spoke_init_prints_warning(tmp_path, capsys):
 
     with patch("schist.sync.git_ops.clone_shallow", side_effect=clone), patch(
         "schist.sync.git_ops.setup_sparse_checkout", return_value=(True, "")
-    ), patch("schist.sync._install_local_hooks", return_value="HOOKS-WARNING"):
+    ), patch("schist.sync._inactive_hooks_warning", return_value="HOOKS-WARNING"):
         sync.init_spoke(
             SimpleNamespace(hub="git@pi:v.git", scope="research/x", identity="c"),
             str(dest),

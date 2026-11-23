@@ -172,31 +172,18 @@ def _atomic_write_hook(hook_path: Path, body: str) -> None:
         raise
 
 
-def _install_local_hooks(vault_path) -> str | None:
-    """Write the post-commit and pre-commit hooks into a working-tree repo.
-
-    Shared by standalone and spoke init so either flavor of vault gets the
-    SQLite auto-rebuild and the staged-secret guard. Caller must have already
-    created `<vault>/.git/`.
-
-    The hooks always go into the repository's own `.git/hooks/`. A
-    `core.hooksPath` (often a global one shared by every repo) redirects Git
-    elsewhere, and writing schist's hooks into a directory other repos use
-    would change them too, so init does not. It returns a warning when Git's
-    effective hooks directory is not the one written here, because Git then
-    ignores these hooks; it returns None otherwise (including a hooksPath that
-    names the repository's own hooks directory).
-
-    Limit: init calls this on a staging directory that is renamed afterwards,
-    so Git is asked about the staging path. An `includeIf "gitdir:"` condition
-    or an absolute value that names the final vault path is therefore judged
-    against the wrong location.
-    """
+def _install_local_hooks(vault_path) -> None:
+    """Install both hooks in the vault's own Git directory during init."""
     hooks_dir = Path(vault_path) / ".git" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     _atomic_write_hook(hooks_dir / "post-commit", POST_COMMIT_HOOK)
     _atomic_write_hook(hooks_dir / "pre-commit", PRE_COMMIT_HOOK)
 
+
+
+def _inactive_hooks_warning(vault_path: Path) -> str | None:
+    """Check the installed location so conditional Git configuration applies."""
+    hooks_dir = Path(vault_path) / ".git" / "hooks"
     from .doctor import _configured_hooks_path, _effective_hooks_dir
 
     configured = _configured_hooks_path(["-C", str(vault_path)])
@@ -391,6 +378,7 @@ def init_spoke(args, vault_path: str, db_path: str) -> None:
 
     # Atomic rename: either target points at a complete spoke, or nothing.
     _install_staging_tree(staging, target, vault_path)
+    _warn_hooks_not_active(_inactive_hooks_warning(target))
 
     # Rebuild SQLite index against the final path (best-effort post-rename).
     # If this step fails the spoke is still usable; user can re-run rebuild.
@@ -442,7 +430,7 @@ def _build_spoke_in_staging(
         comment="schist runtime state + spoke config (never pushed to hub)",
     )
 
-    _warn_hooks_not_active(_install_local_hooks(str(staging)))
+    _install_local_hooks(str(staging))
 
 
 def _ensure_ignore_lines(path: Path, lines: list[str], comment: str | None = None) -> None:
@@ -1833,6 +1821,7 @@ def init_standalone(args) -> None:
     # Atomic rename: either target points at a complete vault, or it doesn't
     # exist at all.
     _install_staging_tree(staging, target, path_arg)
+    _warn_hooks_not_active(_inactive_hooks_warning(target))
 
     print(f"Vault initialized at {target}")
     print()
@@ -1906,7 +1895,7 @@ def _build_standalone_in_staging(
         if r.returncode != 0:
             raise _InitError(f"{' '.join(cmd)} failed: {r.stderr.strip()}")
 
-    _warn_hooks_not_active(_install_local_hooks(staging))
+    _install_local_hooks(staging)
 
 
 def _build_standalone_vault(name: str, identity: str) -> dict:
