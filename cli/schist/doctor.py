@@ -1939,6 +1939,10 @@ def _mcp_config_candidates(vault_path: Optional[str]) -> list[Path]:
         # that kept breaking was also the one nothing validated.
         Path.home() / ".claude-science" / "mcp" / "local-mcp.json",
         Path.home() / ".cursor" / "mcp.json",
+        # OpenCode V2: global config, MCP servers under `mcp.servers`, and
+        # per-entry field names unlike any Claude shape (`command` is a
+        # list, env is `environment`). #851.
+        _opencode_config_path(),
     ]
     # Claude Code reads $CLAUDE_CONFIG_DIR/.claude.json when that is set.
     claude_dir = os.environ.get("CLAUDE_CONFIG_DIR")
@@ -1948,6 +1952,108 @@ def _mcp_config_candidates(vault_path: Optional[str]) -> list[Path]:
         candidates.append(Path(vault_path) / ".claude" / "settings.json")
         candidates.append(Path(vault_path) / ".claude" / "settings.local.json")
     return candidates
+
+
+def _opencode_config_path() -> Path:
+    """OpenCode's global config: $XDG_CONFIG_HOME/opencode/opencode.json,
+    else ~/.config/opencode/opencode.json."""
+    xdg = os.environ.get("XDG_CONFIG_HOME") or None
+    base = Path(os.path.expanduser(xdg)) if xdg else Path.home() / ".config"
+    files = [base / "opencode" / name for name in _OPENCODE_FILENAMES]
+    return next((path for path in reversed(files) if path.is_file()), files[1])
+
+
+_OPENCODE_FILENAMES = ("config.json", "opencode.json", "opencode.jsonc")
+
+
+_JSON_STRING = r'"(?:[^"\\]|\\.)*"'
+_JSONC_COMMENTS = re.compile(_JSON_STRING + r"|//[^\r\n]*|/\*.*?\*/", re.DOTALL)
+_JSONC_TRAILING = re.compile(_JSON_STRING + r"|,(?=\s*[}\]])")
+
+
+def _parse_client_json(path: Path, text: str) -> Any:
+    selected = _opencode_config_path()
+    opencode = path.parent == selected.parent and path.name in _OPENCODE_FILENAMES
+    if opencode:
+        # Both OpenCode filenames accept JSONC. Keep URLs and quoted strings intact.
+        text = _JSONC_COMMENTS.sub(lambda m: " " if m[0][0] == "/" else m[0], text)
+        text = _JSONC_TRAILING.sub(lambda m: "" if m[0] == "," else m[0], text)
+    data = json.loads(text)
+    if not opencode:
+        return data
+    lower = _OPENCODE_FILENAMES[:_OPENCODE_FILENAMES.index(path.name)]
+    base = next((path.with_name(name) for name in reversed(lower) if path.with_name(name).is_file()), None)
+    if base is None:
+        return data
+
+    def merge(old: Any, new: Any) -> Any:
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            return new
+        result = old.copy()
+        for key, value in new.items():
+            result[key] = merge(old.get(key), value)
+        return result
+
+    return merge(_read_client_json(base), data)
+
+
+def _read_client_json(path: Path) -> Any:
+    data = _read_regular_file(path, _MCP_CONFIG_MAX)
+    return _parse_client_json(path, data.decode("utf-8")) if data is not None else None
+
+
+def _opencode_server_block(mcp: Any) -> dict:
+    """The server entries of an OpenCode `mcp` value: the V2 `servers`
+    wrapper, else the compat shape that puts the names directly under
+    `mcp`, where `timeout` and other settings sit beside them and only a
+    dict with a `type` or a `command` is a server."""
+    if not isinstance(mcp, dict):
+        return {}
+    block = mcp.get("servers")
+    if isinstance(block, dict):
+        return block
+    return {
+        k: v for k, v in mcp.items()
+        if isinstance(v, dict) and (v.get("type") is not None or "command" in v)
+    }
+
+
+def _opencode_not_started(cfg: dict) -> bool:
+    """Whether OpenCode would leave this entry unstarted: `disabled: true`
+    (V2) or `enabled: false` (the older spelling)."""
+    return (cfg.get("disabled", False) is True
+            or cfg.get("enabled", True) is False)
+
+
+def _normalize_mcp_entry(cfg: dict) -> dict:
+    """Map an OpenCode-shaped MCP entry onto the shape doctor reads
+    (Claude-style: `command` one program string, `args` list, `env` dict).
+
+    OpenCode V2 stores the whole command as a list under `command` and the
+    server's variables under `environment`; nothing downstream understands
+    those names. Claude and Cursor entries have neither a list `command` nor
+    an `environment` block and pass through unchanged. Returns a copy: the
+    parsed-file cache is shared across callers within one run and must not
+    be mutated (visible half-way between the entry discovery that
+    normalizes and the vault-access read that would otherwise normalize
+    again, or worse).
+    """
+    command = cfg.get("command")
+    environment = cfg.get("environment")
+    if not isinstance(command, list) and not isinstance(environment, dict):
+        return cfg
+    out = dict(cfg)
+    if (isinstance(command, list) and command
+            and all(isinstance(c, str) for c in command)):
+        out["command"] = command[0]
+        rest = command[1:]
+        out["args"] = [
+            *rest,
+            *(out["args"] if isinstance(out.get("args"), list) else []),
+        ]
+    if isinstance(environment, dict):
+        out["env"] = environment
+    return out
 
 
 def _looks_like_schist_entry(cfg: dict) -> bool:
@@ -1997,7 +2103,7 @@ def _discover_mcp_schist_entries(
         try:
             if not c.exists():
                 continue
-            data = json.loads(c.read_text())
+            data = _read_client_json(c)
         except Exception:
             continue
         if not isinstance(data, dict):
@@ -2017,6 +2123,29 @@ def _discover_mcp_schist_entries(
                 # An entry whose command proves it is another program (a
                 # filesystem server on ~/schist-vault matches the loose args
                 # test) is not schist; check_vault_access agrees.
+                if ((name == "schist" or _looks_like_schist_entry(cfg))
+                        and _schist_evidence(cfg) is not False):
+                    found.append((c, str(name), cfg))
+
+        # OpenCode V2: `{"mcp": {"servers": {name: entry}}}`; the V1 compat
+        # spelling puts the names directly under `mcp` (the published schema
+        # still accepts it, and a machine that migrated cannot be told from a
+        # config that never named the wrapper). Entries are normalized BEFORE
+        # the shape tests, which all read the Claude field names (#851). A
+        # `disabled` entry is never started by the client, so doctor skips it
+        # the way `_all_mcp_servers` skips an `enabled: false` one.
+        mcp = data.get("mcp")
+        if isinstance(mcp, dict):
+            block = _opencode_server_block(mcp)
+            ordered = sorted(block.items(), key=lambda kv: kv[0] != "schist")
+            for name, raw in ordered:
+                if not isinstance(raw, dict):
+                    if include_malformed and name == "schist":
+                        found.append((c, str(name), raw))
+                    continue
+                if _opencode_not_started(raw):
+                    continue
+                cfg = _normalize_mcp_entry(raw)
                 if ((name == "schist" or _looks_like_schist_entry(cfg))
                         and _schist_evidence(cfg) is not False):
                     found.append((c, str(name), cfg))
@@ -2225,6 +2354,9 @@ class _McpServer:
     # The folder the client starts this server in, when the config says
     # (a project's own config file, or Claude Code local scope).
     project: Optional[Path]
+    # An OpenCode entry: its variables are `{env:NAME}`, and `$NAME` is
+    # passed on as written.
+    opencode: bool = False
 
 
 def _all_mcp_servers(
@@ -2279,18 +2411,27 @@ def _all_mcp_servers(
                 import tomllib
                 parsed[key] = tomllib.loads(text)
             else:
-                parsed[key] = json.loads(text)
+                parsed[key] = _parse_client_json(path, text)
         except Exception:
             unreadable.append(f"{_printable(str(path))} (cannot be parsed)")
         return parsed[key]
 
     def add_map(where: str, block: Any, project: Optional[Path],
-                skip: frozenset = frozenset()) -> None:
+                skip: frozenset = frozenset(), opencode: bool = False) -> None:
         if isinstance(block, dict):
             for name, cfg in block.items():
-                if (isinstance(cfg, dict) and str(name) not in skip
-                        and cfg.get("enabled", True) is not False):
-                    servers.append(_McpServer(where, str(name), cfg, project))
+                # Claude Code local scope uses `enabled`, OpenCode `disabled`
+                # (#851); a not-started server cannot read anything.
+                if not isinstance(cfg, dict):
+                    continue
+                if (cfg.get("enabled", True) is False
+                        or cfg.get("disabled", False) is True):
+                    continue
+                if str(name) in skip:
+                    continue
+                servers.append(_McpServer(
+                    where, str(name), _normalize_mcp_entry(cfg), project,
+                    opencode))
 
     def as_path(key: Any) -> Optional[Path]:
         if not isinstance(key, str):
@@ -2315,6 +2456,13 @@ def _all_mcp_servers(
             continue
         project = vault if vault is not None and c.parent == vault / ".claude" else None
         add_map(str(c), data.get("mcpServers"), project)
+        # OpenCode V2: MCP servers under `mcp.servers` (V1 compat: directly
+        # under `mcp`), #851. add_map normalizes the per-entry fields.
+        if c == _opencode_config_path():
+            add_map(str(c), _opencode_server_block(data.get("mcp")), project,
+                    opencode=True)
+        else:
+            add_map(str(c), _opencode_server_block(data.get("mcp")), project)
         server_list = data.get("servers")
         if isinstance(server_list, list):
             for cfg in server_list:
@@ -2407,6 +2555,62 @@ _MCP_VAR = re.compile(r"\$\{([^{}$]*)\}")
 # Unbraced $VAR, which only a shell expands.
 _SHELL_VAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
+
+
+# OpenCode substitutes in two passes over each string of the config text
+# (packages/core/src/config/variable.ts in the OpenCode source): first
+# `{env:NAME}` (the name is everything up to the next `}`; an unset variable
+# becomes an empty string), then `{file:path}` over that result. `$NAME` is
+# not touched.
+_OPENCODE_ENV = re.compile(r"\{env:([^}]+)\}")
+_OPENCODE_FILE = re.compile(r"\{file:[^}]+\}")
+
+
+def _expand_opencode_vars(s: str) -> tuple[str, list[str], list[str]]:
+    """`s` with OpenCode's `{env:NAME}` replaced from doctor's environment,
+    the `{env:}` names it could not expand, and the `{file:...}` references
+    left in the result (including ones an `{env:}` value or expansion
+    produced). OpenCode turns an unset variable into an empty string, but its
+    environment may differ from doctor's, so an unset one is left in place
+    and reported rather than guessed to be empty, which could hide a path.
+    The content of a `{file:...}` reference is not read."""
+    missing: list[str] = []
+
+    def sub(m: "re.Match[str]") -> str:
+        value = _getenv(m.group(1))
+        if value is not None:
+            return value
+        missing.append(f"env:{m.group(1)}")
+        return m.group(0)
+
+    text = _OPENCODE_ENV.sub(sub, s)
+    return text, missing, _OPENCODE_FILE.findall(text)
+
+
+def _expand_shell_script(text: str, child_env: Optional[dict]) -> str:
+    """Expand simple shell parameters, honoring quoting and the child's environment."""
+    quoted = ""
+    pos = 0
+    parts = []
+    while pos < len(text):
+        char = text[pos]
+        if char == "\\" and quoted != "'":
+            parts.append(text[pos:pos + 2])
+            pos += 2
+            continue
+        if char in ("'", '"') and (not quoted or quoted == char):
+            quoted = "" if quoted else char
+        if char == "$" and quoted != "'":
+            match = _SHELL_VAR.match(text, pos) or _MCP_VAR.match(text, pos)
+            if match and _ENV_NAME.fullmatch(match[1]):
+                value = (child_env or {}).get(match[1], _getenv(match[1]))
+                if isinstance(value, str):
+                    parts.append(value)
+                    pos = match.end()
+                    continue
+        parts.append(char)
+        pos += 1
+    return "".join(parts)
 
 
 def _expand_mcp_vars(s: str, project: Optional[Path], shell: bool = False,
@@ -2716,24 +2920,43 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
         shell = isinstance(command, str) and _runner_name(command) in _SHELLS
 
         def scan(field: str, items: list[tuple[str, Any]],
-                 start: Optional[Path]) -> None:
+                 start: Optional[Path], oc: bool = False) -> None:
             hit = False
             prev: Any = None
             for key, v in items:
                 is_positional = (field == "args" and not (
                     isinstance(prev, str) and prev.startswith("-")
                     and "=" not in prev and prev != "--"))
-                prev = v
+                previous, prev = prev, v
                 if not isinstance(v, str):
                     continue
                 if len(v) > _MCP_VALUE_MAX:
                     doubts.append(f"{field}: value too long to check")
                     continue
                 try:
-                    text, missing = _expand_mcp_vars(
-                        v, s.project, shell=shell and field == "args",
-                        local=own_env)
-                    if missing and (field != "env"
+                    if oc:
+                        text, missing, files = _expand_opencode_vars(v)
+                        if files:
+                            doubts.append(f"{field}: cannot read a "
+                                          "{file:...} reference")
+                        # Only the shell's script argument expands dollar variables.
+                        script = (shell and field == "args" and isinstance(previous, str)
+                                  and re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", previous))
+                        if script:
+                            text = _expand_shell_script(text, own_env)
+                        # A non-shell child can implement its own expansion. Its
+                        # hypothetical path is tested separately from actual text.
+                        possible, more = _expand_mcp_vars(text, s.project, shell=True, local=own_env)
+                        missing += more
+                        if possible != text:
+                            candidates, _ = _paths_named(possible, start, budget, positional=is_positional)
+                            if any(_reaches(p, vaults, fold) for p in candidates):
+                                doubts.append(f"{field}: child variable expansion could reach the vault")
+                    else:
+                        text, missing = _expand_mcp_vars(
+                            v, s.project, shell=shell and field == "args",
+                            local=own_env)
+                    if missing and (oc or field != "env"
                                     or _PATHLIKE_ENV_KEY.search(key)):
                         names = [f"${{{n}}}" if _ENV_NAME.fullmatch(n)
                                  else "a variable" for n in missing if n != "$"]
@@ -2758,34 +2981,47 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
             if hit:
                 fields.append(field)
 
-        base = s.project
         cwd = cfg.get("cwd")
-        if isinstance(cwd, str):
-            try:
-                text, missing = _expand_mcp_vars(cwd, s.project)
-                text = os.path.expanduser(text)
-                if missing:
+
+        def start_folder(oc: bool) -> Optional[Path]:
+            base = s.project
+            if isinstance(cwd, str):
+                try:
+                    if oc:
+                        text, missing, files = _expand_opencode_vars(cwd)
+                        missing += files
+                        if missing or "$" in text:
+                            doubts.append("cwd: start folder depends on a variable or file reference")
+                    else:
+                        text, missing = _expand_mcp_vars(cwd, s.project)
+                    text = os.path.expanduser(text)
+                    if missing:
+                        base = None
+                    elif os.path.isabs(text):
+                        base = Path(text)
+                    elif s.project is not None:
+                        base = s.project / text
+                    else:
+                        base = None
+                except (RuntimeError, ValueError, UnicodeError):
                     base = None
-                elif os.path.isabs(text):
-                    base = Path(text)
-                elif s.project is not None:
-                    base = s.project / text
-                else:
-                    base = None
-            except (RuntimeError, ValueError, UnicodeError):
-                base = None
+            return base
+
         try:
-            scan("command", [("", command)], base)
+            oc = s.opencode
+            base = start_folder(oc)
+            scan("command", [("", command)], base, oc)
             args = cfg.get("args")
-            scan("args", [("", a) for a in args] if isinstance(args, list)
-                 else [], base)
+            scan("args", [("", a) for a in args]
+                 if isinstance(args, list) else [], base, oc)
             if own_env is not None:
-                scan("env", [(str(k), v) for k, v in own_env.items()], base)
+                scan("env", [(str(k), v) for k, v in own_env.items()],
+                     base, oc)
             forwarded = cfg.get("env_vars")
             if isinstance(forwarded, list):
                 # Codex passes these through from its own environment.
                 scan("env_vars", [(str(n), _getenv(n)) for n in forwarded
-                                  if isinstance(n, str)], base)
+                                  if isinstance(n, str)], base, oc)
         except _ScanBudgetExceeded:
             too_much = f"{_printable(s.where)}: {_printable(s.name)}"
             break
@@ -2798,7 +3034,8 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
                 allowed_hits.append(entry)
             continue
         if fields:
-            offenders.append(f"{entry} ({', '.join(fields)})")
+            offenders.append(
+                f"{entry} ({', '.join(dict.fromkeys(fields))})")
         unsure += [f"{entry} ({d})" for d in dict.fromkeys(doubts)]
 
     offenders = list(dict.fromkeys(offenders))
@@ -2817,7 +3054,7 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
             "Remove the vault path, or a folder that contains it such as ~, "
             "from those servers, or turn them off (Claude Code: "
             "`disabledMcpjsonServers` for a project's .mcp.json servers; "
-            "Codex: `enabled = false`). If one of them should read the "
+            "Codex: `enabled = false`; OpenCode: `\"disabled\": true`). If one of them should read the "
             "vault, add its name to `allowed_mcp_servers` in "
             f"{_VAULT_ACCESS_FILE} in the vault. The file is per machine "
             "and not synced: list the server on each machine where it "
@@ -3025,12 +3262,14 @@ def _mcp_config_entries(vault_path: Optional[str]):
         candidates.append(Path(vault_path) / ".claude" / "settings.json")
         candidates.append(Path(vault_path) / ".claude" / "settings.local.json")
     candidates.append(Path.home() / ".cursor" / "mcp.json")
+    opencode = _opencode_config_path()
+    candidates.append(opencode)
 
     for c in candidates:
         if not c.exists():
             continue
         try:
-            data = json.loads(c.read_text())
+            data = _read_client_json(c)
         except Exception:
             continue
         # Same non-dict/null-shape hardening as check_mcp_config (#437, #441):
@@ -3038,7 +3277,14 @@ def _mcp_config_entries(vault_path: Optional[str]):
         # under run_doctor's unshielded loop.
         if not isinstance(data, dict):
             continue
-        servers = data.get("mcpServers")
+        if c == opencode:
+            servers = {
+                k: _normalize_mcp_entry(v)
+                for k, v in _opencode_server_block(data.get("mcp")).items()
+                if isinstance(v, dict) and not _opencode_not_started(v)
+            }
+        else:
+            servers = data.get("mcpServers")
         if not isinstance(servers, dict):
             continue
         entry = servers.get("schist")
