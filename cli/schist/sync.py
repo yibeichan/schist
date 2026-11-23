@@ -173,17 +173,47 @@ def _atomic_write_hook(hook_path: Path, body: str) -> None:
 
 
 def _install_local_hooks(vault_path) -> None:
-    """Write the post-commit and pre-commit hooks into a working-tree repo.
-
-    Shared by standalone and spoke init so either flavor of vault gets the
-    SQLite auto-rebuild and the staged-secret guard. Caller must have already
-    created `<vault>/.git/`. Also called by `schist hooks reinstall` to refresh
-    spokes initialized with an older hook template (issue #103).
-    """
+    """Install both hooks in the vault's own Git directory during init."""
     hooks_dir = Path(vault_path) / ".git" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     _atomic_write_hook(hooks_dir / "post-commit", POST_COMMIT_HOOK)
     _atomic_write_hook(hooks_dir / "pre-commit", PRE_COMMIT_HOOK)
+
+
+
+def _inactive_hooks_warning(vault_path: Path) -> str | None:
+    """Check the installed location so conditional Git configuration applies."""
+    hooks_dir = Path(vault_path) / ".git" / "hooks"
+    from .doctor import _configured_hooks_path, _effective_hooks_dir
+
+    configured = _configured_hooks_path(["-C", str(vault_path)])
+    if configured is None:
+        return None
+    effective, _, error = _effective_hooks_dir(str(vault_path))
+    if effective is not None and not error:
+        try:
+            if effective.resolve() == hooks_dir.resolve():
+                return None
+        except OSError:
+            pass
+    if configured == "":
+        where = "core.hooksPath is set to an empty value, so Git runs no hooks"
+    else:
+        where = (
+            f"core.hooksPath is set to '{configured}' (a relative value is "
+            f"taken from the working tree root), so Git runs hooks from there"
+        )
+    return (
+        f"{where} and ignores the post-commit ingest and pre-commit secret scan "
+        f"installed in the vault's .git/hooks/. From the new vault, override it locally "
+        f"(`git config --local core.hooksPath .git/hooks`) or integrate the hooks in that "
+        f"directory yourself; `schist doctor` reports the state."
+    )
+
+
+def _warn_hooks_not_active(warning: str | None) -> None:
+    if warning:
+        print(f"Warning: {warning}", file=sys.stderr)
 
 
 def _install_staging_tree(staging: Path, target: Path, display_path: str) -> None:
@@ -239,12 +269,16 @@ def hooks_reinstall(args, vault_path: str, db_path: str) -> None:
         print(f"Error: {vault_path} is not a git repository", file=sys.stderr)
         sys.exit(1)
 
-    from .doctor import _effective_hooks_dir
+    from .doctor import _effective_hooks_dir, _external_hooks_fix, _local_hooks_destination
 
     hooks_dir, _, error = _effective_hooks_dir(str(target))
     if error or hooks_dir is None:
         detail = error or "core.hooksPath is empty; Git runs no hooks"
         print(f"Error: cannot locate active hooks directory: {detail}", file=sys.stderr)
+        sys.exit(1)
+    if not _local_hooks_destination(target, hooks_dir):
+        print(f"Error: refusing to install hooks outside the vault in {hooks_dir}. "
+              + _external_hooks_fix(), file=sys.stderr)
         sys.exit(1)
     hooks_dir.mkdir(parents=True, exist_ok=True)
     force = getattr(args, "force", False)
@@ -344,6 +378,7 @@ def init_spoke(args, vault_path: str, db_path: str) -> None:
 
     # Atomic rename: either target points at a complete spoke, or nothing.
     _install_staging_tree(staging, target, vault_path)
+    _warn_hooks_not_active(_inactive_hooks_warning(target))
 
     # Rebuild SQLite index against the final path (best-effort post-rename).
     # If this step fails the spoke is still usable; user can re-run rebuild.
@@ -1788,6 +1823,7 @@ def init_standalone(args) -> None:
     # Atomic rename: either target points at a complete vault, or it doesn't
     # exist at all.
     _install_staging_tree(staging, target, path_arg)
+    _warn_hooks_not_active(_inactive_hooks_warning(target))
 
     print(f"Vault initialized at {target}")
     print()
