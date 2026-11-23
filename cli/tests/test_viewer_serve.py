@@ -1050,6 +1050,15 @@ class TestOllamaPortOwner:
         agent.proc_net = (_proc_table(tmp_path / 'tcp', v4_rows), _proc_table(tmp_path / 'tcp6', v6_rows))
         return agent
 
+    @pytest.mark.parametrize('uid_fields', ['', '00000000:00000000 00:00000000 00000000 unknown'])
+    def test_matching_listener_without_owner_is_refused(self, vault, db_path, tmp_path, uid_fields):
+        agent = self._agent(vault, db_path, tmp_path)
+        with Path(agent.proc_net[0]).open('a') as table:
+            table.write('1: 0100007F:not-hex 00000000:0000 0A\n')
+            table.write(f'2: 0100007F:2CAA 00000000:0000 0A {uid_fields}\n')
+        status = agent.status()
+        assert not status['available'] and 'cannot tell which user' in status['reason']
+
     def test_another_users_listener_is_refused(self, vault, db_path, tmp_path):
         other = os.getuid() + 1
         st = self._agent(vault, db_path, tmp_path, v4_rows=[('0100007F', 11434, '0A', other)]).status()
