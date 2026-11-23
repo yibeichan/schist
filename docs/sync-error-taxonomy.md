@@ -22,7 +22,7 @@ Every push/pull failure gets exactly one class, in `PushFailureClass`
 | `timeout` | The MCP's own subprocess budget expired before an answer | Yes, within a grace period | Yes | Same as transport |
 | `stale-git-state` | Local git left mid-operation (`index.lock`, a stuck rebase) | No | **Never** | Resolve the git state manually, then run `sync_retry mode=pull-rebase-push` |
 | `spawn-failed` | The MCP couldn't even exec the `schist` binary (PATH/ENOENT) | No | **Never** | Pin `SCHIST_BIN`; `schist doctor` diagnoses this |
-| `other` | Classified nothing more specific matched | No | Yes | Generic: `sync_retry` after checking `sync_status` |
+| `other` | Hub diff inspection failed or no more specific class matched | No | Yes | Generic: `sync_retry` after checking `sync_status` |
 
 Two axes matter and they are NOT the same axis:
 
@@ -88,22 +88,23 @@ glues `detail` directly onto `"push failed [<class>]: "` with no separator,
 so an unprefixed line lands mid-line and fails its own anchor on the next
 read).
 
-## Classification ordering — this is load-bearing (`classifyPushFailure`, `tools.ts:1005`)
+## Classification order in `classifyPushFailure`
 
 In order, first match wins:
 
 1. `outcome.timedOut` → `timeout`
 2. spawn error with no `code`/`signal` → `spawn-failed`
 3. `HUB_TRANSIENT_RE` (hub's own `ERROR:` line, "hub may be under load") → `transport`
-4. `RATE_LIMIT_REJECTION_RE` (anchored on the hub's `REJECTED: rate limit
+4. The hub's `remote: ERROR: failed to diff` line → `other`. Inspect the hub before retrying.
+5. `RATE_LIMIT_REJECTION_RE` (anchored on the hub's `REJECTED: rate limit
    exceeded (...)` line) → `rate-limited`
-5. `non-fast-forward` / `fetch first` / `updates were rejected` (git's own
+6. `non-fast-forward` / `fetch first` / `updates were rejected` (git's own
    hint block, only emitted for a stale ref) → `non-fast-forward`
-6. `isAclRejection` (`HUB_REFUSAL_RE` / `SHELL_REFUSAL_RE` / generic
+7. `isAclRejection` (`HUB_REFUSAL_RE` / `SHELL_REFUSAL_RE` / generic
    `"pre-receive hook declined"`) → `acl-rejected`
-7. `isTransportFailure` → `transport`
-8. `STALE_STATE_PATTERNS` → `stale-git-state`
-9. else → `other`
+8. `isTransportFailure` → `transport`
+9. `STALE_STATE_PATTERNS` → `stale-git-state`
+10. else → `other`
 
 Rate-limit and hub-transient are tested **before** ACL because both arrive
 wrapped in git's generic `(pre-receive hook declined)` line — testing the
