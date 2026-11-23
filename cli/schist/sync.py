@@ -1366,13 +1366,8 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
     elif git_ops.has_uncommitted_changes(vault_path) or git_ops.ignored_scope_files(
         vault_path, config.scope
     )[0]:
-        # #419: the whole stage → count → commit sequence runs under the
-        # vault write lock — commit() ends in a plain `git commit -m` that
-        # sweeps EVERYTHING staged, and MCP's triggerSpokePush spawns
-        # `schist sync push` concurrently with interactive CLI writes as a
-        # matter of course. Locking only the commit would still let an
-        # add/link commit fire between this staging and this commit and
-        # sweep the staged scope files into the wrong commit.
+        # Explicit sync collects every in-scope change. Hold the vault lock
+        # from staging through commit so ordinary writes cannot interleave.
         with git_ops.vault_write_lock(vault_path):
             # Before staging, for landed_via_concurrent_commit below.
             head_before_stage = git_ops._head_sha(vault_path)
@@ -1458,10 +1453,7 @@ def sync_push(args, vault_path: str, db_path: str) -> None:
                         print(f"Warning: {output}", file=sys.stderr)
                     print(f"Committed {n} file{'s' if n != 1 else ''}")
 
-    # --commit-only (#724): the MCP server's commit step, run under its own
-    # write lock so stray in-scope files (hand edits) keep syncing without
-    # racing its writes. The push follows separately with --no-commit. The
-    # sentinel is the push's to clear, so it is left alone here.
+    # A local-only explicit sync leaves the push sentinel for the next push.
     if _commit_only_enabled(args):
         return
 
