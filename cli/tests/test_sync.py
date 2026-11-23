@@ -3291,7 +3291,7 @@ def test_both_git_path_sites_go_through_the_bytes_helper(tmp_path, monkeypatch):
     (tmp_path / "gitdir").mkdir()
     sync.cleanup_stale_git_state(str(vault), force=False)
 
-    hooks = tmp_path / "hooks"
+    hooks = vault / "hooks"
     monkeypatch.setattr(doctor, "_effective_hooks_dir", lambda p: (hooks, None, None))
     sync.hooks_reinstall(types.SimpleNamespace(force=False), str(vault), "db")
 
