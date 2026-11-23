@@ -495,6 +495,22 @@ describe("git-writer under the vault write lock (#724)", () => {
     expect(committed).toContain("EDIT");
   }, 60000);
 
+  test("an unreadable repair under the lock rolls back the deletion", async () => {
+    const vault = await makeTempVault();
+    const target = "notes/delete.md", linker = "notes/linker.md";
+    await writeNote(vault, target, "target");
+    await writeNote(vault, linker, "original");
+    const head = (await execFile("git", ["rev-parse", "HEAD"], { cwd: vault })).stdout;
+    const invalid = Buffer.from([0xff]);
+    await expect(deleteNote(vault, target, "target", "t", [
+      { relPath: linker, transform: () => "repaired" },
+    ], async () => { await fs.writeFile(path.join(vault, linker), invalid); }))
+      .rejects.toMatchObject({ error: "VALIDATION_ERROR" });
+    expect((await execFile("git", ["rev-parse", "HEAD"], { cwd: vault })).stdout).toBe(head);
+    expect(await fs.readFile(path.join(vault, target), "utf8")).toBe("target");
+    expect(await fs.readFile(path.join(vault, linker))).toEqual(invalid);
+  });
+
   test("deleteNote skips a repair whose file vanished or whose transform changes nothing", async () => {
     const vault = await makeTempVault();
     await writeNote(vault, "notes/d.md", "---\ntitle: d\n---\nx\n", "d", "t");

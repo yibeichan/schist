@@ -1154,7 +1154,8 @@ export async function deleteNote(
   relPath: string,
   noteTitle: string,
   owner?: string,
-  repairs: Array<{ relPath: string; transform: (current: string) => string }> = []
+  repairs: Array<{ relPath: string; transform: (current: string) => string }> = [],
+  prepareRepairs?: () => Promise<void>,
 ): Promise<WriteResult & { repaired: string[] }> {
   assertPathSafe(vaultRoot, relPath);
   for (const r of repairs) assertPathSafe(vaultRoot, r.relPath);
@@ -1177,6 +1178,7 @@ export async function deleteNote(
       vlock.assertStillHeld();
       // Only the paths this call staged or wrote: rolling back a skipped repair
       // would restore a linker someone deleted, or fail on one HEAD never had.
+      if (prepareRepairs) await prepareRepairs();
       const touched = [relPath];
       try {
         // Before staging, for landedViaConcurrentCommit below.
@@ -1188,15 +1190,15 @@ export async function deleteNote(
           // repair path (a write-branch symlink could redirect outside the vault;
           // the `git rm` of the delete target above is safe — it removes the link
           // rather than writing through it). #119.
-          await assertResolvesInside(vaultRoot, r.relPath);
           const absPath = path.resolve(vaultRoot, r.relPath);
           let current: string;
           try {
+            await assertResolvesInside(vaultRoot, r.relPath);
             current = decodeNoteBytes(await fs.readFile(absPath), r.relPath);
-          } catch {
-            // Vanished, or not valid UTF-8 (ingest indexes nothing from such
-            // a note): nothing to repair.
-            continue;
+          } catch (e) {
+            if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+            if (e && typeof e === "object" && "error" in e) throw e;
+            throw { error: "VALIDATION_ERROR", message: `Cascade cannot read ${r.relPath}: ${(e as NodeJS.ErrnoException).code ?? "read failed"}` };
           }
           const next = r.transform(current);
           if (next === current) continue;

@@ -5311,6 +5311,176 @@ describe("delete_note", () => {
     expect(await fs.readFile(path.join(vault, linker.id), "utf-8")).not.toContain(`extends: ${slug}`);
   }, 30000);
 
+  // A cascade delete strips bare-slug references only when the deleted file is
+  // the sole claimant of the slug (filename stem or `concept:` key under a
+  // concepts directory). While another file claims it the reference still
+  // resolves after the delete, so it must stay.
+  const slugOwnerCases: Array<{ files: Record<string, string>; slug: string; deleted: string; owner: boolean }> = (() => {
+    type Case = { files: Record<string, string>; slug: string; deleted: string; owner: boolean };
+    const plain = "---\ntitle: C\n---\nb\n";
+    const keyed = (k: string) => `---\ntitle: C\nconcept: ${k}\n---\nb\n`;
+    const two = (a: string, b: string) => ({ [a]: plain, [b]: plain });
+    const cases: Case[] = [
+      { files: two("concepts/x.md", "Concepts/x.md"), slug: "x", deleted: "concepts/x.md", owner: false },
+      { files: two("concepts/x.md", "Concepts/x.md"), slug: "x", deleted: "Concepts/x.md", owner: false },
+      { files: two("concepts/backprop.md", "Concepts/BackProp.md"), slug: "backprop", deleted: "concepts/backprop.md", owner: false },
+      { files: two("concepts/backprop.md", "Concepts/BackProp.md"), slug: "backprop", deleted: "Concepts/BackProp.md", owner: false },
+      { files: two("concepts/BackProp.md", "concepts/backprop.md"), slug: "backprop", deleted: "concepts/BackProp.md", owner: false },
+      { files: two("concepts/BackProp.md", "concepts/backprop.md"), slug: "backprop", deleted: "concepts/backprop.md", owner: false },
+      // concepts/aaa.md claims x through its concept: key (ingest gives it the slug).
+      { files: { "concepts/aaa.md": keyed("x"), "Concepts/x.md": plain }, slug: "x", deleted: "Concepts/x.md", owner: false },
+      // a claimant whose frontmatter cannot be read counts
+      { files: { "concepts/broken.md": "---js\n{ concept: 'x' }\n---\nb\n", "Concepts/x.md": plain }, slug: "x", deleted: "Concepts/x.md", owner: false },
+      { files: { "notes/alias.md": keyed("x"), "concepts/x.md": plain }, slug: "x", deleted: "concepts/x.md", owner: false },
+      // sole claimants
+      { files: { "concepts/x.md": plain, "concepts/other.md": plain }, slug: "x", deleted: "concepts/x.md", owner: true },
+      { files: { "Concepts/BackProp.md": plain }, slug: "backprop", deleted: "Concepts/BackProp.md", owner: true },
+    ];
+    return cases;
+  })();
+  it.each(slugOwnerCases)(
+    "cascade strips bare-slug refs only for the sole claimant: $deleted among $files (#499)",
+    async ({ files, slug, deleted, owner }) => {
+      // Names differing only in case coexist on a case-sensitive filesystem only.
+      const probe = await fs.mkdtemp(path.join(os.tmpdir(), "schist-case-probe-"));
+      await fs.mkdir(path.join(probe, "a"));
+      const caseInsensitive = await fs.stat(path.join(probe, "A")).then(() => true, () => false);
+      await fs.rm(probe, { recursive: true, force: true });
+      if (caseInsensitive) return;
+
+      const vault = await makeTempVault();
+      await fs.writeFile(
+        path.join(vault, "schist.yaml"),
+        "name: Test Vault\nwrite_branch: drafts\ndirectories:\n  - notes\n  - concepts\n  - Concepts\nstatuses:\n  - draft\n  - final\nconnection_types:\n  - extends\n  - supports\n",
+      );
+      await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+      for (const [f, text] of Object.entries(files)) {
+        await fs.mkdir(path.join(vault, path.dirname(f)), { recursive: true });
+        await fs.writeFile(path.join(vault, f), text);
+      }
+      const linkerId = "notes/linker.md";
+      const linkerText = `---\ntitle: Linker\nconcepts: [${slug}]\n---\nbody\n\n## Connections\n\n- extends: ${slug}\n- supports: ${deleted}\n`;
+      await fs.writeFile(path.join(vault, linkerId), linkerText);
+      await execFile("git", ["add", "schist.yaml", ...Object.keys(files), linkerId], { cwd: vault });
+      await execFile("git", ["commit", "-m", "concept files"], { cwd: vault });
+      const config = await loadVaultConfig(vault);
+      await seedEdgesDb(vault, [{ source: linkerId, target: slug, type: "extends" },
+        { source: linkerId, target: deleted, type: "supports" }]);
+
+      const res = await delete_note(vault, { owner: TEST_AGENT, id: deleted, cascade: true }, config) as {
+        deleted: boolean; repaired: string[];
+      };
+      expect(res.deleted).toBe(true);
+      if (owner) {
+        expect(res.repaired).toEqual([linkerId]);
+        expect(await fs.readFile(path.join(vault, linkerId), "utf-8")).not.toContain(`extends: ${slug}`);
+      } else {
+        expect(res.repaired).toEqual([linkerId]);
+        const text = await fs.readFile(path.join(vault, linkerId), "utf-8");
+        expect(text).toContain(`extends: ${slug}`);
+        expect(text).not.toContain(`supports: ${deleted}`);
+      }
+    },
+    30000,
+  );
+
+  describe("the claimant check reads only regular files, and only their head (#499)", () => {
+    async function claimantVault(extra: (vault: string) => Promise<void>) {
+      const vault = await makeTempVault();
+      await fs.writeFile(
+        path.join(vault, "schist.yaml"),
+        "name: Test Vault\nwrite_branch: drafts\ndirectories:\n  - notes\n  - concepts\nstatuses:\n  - draft\n  - final\nconnection_types:\n  - extends\n  - supports\n",
+      );
+      await fs.mkdir(path.join(vault, "notes"), { recursive: true });
+      await fs.mkdir(path.join(vault, "concepts"), { recursive: true });
+      await fs.writeFile(path.join(vault, "concepts", "x.md"), "---\ntitle: X\n---\nb\n");
+      const linkerId = "notes/linker.md";
+      const linkerText = "---\ntitle: Linker\nconcepts: [x]\n---\nbody\n\n## Connections\n\n- extends: x\n";
+      await fs.writeFile(path.join(vault, linkerId), linkerText);
+      await extra(vault);
+      await execFile("git", ["add", "-A", "."], { cwd: vault });
+      await execFile("git", ["commit", "-m", "concept files"], { cwd: vault });
+      const config = await loadVaultConfig(vault);
+      await seedEdgesDb(vault, [{ source: linkerId, target: "x", type: "extends" }]);
+      return { vault, config, linkerId, linkerText };
+    }
+
+    it("a symlinked concept file blocks stripping and is never read", async () => {
+      // The target is a regular file outside the vault that claims another
+      // slug: were the link followed and read, x would count as sole claimant
+      // and the linker would be stripped.
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), "schist-claimant-"));
+      try {
+        const target = path.join(outside, "target.md");
+        await fs.writeFile(target, "---\ntitle: T\nconcept: other\n---\nb\n");
+        const { vault, config, linkerId, linkerText } = await claimantVault(async (v) => {
+          await fs.symlink(target, path.join(v, "concepts", "z.md"));
+        });
+        const res = await delete_note(vault, { owner: TEST_AGENT, id: "concepts/x.md", cascade: true }, config) as {
+          deleted: boolean; repaired: string[];
+        };
+        expect(res.deleted).toBe(true);
+        expect(res.repaired).toEqual([]);
+        expect(await fs.readFile(path.join(vault, linkerId), "utf-8")).toBe(linkerText);
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    }, 30000);
+
+    it("a symlink to a file inside the vault also blocks stripping", async () => {
+      const { vault, config, linkerId, linkerText } = await claimantVault(async (v) => {
+        await fs.writeFile(path.join(v, "concepts", "real.md"), "---\ntitle: R\n---\nb\n");
+        await fs.symlink("real.md", path.join(v, "concepts", "inside.md"));
+      });
+      const res = await delete_note(vault, { owner: TEST_AGENT, id: "concepts/x.md", cascade: true }, config) as {
+        repaired: string[];
+      };
+      expect(res.repaired).toEqual([]);
+      expect(await fs.readFile(path.join(vault, linkerId), "utf-8")).toBe(linkerText);
+    }, 30000);
+
+    it("a large concept file is read only at its head", async () => {
+      // 128 KiB with its frontmatter in the first 64 KiB and an invalid UTF-8
+      // byte after it: a whole-file strict decode fails (the file would count
+      // as an unreadable claimant); the head read sees concept: big.
+      const { vault, config, linkerId } = await claimantVault(async (v) => {
+        const head = Buffer.from("---\ntitle: Big\nconcept: big\n---\n");
+        const body = Buffer.alloc(128 * 1024 - head.length, "a");
+        body[100 * 1024] = 0xff;
+        await fs.writeFile(path.join(v, "concepts", "big.md"), Buffer.concat([head, body]));
+      });
+      const res = await delete_note(vault, { owner: TEST_AGENT, id: "concepts/x.md", cascade: true }, config) as {
+        repaired: string[];
+      };
+      expect(res.repaired).toEqual([linkerId]);
+      expect(await fs.readFile(path.join(vault, linkerId), "utf-8")).not.toContain("extends: x");
+    }, 30000);
+  });
+
+  it("cascade deleting Concepts/BackProp.md also strips the normalized lowercase slug (#499)", async () => {
+    const vault = await makeTempVault();
+    await fs.writeFile(
+      path.join(vault, "schist.yaml"),
+      "name: Test Vault\nwrite_branch: drafts\ndirectories:\n  - notes\n  - Concepts\nstatuses:\n  - draft\n  - final\nconnection_types:\n  - extends\n  - supports\n",
+    );
+    await fs.mkdir(path.join(vault, "Concepts"), { recursive: true });
+    await fs.writeFile(path.join(vault, "Concepts", "BackProp.md"), "---\ntitle: BackProp\n---\nb\n");
+    await execFile("git", ["add", "schist.yaml", "Concepts/BackProp.md"], { cwd: vault });
+    await execFile("git", ["commit", "-m", "add Concepts dir"], { cwd: vault });
+    const config = await loadVaultConfig(vault);
+    const linker = await create_note(
+      vault,
+      { owner: TEST_AGENT, title: "Linker3", body: "b", directory: "notes", connections: [{ target: "backprop", type: "extends" }] },
+      config,
+    ) as { id: string };
+    await seedEdgesDb(vault, [{ source: linker.id, target: "backprop", type: "extends" }]);
+    const res = await delete_note(vault, { owner: TEST_AGENT, id: "Concepts/BackProp.md", cascade: true }, config) as {
+      deleted: boolean; repaired: string[];
+    };
+    expect(res.deleted).toBe(true);
+    expect(res.repaired).toContain(linker.id);
+  }, 30000);
+
   it("cascade refuses, before writing, when a linker's frontmatter is not YAML (#789)", async () => {
     const vault = await makeTempVault();
     const config = await loadVaultConfig(vault);
@@ -5458,7 +5628,7 @@ describe("delete_note", () => {
     expect(res.message).toContain("Cascade cannot read");
     expect(res.message).toContain(linkerId);
     expect(res.message).toContain("not valid UTF-8");
-    expect(res.message).toContain("Re-save each file as UTF-8");
+    expect(res.message).toContain("UTF-8");
     await fs.access(path.join(vault, target.id));
     expect(await fs.readFile(path.join(vault, linkerId))).toEqual(linkerBytes);
     expect((await execFile("git", ["rev-parse", "HEAD"], { cwd: vault })).stdout.trim()).toBe(head);

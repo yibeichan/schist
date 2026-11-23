@@ -632,6 +632,14 @@ def _read_schema_config(path: Path) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def is_content_note_path(rel: Path, roots: set[str]) -> bool:
+    """Whether this relative Markdown path belongs to the vault's content."""
+    return (rel.name.endswith('.md') and rel.name.casefold() != 'readme.md'
+            and not any(part in SKIP_DIRS for part in rel.parts)
+            and (rel.name.casefold() not in ROOT_SUPPORT_DOCS if len(rel.parts) == 1
+                 else rel.parts[0].casefold() in roots))
+
+
 def _configured_content_roots(vault: Path) -> set[str]:
     """Return configured top-level content directories for this vault.
 
@@ -1051,17 +1059,7 @@ def _ingest_into(conn: sqlite3.Connection, vault: Path, schema_path: Path) -> No
 
     for md_file in sorted(vault.rglob('*.md')):
         rel = md_file.relative_to(vault)
-        if not rel.parts:
-            continue
-        if rel.name.casefold() == 'readme.md':
-            continue
-        if len(rel.parts) == 1:
-            if rel.name.casefold() in ROOT_SUPPORT_DOCS:
-                continue
-        elif rel.parts[0].casefold() not in content_roots:
-            continue
-        # Skip hidden/excluded dirs
-        if any(part in SKIP_DIRS for part in rel.parts):
+        if not is_content_note_path(rel, content_roots):
             continue
 
         try:

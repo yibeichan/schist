@@ -5635,3 +5635,20 @@ class TestCheckMcpConnectionsRule:
         src = (Path(__file__).resolve().parents[2] / "mcp-server" / "src" / "markdown-parser.ts").read_text()
         m = _MCP_RULE_VERSION_RE.search(src)
         assert m is not None and int(m.group(1)) == CONNECTIONS_RULE_VERSION
+
+
+def test_note_readability_finds_non_indexed_invalid_utf8_on_disk(tmp_path):
+    from schist.doctor import check_note_readability
+
+    (tmp_path / "schist.yaml").write_text("directories: [notes]\n")
+    for directory in ("notes", "other"):
+        (tmp_path / directory).mkdir()
+        (tmp_path / directory / "bad.md").write_bytes(b"bad\xff")
+    (tmp_path / "README.md").write_bytes(b"bad\xff")
+    result = check_note_readability(str(tmp_path))
+    assert result.status == "WARN"
+    assert "notes/bad.md" in result.message
+    assert "other/bad.md" not in result.message
+    assert "README.md" not in result.message
+    (tmp_path / "notes/bad.md").write_text("fixed")
+    assert check_note_readability(str(tmp_path)).status == "PASS"

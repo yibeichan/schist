@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import * as fs from "fs/promises";
-import { readFileSync } from "fs";
+import { readFileSync, constants as fsConstants } from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
@@ -279,12 +279,13 @@ function validateFrontmatterPatch(
  * any resolution error — callers run this only after confirming the target
  * exists, so a failure means the path is suspect. #119.
  */
-async function resolvesInsideVault(vaultRoot: string, relPath: string): Promise<boolean> {
+async function resolvesInsideVault(vaultRoot: string, relPath: string, propagateError = false): Promise<boolean> {
   try {
     const realRoot = await fs.realpath(vaultRoot);
     const realTarget = await fs.realpath(path.join(vaultRoot, relPath));
     return realTarget === realRoot || realTarget.startsWith(realRoot + path.sep);
-  } catch {
+  } catch (e) {
+    if (propagateError) throw e;
     return false;
   }
 }
@@ -3358,16 +3359,136 @@ export async function add_connection(
 
 /**
  * Tokens a `## Connections` line might use to reference the note `id`. Always
- * the full vault path; for a concept note (`concepts/<slug>.md`) also the bare
- * `<slug>`, because edges to concepts are stored either way (see
- * sqlite-reader's conceptEdgeJoinCondition). Without this, deleting a concept
- * note would miss inbound edges written as the bare slug.
+ * the full vault path; for a concept note (`concepts/<slug>.md`, or the
+ * casefold axis `Concepts/<slug>.md`) also the bare slug, because edges to
+ * concepts are stored either way (see sqlite-reader's conceptEdgeJoinCondition).
+ * Without this, deleting a concept note would miss inbound edges written as the
+ * bare slug. The bare slug goes only to a note that is the sole claimant of
+ * the slug (soleConceptClaimant): while another file claims it, a bare
+ * reference still resolves after the delete, so stripping it would lose a
+ * valid reference.
  */
-function noteRefTokens(id: string): string[] {
+async function noteRefTokens(vaultRoot: string, id: string, dirs: string[]): Promise<string[]> {
   const tokens = new Set<string>([id]);
-  const m = id.match(/^concepts\/(.+)\.md$/);
-  if (m) tokens.add(m[1]);
+  const m = id.match(/^concepts\/(.+)\.md$/i);
+  if (m) {
+    const stem = path.posix.basename(m[1]);
+    const slug = normalizeConceptSlug(stem);
+    if (await soleConceptClaimant(vaultRoot, id, slug, dirs)) {
+      tokens.add(m[1]);
+      // Ingest stores the concept slug normalized (lowercase).
+      tokens.add(slug);
+    }
+  }
   return [...tokens];
+}
+
+/** A concept-axis .md entry; regular is false for a symlink or other non-regular file. */
+interface ConceptAxisFile { rel: string; regular: boolean }
+
+/**
+ * Indexed-scope Markdown files that could declare a concept.
+ * Symlinks (any name: one may point at a directory or a note) and non-regular
+ * .md entries are listed as not regular and never opened.
+ */
+async function conceptFiles(vaultRoot: string, dirs: string[]): Promise<ConceptAxisFile[]> {
+  const out: ConceptAxisFile[] = [];
+  const walk = async (rel: string): Promise<void> => {
+    for (const entry of await fs.readdir(path.join(vaultRoot, rel), { withFileTypes: true })) {
+      const child = `${rel}/${entry.name}`;
+      if ([".git", ".schist"].includes(entry.name) || entry.name.toLowerCase() === "readme.md") continue;
+      if (entry.isSymbolicLink()) out.push({ rel: child, regular: false });
+      else if (entry.isDirectory()) await walk(child);
+      else if (entry.name.endsWith(".md")) out.push({ rel: child, regular: entry.isFile() });
+    }
+  };
+  const roots = new Set(dirs.map(dir => dir.split("/")[0].toLowerCase()));
+  roots.add("concepts");
+  const support = new Set(["readme.md", "schema.md", "tags.md", "conventions.md"]);
+  for (const entry of await fs.readdir(vaultRoot, { withFileTypes: true })) {
+    if (roots.has(entry.name.toLowerCase()) && entry.isDirectory()) await walk(entry.name);
+    else if ((roots.has(entry.name.toLowerCase()) && entry.isSymbolicLink())
+        || (entry.name.endsWith(".md") && !support.has(entry.name.toLowerCase()))) {
+      out.push({ rel: entry.name, regular: entry.isFile() });
+    }
+  }
+  return out;
+}
+
+// Enough for any real frontmatter block; a note is not read past this.
+const CLAIMANT_HEAD_BYTES = 64 * 1024;
+
+/**
+ * The `concept:` key of a regular file inside the vault, from its first
+ * CLAIMANT_HEAD_BYTES bytes. Throws when the file cannot be read as a regular
+ * file, or when it is longer than the head and the head does not hold a whole
+ * frontmatter block.
+ */
+async function readConceptKey(vaultRoot: string, rel: string): Promise<string | null> {
+  if (!(await resolvesInsideVault(vaultRoot, rel))) throw new Error("outside the vault");
+  const handle = await fs.open(
+    path.join(vaultRoot, rel),
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+  );
+  try {
+    const st = await handle.stat();
+    if (!st.isFile()) throw new Error("not a regular file");
+    const buf = Buffer.alloc(Math.min(st.size, CLAIMANT_HEAD_BYTES));
+    const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+    if (bytesRead !== buf.length) throw new Error("incomplete concept header");
+    const bytes = buf.subarray(0, bytesRead);
+    const truncated = st.size > CLAIMANT_HEAD_BYTES;
+    // A cut head may end inside a character, so it is decoded leniently; a
+    // whole file is decoded as ingest does.
+    const text = truncated
+      ? normalizeNewlines(new TextDecoder("utf-8").decode(bytes))
+      : decodeNoteBytes(bytes, path.basename(rel));
+    if (truncated && frontmatterLength(text) === 0) throw new Error("frontmatter not within the head");
+    const { metadata } = parseNoteForRewrite(text, "checking the concept slug");
+    return typeof metadata.concept === "string" ? normalizeConceptSlug(metadata.concept) :
+      Object.hasOwn(metadata, "concept") ? normalizeConceptSlug(path.posix.basename(rel, ".md")) : null;
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Whether `id` is the only file that claims the normalized concept slug. A
+ * claimant is any file under a concepts directory (any case, any depth) whose
+ * filename stem, or whose `concept:` frontmatter key (the key ingest reads),
+ * normalizes to the slug. The claimant check reads only regular files inside
+ * the vault; a symlink or other non-regular entry counts as a claimant without
+ * being read, as does a file whose frontmatter cannot be read. False when the
+ * tree cannot be listed or `id` itself declares a different slug. This
+ * deliberately does not reproduce ingest's ranking of claimants: when in doubt
+ * the answer is false, because leaving a stale reference is acceptable and
+ * stripping one that still resolves is not. A document outside the concepts
+ * axis can also claim the slug through its frontmatter.
+ */
+async function soleConceptClaimant(vaultRoot: string, id: string, slug: string, dirs: string[]): Promise<boolean> {
+  let files: ConceptAxisFile[];
+  try {
+    files = await conceptFiles(vaultRoot, dirs);
+  } catch {
+    return false;
+  }
+  for (const { rel, regular } of files) {
+    if (!regular) return false;
+    let declared: string | null;
+    try {
+      declared = await readConceptKey(vaultRoot, rel);
+    } catch {
+      return false;
+    }
+    // The note's own key decides its slug; one that differs from the stem
+    // means the stem-derived slug is not this note's.
+    if (rel === id) {
+      if (declared !== null && declared !== slug) return false;
+      continue;
+    }
+    if ((rel.split("/")[0].toLowerCase() === "concepts" && normalizeConceptSlug(path.posix.basename(rel, ".md")) === slug) || declared === slug) return false;
+  }
+  return true;
 }
 
 // Explicit whitespace set shared verbatim with cli/schist/ingest.py's
@@ -3541,7 +3662,7 @@ export async function delete_note(
     // reference left in another note — surfaced via indexWarning so the caller
     // can repair it. The ACL gate above (the real security boundary) is
     // independent of the index.
-    const refTokens = noteRefTokens(args.id);
+    const refTokens = await noteRefTokens(vaultRoot, args.id, config.directories);
     let inbound: Array<{ source: string; type: string }> = [];
     let indexWarning: string | undefined;
     try {
@@ -3582,9 +3703,9 @@ export async function delete_note(
         // cascade can't mutate a non-note file or follow a symlink out of the
         // vault. A source that fails validation is skipped, not repaired. #119.
         if (validateNoteId(source, config) !== null) continue;
-        if (!(await resolvesInsideVault(vaultRoot, source))) continue;
         let content: string;
         try {
+          if (!(await resolvesInsideVault(vaultRoot, source, true))) continue;
           content = await readNoteText(path.join(vaultRoot, source));
         } catch (e: unknown) {
           if (e instanceof NoteDecodeError) {
@@ -3594,7 +3715,8 @@ export async function delete_note(
             decodeErrors.push({ relPath: source, message: "it is not valid UTF-8" });
             continue;
           }
-          // Source vanished since the index was built — nothing to repair.
+          const code = (e as NodeJS.ErrnoException).code;
+          if (code !== "ENOENT") decodeErrors.push({ relPath: source, message: code ?? "read failed" });
           continue;
         }
         // Strip both the body `## Connections` lines AND any matching
@@ -3686,7 +3808,7 @@ export async function delete_note(
           message:
             "Cascade cannot read: " +
             decodeErrors.map((p) => `${p.relPath} (${p.message})`).join("; ") +
-            ". Re-save each file as UTF-8, commit, then retry the delete.",
+            ". Check file access or re-save invalid text as UTF-8, then retry the delete.",
         } satisfies ToolError;
       }
       if (splitErrors.length > 0) {
@@ -3729,6 +3851,7 @@ export async function delete_note(
     }
 
     // Each repair re-strips the linker as read inside the vault lock (#724).
+    let lockedTokens = refTokens;
     const result = await deleteNote(
       vaultRoot,
       args.id,
@@ -3736,8 +3859,12 @@ export async function delete_note(
       owner,
       repairs.map((r) => ({
         relPath: r.relPath,
-        transform: (c: string) => stripConceptRefs(stripConnectionsTo(c, refTokens).content, refTokens).content,
+        transform: (c: string) => stripConceptRefs(stripConnectionsTo(c, lockedTokens).content, lockedTokens).content,
       })),
+      refTokens.length > 1 && repairs.length ? async () => {
+        const current = await noteRefTokens(vaultRoot, args.id, config.directories);
+        lockedTokens = refTokens.filter(token => current.includes(token));
+      } : undefined,
     );
 
     triggerIngestion(vaultRoot);
