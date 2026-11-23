@@ -380,9 +380,9 @@ def main():
             parser.error('cleanup-temps requires --vault or SCHIST_VAULT_PATH')
         try:
             for path in cleanup_temps(args.vault, writers_stopped=args.writers_stopped):
-                print(path)
+                print(doctor_mod._printable(str(path)))
         except OSError as exc:
-            parser.exit(1, f'Could not finish temporary file cleanup: {exc}\n')
+            parser.exit(1, f'Could not finish temporary file cleanup: {doctor_mod._printable(str(exc))}\n')
         return
 
     if args.command == 'doctor':

@@ -59,3 +59,14 @@ def test_cleanup_refuses_symlinked_staging_components(tmp_path, component):
         victim = old(outside / 'tmpabcdefgh.tmp')
     assert cli(vault, '--writers-stopped').returncode != 0
     assert victim.exists()
+
+def test_report_and_cleanup_print_each_filename_on_one_line(tmp_path):
+    from schist.doctor import check_stale_atomic_temps
+    stage = tmp_path / '.schist/tmp'
+    stage.mkdir(parents=True)
+    eligible = old(stage / '.new\nline.md.42.0123456789ab.tmp')
+    assert r'.new\x0aline.md.' in check_stale_atomic_temps(str(tmp_path)).message
+    result = cli(tmp_path, '--writers-stopped')
+    assert result.returncode == 0
+    assert len(result.stdout.splitlines()) == 1 and r'.new\x0aline.md.' in result.stdout
+    assert not eligible.exists()

@@ -869,17 +869,17 @@ def check_stale_atomic_temps(vault_path: Optional[str]) -> CheckResult:
     label = "Stale write temps"
     if not vault_path:
         return CheckResult("SKIP", label, "skipped (no vault)")
-    staging = Path(vault_path) / ".schist" / "tmp"
+    staging = _printable(str(Path(vault_path) / ".schist" / "tmp"))
     try:
         stale = find_stale_temps(vault_path)
     except OSError as e:
         return CheckResult(
-            "WARN", label, f"cannot read {staging}: {e}",
+            "WARN", label, f"cannot read {staging}: {_printable(str(e))}",
             "Fix the directory's permissions or type so stale temps can be checked.",
         )
     if not stale:
         return CheckResult("PASS", label, "no stale temp files in .schist/tmp/")
-    shown = ", ".join(s.name for s in stale[:5])
+    shown = ", ".join(_printable(s.name) for s in stale[:5])
     more = f" and {len(stale) - 5} more" if len(stale) > 5 else ""
     return CheckResult(
         "WARN", label,
