@@ -470,6 +470,42 @@ class TestSchemaCommand:
         )
         assert capsys.readouterr().out.strip() == "All documents valid."
 
+    def test_validate_compares_key_to_normalized_stem(self, tmp_path, capsys):
+        """ingest ranks a file by whether its key matches the NORMALIZED stem,
+        so `concepts/Foo.md` carrying `concept: Foo` is not a key/stem
+        mismatch. The bad filename itself is still reported (#507)."""
+        concepts_dir = tmp_path / "concepts"
+        concepts_dir.mkdir()
+        (concepts_dir / "Foo.md").write_text(
+            "---\nconcept: Foo\ntitle: Foo\n---\n\nDef.\n", encoding="utf-8",
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            commands.schema(
+                _schema_args(validate=True),
+                str(tmp_path),
+                str(tmp_path / ".schist" / "schist.db"),
+            )
+        out = capsys.readouterr().out
+        assert exc.value.code == 1
+        assert "concept filename stem must match" in out
+        assert "does not match filename stem" not in out
+
+    def test_validate_suggests_normalized_stem_for_blank_key(self, tmp_path, capsys):
+        concepts_dir = tmp_path / "concepts"
+        concepts_dir.mkdir()
+        (concepts_dir / "Foo.md").write_text(
+            '---\nconcept: ""\ntitle: Foo\n---\n\nDef.\n', encoding="utf-8",
+        )
+
+        with pytest.raises(SystemExit):
+            commands.schema(
+                _schema_args(validate=True),
+                str(tmp_path),
+                str(tmp_path / ".schist" / "schist.db"),
+            )
+        assert "set it to 'foo'" in capsys.readouterr().out
+
     @pytest.mark.parametrize("value", ['""', "'   '", "[]"])
     def test_validate_reports_empty_or_non_string_concept_key(
         self, tmp_path, capsys, value,

@@ -975,19 +975,21 @@ def schema(args, vault_path: str, db_path: str):
             # it as "no key" on-axis, which is recoverable but not intended
             # (#482), and staying silent would leave the two tools disagreeing
             # about whether the file is well-formed.
+            # Compare against the normalized stem, as ingest's stem_rank does.
+            stem_slug = _normalize_concept_slug(rel.stem)
             if 'concept' in fm:
                 raw_key = fm['concept']
                 if not isinstance(raw_key, str) or not _normalize_concept_slug(raw_key):
                     violations.append(
                         f'{rel}: concept: key is empty or not a string — '
-                        f'remove it or set it to {rel.stem!r}',
+                        f'remove it or set it to {stem_slug!r}',
                     )
                 else:
                     key_slug = _normalize_concept_slug(raw_key)
-                    if key_slug != rel.stem:
+                    if key_slug != stem_slug:
                         violations.append(
                             f'{rel}: concept: key {key_slug!r} does not match '
-                            f'filename stem {rel.stem!r} — ingest would index '
+                            f'filename stem {stem_slug!r} — ingest would index '
                             f'this file under {key_slug!r}',
                         )
             forbidden = sorted({

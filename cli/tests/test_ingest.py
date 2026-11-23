@@ -1394,12 +1394,14 @@ def test_casefold_axis_without_concept_key_outranks_off_axis_claimant(
     "rel, expected",
     [
         ("concepts/ml.md", 1),
-        ("Concepts/ml.md", 2),
-        ("CONCEPTS/ml.md", 2),
-        ("Archive/ml.md", 3),
-        ("notes/ml.md", 3),
-        ("conceptsx/ml.md", 3),
-        ("ml.md", 3),  # vault root — no directory component at all
+        ("concepts/algorithms/ml.md", 2),  # nested: below a direct child
+        ("concepts/a/b/ml.md", 2),
+        ("Concepts/ml.md", 3),
+        ("CONCEPTS/ml.md", 3),
+        ("Archive/ml.md", 4),
+        ("notes/ml.md", 4),
+        ("conceptsx/ml.md", 4),
+        ("ml.md", 4),  # vault root — no directory component at all
     ],
 )
 def test_concept_axis_rank_tiers(rel: str, expected: int) -> None:
@@ -1408,6 +1410,35 @@ def test_concept_axis_rank_tiers(rel: str, expected: int) -> None:
     from schist.ingest import _concept_axis_rank
 
     assert _concept_axis_rank(Path(rel)) == expected
+
+
+def test_nested_concept_file_does_not_shadow_direct_child(tmp_path: Path) -> None:
+    """`concepts/algorithms/binary-search.md` sorts BEFORE
+    `concepts/binary-search.md`; with both ranked as the reserved axis the
+    nested file arrived first and took the slug, silently dropping the
+    canonical direct child (#505)."""
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    (vault / "concepts" / "algorithms").mkdir(parents=True)
+    (vault / "concepts" / "algorithms" / "binary-search.md").write_text(
+        "---\ntitle: NESTED\n---\n\nNested.\n", encoding="utf-8",
+    )
+    (vault / "concepts" / "binary-search.md").write_text(
+        "---\ntitle: DIRECT\n---\n\nDirect.\n", encoding="utf-8",
+    )
+    db = vault / ".schist" / "schist.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+
+    ingest(str(vault), str(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT slug, title FROM concepts").fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [("binary-search", "DIRECT")]
 
 
 def test_matching_stem_outranks_mismatched_concept_key_in_axis(
@@ -1730,6 +1761,40 @@ def test_ingest_indexes_paper_metadata(tmp_path: Path) -> None:
     ]
     assert row["url"] == "https://doi.org/10.1234/example"
     assert query == {"columns": ["title", "year"], "rows": [["Example Paper", 2024]]}
+
+
+def test_legacy_concept_body_edges_remain_queryable(tmp_path: Path) -> None:
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    _write_vault(vault)
+    legacy = vault / "concepts" / "2026-04-16-legacy.md"
+    legacy.write_text(
+        "---\ntitle: Legacy\ndate: 2026-04-16\n---\n\n"
+        "## Connections\n- extends: concepts/ingestion.md\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "index.db"
+    ingest(str(vault), str(db))
+    with sqlite3.connect(db) as conn:
+        assert conn.execute(
+            "SELECT target FROM edges WHERE source = ? AND type = 'extends'",
+            (legacy.relative_to(vault).as_posix(),),
+        ).fetchall() == [("concepts/ingestion.md",)]
+
+
+def test_capitalized_papers_is_an_ordinary_document_directory(tmp_path: Path) -> None:
+    from schist.ingest import ingest
+
+    vault = tmp_path / "vault"
+    other = vault / "Papers"
+    other.mkdir(parents=True)
+    (other / "ordinary.md").write_text("---\ntitle: Ordinary\n---\n", encoding="utf-8")
+    db = tmp_path / "index.db"
+    ingest(str(vault), str(db))
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT 1 FROM docs WHERE id = 'Papers/ordinary.md'").fetchone()
+        assert conn.execute("SELECT 1 FROM paper_metadata WHERE doc_id = 'Papers/ordinary.md'").fetchone() is None
 
 
 def test_papers_without_metadata_get_unverified_paper_row(tmp_path: Path) -> None:

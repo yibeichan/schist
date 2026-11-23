@@ -685,16 +685,19 @@ def _configured_content_roots(vault: Path) -> set[str]:
     return roots
 
 
-# Authority tiers for a concept definition, LOWER wins. Three tiers and not
-# two, because `concepts/` and `Concepts/` are the SAME directory on a
-# case-insensitive filesystem (APFS/HFS+) but DIFFERENT ones on a
+# Authority tiers for a concept definition, LOWER wins. Four tiers: a direct
+# child of `concepts/`, a file in one of its subdirectories, the case-folded
+# `Concepts/` axis, and everything else. The case-folded tier is separate
+# from the literal axis because `concepts/` and `Concepts/` are the SAME
+# directory on a case-insensitive filesystem (APFS/HFS+) but DIFFERENT ones on a
 # case-sensitive filesystem (ext4 — the hub). Collapsing the two axis tiers
 # into one would let `Concepts/x.md`, which sorts BEFORE `concepts/x.md`, take
 # the slug from the literal axis on ext4 — the very hijack this ranking exists
 # to prevent.
-CONCEPT_AXIS_EXACT = 1      # `concepts/` — the reserved axis, always wins
-CONCEPT_AXIS_CASEFOLD = 2   # `Concepts/` — the reserved axis on APFS/HFS+ only
-CONCEPT_AXIS_NONE = 3       # a `concept:`-keyed file anywhere else
+CONCEPT_AXIS_EXACT = 1      # `concepts/<file>.md` — the reserved axis, always wins
+CONCEPT_AXIS_SUBDIR = 2     # `concepts/<dir>/…/<file>.md` — on the axis, below a direct child
+CONCEPT_AXIS_CASEFOLD = 3   # `Concepts/` — the reserved axis on APFS/HFS+ only
+CONCEPT_AXIS_NONE = 4       # a `concept:`-keyed file anywhere else
 
 
 def _concept_axis_rank(rel: Path) -> int:
@@ -709,7 +712,11 @@ def _concept_axis_rank(rel: Path) -> int:
     if len(rel.parts) > 1:
         top = rel.parts[0]
         if top == 'concepts':
-            return CONCEPT_AXIS_EXACT
+            # A file in a subdirectory is still a concept, but must not
+            # outrank `concepts/<slug>.md`: `sorted()` visits
+            # `concepts/algorithms/x.md` before `concepts/x.md`, so equal
+            # rank let the nested file take the slug (#505).
+            return CONCEPT_AXIS_EXACT if len(rel.parts) == 2 else CONCEPT_AXIS_SUBDIR
         if top.casefold() == 'concepts':
             return CONCEPT_AXIS_CASEFOLD
     return CONCEPT_AXIS_NONE
