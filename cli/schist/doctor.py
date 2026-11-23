@@ -1326,6 +1326,42 @@ def check_hub_acl_drift(hub_path: Optional[str]) -> CheckResult:
     )
 
 
+def check_hub_wildcard_writers(hub_path: Optional[str]) -> CheckResult:
+    """Report which participants hold `write: ['*']` on a bare hub (#529).
+
+    `check_hub_acl_drift` stopped treating a wildcard writer as drift (#512),
+    which is right for an admin identity but leaves the shape unreported: a
+    `'*'` writer can only arrive by hand-editing vault.yaml, since
+    `schist hub grant` and `participant add` refuse to create one (it also
+    authorizes editing vault.yaml over SSH). The holders are named in the
+    PASS line so the shape is always visible. It is not a WARN: an admin
+    identity holding `'*'` is the expected setup and a WARN would bring back
+    the noise #512 removed.
+    """
+    label = "Hub wildcard writers"
+    if not hub_path:
+        return CheckResult("SKIP", label, "no --hub-path supplied")
+
+    hub = Path(hub_path)
+    if not (hub / "objects").is_dir():
+        return CheckResult("SKIP", label, f"not a git repository: {hub_path}")
+
+    try:
+        acl = _load_hub_acl(hub)
+    except Exception as e:  # noqa: BLE001 — surface as SKIP so doctor never crashes
+        return CheckResult("SKIP", label, f"could not read/parse hub vault.yaml: {e}")
+
+    holders = sorted(n for n, a in acl.access.items() if "*" in a.write)
+    if not holders:
+        return CheckResult(
+            "PASS", label,
+            f"no participant of {len(acl.access)} holds write '*'")
+    return CheckResult(
+        "PASS", label,
+        f"{len(holders)} of {len(acl.access)} participants hold write '*' "
+        f"(can write every directory and edit vault.yaml): {', '.join(holders)}")
+
+
 def _hub_file_text(hub: Path, rel: str, *, required: bool = True) -> Optional[str]:
     """`HEAD:<rel>` from a bare hub as text.
 
@@ -3949,6 +3985,7 @@ def run_doctor(vault_path: Optional[str], db_path: Optional[str],
     if hub_path:
         checks.append(check_hub_vault_yaml(hub_path))
         checks.append(check_hub_acl_drift(hub_path))
+        checks.append(check_hub_wildcard_writers(hub_path))
         checks.append(check_hub_pre_receive_hook(hub_path))
         checks.append(check_hub_key_pinning(hub_path, authorized_keys))
         checks.append(check_hub_sshd_acceptenv(hub_path))

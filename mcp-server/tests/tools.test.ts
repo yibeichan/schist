@@ -73,6 +73,11 @@ async function makeTempVault(extraYaml = ""): Promise<string> {
   return dir;
 }
 
+async function commitFixture(vault: string, rel: string): Promise<void> {
+  await execFile("git", ["add", "--", rel], { cwd: vault });
+  await execFile("git", ["commit", "-m", "seed note"], { cwd: vault });
+}
+
 /** A minimal index holding `edges` as ingest would have indexed them, for
  * update_note's grandfathering, which reads the index's edges table. */
 function seedIndexEdges(vault: string, edges: { source: string; target: string; type: string }[]): void {
@@ -585,6 +590,7 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
       "---\ntitle: Legacy Edge\n---\n\nOriginal prose.\n\n## Connections\n\n- legacy-type: notes/x.md\n",
       "utf-8",
     );
+    await commitFixture(vault, rel);
 
     const res = await update_note(
       vault,
@@ -613,6 +619,7 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     const original =
       "---\ntitle: FM Split\n---foo: |\n  ## Connections\n  - legacy-type: notes/x.md\n---\nProse.\n";
     await fs.writeFile(path.join(vault, rel), original, "utf-8");
+    await commitFixture(vault, rel);
 
     const res = await update_note(
       vault,
@@ -678,6 +685,7 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     const original =
       "---\ntitle: New Bad Edge\n---\n\nProse.\n\n## Connections\n\n- legacy-type: notes/x.md\n";
     await fs.writeFile(path.join(vault, rel), original, "utf-8");
+    await commitFixture(vault, rel);
 
     const res = await update_note(
       vault,
@@ -707,6 +715,7 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
     const original =
       "---\ntitle: Dup Vs New\n---\n\nProse.\n\n## Connections\n\n- legacy-type: notes/x.md\n";
     await fs.writeFile(path.join(vault, rel), original, "utf-8");
+    await commitFixture(vault, rel);
 
     // Exact duplicate of the grandfathered line: allowed (acceptable — it
     // introduces no line that wasn't already on disk).
@@ -749,6 +758,7 @@ describe("write-path validation and normalization (#276/#302/#304)", () => {
       "---\ntitle: Indent Edge\n---\n\nProse.\n\n## Connections\n\n- legacy-type: notes/x.md\n",
       "utf-8",
     );
+    await commitFixture(vault, rel);
 
     const res = await update_note(
       vault,
@@ -1364,61 +1374,39 @@ describe("triggerSpokePush", () => {
     }
   }, 10000);
 
-  test("commits stray vault files under the write lock, then pushes with --no-commit (#724)", async () => {
-    // A hand edit (Obsidian, an editor) is uncommitted. The background push
-    // commits it in a separate --commit-only step while holding this server's
-    // write lock, so it cannot race the server's own writes, and pushes after.
+  test("create_note pushes only its own note and preserves staged and unstaged hand edits", async () => {
     const vault = await makeTempVault();
+    const hub = await fs.mkdtemp(path.join(os.tmpdir(), "schist-owned-hub-"));
+    createdDirs.add(hub);
+    const git = async (...args: string[]) => (await execFile("git", args, { cwd: vault })).stdout.trim();
+    await execFile("git", ["init", "--bare", hub]);
+    await git("checkout", "-b", "drafts");
+    await git("remote", "add", "origin", hub);
+    await git("push", "-u", "origin", "drafts");
     await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
-    await fs.writeFile(
-      path.join(vault, ".schist", "spoke.yaml"),
-      "hub: file:///nonexistent\nidentity: test\nscope: notes\n"
-    );
+    await fs.writeFile(path.join(vault, ".schist", "spoke.yaml"),
+      `hub: ${hub}\nidentity: test\nscope: global\n`);
     await fs.mkdir(path.join(vault, "notes"), { recursive: true });
-    await fs.writeFile(path.join(vault, "notes", "hand-edit.md"), "edited by hand\n");
-    const logPath = path.join(vault, ".schist", "push-log");
-    const lockSeen = path.join(vault, ".schist", "lock-seen");
-    const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), "stub-schist-"));
-    await fs.writeFile(
-      path.join(stubDir, "schist"),
-      `#!/bin/sh\necho "$@" >> "${logPath}"\n` +
-      `case "$*" in *--commit-only*) : > "${lockSeen}"; sleep 0.5;; esac\nexit 0\n`,
-      { mode: 0o755 },
-    );
-
-    const origPath = process.env.PATH;
-    process.env.PATH = `${stubDir}:${origPath}`;
-    try {
-      triggerSpokePush(vault);
-      let heldDuringCommit = false;
-      for (let i = 0; i < 60; i++) {
-        await new Promise((r) => setTimeout(r, 25));
-        if (await fs.access(lockSeen).then(() => true, () => false)) {
-          heldDuringCommit = writeMutex.isLocked();
-          break;
-        }
-      }
-      let lines: string[] = [];
-      for (let i = 0; i < 80 && lines.length < 2; i++) {
-        await new Promise((r) => setTimeout(r, 50));
-        lines = (await fs.readFile(logPath, "utf-8").catch(() => "")).trim().split("\n").filter(Boolean);
-      }
-      expect(lines).toEqual([
-        `--vault ${vault} sync push --commit-only`,
-        `--vault ${vault} sync push --no-commit`,
-      ]);
-      expect(heldDuringCommit).toBe(true);
-      expect(writeMutex.isLocked()).toBe(false);
-    } finally {
-      process.env.PATH = origPath;
-      await fs.rm(stubDir, { recursive: true, force: true });
+    const hand = "notes/hand.md";
+    await fs.writeFile(path.join(vault, hand), "staged bytes");
+    await git("add", "--", hand);
+    const blob = await git("rev-parse", ":" + hand);
+    await fs.writeFile(path.join(vault, hand), "later bytes");
+    const result = await create_note(vault, { owner: TEST_AGENT, title: "Owned", body: "ours" },
+      await loadVaultConfig(vault)) as { path: string };
+    const head = await git("rev-parse", "HEAD");
+    let remote = "";
+    for (let attempt = 0; attempt < 100 && remote !== head; attempt++) {
+      remote = (await execFile("git", ["--git-dir", hub, "rev-parse", "drafts"])).stdout.trim();
+      if (remote !== head) await new Promise(r => setTimeout(r, 50));
     }
-  }, 10000);
+    expect(remote).toBe(head);
+    expect(await git("diff-tree", "--no-commit-id", "--name-only", "-r", head)).toBe(result.path);
+    expect(await git("rev-parse", ":" + hand)).toBe(blob);
+    expect(await fs.readFile(path.join(vault, hand), "utf8")).toBe("later bytes");
+  }, 15000);
 
-  test("falls back to a plain push when the CLI predates --no-commit (#724)", async () => {
-    // A non-editable CLI install can lag the server. argparse rejects the
-    // unknown flag; without the fallback every background push would fail and
-    // write a sentinel that blocks later writes.
+  test("reports an old CLI that cannot push existing commits only", async () => {
     const vault = await makeTempVault();
     await fs.mkdir(path.join(vault, ".schist"), { recursive: true });
     await fs.writeFile(
@@ -1439,18 +1427,14 @@ describe("triggerSpokePush", () => {
     process.env.PATH = `${stubDir}:${origPath}`;
     try {
       triggerSpokePush(vault);
-      let lines: string[] = [];
-      for (let i = 0; i < 60 && lines.length < 2; i++) {
-        await new Promise((r) => setTimeout(r, 50));
-        lines = (await fs.readFile(logPath, "utf-8").catch(() => "")).trim().split("\n").filter(Boolean);
+      const sentinel = path.join(vault, ".schist", "last-sync-error");
+      let reason = "";
+      for (let i = 0; i < 100 && !reason; i++) {
+        reason = await fs.readFile(sentinel, "utf8").catch(() => "");
+        if (!reason) await new Promise(r => setTimeout(r, 50));
       }
-      expect(lines).toEqual([
-        `--vault ${vault} sync push --no-commit`,
-        `--vault ${vault} sync push`,
-      ]);
-      // The plain push succeeded, so no failure sentinel was recorded.
-      await new Promise((r) => setTimeout(r, 200));
-      expect((await sync_status(vault) as unknown as Record<string, unknown>).last_sync_error).toBeNull();
+      expect(reason).toContain("--no-commit");
+      expect((await fs.readFile(logPath, "utf8")).trim()).toBe(`--vault ${vault} sync push --no-commit`);
     } finally {
       process.env.PATH = origPath;
       await fs.rm(stubDir, { recursive: true, force: true });
@@ -4906,6 +4890,7 @@ describe("update_note", () => {
       "---\ntitle: Hand Edited\ndate: 2026-06-18\nstatus: draft\n---\n\noriginal body\n",
       "utf-8",
     );
+    await commitFixture(vault, id);
     await update_note(vault, { owner: TEST_AGENT, id, body: "edited" }, config);
 
     const after = await fs.readFile(path.join(vault, id), "utf-8");
@@ -4927,6 +4912,7 @@ describe("update_note", () => {
         "original body\n",
       "utf-8",
     );
+    await commitFixture(vault, id);
 
     const res = await update_note(vault, { owner: TEST_AGENT, id, body: "edited body" }, config) as {
       updated: boolean;
@@ -5262,6 +5248,7 @@ describe("delete_note", () => {
     const linkerPath = path.join(vault, linker.id);
     const orig = await fs.readFile(linkerPath, "utf-8");
     await fs.writeFile(linkerPath, orig + "\n## Notes\n\ntrailing text\n");
+    await commitFixture(vault, linker.id);
     await seedEdgesDb(vault, [{ source: linker.id, target: target.id, type: "extends" }]);
 
     const res = await delete_note(vault, { owner: TEST_AGENT, id: target.id, cascade: true }, config) as {
@@ -6796,6 +6783,7 @@ describe("connection writers check their own result", () => {
   async function noteIn(vault: string, rel: string, text: string): Promise<string> {
     await fs.mkdir(path.join(vault, path.dirname(rel)), { recursive: true });
     await fs.writeFile(path.join(vault, rel), text, "utf-8");
+    await commitFixture(vault, rel);
     return rel;
   }
 
@@ -6862,6 +6850,7 @@ describe("connection writers check their own result", () => {
     await fs.mkdir(path.join(vault, "notes"), { recursive: true });
     const bytes = Buffer.from("---\ntitle: Legacy\n---\n\xff\n\n## Connections\n- badtype: notes/x.md\n", "latin1");
     await fs.writeFile(path.join(vault, rel), bytes);
+    await commitFixture(vault, rel);
 
     const got = await get_note(vault, { id: rel }, config) as { error: string; message: string };
     expect(got.error).toBe("VALIDATION_ERROR");
