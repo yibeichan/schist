@@ -5874,6 +5874,11 @@ class TestSpokeSparseAxes:
                         ["notes", "papers", "figures"])
         assert check_spoke_sparse_axes(str(v)).status == "PASS"
 
+    def test_parent_cone_covers_child_axis(self, tmp_path):
+        from schist.doctor import check_spoke_sparse_axes
+        v = self._spoke(tmp_path, "directories: [notes/project]\n", ["notes"])
+        assert check_spoke_sparse_axes(str(v)).status == "PASS"
+
     def test_non_sparse_clone_skips(self, tmp_path):
         from schist.doctor import check_spoke_sparse_axes
         v = self._spoke(tmp_path, "directories: [notes, figures]\n", None)
