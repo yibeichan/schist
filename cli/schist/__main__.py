@@ -189,6 +189,8 @@ def main():
 
     # build
     p_build = sub.add_parser('build', help='Build the static viewer site (graph, search index, page); it holds the full text of every note')
+    p_build.add_argument('--require-fresh', action='store_true',
+                         help='stop before writing the site if the index cannot be verified against the vault')
     p_build.add_argument('--out', default=None, help='Output directory (default: <vault>/.schist/data/)')
 
     # serve
@@ -211,6 +213,10 @@ def main():
     p_schema.add_argument('--validate', action='store_true')
 
     # doctor
+    p_cleanup = sub.add_parser('cleanup-temps', help='Remove old atomic-write files from a quiescent vault')
+    p_cleanup.add_argument('--writers-stopped', action='store_true', required=True,
+                           help='confirm all writers on every host have stopped and will stay stopped during cleanup')
+
     p_doctor = sub.add_parser('doctor', help='Health check for schist setup')
     p_doctor.add_argument('--json', action='store_true', dest='as_json',
                           help='Output results as JSON')
@@ -399,6 +405,17 @@ def main():
         sys.exit(0)
 
     # doctor: tolerates missing vault, runs before vault-required check
+    if args.command == 'cleanup-temps':
+        from .stale_temps import cleanup_temps
+        if not args.vault:
+            parser.error('cleanup-temps requires --vault or SCHIST_VAULT_PATH')
+        try:
+            for path in cleanup_temps(args.vault, writers_stopped=args.writers_stopped):
+                print(doctor_mod._printable(str(path)))
+        except OSError as exc:
+            parser.exit(1, f'Could not finish temporary file cleanup: {doctor_mod._printable(str(exc))}\n')
+        return
+
     if args.command == 'doctor':
         doctor_mod.doctor(args)
         sys.exit(0)
