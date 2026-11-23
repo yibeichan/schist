@@ -1120,7 +1120,7 @@ class TestStandards:
         store = proposals_mod.ProposalStore(vault)
         with pytest.raises(proposals_mod.ProposalError, match='has 2 standard.s. and this proposal names 0') as e:
             store.propose_note(ro, title='T', body='b', rationale='r')
-        assert 'Missing: notes/std-a.md, notes/std-b.md' in str(e.value)
+        assert 'Missing: notes/std-a.md (Cite a source), notes/std-b.md (One topic per note)' in str(e.value)
         with pytest.raises(proposals_mod.ProposalError, match='names 1 of them'):
             store.propose_note(ro, title='T', body='b', rationale='r', checked_standards=[a, 'made/up.md'])
         p = store.propose_note(ro, title='T', body='b', rationale='r', checked_standards=[b, a])
@@ -1384,7 +1384,7 @@ class TestStandardsReview:
         with pytest.raises(proposals_mod.ProposalError) as e:
             store.propose_note(ro, title='T', body='b', rationale='r', checked_standards=shown)
         unseen = [s['id'] for s in found if s['id'] not in shown]
-        assert 'Missing: ' + ', '.join(unseen) in str(e.value)
+        assert all(sid in str(e.value) for sid in unseen)
         p = store.propose_note(ro, title='T', body='b', rationale='r', checked_standards=shown + unseen)
         assert len(p['checked_standards']) == 80
 

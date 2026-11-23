@@ -1225,7 +1225,7 @@ SPDX-License-Identifier: Apache-2.0
     card.appendChild(el("pre", null, p.diff || ""));
     const checked = Array.isArray(p.checked_standards) ? p.checked_standards : [];
     if (checked.length) {
-      const s = el("div", "p-meta", `the agent listed ${checked.length} standard${checked.length > 1 ? "s" : ""} it checked: `);
+      const s = el("div", "p-meta", `Standards for this directory at filing: `);
       s.appendChild(document.createTextNode(checked.join(", ")));
       card.appendChild(s);
     }

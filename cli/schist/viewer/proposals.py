@@ -171,7 +171,8 @@ def _one_line(text: str) -> str:
 
 
 def _require_checked(db, directory: str, checked) -> list[str]:
-    required = [s['id'] for s in standards_for(db, directory)]
+    titles = {s['id']: s['title'] for s in standards_for(db, directory)}
+    required = list(titles)
     if checked is None:
         checked = []
     elif isinstance(checked, str):
@@ -185,6 +186,13 @@ def _require_checked(db, directory: str, checked) -> list[str]:
         listed, rest = [], list(missing)
         while rest and len(', '.join(listed + rest[:1])) <= MAX_UNSEEN_CHARS:
             listed.append(rest.pop(0))
+        # Keep the complete IDs that fit before spending any space on titles.
+        room = MAX_UNSEEN_CHARS - len(', '.join(listed))
+        for i, sid in enumerate(listed):
+            title = _one_line(titles[sid] or '')[:min(120, max(0, room - 3))]
+            if title:
+                listed[i] = f'{sid} ({title})'
+                room -= len(title) + 3
         msg = (f'{directory}/ has {len(required)} standard(s) and this proposal names '
                f'{len(required) - len(missing)} of them. Missing: {", ".join(listed)}')
         msg += (f', and {len(rest)} more that do not fit here; {directory}/ has too many '
