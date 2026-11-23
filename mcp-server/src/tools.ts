@@ -437,10 +437,6 @@ export function triggerIngestion(vaultRoot: string): void {
 
 const SYNC_ERROR_SENTINEL = ".schist/last-sync-error";
 const SYNC_RETRY_TIMEOUT_MS = 30_000;
-// The --commit-only step runs while writeMutex is held, so queued writes wait
-// on it. It is local (stage, commit, post-commit ingest), so a tighter cap
-// than the network operations.
-const SYNC_COMMIT_ONLY_TIMEOUT_MS = 20_000;
 const SYNC_STATUS_TIMEOUT_MS = 10_000;
 
 /**
@@ -892,15 +888,13 @@ type SchistSyncOptions = {
   autostash?: boolean;
   /** push: send existing commits only (the background push, #724). */
   noCommit?: boolean;
-  /** push: stage and commit in-scope changes, then stop (#724). */
-  commitOnly?: boolean;
 };
 
 async function runSchistSync(
   vaultRoot: string,
   action: "pull" | "push",
   timeoutMs = SYNC_RETRY_TIMEOUT_MS,
-  { force = false, autostash = false, noCommit = false, commitOnly = false }: SchistSyncOptions = {},
+  { force = false, autostash = false, noCommit = false }: SchistSyncOptions = {},
 ): Promise<SyncCommandOutcome> {
   const args = ["--vault", vaultRoot, "sync", action];
   if (force) args.push("--force");
@@ -914,54 +908,7 @@ async function runSchistSync(
   // that write's staged note in under `sync(<id>)`. Explicit sync_retry
   // pushes still commit stray files.
   if (noCommit && action === "push") args.push("--no-commit");
-  if (commitOnly && action === "push") args.push("--commit-only");
-  const run = (argv: string[]) =>
-    runCommand(schistCliBin("schist"), argv, { cwd: vaultRoot, timeoutMs, env: process.env, capture: true });
-  const outcome = await run(args);
-  // A CLI older than this server (a non-editable install on a spoke) rejects
-  // the flag. Falling back keeps every background push from failing, and from
-  // writing a sentinel that blocks writes, until the CLI is upgraded.
-  if (noCommit && !outcome.ok && rejectsFlag(outcome, "--no-commit")) {
-    console.error("[schist] the schist CLI does not support `sync push --no-commit`; pushing without it (upgrade the CLI)");
-    return run(args.filter((a) => a !== "--no-commit"));
-  }
-  return outcome;
-}
-
-/** argparse's refusal of an unknown flag, from a CLI that predates #724. */
-function rejectsFlag(outcome: SyncCommandOutcome, flag: "--no-commit" | "--commit-only"): boolean {
-  const line = (outcome.stderr ?? "").split("\n").find((l) => l.includes("unrecognized arguments:"));
-  return line !== undefined && line.split(/\s+/).includes(flag);
-}
-
-/**
- * The commit half of the background push (#724). Stray in-scope files (a hand
- * edit in an editor, say) used to be committed by the background push itself,
- * racing this server's writes for the index (#719). They are now committed by
- * `sync push --commit-only` while this server holds writeMutex, so no write of
- * ours can be between `git add` and `git commit` meanwhile; the push follows
- * outside the lock. Returns null when there was nothing to do or the step was
- * skipped (busy lock, probe failure, a CLI without the flag): the push still
- * runs, and a later push picks the files up. `.schist/` is runtime state,
- * never vault content, so it does not count as a stray.
- */
-async function commitStraysUnderWriteLock(vaultRoot: string): Promise<SyncCommandOutcome | null> {
-  const status = await runGit(
-    vaultRoot, ["--no-optional-locks", "status", "--porcelain", "--", ".", ":(exclude).schist"]);
-  if (!status.ok || (status.stdout ?? "").trim().length === 0) return null;
-  let release: () => void;
-  try {
-    release = await writeMutex.acquire();
-  } catch {
-    return null; // writes kept the lock busy past its timeout: next push
-  }
-  try {
-    const outcome = await runSchistSync(vaultRoot, "push", SYNC_COMMIT_ONLY_TIMEOUT_MS, { commitOnly: true });
-    if (!outcome.ok && rejectsFlag(outcome, "--commit-only")) return null; // old CLI: its plain push commits
-    return outcome;
-  } finally {
-    release();
-  }
+  return runCommand(schistCliBin("schist"), args, { cwd: vaultRoot, timeoutMs, env: process.env, capture: true });
 }
 
 /** The command outcome and the diagnosis eventually committed to the sentinel.
@@ -1547,15 +1494,6 @@ export function triggerSpokePush(vaultRoot: string): void {
       // class read as "push exited with code 1" in the sentinel, which is
       // both useless to an operator and unusable as a recovery signal.
       //
-      // Two steps (#724): commit stray files under writeMutex, then push
-      // existing commits outside it. A failed commit step is recorded like a
-      // failed push used to be, and nothing is pushed this round.
-      const commitStep = await commitStraysUnderWriteLock(vaultRoot);
-      if (commitStep !== null && !commitStep.ok) {
-        const failure = formatPushFailure(commitStep, "committing uncommitted vault files failed");
-        await writeSyncError(vaultRoot, failure);
-        return { outcome: commitStep, failure };
-      }
       let outcome = await runSchistSync(vaultRoot, "push", SYNC_RETRY_TIMEOUT_MS, { noCommit: true });
 
       let failure = pushFailureMessage(outcome) === null ? null : formatPushFailure(outcome);
@@ -2318,7 +2256,7 @@ export async function sync_retry(
     // Hold writeMutex while the CLI children pull and push (#724): they take
     // the vault flock themselves, so a concurrent MCP write must not interleave
     // with a rebase. Acquired after the in-flight await above, which may itself
-    // be waiting on commitStraysUnderWriteLock. A busy mutex rejects with
+    // be waiting on the vault lock. A busy mutex rejects with
     // WRITE_TIMEOUT, which normalizeError turns into the tool error. Never
     // withVaultLock around the children: they would wait on our own flock.
     // Only the conflict path's lone `rebase --abort` takes it.

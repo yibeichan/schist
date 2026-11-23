@@ -180,14 +180,12 @@ Once wired up, the MCP server detects the spoke (by looking for
   checks for `.schist/last-sync-error`. If a prior background push failed, the
   write returns `SYNC_DIRTY` so the agent does not compound spoke/hub
   divergence. After a clean local commit and ingestion, the server pushes in
-  the background, in two steps. If the vault has uncommitted files (a hand
-  edit in an editor, say), it first runs `schist --vault <root> sync push
-  --commit-only` while holding its own write lock, so those files are
-  committed (as `sync(<identity>): N files`) without racing the server's next
-  write. It then runs `schist --vault <root> sync push --no-commit` outside the
-  lock, which only sends existing commits. A push with nothing to send still
-  clears an earlier sync-error sentinel, even if some files could not be
-  committed; `sync_status` reports those as `clean_working_tree: false`.
+  the background with `schist --vault <root> sync push --no-commit`. Each
+  ordinary write commits its own paths. Existing edits to a target or a
+  cascade repair must be committed or set aside first. Unrelated staged and
+  unstaged files stay local until an explicit sync. The background push sends
+  existing commits, including any manual commits already on the branch. A CLI
+  that does not recognize `--no-commit` reports a push failure.
 - **On read** (`get_context` only): before querying SQLite, the server awaits
   `python3 -m schist --vault <root> sync pull` with a **5-second hard
   timeout**. If the hub is unreachable or slow, the pull is killed and the
@@ -621,3 +619,10 @@ when a write grant falls outside the content axes and `shared`. `schist doctor` 
 a non-sparse clone and a non-cone sparse clone are skipped. Both checks read
 `directories` as a list or a mapping, drop null entries, and SKIP naming
 `schist.yaml` when it holds no usable directory.
+
+
+The same run names every participant that holds `write: ['*']` in its
+"Hub wildcard writers" line. That line is a PASS, since an admin identity
+holding `'*'` is the expected setup, but a wildcard writer can only come from
+editing `vault.yaml` by hand (`schist hub grant` and `participant add` refuse
+to create one), so check that the names it lists are the ones you intend.
