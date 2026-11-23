@@ -1891,7 +1891,42 @@ def _opencode_config_path() -> Path:
     else ~/.config/opencode/opencode.json."""
     xdg = os.environ.get("XDG_CONFIG_HOME") or None
     base = Path(os.path.expanduser(xdg)) if xdg else Path.home() / ".config"
-    return base / "opencode" / "opencode.json"
+    config = base / "opencode" / "opencode.json"
+    overlay = config.with_suffix(".jsonc")
+    return overlay if overlay.exists() else config
+
+
+_JSON_STRING = r'"(?:[^"\\]|\\.)*"'
+_JSONC_COMMENTS = re.compile(_JSON_STRING + r"|//[^\r\n]*|/\*.*?\*/", re.DOTALL)
+_JSONC_TRAILING = re.compile(_JSON_STRING + r"|,(?=\s*[}\]])")
+
+
+def _parse_client_json(path: Path, text: str) -> Any:
+    if path.suffix == ".jsonc":
+        # Keep quoted URLs, escaped quotes, and comment-looking string data intact.
+        text = _JSONC_COMMENTS.sub(lambda m: " " if m[0][0] == "/" else m[0], text)
+        text = _JSONC_TRAILING.sub(lambda m: "" if m[0] == "," else m[0], text)
+    data = json.loads(text)
+    if path.suffix != ".jsonc" or path != _opencode_config_path():
+        return data
+    base = path.with_suffix(".json")
+    if not base.exists():
+        return data
+
+    def merge(old: Any, new: Any) -> Any:
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            return new
+        result = old.copy()
+        for key, value in new.items():
+            result[key] = merge(old.get(key), value)
+        return result
+
+    return merge(_read_client_json(base), data)
+
+
+def _read_client_json(path: Path) -> Any:
+    data = _read_regular_file(path, _MCP_CONFIG_MAX)
+    return _parse_client_json(path, data.decode("utf-8")) if data is not None else None
 
 
 def _opencode_server_block(mcp: Any) -> dict:
@@ -1995,7 +2030,7 @@ def _discover_mcp_schist_entries(
         try:
             if not c.exists():
                 continue
-            data = json.loads(c.read_text())
+            data = _read_client_json(c)
         except Exception:
             continue
         if not isinstance(data, dict):
@@ -2303,7 +2338,7 @@ def _all_mcp_servers(
                 import tomllib
                 parsed[key] = tomllib.loads(text)
             else:
-                parsed[key] = json.loads(text)
+                parsed[key] = _parse_client_json(path, text)
         except Exception:
             unreadable.append(f"{_printable(str(path))} (cannot be parsed)")
         return parsed[key]
@@ -2477,6 +2512,32 @@ def _expand_opencode_vars(s: str) -> tuple[str, list[str], list[str]]:
 
     text = _OPENCODE_ENV.sub(sub, s)
     return text, missing, _OPENCODE_FILE.findall(text)
+
+
+def _expand_shell_script(text: str, child_env: Optional[dict]) -> str:
+    """Expand simple shell parameters, honoring quoting and the child's environment."""
+    quoted = ""
+    pos = 0
+    parts = []
+    while pos < len(text):
+        char = text[pos]
+        if char == "\\" and quoted != "'":
+            parts.append(text[pos:pos + 2])
+            pos += 2
+            continue
+        if char in ("'", '"') and (not quoted or quoted == char):
+            quoted = "" if quoted else char
+        if char == "$" and quoted != "'":
+            match = _SHELL_VAR.match(text, pos) or _MCP_VAR.match(text, pos)
+            if match and _ENV_NAME.fullmatch(match[1]):
+                value = (child_env or {}).get(match[1], _getenv(match[1]))
+                if isinstance(value, str):
+                    parts.append(value)
+                    pos = match.end()
+                    continue
+        parts.append(char)
+        pos += 1
+    return "".join(parts)
 
 
 def _expand_mcp_vars(s: str, project: Optional[Path], shell: bool = False,
@@ -2793,7 +2854,7 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
                 is_positional = (field == "args" and not (
                     isinstance(prev, str) and prev.startswith("-")
                     and "=" not in prev and prev != "--"))
-                prev = v
+                previous, prev = prev, v
                 if not isinstance(v, str):
                     continue
                 if len(v) > _MCP_VALUE_MAX:
@@ -2805,18 +2866,24 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
                         if files:
                             doubts.append(f"{field}: cannot read a "
                                           "{file:...} reference")
-                        # What OpenCode substituted can hold ${NAME} (a
-                        # variable whose value names one): a shell, or a
-                        # server that expands variables itself, resolves it.
-                        text, more = _expand_mcp_vars(
-                            text, s.project,
-                            shell=shell and field == "args", local=own_env)
+                        # Only the shell's script argument expands dollar variables.
+                        script = (shell and field == "args" and isinstance(previous, str)
+                                  and re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", previous))
+                        if script:
+                            text = _expand_shell_script(text, own_env)
+                        # A non-shell child can implement its own expansion. Its
+                        # hypothetical path is tested separately from actual text.
+                        possible, more = _expand_mcp_vars(text, s.project, shell=True, local=own_env)
                         missing += more
+                        if possible != text:
+                            candidates, _ = _paths_named(possible, start, budget, positional=is_positional)
+                            if any(_reaches(p, vaults, fold) for p in candidates):
+                                doubts.append(f"{field}: child variable expansion could reach the vault")
                     else:
                         text, missing = _expand_mcp_vars(
                             v, s.project, shell=shell and field == "args",
                             local=own_env)
-                    if missing and (field != "env"
+                    if missing and (oc or field != "env"
                                     or _PATHLIKE_ENV_KEY.search(key)):
                         names = [f"${{{n}}}" if _ENV_NAME.fullmatch(n)
                                  else "a variable" for n in missing if n != "$"]
@@ -2850,6 +2917,8 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
                     if oc:
                         text, missing, files = _expand_opencode_vars(cwd)
                         missing += files
+                        if missing or "$" in text:
+                            doubts.append("cwd: start folder depends on a variable or file reference")
                     else:
                         text, missing = _expand_mcp_vars(cwd, s.project)
                     text = os.path.expanduser(text)
@@ -2865,26 +2934,21 @@ def check_vault_access(vault_path: Optional[str]) -> CheckResult:
                     base = None
             return base
 
-        # An OpenCode entry is read twice: with OpenCode's own substitution,
-        # and as every other client's entry is, with `${NAME}` expanded. A
-        # server can expand variables itself, so what OpenCode passes on as
-        # written still counts when it reaches the vault once expanded.
-        passes = [False, True] if s.opencode else [False]
         try:
-            for oc in passes:
-                base = start_folder(oc)
-                scan("command", [("", command)], base, oc)
-                args = cfg.get("args")
-                scan("args", [("", a) for a in args]
-                     if isinstance(args, list) else [], base, oc)
-                if own_env is not None:
-                    scan("env", [(str(k), v) for k, v in own_env.items()],
-                         base, oc)
-                forwarded = cfg.get("env_vars")
-                if isinstance(forwarded, list):
-                    # Codex passes these through from its own environment.
-                    scan("env_vars", [(str(n), _getenv(n)) for n in forwarded
-                                      if isinstance(n, str)], base, oc)
+            oc = s.opencode
+            base = start_folder(oc)
+            scan("command", [("", command)], base, oc)
+            args = cfg.get("args")
+            scan("args", [("", a) for a in args]
+                 if isinstance(args, list) else [], base, oc)
+            if own_env is not None:
+                scan("env", [(str(k), v) for k, v in own_env.items()],
+                     base, oc)
+            forwarded = cfg.get("env_vars")
+            if isinstance(forwarded, list):
+                # Codex passes these through from its own environment.
+                scan("env_vars", [(str(n), _getenv(n)) for n in forwarded
+                                  if isinstance(n, str)], base, oc)
         except _ScanBudgetExceeded:
             too_much = f"{_printable(s.where)}: {_printable(s.name)}"
             break
@@ -3132,7 +3196,7 @@ def _mcp_config_entries(vault_path: Optional[str]):
         if not c.exists():
             continue
         try:
-            data = json.loads(c.read_text())
+            data = _read_client_json(c)
         except Exception:
             continue
         # Same non-dict/null-shape hardening as check_mcp_config (#437, #441):

@@ -4462,6 +4462,49 @@ class TestCheckVaultAccess:
         r = check_vault_access(str(vault))
         assert r.status == "PASS", r
 
+    def test_opencode_jsonc_overlays_matching_entries_and_keeps_others(
+        self, home, monkeypatch, vault
+    ):
+        self.opencode_home(monkeypatch)
+        base = self._opencode_config(home, {
+            "retained": {"command": ["reader", str(vault)]},
+            "disabled": {"command": ["reader", str(vault)]},
+        })
+        overlay = base.with_suffix(".jsonc")
+        overlay.write_text(
+            '{/* global overrides */ "mcp": {"servers": {'
+            '"disabled": {"disabled": true, "url": "https://example.org/a/*b*/",},'
+            '// end of entries\n},},}')
+        r = check_vault_access(str(vault))
+        assert r.status == "FAIL" and ": retained (args)" in r.message
+        assert ": disabled (args)" not in r.message
+
+    def test_opencode_malformed_jsonc_warns(self, home, monkeypatch, vault):
+        self.opencode_home(monkeypatch)
+        base = self._opencode_config(home, {})
+        base.with_suffix(".jsonc").write_text('{"mcp": /* unfinished comment')
+        r = check_vault_access(str(vault))
+        assert r.status == "WARN" and "cannot be parsed" in r.message
+
+    @pytest.mark.parametrize("variable,exit_fails", [
+        ("{env:HOME}", True), ("${HOME}", False)
+    ])
+    def test_opencode_path_severity_controls_doctor_exit(
+        self, home, monkeypatch, vault, variable, exit_fails
+    ):
+        from types import SimpleNamespace
+        from schist import doctor
+        self.opencode_home(monkeypatch)
+        base = self._opencode_config(home, {"reader": {"command": ["reader", variable]}})
+        base.rename(base.with_suffix(".jsonc"))
+        monkeypatch.setattr(doctor, "run_doctor", lambda *args, **kw: [check_vault_access(str(vault))])
+        if exit_fails:
+            with pytest.raises(SystemExit) as exc:
+                doctor.doctor(SimpleNamespace(vault=str(vault)))
+            assert exc.value.code == 1
+        else:
+            doctor.doctor(SimpleNamespace(vault=str(vault)))
+
     def test_opencode_fs_server_naming_vault_fails(self, home, monkeypatch, vault):
         self.opencode_home(monkeypatch)
         path = self._opencode_config(home, {"fs": self._fs(str(vault))})
@@ -4587,19 +4630,14 @@ class TestCheckVaultAccess:
         r = check_vault_access(str(vault))
         assert r.status == "WARN", r
 
-    def test_opencode_dollar_variables_for_a_program_still_fail(
-        self, home, monkeypatch, vault
-    ):
-        """OpenCode passes `${HOME}` on as written, but a server can expand
-        it itself, so a value that reaches the vault once expanded still
-        FAILs, as it did before OpenCode's own syntax was read."""
+    def test_opencode_dollar_variables_for_a_program_warn(self, home, monkeypatch, vault):
         self.opencode_home(monkeypatch)
         for name, arg in (("a", "${HOME}/schist-vault"), ("b", "${HOME}"),
                           ("c", "--root=${HOME}"), ("d", "${userHome}")):
             self._opencode_config(home, {name: {"type": "local", "command": [
                 "npx", "-y", "server-filesystem", arg]}})
             r = check_vault_access(str(vault))
-            assert r.status == "FAIL", (arg, r)
+            assert r.status == "WARN", (arg, r)
 
     def test_opencode_file_reference_warns_in_any_field(
         self, home, monkeypatch, vault
@@ -4643,25 +4681,25 @@ class TestCheckVaultAccess:
         r = check_vault_access(str(vault))
         assert r.status == "PASS", r
 
-    @pytest.mark.parametrize("name,entry,env,base", [
+    @pytest.mark.parametrize("name,entry,env,expected", [
         ("literal vault arg", {"command": ["srv", "H/schist-vault"]}, {}, "FAIL"),
-        ("{env:HOME} arg", {"command": ["srv", "{env:HOME}"]}, {}, "PASS"),
+        ("{env:HOME} arg", {"command": ["srv", "{env:HOME}"]}, {}, "FAIL"),
         ("{env:HOME}/schist-vault arg",
-         {"command": ["srv", "{env:HOME}/schist-vault"]}, {}, "PASS"),
+         {"command": ["srv", "{env:HOME}/schist-vault"]}, {}, "FAIL"),
         ("${HOME}/schist-vault arg",
-         {"command": ["srv", "${HOME}/schist-vault"]}, {}, "FAIL"),
+         {"command": ["srv", "${HOME}/schist-vault"]}, {}, "WARN"),
         ("$HOME/schist-vault arg",
-         {"command": ["srv", "$HOME/schist-vault"]}, {}, "PASS"),
-        ("${HOME} arg", {"command": ["srv", "${HOME}"]}, {}, "FAIL"),
-        ("${env:HOME} arg", {"command": ["srv", "${env:HOME}"]}, {}, "FAIL"),
-        ("${userHome} arg", {"command": ["srv", "${userHome}"]}, {}, "FAIL"),
+         {"command": ["srv", "$HOME/schist-vault"]}, {}, "WARN"),
+        ("${HOME} arg", {"command": ["srv", "${HOME}"]}, {}, "WARN"),
+        ("${env:HOME} arg", {"command": ["srv", "${env:HOME}"]}, {}, "PASS"),
+        ("${userHome} arg", {"command": ["srv", "${userHome}"]}, {}, "WARN"),
         ("${NOPE:-default} arg",
-         {"command": ["srv", "${NOPE:-H/schist-vault}"]}, {}, "FAIL"),
-        ("--root=${HOME} arg", {"command": ["srv", "--root=${HOME}"]}, {}, "FAIL"),
+         {"command": ["srv", "${NOPE:-H/schist-vault}"]}, {}, "WARN"),
+        ("--root=${HOME} arg", {"command": ["srv", "--root=${HOME}"]}, {}, "WARN"),
         ("${VAULTX} arg set", {"command": ["srv", "${VAULTX}"]},
-         {"VAULTX": "H/schist-vault"}, "FAIL"),
+         {"VAULTX": "H/schist-vault"}, "WARN"),
         ("$VAULTX arg set", {"command": ["srv", "$VAULTX"]},
-         {"VAULTX": "H/schist-vault"}, "PASS"),
+         {"VAULTX": "H/schist-vault"}, "WARN"),
         ("${VD} arg, VD in own environment",
          {"command": ["srv", "${VD}"], "environment": {"VD": "H/schist-vault"}},
          {}, "FAIL"),
@@ -4670,55 +4708,55 @@ class TestCheckVaultAccess:
          {}, "FAIL"),
         ("env ROOT=${HOME}/schist-vault",
          {"command": ["srv"], "environment": {"ROOT": "${HOME}/schist-vault"}},
-         {}, "FAIL"),
+         {}, "WARN"),
         ("env CONFIG=${HOME}/schist-vault",
          {"command": ["srv"], "environment": {"CONFIG": "${HOME}/schist-vault"}},
-         {}, "FAIL"),
+         {}, "WARN"),
         ("env ROOT={env:HOME}/schist-vault",
          {"command": ["srv"], "environment": {"ROOT": "{env:HOME}/schist-vault"}},
-         {}, "PASS"),
+         {}, "FAIL"),
         ("env CONFIG={env:UNSET1}/x",
          {"command": ["srv"], "environment": {"CONFIG": "{env:UNSET1}/x"}},
-         {}, "PASS"),
+         {}, "WARN"),
         ("env CONFIG={file:~/p.txt}",
          {"command": ["srv"], "environment": {"CONFIG": "{file:~/p.txt}"}},
-         {}, "PASS"),
+         {}, "WARN"),
         ("env ROOT={file:~/p.txt}",
          {"command": ["srv"], "environment": {"ROOT": "{file:~/p.txt}"}},
-         {}, "PASS"),
-        ("{file:~/p.txt} arg", {"command": ["srv", "{file:~/p.txt}"]}, {}, "PASS"),
-        ("{env:UNSET1} arg", {"command": ["srv", "{env:UNSET1}"]}, {}, "PASS"),
+         {}, "WARN"),
+        ("{file:~/p.txt} arg", {"command": ["srv", "{file:~/p.txt}"]}, {}, "WARN"),
+        ("{env:UNSET1} arg", {"command": ["srv", "{env:UNSET1}"]}, {}, "WARN"),
         ("{env:UNSET1}H/schist-vault arg",
-         {"command": ["srv", "{env:UNSET1}H/schist-vault"]}, {}, "PASS"),
+         {"command": ["srv", "{env:UNSET1}H/schist-vault"]}, {}, "WARN"),
         ("{env:A{B}H/schist-vault arg",
-         {"command": ["srv", "{env:A{B}H/schist-vault"]}, {}, "PASS"),
+         {"command": ["srv", "{env:A{B}H/schist-vault"]}, {}, "WARN"),
         ("{env:} arg", {"command": ["srv", "{env:}H/schist-vault"]}, {}, "PASS"),
         ("nested {env:{env:N}}", {"command": ["srv", "{env:{env:N}}"]},
-         {"N": "HOME"}, "PASS"),
+         {"N": "HOME"}, "WARN"),
         ("~ arg", {"command": ["srv", "~"]}, {}, "FAIL"),
         ("~/schist-vault arg", {"command": ["srv", "~/schist-vault"]}, {}, "FAIL"),
         ("relative ./schist-vault, no cwd",
          {"command": ["srv", "./schist-vault"]}, {}, "WARN"),
         ("relative, cwd={env:HOME}",
-         {"command": ["srv", "schist-vault"], "cwd": "{env:HOME}"}, {}, "PASS"),
+         {"command": ["srv", "schist-vault"], "cwd": "{env:HOME}"}, {}, "FAIL"),
         ("relative, cwd=${HOME}",
-         {"command": ["srv", "schist-vault"], "cwd": "${HOME}"}, {}, "FAIL"),
+         {"command": ["srv", "schist-vault"], "cwd": "${HOME}"}, {}, "WARN"),
         ("relative, cwd=~",
          {"command": ["srv", "schist-vault"], "cwd": "~"}, {}, "FAIL"),
         ("relative ./, cwd=${HOME}",
-         {"command": ["srv", "./schist-vault"], "cwd": "${HOME}"}, {}, "FAIL"),
+         {"command": ["srv", "./schist-vault"], "cwd": "${HOME}"}, {}, "WARN"),
         ("sh -c $HOME", {"command": ["sh", "-c", "cat $HOME/schist-vault"]},
          {}, "FAIL"),
         ("sh -c {env:HOME}",
-         {"command": ["sh", "-c", "cat {env:HOME}/schist-vault"]}, {}, "PASS"),
+         {"command": ["sh", "-c", "cat {env:HOME}/schist-vault"]}, {}, "FAIL"),
         ("sh -c $VD",
          {"command": ["sh", "-c", "cat $VD"],
           "environment": {"VD": "H/schist-vault"}}, {}, "FAIL"),
         ("bash -lc cd ~", {"command": ["bash", "-lc", "cd ~ && srv"]}, {}, "FAIL"),
         ("docker -v ${HOME}",
-         {"command": ["docker", "run", "-v", "${HOME}:/data", "img"]}, {}, "FAIL"),
+         {"command": ["docker", "run", "-v", "${HOME}:/data", "img"]}, {}, "WARN"),
         ("command[0] {env:HOME}", {"command": ["{env:HOME}/schist-vault/bin"]},
-         {}, "PASS"),
+         {}, "FAIL"),
         ("disabled true", {"command": ["srv", "H/schist-vault"], "disabled": True},
          {}, "PASS"),
         ("enabled false", {"command": ["srv", "H/schist-vault"], "enabled": False},
@@ -4727,27 +4765,19 @@ class TestCheckVaultAccess:
          {}, "FAIL"),
         ("env HOME={env:HOME}/schist-vault",
          {"command": ["srv"], "environment": {"HOME": "{env:HOME}/schist-vault"}},
-         {}, "PASS"),
+         {}, "FAIL"),
         ("{env:SUB} whose value is ${HOME}/schist-vault",
          {"command": ["srv", "{env:SUB}"]},
-         {"SUB": "${HOME}/schist-vault"}, "PASS"),
+         {"SUB": "${HOME}/schist-vault"}, "WARN"),
         ("env ROOT={env:SUB} whose value is ${HOME}/schist-vault",
          {"command": ["srv"], "environment": {"ROOT": "{env:SUB}"}},
-         {"SUB": "${HOME}/schist-vault"}, "PASS"),
+         {"SUB": "${HOME}/schist-vault"}, "WARN"),
         ("{file:{env:HOME}/p.txt} arg",
-         {"command": ["srv", "{file:{env:HOME}/p.txt}"]}, {}, "PASS"),
+         {"command": ["srv", "{file:{env:HOME}/p.txt}"]}, {}, "WARN"),
         ("{env:X} arg, X is a file reference",
-         {"command": ["srv", "{env:X}"]}, {"X": "{file:~/p.txt}"}, "PASS"),
+         {"command": ["srv", "{env:X}"]}, {"X": "{file:~/p.txt}"}, "WARN"),
     ])
-    def test_opencode_entry_is_never_less_severe_than_on_the_base(
-        self, home, monkeypatch, vault, name, entry, env, base
-    ):
-        """Status of the audit on each input when OpenCode's variables were
-        not read (recorded from the previous implementation). A server can
-        expand variables itself, so no input may become less severe: no
-        FAIL turns into WARN or PASS, no WARN into PASS. The two `SUB` rows
-        passed before and must FAIL: they name the vault through a variable
-        whose value holds `${HOME}`."""
+    def test_opencode_entry_audit(self, home, monkeypatch, vault, name, entry, env, expected):
         self.opencode_home(monkeypatch)
         for k in ("VAULTX", "N", "UNSET1", "VD", "X", "NOPE", "SUB"):
             monkeypatch.delenv(k, raising=False)
@@ -4759,10 +4789,7 @@ class TestCheckVaultAccess:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"mcp": {"servers": {"x": json.loads(text)}}}))
         r = check_vault_access(str(vault))
-        rank = {"PASS": 0, "WARN": 1, "FAIL": 2}
-        assert rank[r.status] >= rank[base], (name, base, r)
-        if "SUB" in env:
-            assert r.status == "FAIL", (name, r)
+        assert r.status == expected, (name, r)
 
     def test_opencode_shell_command_still_expands_shell_variables(
         self, home, monkeypatch, vault
