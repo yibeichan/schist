@@ -274,6 +274,12 @@ class ProposalStore:
                 return self._save(p)
             p['output'] = ((r.stdout or '') + (r.stderr or ''))[-2000:]
             p['status'] = APPROVED if r.returncode == 0 else FAILED
+            if p['kind'] == 'create' and p['status'] == APPROVED:
+                # add prints the written path on stdout, including any collision
+                # suffix. Commit and hook warnings are reported on stderr.
+                written = (r.stdout or '').removesuffix('\n')
+                if written and '\n' not in written:
+                    p['written_path'] = written
             return self._save(p)
 
     def reject(self, pid: str) -> dict:

@@ -1211,8 +1211,10 @@ SPDX-License-Identifier: Apache-2.0
   function proposalCard(p) {
     const card = el("div", "proposal");
     card.appendChild(el("h3", null, p.title));
+    const destination = p.kind === "link" ? `new connection in ${p.target}`
+      : p.written_path ? `written to ${p.written_path}` : `estimated note path: ${p.target}`;
     card.appendChild(el("div", "p-meta",
-      `${p.kind === "link" ? "new connection in" : "new note"} ${p.target} · ${new Date(p.created_at).toLocaleString()}`));
+      `${destination} · ${new Date(p.created_at).toLocaleString()}`));
     if (p.rationale) card.appendChild(el("div", "p-why", p.rationale));
     if (p.question) card.appendChild(el("div", "p-meta", `asked: “${p.question}”`));
     card.appendChild(el("pre", null, p.diff || ""));
@@ -1232,8 +1234,9 @@ SPDX-License-Identifier: Apache-2.0
         const body = await r.json().catch(() => ({}));
         if (r.ok && body.ok) {
           result.textContent = action !== "approve" ? "rejected"
-            : body.rebuilding ? "approved and committed; rebuilding the site"
-            : "approved and committed; rebuild the site to see it";
+            : [body.written_path ? `written to ${body.written_path}` : "approved",
+               body.rebuilding ? "rebuilding the site" : "rebuild the site to see it"].join("; ");
+          if (body.output) result.title = body.output;
           setTimeout(loadProposals, 1500);
           return;
         }
